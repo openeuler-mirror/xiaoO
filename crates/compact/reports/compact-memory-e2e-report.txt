@@ -1,0 +1,330 @@
+compact + memory module report
+generated_at=2026-04-11T10:28:07+0800
+
+[memory e2e scenarios]
+# Memory Tests README
+
+## 运行方式
+
+```bash
+cargo test --manifest-path crates/memory/Cargo.toml --test memory_e2e -- --nocapture
+```
+
+`memory_filesystem.rs` 和 `memory_validation.rs` 继续覆盖 fail-fast、filesystem 和预算边界；本 README 现在把端到端功能矩阵也一起列出来，方便核对哪些能力已经进入真实闭环。
+
+默认测试使用一个严格按 schema 回包的测试 provider，目的是稳定验证 memory 自己的结构化 source 组织、provider 调用编排、JSON 解析、section 预算和持久化闭环；真正的网络 provider 集成由 compact 侧的 live test 单独覆盖。
+
+## 覆盖矩阵
+
+- snapshot 持久化、回读、跨 session 索引排序：
+  `memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering`
+- `MemoryManager::from_snapshot()`、`build_recall()`、`build_recall_with_durable()`、`clear_session_memory()`：
+  `memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering`
+- session summary 构建、持久化、回读、预算内截断：
+  `memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering`
+- durable memory 的 save / load / list / list_and_load / replace_all / delete：
+  `memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering`
+- durable staged swap 失败后保留旧 generation：
+  `memory_module_e2e_staged_swap_failure_keeps_previous_durable_generation_live`
+- runtime 重启后从 snapshot + session summary + durable memory 恢复 recall：
+  `memory_module_e2e_persisted_restart_restores_recall_continuity`
+
+## E2E 场景
+
+### `memory_module_e2e_persisted_restart_restores_recall_continuity`
+
+- 场景：
+  把 snapshot、session summary、durable memories 分别写入真实 filesystem store，然后模拟 runtime 重启，从三个 store 重新加载并恢复 recall。
+- 测试数据：
+  `session_id=session-recovery-e2e`；5 条真实消息，顺序为 system、user、assistant tool_use、tool_result、assistant final reply。
+  其中 tool call id 为 `call-rehydrate`，最后一条 assistant 消息的 `message_id=assistant-final`，用于校验 summary 的 summarized-through 边界。
+  额外写入 2 条 instruction、2 条 fact、当前任务与 2 个 pending steps、2 条 prompt history、1 份 usage baseline、2 条 durable memory（`preference-style` / `procedure-recovery`）。
+- 预期效果：
+  snapshot 重新加载后，消息顺序、tool_use / tool_result 结构和普通文本内容保持不变。
+  session summary 通过注入的 LLM provider 生成，不依赖 snapshot 内嵌字段，而是可以从独立的 session store 重新加载并 attach 回 `MemoryManager`。
+  `build_recall_with_durable()` 恢复出的 instructions、facts、prompt history、task、usage baseline、session memory、durable memories 保持闭环一致。
+  durable memories 按 `updated_at` 降序返回，证明 restart 后仍然能拿到稳定的最新优先顺序。
+
+### `memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering`
+
+- 场景：
+  同时验证 snapshot、summary、durable memory、recall 控制面和跨 session 索引排序，确认 memory 模块的公开能力不是只覆盖 happy path。
+- 测试数据：
+  1 个主 session，包含 5 条消息、3 条 instruction、3 条 fact、3 条 prompt history、task + 3 个 pending steps、1 份 usage baseline、3 条 durable memory。
+  另建 1 个更新时间更晚的 session 用于验证 snapshot index 排序。
+- 预期效果：
+  `build_recall()` 会按 query 上限返回“最近 N 条” instruction / fact / prompt history，且顺序稳定。
+  `build_recall_with_durable()` 在开启 include flag 后会带上 session memory 和 durable memories，`clear_session_memory()` 后会立即失效。
+  `truncate_session_memory_summary()` 能在预算内保住关键 section，并返回截断记录。
+  `list_snapshots()` 会按 `updated_at` 降序返回多 session 索引。
+  durable memory 的 `save/load/replace_all/list_and_load/delete` 都在真实 filesystem 上完成闭环。
+
+### `memory_module_e2e_staged_swap_failure_keeps_previous_durable_generation_live`
+
+- 场景：
+  durable store 已经有一代生效数据时，发起一次带非法 `memory_id` 的 `replace_all()`，验证 staged swap 失败不会破坏当前 generation。
+- 测试数据：
+  先写入 1 条合法 procedure memory，再执行 1 条合法 + 1 条非法 `../invalid` 的 replace-all。
+- 预期效果：
+  `replace_all()` 返回错误后，旧 generation 仍可通过 `load_memory()` 和 `list_memories()` 完整读取，不会出现“半替换”状态。
+
+
+[memory tests]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test memory_module_e2e_staged_swap_failure_keeps_previous_durable_generation_live ... ok
+test memory_module_e2e_persisted_restart_restores_recall_continuity ... ok
+test memory_module_e2e_feature_matrix_covers_snapshot_summary_recall_controls_and_ordering ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 5 tests
+test filesystem_stores_reject_path_traversal_ids ... ok
+test durable_memory_manager_allows_overwriting_existing_memory_within_limit ... ok
+test filesystem_memory_store_roundtrip_and_sorting_are_real ... ok
+test durable_replace_all_uses_staged_swap_and_preserves_old_generation_on_failure ... ok
+test filesystem_session_and_durable_stores_roundtrip_and_replace_all ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+test session_and_durable_policies_fail_fast_on_invalid_config ... ok
+test memory_manager_fail_fast_validates_invalid_inputs ... ok
+test memory_manager_recall_respects_include_flags_and_clear_session_memory ... ok
+test snapshot_derives_conversation_from_chat_messages ... ok
+test durable_memory_manager_fail_fast_on_invalid_memory_and_limit ... ok
+test session_memory_budgeting_truncates_sections_and_total_tokens ... ok
+test session_memory_summary_respects_limits_and_recent_entries ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+[compact e2e scenarios]
+# Compact Tests README
+
+## 运行方式
+
+```bash
+cargo test --manifest-path crates/compact/Cargo.toml --test compact_memory_e2e -- --nocapture
+```
+
+`compact_validation.rs` 继续覆盖阈值、边界发现、预算耗尽和 fail-fast 路径；本 README 现在把端到端覆盖矩阵也列出来，便于核对 compact 的公开功能有没有进入完整闭环。
+
+默认测试使用一个严格按 schema 回包的测试 provider，稳定验证 compact 自己的候选区间选择、provider 编排、summary 合并、预算裁剪和 tail invariant；另外还有一个 `ignored` 的 `live_llm_compaction`，用于拿真实 OpenRouter provider 打通 `llm-client -> memory -> compact` 集成链路。
+
+## 覆盖矩阵
+
+- `checked_analyze()` / `decide_compaction()` 的 Normal / Warning / AutoCompact / Blocking 决策矩阵：
+  `compact_module_e2e_decision_matrix_and_standard_pipeline_are_fully_exercised`
+- `run_compaction_request()` 的 `HistorySnip` / `ContextCollapse` / `AutoCompact`：
+  `compact_module_e2e_request_matrix_covers_all_compaction_modes_and_envelope`
+- `build_envelope()`：
+  `compact_module_e2e_request_matrix_covers_all_compaction_modes_and_envelope`
+- `CompactionBoundary` 的 `BeforePivot` / `AfterPivot`：
+  `compact_module_e2e_boundary_requests_cover_before_and_after_pivot`
+- `compress_snapshot()` 的 session-memory-first 成功路径：
+  `compact_module_e2e_microcompact_and_full_compaction_flow`
+  `compact_module_e2e_session_memory_timestamp_fallback_preserves_tail_invariants`
+- `compress_snapshot()` 的 session-memory-first 过大后回退到普通 compact：
+  `compact_module_e2e_session_memory_over_budget_falls_back_to_standard_pipeline`
+- `microcompact()` 删除陈旧 tool pair：
+  `compact_module_e2e_microcompact_and_full_compaction_flow`
+- compact summary 跨多轮滚动继承：
+  `compact_module_e2e_rolls_summary_forward_across_auto_compact_rounds`
+- 真实 OpenRouter provider 打通 `memory` / `compact` 摘要：
+  `live_llm_provider_drives_memory_and_compact_summaries`（`ignored`，需显式提供环境变量）
+
+## Live 运行方式
+
+```bash
+OPENROUTER_API_KEY=... \
+OPENROUTER_API_BASE=https://openrouter.ai/api/v1 \
+OPENROUTER_MODEL=z-ai/glm-5 \
+LIVE_LLM_MAX_TOKENS=4096 \
+LIVE_LLM_TEMPERATURE=0.7 \
+cargo test --manifest-path crates/compact/Cargo.toml live_llm_provider_drives_memory_and_compact_summaries -- --ignored --nocapture
+```
+
+## E2E 场景
+
+### `memory_module_e2e_real_filesystem_flow`
+
+- 场景：
+  在真实 filesystem store 上串起 memory snapshot、session summary、durable memories 的 happy path，并验证 recall 能把三类信息重新组合出来。
+- 测试数据：
+  8 条对话消息、2 条 instruction、2 条 fact、2 个 pending steps、2 条 prompt history、1 份 usage baseline、2 条 durable memories。
+- 预期效果：
+  snapshot、session summary、durable memories 都能成功落盘并回读。
+  `build_recall_with_durable()` 同时返回 session memory 和 durable memories，证明 memory 模块基础闭环可用。
+
+### `compact_module_e2e_microcompact_and_full_compaction_flow`
+
+- 场景：
+  先触发 microcompact 删除陈旧 tool pair，再基于旧 session summary 执行一次完整 `compress_snapshot()`。
+- 测试数据：
+  历史区包含 1 组过期 `tool_use -> tool_result`，同时构造旧 summary、当前 tail、真实 token budget 和 context threshold。
+- 预期效果：
+  microcompact 先移除陈旧 tool pair。
+  `compress_snapshot()` 在 history limit 内生成 `session_memory_compact` 消息，summary 保留 `# User Intent`、`# Files and References`、`# Errors and Corrections`、`# Pending Tasks`、`# Current Work`、`# Next Step`。
+
+### `compact_module_e2e_session_memory_timestamp_fallback_preserves_tail_invariants`
+
+- 场景：
+  `summarized_through_message_id` 故意失效，只能依赖 `summarized_through_timestamp_ms` 回退到 session-memory-first compact，同时尾部带有 assistant 分片和 `tool_use -> tool_result` 依赖。
+- 测试数据：
+  8 条消息，其中第 4/5 条共享 `message_id=work-fragment`，第 5/6 条组成 `call-keep` tool pair，最后 2 条文本消息用于满足最小尾部保留预算。
+- 预期效果：
+  压缩结果优先生成 `session_memory_compact`。
+  被保留的尾部不会切裂 assistant 分片，也不会把 `tool_result` 和对应的 `tool_use` 分开。
+  结果中应同时保留 `work-fragment` 两段 assistant 消息、`call-keep` tool pair 和最新用户请求。
+
+### `compact_module_e2e_rolls_summary_forward_across_auto_compact_rounds`
+
+- 场景：
+  对同一 compact meta 连续执行两轮 `AutoCompact`，验证第二轮 summary 会继承第一轮 summary。
+- 测试数据：
+  两轮都使用 4 条消息：system、旧 user detail、旧 assistant detail、最新 tail；第二轮把第一轮 `updated_meta` 作为输入。
+- 预期效果：
+  第一轮把历史折叠成 `auto_compact` summary，并把 `last_compact_turn` 置为 `1`。
+  第二轮 summary 同时包含 `Previously compacted context` 和 `Newly compacted context`，`last_compact_turn` 递增到 `2`，且最新 tail 仍保持原文。
+
+### `compact_module_e2e_decision_matrix_and_standard_pipeline_are_fully_exercised`
+
+- 场景：
+  用真实 estimator + budget 构造四档 severity，验证 analyze / decide 的映射关系，并确认普通 `compress()` 管线至少完整走通 Normal 和 Warning 两档。
+- 测试数据：
+  4 条消息的标准 compact 夹具，通过重复文本长度把整体 token 使用量推到 Normal / Warning / AutoCompact / Blocking。
+- 预期效果：
+  四档 severity 的分析结果稳定映射到 `None` / `HistorySnip` / `ContextCollapse` / `AutoCompact`。
+  Warning 档走 `compress()` 时会发生真实 snip，Normal 档则保持原消息不变。
+
+### `compact_module_e2e_request_matrix_covers_all_compaction_modes_and_envelope`
+
+- 场景：
+  对同一组历史消息分别执行 `HistorySnip`、`ContextCollapse`、`AutoCompact`，并在 compact 后构建 envelope。
+- 测试数据：
+  4 条消息，包含 system、旧 user detail、旧 assistant detail、最新 tail。
+- 预期效果：
+  `HistorySnip` 只移除历史，不生成 summary。
+  `ContextCollapse` 会生成 `context_collapse:` summary message，并更新 `last_collapse_index`。
+  `AutoCompact` 会在已有 summary 的基础上继续合并“之前已 compact 的上下文”和“这次新增 compact 的上下文”，同时更新 `last_compact_turn`。
+  `build_envelope()` 返回 `head / summary / tail` 三段结构。
+
+### `compact_module_e2e_boundary_requests_cover_before_and_after_pivot`
+
+- 场景：
+  在同一组消息上分别指定 `BeforePivot` 和 `AfterPivot` 边界，验证 request 级 compaction 窗口控制。
+- 测试数据：
+  5 条消息，含 `message_id=pivot-middle` 的 pivot、pivot 前历史、pivot 后中段和最新 tail。
+- 预期效果：
+  `BeforePivot` 只删除 pivot 之前的历史，保留 pivot 之后内容。
+  `AfterPivot` 只删除 pivot 之后、受 tail 保护之前的中段，保留 pivot 之前历史和最新 tail。
+
+### `compact_module_e2e_session_memory_over_budget_falls_back_to_standard_pipeline`
+
+- 场景：
+  先构造一个可以直接生成 session-memory compact 的 snapshot，再分别用紧预算和宽预算压缩，验证 fallback。
+- 测试数据：
+  4 条消息，其中前 2 条已被 session summary 覆盖，后 2 条是必须保留的最新 tail；同时附带结构化 session summary。
+- 预期效果：
+  宽预算下会生成 `session_memory_compact:` 消息。
+  紧预算下同一 snapshot 不再采用 session-memory-first，而是回退到普通 compact 路径，生成 `context_collapse:` 或 `auto_compact:` summary message。
+
+
+
+[compact tests]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+test compact_module_e2e_boundary_requests_cover_before_and_after_pivot ... ok
+test compact_module_e2e_decision_matrix_and_standard_pipeline_are_fully_exercised ... ok
+test compact_module_e2e_session_memory_timestamp_fallback_preserves_tail_invariants ... ok
+test compact_module_e2e_request_matrix_covers_all_compaction_modes_and_envelope ... ok
+test compact_module_e2e_rolls_summary_forward_across_auto_compact_rounds ... ok
+test compact_module_e2e_session_memory_over_budget_falls_back_to_standard_pipeline ... ok
+test compact_module_e2e_microcompact_and_full_compaction_flow ... ok
+test memory_module_e2e_real_filesystem_flow ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 11 tests
+test context_thresholds_and_summary_budget_fail_fast ... ok
+test discover_boundary_skips_pivot_without_removable_history ... ok
+test envelope_summary_section_and_missing_memory_store_are_covered ... ok
+test compaction_request_supports_after_pivot_and_missing_boundary_is_fail_fast ... ok
+test history_snip_preserves_tail_tool_pairs_and_assistant_message_fragments ... ok
+test summary_budget_exhaustion_and_microcompact_preserve_tail_are_covered ... ok
+test summary_compression_merges_previous_context_and_deduplicates_lines ... ok
+test context_collapse_and_auto_compact_requests_emit_summary_and_meta ... ok
+test compress_snapshot_uses_session_memory_when_result_fits_and_falls_back_when_it_does_not ... ok
+test decide_compaction_maps_severity_to_documented_modes ... ok
+test rough_estimator_and_policy_analysis_cover_warning_auto_and_blocking ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test live_llm_provider_drives_memory_and_compact_summaries ... ignored, requires OPENROUTER_API_KEY, OPENROUTER_API_BASE, OPENROUTER_MODEL, LIVE_LLM_MAX_TOKENS, LIVE_LLM_TEMPERATURE
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+[live llm tests]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 1 test
+test live_llm_provider_drives_memory_and_compact_summaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.21s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

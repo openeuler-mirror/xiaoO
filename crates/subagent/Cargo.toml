@@ -1,0 +1,12 @@
+[package]
+name = "subagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-types = { path = "../agent-types" }
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+ulid.workspace = true

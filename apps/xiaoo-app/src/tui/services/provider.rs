@@ -1,0 +1,180 @@
+use anyhow::Result;
+
+use crate::app_state::AppState;
+use crate::config::{save_llm_secret, Config};
+
+pub fn api_key_env_for_provider(provider: &str) -> &'static str {
+    match provider.to_lowercase().as_str() {
+        "openai" => "OPENAI_API_KEY",
+        "anthropic" | "claude" => "ANTHROPIC_API_KEY",
+        "gemini" | "google" => "GEMINI_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "xai" | "xai-grok" => "XAI_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "zai" | "zai-global" | "z.ai" => "ZAI_API_KEY",
+        "zai-cn" | "zai-china" | "bigmodel" | "zhipu" | "glm-cn" => "GLM_API_KEY",
+        "glm" | "glm-global" => "GLM_API_KEY",
+        "gitcode" => "GITCODE_API_KEY",
+        "ollama" => "OLLAMA_HOST",
+        _ => "API_KEY",
+    }
+}
+
+pub fn default_api_key_env_for_provider(provider: &str) -> Option<String> {
+    let env_var = api_key_env_for_provider(provider);
+    match env_var {
+        "API_KEY" | "OLLAMA_HOST" => None,
+        _ => Some(env_var.to_string()),
+    }
+}
+
+pub fn default_api_base_for_provider(provider: &str) -> String {
+    match provider.to_lowercase().as_str() {
+        "openai" => "https://api.openai.com/v1".to_string(),
+        "openrouter" => "https://openrouter.ai/api/v1".to_string(),
+        "groq" => "https://api.groq.com/openai/v1".to_string(),
+        "mistral" => "https://api.mistral.ai/v1".to_string(),
+        "together" => "https://api.together.xyz/v1".to_string(),
+        "xai" | "xai-grok" => "https://api.x.ai/v1".to_string(),
+        "deepseek" => "https://api.deepseek.com".to_string(),
+        "gitcode" => "https://api-ai.gitcode.com/v1".to_string(),
+        "ollama" => "http://localhost:11434".to_string(),
+        _ => String::new(),
+    }
+}
+
+pub fn persisted_selection_settings(config: &Config, provider: &str) -> (Option<String>, String) {
+    let default_api_key_env = default_api_key_env_for_provider(provider);
+    let default_api_base = default_api_base_for_provider(provider);
+
+    if config.llm.provider.eq_ignore_ascii_case(provider) {
+        let api_key_env = config.llm.api_key_env.clone().or(default_api_key_env);
+        let api_base = if config.llm.api_base.trim().is_empty() {
+            default_api_base
+        } else {
+            config.llm.api_base.clone()
+        };
+        (api_key_env, api_base)
+    } else {
+        (default_api_key_env, default_api_base)
+    }
+}
+
+pub fn persist_active_provider_selection(
+    state: &mut AppState,
+    provider: String,
+    model: String,
+    api_key_env: Option<String>,
+    api_base: String,
+) {
+    let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
+    cfg.llm.provider = provider.clone();
+    cfg.llm.model = model.clone();
+    cfg.llm.api_key_env = api_key_env.clone();
+    cfg.llm.api_base = api_base.clone();
+    if let Err(error) = cfg.save_to(&state.config_path) {
+        tracing::warn!("Failed to save config: {}", error);
+    }
+
+    state.agent_config.llm.provider = provider.clone();
+    state.agent_config.llm.model = model.clone();
+    state.agent_config.llm.api_key_env = api_key_env;
+    state.agent_config.llm.api_base = api_base;
+
+    state.status_panel.set_provider(&provider, &model);
+}
+
+pub fn validate_and_connect_api_key(
+    state: &mut AppState,
+    provider: String,
+    model: String,
+    api_key: &str,
+) -> Result<(), String> {
+    let env_var = api_key_env_for_provider(&provider).to_string();
+    let api_base = default_api_base_for_provider(&provider);
+    std::env::set_var(&env_var, api_key);
+
+    if let Err(error) = save_llm_secret(&state.config_path, &env_var, api_key) {
+        tracing::warn!("Failed to save API key: {}", error);
+    }
+
+    persist_active_provider_selection(state, provider, model, Some(env_var), api_base);
+    Ok(())
+}
+
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    anyhow::bail!("clipboard integration is not available in apps/xiaoo-app build: {text}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn temp_state() -> (TempDir, AppState) {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let config_path = temp_dir.path().join("nested").join("config.toml");
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let state = AppState::new(config_path, workspace).expect("create app state");
+        (temp_dir, state)
+    }
+
+    #[test]
+    fn persist_active_provider_selection_writes_llm_to_app_config_path() {
+        let (_temp_dir, mut state) = temp_state();
+        let config_path = state.config_path.clone();
+
+        persist_active_provider_selection(
+            &mut state,
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            Some("OPENAI_API_KEY".to_string()),
+            "https://api.openai.com/v1".to_string(),
+        );
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        assert_eq!(saved.llm.provider, "openai");
+        assert_eq!(saved.llm.model, "gpt-4o");
+        assert_eq!(saved.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert_eq!(saved.llm.api_base, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn persisted_selection_settings_switching_provider_uses_new_provider_defaults() {
+        let (_temp_dir, mut state) = temp_state();
+        state.agent_config.llm.provider = "openai".to_string();
+        state.agent_config.llm.model = "gpt-4o".to_string();
+        state.agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
+        state.agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
+
+        let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "deepseek");
+
+        assert_eq!(api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(api_base, "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn persisted_selection_settings_same_provider_preserves_existing_config() {
+        let (_temp_dir, mut state) = temp_state();
+        state.agent_config.llm.provider = "openai".to_string();
+        state.agent_config.llm.model = "gpt-4o".to_string();
+        state.agent_config.llm.api_key_env = Some("CUSTOM_OPENAI_KEY".to_string());
+        state.agent_config.llm.api_base = "https://proxy.example/v1".to_string();
+
+        let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "openai");
+
+        assert_eq!(api_key_env.as_deref(), Some("CUSTOM_OPENAI_KEY"));
+        assert_eq!(api_base, "https://proxy.example/v1");
+    }
+
+    #[test]
+    fn default_api_base_for_openai_is_explicit() {
+        assert_eq!(
+            default_api_base_for_provider("openai"),
+            "https://api.openai.com/v1"
+        );
+    }
+}

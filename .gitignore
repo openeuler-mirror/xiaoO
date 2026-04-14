@@ -1,0 +1,14 @@
+target/ 
+*.log 
+# Local config (use ~/.config/xiaoo/config.toml instead) 
+/config.toml 
+
+logs/* 
+.DS_Store 
+*.db 
+.DS_Store
+AGENTS.md
+
+
+__pycache__/
+*.pyc

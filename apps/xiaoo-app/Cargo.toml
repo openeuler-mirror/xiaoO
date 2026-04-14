@@ -1,0 +1,52 @@
+[package]
+name = "xiaoo-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "xiaoo"
+path = "src/cli/main.rs"
+
+[[bin]]
+name = "xiaoo-tui"
+path = "src/tui/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+toml = "0.8"
+anyhow.workspace = true
+async-trait.workspace = true
+axum = "0.7"
+regex = "1.11"
+reqwest.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+unicode-width = "0.1.14"
+uuid.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+agent-contracts = { path = "../../crates/agent-contracts" }
+agent-llm = { path = "../../crates/agent-llm" }
+agent-types = { path = "../../crates/agent-types" }
+compact = { path = "../../crates/compact" }
+xiaoo-core = { path = "../../crates/core" }
+hooker = { path = "../../crates/hooker" }
+llm-client = { path = "../../crates/llm-client" }
+memory = { path = "../../crates/memory" }
+prompt = { path = "../../crates/prompt" }
+skill = { path = "../../crates/skill" }
+tool = { path = "../../crates/tool" }
+subagent = { path = "../../crates/subagent" }
+trace = { path = "../../crates/trace" }
+
+[dev-dependencies]
+tempfile.workspace = true

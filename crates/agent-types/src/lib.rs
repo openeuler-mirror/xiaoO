@@ -1,0 +1,23 @@
+pub mod common;
+pub mod compression;
+pub mod context;
+pub mod events;
+pub mod hooker;
+pub mod interaction;
+pub mod llm;
+pub mod outcome;
+pub mod tool;
+
+pub use common::{AgentId, AgentMetadata, BuildError, HookerId, ToolId, ToolName, WorkspaceRef};
+pub use compression::CompressionMeta;
+pub use context::{
+    BudgetError, FeatureFlags, PromptBuildError, PromptBuildResult, TokenBudgetConfig,
+};
+pub use hooker::{HookPointId, HookerDescriptor, HookerRegistryConfig};
+pub use llm::{
+    AssistantMessage, ChatMessage, CompletionConfig, ContentBlock, LlmError, LlmRequest,
+    LlmResponse, MessageRole, ResponseFormat, StopReason, StreamChunk, Tool, ToolChoice,
+    ToolUseBlock, Usage,
+};
+pub use outcome::{AgentError, AgentOutcome, TokenUsage};
+pub use tool::{ToolRegistryConfig, ToolStateStoreConfig, ToolVisibilityConfig};
