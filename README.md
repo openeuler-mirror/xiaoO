@@ -1,8 +1,8 @@
-# XiaoO
+# xiaoO
 
 **智能体框架** — 自主节点，可扩展集群。安全、可观测、OpenClaw 兼容。
 
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 
 ---
