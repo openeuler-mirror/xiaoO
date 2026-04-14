@@ -1,0 +1,36 @@
+[package]
+name = "moirai"
+version.workspace = true
+edition.workspace = true
+description = "Core tracing infrastructure - span storage and topology management"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "moirai"
+path = "src/bin/moirai.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:axum", "dep:tower-http", "dep:rust-embed", "dep:mime_guess"]
+
+[dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "rt-multi-thread", "macros"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+ulid.workspace = true
+
+# CLI dependencies (optional)
+clap = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

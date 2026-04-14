@@ -1,0 +1,117 @@
+use crate::gateway::{
+    AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
+    SessionRuntimeResolver, SessionServiceError,
+};
+use agent_types::common::ids::AgentId;
+use memory::{MemoryManager, MemorySnapshot};
+use tokio_util::sync::CancellationToken;
+use xiaoo_core::{run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot};
+
+pub struct SessionWorkerInput {
+    pub runtime_input: SessionRuntimeBuildInput,
+    pub session: SessionRecord,
+    pub agent_id: AgentId,
+    pub user_message: String,
+    pub append_user_message: bool,
+    pub loop_state: Option<LoopStateSnapshot>,
+    pub memory_snapshot: Option<MemorySnapshot>,
+}
+
+pub struct SessionWorkerResult {
+    pub loop_result: LoopRunResult,
+    pub loop_state: LoopStateSnapshot,
+    pub memory_snapshot: MemorySnapshot,
+}
+
+pub struct SessionWorker;
+
+impl SessionWorker {
+    pub async fn run(
+        runtime_resolver: &dyn SessionRuntimeResolver,
+        input: SessionWorkerInput,
+    ) -> Result<SessionWorkerResult, SessionServiceError> {
+        let is_root_lane = input.agent_id == input.session.runtime.agent_id;
+        let mut runtime_input = input.runtime_input.clone();
+        runtime_input.agent_id_override = Some(input.agent_id.clone());
+
+        let mut resolved = runtime_resolver
+            .resolve(&runtime_input, Some(&input.session))
+            .await?;
+        if !is_root_lane {
+            resolved.bindings.loop_event_sink = None;
+            resolved.bindings.tool_event_sink = None;
+            resolved.bindings.interaction_handle = None;
+        }
+        let assembly =
+            AppRuntimeFactory::build(&resolved, &input.session, input.loop_state.as_ref()).await?;
+
+        let loop_session_id = input
+            .loop_state
+            .as_ref()
+            .map(|snapshot| snapshot.session_id)
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        let cancel = CancellationToken::new();
+        let mut loop_state = input
+            .loop_state
+            .clone()
+            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel))
+            .unwrap_or_else(|| LoopState::new(loop_session_id));
+        let mut memory_manager = match input.memory_snapshot.clone() {
+            Some(snapshot) => MemoryManager::from_snapshot(snapshot),
+            None => {
+                let memory_session_id = if is_root_lane {
+                    input.session.session_id.clone()
+                } else {
+                    input.agent_id.0.clone()
+                };
+                MemoryManager::new(memory_session_id, current_time_ms()).map_err(|error| {
+                    SessionServiceError::Memory {
+                        message: error.to_string(),
+                    }
+                })?
+            }
+        };
+
+        let mut loop_input = AgentLoopInput::new(input.user_message)
+            .with_agent_id(input.agent_id)
+            .with_visible_tools(assembly.visible_tools.clone());
+        if !input.append_user_message {
+            loop_input = loop_input.resume_without_user_message();
+        }
+        if let Some(loop_event_sink) = resolved.bindings.loop_event_sink.clone() {
+            loop_input = loop_input.with_event_sink(loop_event_sink);
+        }
+        if let Some(runtime_view) = assembly.runtime_view.clone() {
+            loop_input = loop_input.with_runtime_view(runtime_view);
+        }
+
+        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input)
+            .await
+            .map_err(|error| SessionServiceError::CoreRun {
+                message: error.to_string(),
+            })?;
+
+        memory_manager.sync_from_loop_state(&loop_state.messages, current_time_ms());
+
+        Ok(SessionWorkerResult {
+            loop_result,
+            loop_state: loop_state.to_snapshot(),
+            memory_snapshot: memory_manager.snapshot().clone(),
+        })
+    }
+}
+
+impl From<AppRuntimeFactoryError> for SessionServiceError {
+    fn from(value: AppRuntimeFactoryError) -> Self {
+        Self::RuntimeBuild {
+            message: value.to_string(),
+        }
+    }
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}

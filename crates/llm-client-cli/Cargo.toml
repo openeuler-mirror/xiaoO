@@ -1,0 +1,20 @@
+[package]
+name = "llm-client-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "llm-client-cli"
+path = "src/main.rs"
+
+[dependencies]
+agent-contracts = { path = "../agent-contracts" }
+agent-llm = { path = "../agent-llm" }
+llm-client = { path = "../llm-client" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "skill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-contracts = { path = "../agent-contracts" }
+agent-types = { path = "../agent-types" }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+toml.workspace = true
+regex-lite = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+dirs = "6"
+xiaoo-core = { path = "../core" }
+hooker = { path = "../hooker" }
+tool = { path = "../tool" }
+trace = { path = "../trace" }
+tokio = { workspace = true, features = ["rt", "macros"] }

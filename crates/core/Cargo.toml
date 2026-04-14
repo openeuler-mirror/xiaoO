@@ -1,0 +1,24 @@
+[package]
+name = "xiaoo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-types = { path = "../agent-types" }
+agent-llm = { path = "../agent-llm" }
+tool = { path = "../tool" }
+agent-contracts = { path = "../agent-contracts" }
+llm-client = { path = "../llm-client" }
+tokio.workspace = true
+tokio-util.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+arc-swap.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+compact = { path = "../compact" }

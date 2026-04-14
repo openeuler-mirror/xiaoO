@@ -1,0 +1,27 @@
+[package]
+name = "llm-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-contracts = { path = "../agent-contracts" }
+agent-llm = { path = "../agent-llm" }
+agent-types = { path = "../agent-types" }
+hooker = { path = "../hooker" }
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time"] }
+futures = "0.3"
+async-stream = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+uuid.workspace = true
+tracing.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true
+mockito = "1"

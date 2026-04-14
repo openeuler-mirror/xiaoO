@@ -1,0 +1,270 @@
+use crate::daemon_config::{DaemonConfig, ResolvedAgentConfig};
+use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
+use agent_types::common::ids::AgentId;
+use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use compact::{
+    ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
+    RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
+};
+use llm_client::{
+    create_llm_provider_from_resolved, resolve_config, LlmProviderWrapper, ResolveInput,
+};
+use prompt::{compose_channel_system_prompt, ChannelPromptSections};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::{fs, path::Path};
+use tool::{load_tool_sources, ToolRegistryBuilderImpl};
+use xiaoo_app::gateway::{
+    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
+    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
+};
+use xiaoo_core::EmptySkillRegistry;
+
+const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
+const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
+const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
+
+pub struct ConfiguredRuntimeResolver {
+    agent: ResolvedAgentConfig,
+    llm_provider: Arc<LlmProviderWrapper>,
+    token_budget: TokenBudgetConfig,
+    feature_flags: FeatureFlags,
+    trace: Value,
+    compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
+}
+
+impl ConfiguredRuntimeResolver {
+    pub fn from_config(config: &DaemonConfig) -> Result<Self> {
+        let agent = config.resolve_agent()?;
+        ensure_workspace_exists(&agent.workspace_root)?;
+
+        let resolved_provider = resolve_config(ResolveInput {
+            provider: Some(config.app.llm.provider.clone()),
+            protocol: None,
+            api_key: config.app.llm.api_key.clone(),
+            api_key_env: config.app.llm.api_key_env.clone(),
+            base_url: config.app.llm.api_base.clone(),
+        })
+        .context("failed to resolve llm provider config")?;
+        let llm_provider = Arc::new(
+            create_llm_provider_from_resolved(
+                &resolved_provider,
+                agent.model.clone(),
+                Some(agent.id.clone()),
+                None,
+            )
+            .context("failed to create llm provider")?,
+        );
+        let token_budget = build_token_budget(
+            config.app.llm.context_window,
+            config.max_output_tokens(),
+            llm_provider.capabilities().max_context_window,
+        );
+
+        let trace = config.resolve_trace_config();
+        let compression_pipeline = build_compression_pipeline(config, &llm_provider)?;
+
+        Ok(Self {
+            agent,
+            llm_provider,
+            token_budget,
+            feature_flags: FeatureFlags::default(),
+            trace,
+            compression_pipeline: Some(compression_pipeline),
+        })
+    }
+
+    fn build_tool_registry(
+        &self,
+    ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
+        let tool_sources = load_tool_sources();
+        let all_tool_names = tool_sources
+            .iter()
+            .flat_map(|source| source.discover())
+            .map(|tool| tool.spec.name().clone())
+            .collect();
+        let mut per_agent_allowed_tools = HashMap::new();
+        per_agent_allowed_tools.insert(AgentId(self.agent.id.clone()), all_tool_names);
+
+        let registry = ToolRegistryBuilderImpl::new()
+            .with_sources(tool_sources)
+            .with_config(ToolRegistryConfig {
+                visibility: ToolVisibilityConfig {
+                    per_agent_allowed_tools,
+                },
+            })
+            .build()
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("failed to build tool registry: {error}"),
+            })?;
+
+        Ok(Some(Arc::from(registry)))
+    }
+}
+
+#[async_trait]
+impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
+    async fn resolve(
+        &self,
+        request: &SessionRuntimeBuildInput,
+        _existing: Option<&SessionRecord>,
+    ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+        Ok(ResolvedSessionRuntime {
+            descriptor: SessionRuntimeDescriptor {
+                agent_id: AgentId(self.agent.id.clone()),
+                model: self.agent.model.clone(),
+                system_prompt: build_system_prompt(&self.agent.system_prompt, request),
+                feature_flags: self.feature_flags.clone(),
+
+                token_budget: self.token_budget.clone(),
+                workspace_root: self.agent.workspace_root.clone(),
+                max_turns: None,
+            },
+            entry_kind: request.entry.kind.clone(),
+            llm_provider: Arc::clone(&self.llm_provider),
+            tool_registry: self.build_tool_registry()?,
+            skill_registry: Some(Arc::new(EmptySkillRegistry::new()) as Arc<dyn SkillRegistry>),
+            bindings: SessionRuntimeBindings::default(),
+            compression_pipeline: self.compression_pipeline.clone(),
+            trace: self.trace.clone(),
+        })
+    }
+}
+
+fn build_token_budget(
+    configured_context_window: Option<usize>,
+    configured_output_tokens: usize,
+    provider_context_window: usize,
+) -> TokenBudgetConfig {
+    let total_budget = configured_context_window
+        .unwrap_or(provider_context_window)
+        .max(1);
+    let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
+    let reserved_for_prompt = DEFAULT_MIN_PROMPT_TOKEN_RESERVE.min(
+        total_budget
+            .saturating_sub(reserved_for_system)
+            .saturating_sub(1),
+    );
+    let reserved_for_output = configured_output_tokens.min(
+        total_budget
+            .saturating_sub(reserved_for_system)
+            .saturating_sub(reserved_for_prompt),
+    );
+
+    TokenBudgetConfig {
+        total_budget,
+        reserved_for_output,
+        reserved_for_system,
+        hard_limit_ratio: DEFAULT_HARD_LIMIT_RATIO,
+    }
+}
+
+fn build_system_prompt(base_prompt: &str, request: &SessionRuntimeBuildInput) -> String {
+    let base_prompt = base_prompt.trim();
+    let channel_prompt = request.channel.as_deref().map(|channel| {
+        let mut prompt = compose_channel_system_prompt(ChannelPromptSections {
+            memory_prompt: "",
+            identity_prompt: request.channel_identity_prompt.as_deref().unwrap_or(""),
+            group_session_context: None,
+        });
+        prompt.push_str("\n\n## 当前通道");
+        prompt.push_str(&format!("\n- 当前 channel: {channel}."));
+        prompt.push_str("\n- 回复必须适合企业 IM 场景，保持纯文本、轻格式。");
+        prompt
+    });
+
+    match (base_prompt.is_empty(), channel_prompt) {
+        (true, Some(channel_prompt)) => channel_prompt,
+        (false, Some(channel_prompt)) => format!("{base_prompt}\n\n{channel_prompt}"),
+        (false, None) => base_prompt.to_string(),
+        (true, None) => String::new(),
+    }
+}
+
+fn ensure_workspace_exists(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create workspace {}", path.display()))
+}
+
+fn build_compression_pipeline(
+    config: &DaemonConfig,
+    llm_provider: &Arc<LlmProviderWrapper>,
+) -> Result<Arc<dyn CompressionPipeline>> {
+    let compact = match config.resolve_compact_config() {
+        Some(cc) => cc,
+        None => {
+            return Ok(Arc::from(compact::PassthroughCompressionPipeline::new())
+                as Arc<dyn CompressionPipeline>);
+        }
+    };
+
+    let estimator = Arc::new(
+        RoughTokenEstimator::try_new(RoughTokenEstimatorConfig {
+            chars_per_token: 4,
+            message_overhead_tokens: 4,
+            tool_use_overhead_tokens: 8,
+            tool_result_overhead_tokens: 8,
+            image_block_overhead_tokens: 256,
+            document_block_overhead_tokens: 256,
+        })
+        .map_err(|e| anyhow::anyhow!("token estimator: {e}"))?,
+    );
+    let cc = compact;
+    let context_manager_config = ContextManagerConfig {
+        thresholds: ContextThresholds {
+            warning_ratio: cc.warning_ratio.unwrap_or(0.6),
+            auto_compact_ratio: cc.auto_compact_ratio.unwrap_or(0.75),
+            blocking_ratio: cc.blocking_ratio.unwrap_or(0.9),
+        },
+        micro_policy: MicroCompactionPolicy {
+            stale_tool_pair_after_ms: 120_000,
+            preserve_recent_messages: 6,
+        },
+        summary_budget: SummaryCompressionBudget {
+            max_summary_tokens: cc.summary_max_tokens.unwrap_or(1024),
+            preserve_tail_messages: cc.summary_preserve_tail.unwrap_or(4),
+        },
+        snip_preserve_tail_messages: cc.snip_preserve_tail.unwrap_or(6),
+        collapse_preserve_tail_messages: cc.collapse_preserve_tail.unwrap_or(4),
+        session_memory_compaction: None,
+        snip_stale_after_ms: cc.snip_stale_after_ms.unwrap_or(3_600_000),
+    };
+    let compression_pipeline: Arc<dyn CompressionPipeline> = Arc::new(
+        ContextManager::new(
+            estimator,
+            context_manager_config,
+            Arc::clone(llm_provider),
+            agent_types::CompletionConfig {
+                max_tokens: cc.summary_llm_max_tokens.unwrap_or(4096),
+                temperature: 0.2,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("context manager: {e}"))?,
+    );
+    Ok(compression_pipeline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_token_budget;
+
+    #[test]
+    fn token_budget_caps_output_to_preserve_prompt_budget() {
+        let budget = build_token_budget(None, 150_000, 128_000);
+        assert_eq!(budget.total_budget, 128_000);
+        assert_eq!(budget.reserved_for_output, 123_904);
+        assert_eq!(budget.reserved_for_system, 2_048);
+    }
+
+    #[test]
+    fn token_budget_prefers_configured_context_window() {
+        let budget = build_token_budget(Some(65536), 8192, 128000);
+        assert_eq!(budget.total_budget, 65536);
+        assert_eq!(budget.reserved_for_output, 8192);
+        assert_eq!(budget.reserved_for_system, 2048);
+    }
+}

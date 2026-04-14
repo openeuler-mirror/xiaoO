@@ -1,0 +1,17 @@
+[package]
+name = "trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+agent-contracts = { path = "../agent-contracts" }
+agent-types = { path = "../agent-types" }
+moirai = { path = "src/moirai", default-features = false }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+ulid.workspace = true
