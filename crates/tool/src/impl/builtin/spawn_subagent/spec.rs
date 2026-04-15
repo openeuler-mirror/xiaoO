@@ -19,11 +19,11 @@ impl SpawnSubagentToolSpec {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "A short, concise description of the delegated task"
+                    "description": "A short label for the delegated branch or subtask"
                 },
                 "task_goal": {
                     "type": "string",
-                    "description": "The exact core goal the subagent needs to accomplish"
+                    "description": "The exact core goal the subagent needs to accomplish. When the task needs a count, comparison, or directory statistic, explicitly require an exact result and forbid approximate or truncated answers."
                 },
                 "task_context": {
                     "type": "string",
@@ -40,7 +40,7 @@ impl SpawnSubagentToolSpec {
         Self {
             id: ToolId("builtin_spawn_subagent".to_string()),
             name: ToolName("spawn_subagent".to_string()),
-            description: "Spawns an asynchronous subagent inside the current session".to_string(),
+            description: "Spawns an asynchronous subagent inside the current session. Use it when the request explicitly asks for subagents or parallel work, or when the work cleanly splits into multiple independent read-only branches whose results will later be compared, sorted, or aggregated. Do not use it for tiny single-step lookups, and do not attempt nested delegation from inside an already delegated subtask.".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
                 description: "Serialized JSON containing the spawned subagent agent_id".to_string(),

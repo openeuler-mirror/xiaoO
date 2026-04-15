@@ -28,7 +28,7 @@ impl JoinSubagentToolSpec {
         Self {
             id: ToolId("builtin_join_subagent".to_string()),
             name: ToolName("join_subagent".to_string()),
-            description: "Waits for a spawned subagent to finish within the current session"
+            description: "Waits for a spawned subagent to finish within the current session. After joining, verify that the returned result is exact before you aggregate, compare, sort, or total multiple branches."
                 .to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {

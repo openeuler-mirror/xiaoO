@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use moirai::{Span, SpanStorage, SqliteStorage, TraceSummary};
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,10 @@ pub async fn get_trace(
         .await?
         .ok_or(AppError::NotFound(format!("Trace not found: {}", trace_id)))?;
 
-    let spans = state.storage.get_trace_spans(&resolved_id).await?;
+    let spans = state
+        .storage
+        .get_trace_spans_with_related_segments(&resolved_id)
+        .await?;
     Ok(Json(spans))
 }
 

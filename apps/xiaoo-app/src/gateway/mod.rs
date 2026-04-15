@@ -14,6 +14,7 @@ pub mod session_supervisor;
 pub mod session_worker;
 pub mod turn_request;
 pub mod turn_result;
+pub mod workspace_prompt;
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use core_session_service::CoreBackedSessionService;
@@ -35,3 +36,4 @@ pub use session_service::{SessionControlPlane, SessionService, SessionServiceErr
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turn_request::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, TurnMention};
 pub use turn_result::AppTurnResult;
+pub use workspace_prompt::compose_workspace_system_prompt;

@@ -230,6 +230,7 @@ function getSpanTypeColor(type) {
         'SPAWNED': 'bg-cyan-200 text-cyan-800',
         'THINK': 'bg-indigo-200 text-indigo-800',
         'TOOL': 'bg-green-200 text-green-800',
+        'TOOL_CALL': 'bg-green-200 text-green-800',
         'AgentCOMM': 'bg-teal-200 text-teal-800',
         'SPAWN': 'bg-yellow-200 text-yellow-800',
         'MERGE': 'bg-orange-200 text-orange-800',
