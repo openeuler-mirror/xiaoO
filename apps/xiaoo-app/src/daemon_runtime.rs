@@ -15,6 +15,7 @@ use llm_client::{
 };
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
+use skill::FileSkillRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fs, path::Path};
@@ -24,7 +25,6 @@ use xiaoo_app::gateway::{
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
-use xiaoo_core::EmptySkillRegistry;
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
@@ -38,6 +38,7 @@ pub struct ConfiguredRuntimeResolver {
     trace: Value,
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
+    skill_registry: Arc<dyn SkillRegistry>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -70,6 +71,8 @@ impl ConfiguredRuntimeResolver {
 
         let trace = config.resolve_trace_config();
         let compression_pipeline = build_compression_pipeline(config, &llm_provider)?;
+        let skill_registry: Arc<dyn SkillRegistry> =
+            Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
 
         Ok(Self {
             agent,
@@ -79,6 +82,7 @@ impl ConfiguredRuntimeResolver {
             trace,
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
+            skill_registry,
         })
     }
 
@@ -135,7 +139,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             entry_kind: request.entry.kind.clone(),
             llm_provider: Arc::clone(&self.llm_provider),
             tool_registry: self.build_tool_registry()?,
-            skill_registry: Some(Arc::new(EmptySkillRegistry::new()) as Arc<dyn SkillRegistry>),
+            skill_registry: Some(Arc::clone(&self.skill_registry)),
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: self.compression_pipeline.clone(),
             trace: self.trace.clone(),
