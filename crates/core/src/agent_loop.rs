@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
 use agent_contracts::tool::ToolCallBuilder;
-use agent_contracts::trace::TraceOutcome;
+use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_llm::{AssistantMessageExt, ChatMessageExt};
 use agent_types::compression::CompressedView;
 use agent_types::context::prompt::result::PromptBuildResult;
@@ -37,6 +37,7 @@ pub struct TurnState {
     pub assistant_message: Option<AssistantMessage>,
     pub tool_results: Vec<ToolExecutionResult>,
     pub decision: Option<LoopDecision>,
+    pub turn_span: Option<TraceSpanHandle>,
 }
 
 impl TurnState {
@@ -48,6 +49,7 @@ impl TurnState {
             assistant_message: None,
             tool_results: Vec::new(),
             decision: None,
+            turn_span: None,
         }
     }
 }
@@ -83,6 +85,7 @@ pub async fn run_agent_loop(
 
     loop {
         ctx.turn = TurnState::new(ctx.turn.turn_number);
+        begin_turn_span(&mut ctx).await;
 
         if let Some(ref sink) = ctx.input.event_sink {
             let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
@@ -90,6 +93,7 @@ pub async fn run_agent_loop(
             sink.on_turn_start(agent_id, ctx.turn.turn_number);
         }
         if let Err(error) = compress(&mut ctx).await {
+            end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "compression_error"})).await;
             finalize_trace_for_ctx(
                 &ctx,
                 TraceOutcome::Error,
@@ -100,6 +104,7 @@ pub async fn run_agent_loop(
             return Err(error);
         }
         if let Err(error) = build_messages(&mut ctx).await {
+            end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "prompt_build_error"})).await;
             finalize_trace_for_ctx(
                 &ctx,
                 TraceOutcome::Error,
@@ -110,6 +115,7 @@ pub async fn run_agent_loop(
             return Err(error);
         }
         if let Err(error) = llm_call(&mut ctx).await {
+            end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "llm_call_error"})).await;
             finalize_trace_for_ctx(
                 &ctx,
                 TraceOutcome::Error,
@@ -119,9 +125,11 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
+        update_turn_span_after_llm(&mut ctx).await;
         let suspended_call = match tool_exec(&mut ctx).await {
             Ok(suspended_call) => suspended_call,
             Err(error) => {
+                end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "tool_exec_error"})).await;
                 finalize_trace_for_ctx(
                     &ctx,
                     TraceOutcome::Error,
@@ -133,6 +141,7 @@ pub async fn run_agent_loop(
             }
         };
         if let Some(suspended_call) = suspended_call {
+            end_turn_span(&mut ctx, TraceOutcome::Ok, json!({"stop_reason": "suspended"})).await;
             emit_loop_end(&ctx, "suspended");
             finalize_trace_for_ctx(
                 &ctx,
@@ -147,6 +156,7 @@ pub async fn run_agent_loop(
 
         match ctx.turn.decision {
             Some(LoopDecision::Continue) => {
+                end_turn_span(&mut ctx, TraceOutcome::Ok, json!({"stop_reason": "continue"})).await;
                 ctx.state.turn_count += 1;
                 ctx.turn = TurnState::new(ctx.turn.turn_number + 1);
             }
@@ -157,6 +167,7 @@ pub async fn run_agent_loop(
             Some(LoopDecision::ReturnMaxTurns) => {
                 ctx.state.turn_count += 1;
                 let outcome = build_outcome_max_turns(&ctx);
+                end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "max_turns"})).await;
                 finalize_trace_for_ctx(
                     &ctx,
                     TraceOutcome::Error,
@@ -170,6 +181,7 @@ pub async fn run_agent_loop(
             Some(LoopDecision::ReturnBudgetExhausted) => {
                 ctx.state.turn_count += 1;
                 let outcome = build_outcome_budget(&ctx);
+                end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "budget_exhausted"})).await;
                 finalize_trace_for_ctx(
                     &ctx,
                     TraceOutcome::Error,
@@ -182,6 +194,7 @@ pub async fn run_agent_loop(
             }
             Some(LoopDecision::ReturnCancelled) => {
                 let outcome = build_outcome_cancelled(&ctx);
+                end_turn_span(&mut ctx, TraceOutcome::Cancelled, json!({"stop_reason": "cancelled"})).await;
                 finalize_trace_for_ctx(
                     &ctx,
                     TraceOutcome::Cancelled,
@@ -194,6 +207,7 @@ pub async fn run_agent_loop(
             }
             None => {
                 let error = AgentError::LlmProvider("loop decision was not set".into());
+                end_turn_span(&mut ctx, TraceOutcome::Error, json!({"stop_reason": "missing_decision"})).await;
                 finalize_trace_for_ctx(
                     &ctx,
                     TraceOutcome::Error,
@@ -205,6 +219,7 @@ pub async fn run_agent_loop(
             }
         }
     }
+    end_turn_span(&mut ctx, TraceOutcome::Ok, json!({"stop_reason": "complete"})).await;
 
     let reply = ctx
         .turn
@@ -246,6 +261,75 @@ async fn finalize_trace_for_ctx(
                 "total_tokens": ctx.state.token_usage.total_tokens,
             }),
         )
+        .await;
+}
+
+async fn begin_turn_span(ctx: &mut LoopContext<'_>) {
+    let Some(runtime_view) = ctx.input.runtime_view.clone() else {
+        return;
+    };
+    let agent_id = ctx
+        .input
+        .agent_id
+        .as_ref()
+        .map(|id| id.0.as_str())
+        .unwrap_or("anonymous")
+        .to_string();
+    let span = runtime_view
+        .trace_recorder()
+        .begin_span(
+            TraceSpanKind::Turn,
+            std::borrow::Cow::Borrowed("turn"),
+            json!({
+                "turn_number": ctx.turn.turn_number,
+                "agent_id": agent_id,
+            }),
+        )
+        .await;
+    ctx.turn.turn_span = Some(span);
+}
+
+async fn update_turn_span_after_llm(ctx: &mut LoopContext<'_>) {
+    let Some(runtime_view) = ctx.input.runtime_view.clone() else {
+        return;
+    };
+    let Some(span) = ctx.turn.turn_span.as_ref() else {
+        return;
+    };
+    let (prompt_tokens, completion_tokens, total_tokens, has_tool_calls) =
+        match ctx.turn.assistant_message.as_ref() {
+            Some(msg) => (
+                msg.usage.prompt_tokens,
+                msg.usage.completion_tokens,
+                msg.usage.total_tokens,
+                msg.has_tool_calls(),
+            ),
+            None => (0, 0, 0, false),
+        };
+    runtime_view
+        .trace_recorder()
+        .update_span(
+            span,
+            json!({
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "has_tool_calls": has_tool_calls,
+            }),
+        )
+        .await;
+}
+
+async fn end_turn_span(ctx: &mut LoopContext<'_>, outcome: TraceOutcome, fields: serde_json::Value) {
+    let Some(runtime_view) = ctx.input.runtime_view.clone() else {
+        return;
+    };
+    let Some(span) = ctx.turn.turn_span.take() else {
+        return;
+    };
+    runtime_view
+        .trace_recorder()
+        .end_span(span, outcome, fields)
         .await;
 }
 
@@ -326,6 +410,24 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         .map(|id| id.0.clone())
         .unwrap_or_default();
 
+    // begin span — 记录开始时的基础元数据
+    let prompt_build_span = if let Some(rv) = ctx.input.runtime_view.clone() {
+        Some(
+            rv.trace_recorder()
+                .begin_span(
+                    TraceSpanKind::PromptBuild,
+                    std::borrow::Cow::Borrowed("prompt_build"),
+                    json!({
+                        "turn_number": ctx.turn.turn_number,
+                        "agent_id": agent_id_str,
+                    }),
+                )
+                .await,
+        )
+    } else {
+        None
+    };
+
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
         messages: ctx.state.messages.clone(),
@@ -344,15 +446,66 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         budget: ctx.snapshot.token_budget_config.clone(),
     };
 
+    // update span — 记录构建完成的 input 维度信息
+    if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span.as_ref()) {
+        rv.trace_recorder()
+            .update_span(
+                span,
+                json!({
+                    "message_count": input.messages.len(),
+                    "visible_tool_count": input.visible_tools.len(),
+                    "skill_count": input.skill_summaries.len(),
+                    "has_system_prompt": !input.system_prompt.is_empty(),
+                }),
+            )
+            .await;
+    }
+
     let result = ctx
         .snapshot
         .prompt_builder
         .build(input)
         .await
-        .map_err(|e| AgentError::PromptBuild(e.to_string()))?;
+        .map_err(|e| AgentError::PromptBuild(e.to_string()));
 
-    ctx.turn.build_messages_output = Some(result);
-    Ok(())
+    match result {
+        Ok(result) => {
+            // end span — 成功，记录估算 token 数等输出信息
+            if let (Some(rv), Some(span)) =
+                (ctx.input.runtime_view.clone(), prompt_build_span)
+            {
+                rv.trace_recorder()
+                    .end_span(
+                        span,
+                        TraceOutcome::Ok,
+                        json!({
+                            "estimated_input_tokens": result.estimated_input_tokens,
+                            "request_message_count": result.request.messages.len(),
+                        }),
+                    )
+                    .await;
+            }
+            ctx.turn.build_messages_output = Some(result);
+            Ok(())
+        }
+        Err(e) => {
+            // end span — 失败，记录错误信息
+            if let (Some(rv), Some(span)) =
+                (ctx.input.runtime_view.clone(), prompt_build_span)
+            {
+                rv.trace_recorder()
+                    .end_span(
+                        span,
+                        TraceOutcome::Error,
+                        json!({
+                            "error": e.to_string(),
+                        }),
+                    )
+                    .await;
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
