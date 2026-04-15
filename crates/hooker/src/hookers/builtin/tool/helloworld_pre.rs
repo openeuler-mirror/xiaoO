@@ -40,10 +40,10 @@ impl Hooker for BuiltinHelloWorldPreHooker {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, HookInvokeError> {
         match input {
-            HookInvokeInput::Pre(input) => {
+            HookInvokeInput::Pre { input, .. } => {
                 Ok(HookInvokeOutput::Pre(self.hook(&input, runtime).await))
             }
-            HookInvokeInput::Post(_) => {
+            HookInvokeInput::Post { .. } => {
                 Err(HookInvokeError::Tool(ToolExecutionError::ExecutionFailed {
                     message: format!(
                         "hooker '{}' cannot handle post-hook input for hook point {}",
@@ -51,7 +51,7 @@ impl Hooker for BuiltinHelloWorldPreHooker {
                     ),
                 }))
             }
-            HookInvokeInput::Error(_) => {
+            HookInvokeInput::Error { .. } => {
                 Err(HookInvokeError::Tool(ToolExecutionError::ExecutionFailed {
                     message: format!(
                         "hooker '{}' cannot handle error-hook input for hook point {}",

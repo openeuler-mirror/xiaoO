@@ -1,7 +1,7 @@
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolCall, ToolExecutor, ToolSpecView};
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
-use agent_types::hooker::{HookInvokeInput, HookInvokeOutput, HookPointId};
+use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, FinalToolCall, PostHookResult, PostToolHookInput,
     PreHookResult, PreToolHookInput, RawToolOutcome, ToolExecutionError, ToolExecutionResult,
@@ -98,9 +98,27 @@ impl ToolCallImpl {
         let mut results = Vec::new();
 
         for hooker in hookers {
-            let input = HookInvokeInput::Pre(PreToolHookInput {
-                call: state.final_call.clone(),
-            });
+            let hook_span = runtime
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("tool_pre_hook"),
+                    json!({
+                        "hook_kind": "tool_pre",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                        "tool_name": state.final_call.tool_name,
+                        "call_id": state.final_call.call_id,
+                    }),
+                )
+                .await;
+
+            let input = HookInvokeInput::Pre {
+                input: PreToolHookInput {
+                    call: state.final_call.clone(),
+                },
+                metadata: Self::hook_invoke_metadata(&hook_span),
+            };
 
             let output = match hooker.invoke(input, runtime).await {
                 Ok(output) => output,
@@ -112,6 +130,14 @@ impl ToolCallImpl {
                         state.final_call.tool_name,
                         error
                     );
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": error.to_string()}),
+                        )
+                        .await;
                     continue;
                 }
             };
@@ -125,6 +151,14 @@ impl ToolCallImpl {
                         other,
                         state.final_call.call_id
                     );
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": "unexpected output variant"}),
+                        )
+                        .await;
                     continue;
                 }
             };
@@ -132,9 +166,18 @@ impl ToolCallImpl {
             match pre_result {
                 PreHookResult::Allow => {
                     results.push(PreHookResult::Allow);
+                    runtime
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "allow"}))
+                        .await;
                 }
                 PreHookResult::Deny { reason } => {
+                    let fields = json!({"result": "deny", "reason": &reason});
                     results.push(PreHookResult::Deny { reason });
+                    runtime
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Denied, fields)
+                        .await;
                     return Ok(results);
                 }
                 PreHookResult::Transform { modified_input } => {
@@ -142,6 +185,10 @@ impl ToolCallImpl {
                     results.push(PreHookResult::Transform {
                         modified_input: state.final_call.input.clone(),
                     });
+                    runtime
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "transform"}))
+                        .await;
                 }
             }
         }
@@ -294,40 +341,88 @@ impl ToolCallImpl {
                 .cloned()
                 .unwrap_or_else(|| initial_outcome.clone());
 
-            let input = HookInvokeInput::Post(PostToolHookInput {
-                call: state.final_call.clone(),
-                outcome: current_outcome,
-            });
+            let hook_span = runtime
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("tool_post_hook"),
+                    json!({
+                        "hook_kind": "tool_post",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                        "tool_name": state.final_call.tool_name,
+                        "call_id": state.final_call.call_id,
+                    }),
+                )
+                .await;
 
-            let output = hooker.invoke(input, runtime).await.map_err(|e| {
+            let input = HookInvokeInput::Post {
+                input: PostToolHookInput {
+                    call: state.final_call.clone(),
+                    outcome: current_outcome,
+                },
+                metadata: Self::hook_invoke_metadata(&hook_span),
+            };
+
+            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
                 ToolExecutionError::ExecutionFailed {
                     message: e.to_string(),
                 }
-            })?;
+            }) {
+                Ok(o) => o,
+                Err(e) => {
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": e.to_string()}),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            };
 
             let post_result = match output {
                 HookInvokeOutput::Post(post_result) => post_result,
                 other => {
-                    return Err(ToolExecutionError::ExecutionFailed {
+                    let err = ToolExecutionError::ExecutionFailed {
                         message: format!(
                             "post-hooker '{}' returned non-post output {:?} for tool call '{}'",
                             hooker.id(),
                             other,
                             state.final_call.call_id
                         ),
-                    });
+                    };
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": err.to_string()}),
+                        )
+                        .await;
+                    return Err(err);
                 }
             };
 
             match post_result {
                 PostHookResult::Accept => {
                     results.push(PostHookResult::Accept);
+                    runtime
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "accept"}))
+                        .await;
                 }
                 PostHookResult::Transform { modified_output } => {
                     state.raw_outcome = Some(RawToolOutcome::Success {
                         output: modified_output.clone(),
                     });
                     results.push(PostHookResult::Transform { modified_output });
+                    runtime
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "transform"}))
+                        .await;
                 }
             }
         }
@@ -371,30 +466,80 @@ impl ToolCallImpl {
         let mut results = Vec::new();
 
         for hooker in hookers {
-            let input = HookInvokeInput::Error(ErrorToolHookInput {
-                call: state.final_call.clone(),
-                error: execution_error.clone(),
-            });
+            let hook_span = runtime
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("tool_error_hook"),
+                    json!({
+                        "hook_kind": "tool_error",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                        "tool_name": state.final_call.tool_name,
+                        "call_id": state.final_call.call_id,
+                        "execution_error": execution_error.to_string(),
+                    }),
+                )
+                .await;
 
-            let output = hooker.invoke(input, runtime).await.map_err(|e| {
+            let input = HookInvokeInput::Error {
+                input: ErrorToolHookInput {
+                    call: state.final_call.clone(),
+                    error: execution_error.clone(),
+                },
+                metadata: Self::hook_invoke_metadata(&hook_span),
+            };
+
+            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
                 ToolExecutionError::ExecutionFailed {
                     message: e.to_string(),
                 }
-            })?;
+            }) {
+                Ok(o) => o,
+                Err(e) => {
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": e.to_string()}),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            };
 
             let error_result = match output {
                 HookInvokeOutput::Error(error_result) => error_result,
                 other => {
-                    return Err(ToolExecutionError::ExecutionFailed {
+                    let err = ToolExecutionError::ExecutionFailed {
                         message: format!(
                             "error-hooker '{}' returned non-error output {:?} for tool call '{}'",
                             hooker.id(),
                             other,
                             state.final_call.call_id
                         ),
-                    });
+                    };
+                    runtime
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": err.to_string()}),
+                        )
+                        .await;
+                    return Err(err);
                 }
             };
+
+            let (trace_outcome, result_label) = match &error_result {
+                ErrorHookResult::Propagate => (TraceOutcome::Ok, "propagate"),
+                ErrorHookResult::Recover { .. } => (TraceOutcome::Ok, "recover"),
+            };
+            runtime
+                .trace_recorder()
+                .end_span(hook_span, trace_outcome, json!({"result": result_label}))
+                .await;
 
             results.push(error_result);
         }
@@ -408,6 +553,14 @@ impl ToolCallImpl {
             pre_hook_results: state.pre_hook_results.clone(),
             error_hook_results: state.error_hook_results.clone(),
             error: state.execution_error.clone(),
+        }
+    }
+
+    fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
+        HookInvokeMetadata {
+            trace_id: Some(hook_span.trace_id().to_string()),
+            span_id: Some(hook_span.span_id().to_string()),
+            parent_span_id: hook_span.parent_span_id().map(ToString::to_string),
         }
     }
 

@@ -1,6 +1,8 @@
+use agent_types::hooker::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json;
+use skill::SkillsConfig;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,6 +17,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
+    pub skills: Option<SkillsSection>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub paths: PathsConfig,
@@ -22,6 +26,8 @@ pub struct AppConfig {
     pub trace: Option<TraceConfig>,
     #[serde(default)]
     pub compact: Option<CompactConfig>,
+    #[serde(default)]
+    pub hooker: HookerRegistryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +64,14 @@ pub struct FeishuChannelConfig {
     pub verification_token: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillsSection {
+    #[serde(default)]
+    pub dirs: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_scripts: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -228,6 +242,33 @@ impl DaemonConfig {
             max_file_download_bytes: 0,
             max_file_text_chars: 0,
         }))
+    }
+
+    pub fn resolve_skills_config(&self) -> SkillsConfig {
+        let mut skills_dirs = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            skills_dirs.push(home.join(".xiaoo").join("skills"));
+        }
+        if let Some(skills) = self.app.skills.as_ref() {
+            if let Some(extra_dirs) = skills.dirs.as_ref() {
+                for dir in extra_dirs {
+                    skills_dirs.push(PathBuf::from(dir));
+                }
+            }
+        }
+        skills_dirs.sort();
+        skills_dirs.dedup();
+
+        SkillsConfig {
+            skills_dirs,
+            allow_scripts: self
+                .app
+                .skills
+                .as_ref()
+                .and_then(|skills| skills.allow_scripts)
+                .unwrap_or(false),
+            ..SkillsConfig::default()
+        }
     }
 
     pub fn max_output_tokens(&self) -> usize {

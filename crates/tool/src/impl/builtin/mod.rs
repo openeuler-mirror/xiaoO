@@ -8,8 +8,10 @@ mod glob;
 mod grep;
 mod join_subagent;
 mod print_hello_world;
+mod skill;
 mod spawn_subagent;
 mod tool_source;
 mod webfetch;
+mod websearch;
 
 pub use tool_source::BuiltinToolSource;

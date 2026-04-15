@@ -280,7 +280,9 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmPre(_) => Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Allow)),
+                HookInvokeInput::LlmPre { .. } => {
+                    Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Allow))
+                }
                 _ => panic!("AllowPreHooker: unexpected input"),
             }
         }
@@ -320,7 +322,9 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmPre(pre_input) => {
+                HookInvokeInput::LlmPre {
+                    input: pre_input, ..
+                } => {
                     let mut req = pre_input.request;
                     req.messages = vec![ChatMessage {
                         role: MessageRole::User,
@@ -372,7 +376,7 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmPost(_) => {
+                HookInvokeInput::LlmPost { .. } => {
                     Ok(HookInvokeOutput::LlmPost(PostLlmHookResult::Accept))
                 }
                 _ => panic!("AcceptPostHooker: unexpected input"),
@@ -414,7 +418,9 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmPost(post_input) => {
+                HookInvokeInput::LlmPost {
+                    input: post_input, ..
+                } => {
                     let mut resp = post_input.response;
                     resp.message.text = Some(self.new_text.clone());
                     Ok(HookInvokeOutput::LlmPost(PostLlmHookResult::Transform {
@@ -458,7 +464,7 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmError(_) => {
+                HookInvokeInput::LlmError { .. } => {
                     Ok(HookInvokeOutput::LlmError(ErrorLlmHookResult::Propagate))
                 }
                 _ => panic!("PropagateErrorHooker: unexpected input"),
@@ -500,7 +506,7 @@ mod wrapper_tests {
             _: &dyn RuntimeView,
         ) -> Result<HookInvokeOutput, HookInvokeError> {
             match input {
-                HookInvokeInput::LlmError(_) => {
+                HookInvokeInput::LlmError { .. } => {
                     Ok(HookInvokeOutput::LlmError(ErrorLlmHookResult::Recover {
                         response: make_response(&self.fallback_text),
                     }))
@@ -667,7 +673,7 @@ mod wrapper_tests {
                 _: &dyn RuntimeView,
             ) -> Result<HookInvokeOutput, HookInvokeError> {
                 match input {
-                    HookInvokeInput::LlmPre(pre) => {
+                    HookInvokeInput::LlmPre { input: pre, .. } => {
                         let mut req = pre.request;
                         req.messages = vec![ChatMessage {
                             role: MessageRole::User,

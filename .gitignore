@@ -12,3 +12,8 @@ AGENTS.md
 
 __pycache__/
 *.pyc
+.clawtrace
+.env
+
+**/tests/
+**/docs/

@@ -39,7 +39,9 @@ impl Hooker for HelloWorldLlmPostHooker {
         _runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, HookInvokeError> {
         match input {
-            HookInvokeInput::LlmPost(post_input) => {
+            HookInvokeInput::LlmPost {
+                input: post_input, ..
+            } => {
                 let token_count = post_input.response.message.usage.total_tokens;
                 println!(
                     "[HelloWorldLlmPostHooker] hook triggered at '{}', total_tokens={}",

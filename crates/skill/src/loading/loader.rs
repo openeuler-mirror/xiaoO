@@ -41,15 +41,17 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
                 continue;
             }
 
-            // Security audit before loading
-            let audit_report = audit_skill_directory(&skill_dir, &audit_options);
-            if !audit_report.is_clean() {
-                tracing::warn!(
-                    dir = %skill_dir.display(),
-                    findings = ?audit_report.findings,
-                    "skill failed security audit, skipping"
-                );
-                continue;
+            // Security audit before loading (when enabled)
+            if config.audit_enabled {
+                let audit_report = audit_skill_directory(&skill_dir, &audit_options);
+                if !audit_report.is_clean() {
+                    tracing::warn!(
+                        dir = %skill_dir.display(),
+                        findings = ?audit_report.findings,
+                        "skill failed security audit, skipping"
+                    );
+                    continue;
+                }
             }
 
             match load_skill_from_dir(&skill_dir) {
