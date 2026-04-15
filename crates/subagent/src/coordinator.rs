@@ -29,6 +29,21 @@ pub enum JoinDecision {
     },
 }
 
+pub struct SubagentPromptBuilder;
+
+impl SubagentPromptBuilder {
+    pub fn build(task_goal: &str, task_context: &str, output_schema: &serde_json::Value) -> String {
+        format!(
+            "You are a subagent summoned by a parent agent. Your primary goal is:\n{task_goal}\n\n\
+             Task Context:\n{task_context}\n\n\
+             You MUST conclude your task by producing a final result that strictly adheres to the \
+             following JSON schema. Do not include any other explanatory text in your final finish/terminal reply, \
+             ONLY the JSON matching this schema:\n{}",
+            serde_json::to_string_pretty(output_schema).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+}
+
 /// Configuration options for controlling subagent boundaries and quotas.
 #[derive(Debug, Clone, Copy)]
 pub struct SubagentCoordinatorConfig {
@@ -91,13 +106,20 @@ impl SubagentCoordinator {
             });
         }
 
+        let built_prompt = SubagentPromptBuilder::build(
+            &request.task_goal,
+            &request.task_context,
+            &request.output_schema,
+        );
+
         state.agents.insert(
             child_agent_id.0.clone(),
             SubagentRecord {
                 agent_id: child_agent_id.clone(),
                 parent_agent_id: Some(request.parent_agent_id.clone()),
                 description: request.description.clone(),
-                prompt: request.prompt.clone(),
+                prompt: built_prompt.clone(),
+                output_schema: Some(request.output_schema.clone()),
                 status: SubagentStatus::Running,
                 created_at_ms,
                 updated_at_ms: created_at_ms,
@@ -113,7 +135,8 @@ impl SubagentCoordinator {
                 agent_id: child_agent_id,
                 parent_agent_id: request.parent_agent_id.clone(),
                 description: request.description.clone(),
-                prompt: request.prompt.clone(),
+                prompt: built_prompt,
+                output_schema: request.output_schema.clone(),
             }],
         })
     }

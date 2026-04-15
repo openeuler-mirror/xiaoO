@@ -1,3 +1,4 @@
+use agent_types::hooker::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json;
@@ -22,6 +23,8 @@ pub struct AppConfig {
     pub trace: Option<TraceConfig>,
     #[serde(default)]
     pub compact: Option<CompactConfig>,
+    #[serde(default)]
+    pub hooker: HookerRegistryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -25,6 +25,18 @@ impl HookerRegistryImpl {
             policies,
         }
     }
+
+    fn hook_point_matches(pattern: &str, candidate: &str) -> bool {
+        let pattern_segments: Vec<_> = pattern.split('.').collect();
+        let candidate_segments: Vec<_> = candidate.split('.').collect();
+
+        pattern_segments.len() == candidate_segments.len()
+            && pattern_segments.iter().zip(candidate_segments.iter()).all(
+                |(pattern_segment, candidate_segment)| {
+                    pattern_segment == candidate_segment || *pattern_segment == "*"
+                },
+            )
+    }
 }
 
 impl HookerRegistry for HookerRegistryImpl {
@@ -39,7 +51,7 @@ impl HookerRegistry for HookerRegistryImpl {
     fn list_for_hook_point(&self, hook_point: &HookPointId) -> Vec<&dyn Hooker> {
         self.hookers
             .values()
-            .filter(|hooker| hooker.hook_point() == hook_point)
+            .filter(|hooker| Self::hook_point_matches(&hooker.hook_point().0, &hook_point.0))
             .map(Box::as_ref)
             .collect()
     }

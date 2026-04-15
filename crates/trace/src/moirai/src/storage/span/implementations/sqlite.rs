@@ -6,6 +6,8 @@ use rusqlite::{Connection, Row};
 use super::super::storage_trait::{SpanStorage, TraceSummary};
 use crate::{MoiraiError, Result, Span};
 
+const SPAN_PREFIX_SUGGESTION_LIMIT: usize = 5;
+
 #[derive(Clone)]
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -364,6 +366,53 @@ impl SpanStorage for SqliteStorage {
                     )))
                 }
             }
+        })
+        .await
+        .map_err(|e| MoiraiError::Storage(e.to_string()))?
+    }
+
+    async fn get_span_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        let conn = self.conn.clone();
+        let prefix = prefix.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            let pattern = format!("{}%", prefix);
+
+            let total_matches: usize = conn.query_row(
+                "SELECT COUNT(*) FROM spans WHERE span_id LIKE ?1",
+                rusqlite::params![&pattern],
+                |row| row.get(0),
+            )?;
+
+            if total_matches == 0 {
+                return Ok(None);
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT span_id FROM spans WHERE span_id LIKE ?1 ORDER BY span_id LIMIT ?2",
+            )?;
+
+            let matches: Vec<String> = stmt
+                .query_map(
+                    rusqlite::params![&pattern, SPAN_PREFIX_SUGGESTION_LIMIT],
+                    |row| row.get(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            if total_matches == 1 {
+                return Ok(matches.into_iter().next());
+            }
+
+            Err(MoiraiError::InvalidState(format!(
+                "Multiple spans match prefix '{}': {} ({} total matches)",
+                prefix,
+                matches.join(", "),
+                total_matches
+            )))
         })
         .await
         .map_err(|e| MoiraiError::Storage(e.to_string()))?

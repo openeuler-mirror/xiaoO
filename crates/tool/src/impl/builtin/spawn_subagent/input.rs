@@ -4,5 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub struct SpawnSubagentInput {
     pub description: String,
-    pub prompt: String,
+    pub task_goal: String,
+    pub task_context: String,
+    pub output_schema: serde_json::Value,
 }

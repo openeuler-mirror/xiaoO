@@ -2697,6 +2697,7 @@ dependencies = [
  "agent-types",
  "async-trait",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "ulid",
 ]

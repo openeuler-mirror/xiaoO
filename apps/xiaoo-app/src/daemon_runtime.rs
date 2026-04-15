@@ -2,6 +2,7 @@ use crate::daemon_config::{DaemonConfig, ResolvedAgentConfig};
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::hooker::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -35,6 +36,7 @@ pub struct ConfiguredRuntimeResolver {
     feature_flags: FeatureFlags,
     trace: Value,
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
+    hooker: HookerRegistryConfig,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -75,6 +77,7 @@ impl ConfiguredRuntimeResolver {
             feature_flags: FeatureFlags::default(),
             trace,
             compression_pipeline: Some(compression_pipeline),
+            hooker: config.app.hooker.clone(),
         })
     }
 
@@ -131,6 +134,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: self.compression_pipeline.clone(),
             trace: self.trace.clone(),
+            hooker: self.hooker.clone(),
         })
     }
 }

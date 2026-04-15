@@ -39,7 +39,7 @@ agent-llm = { path = "../../crates/agent-llm" }
 agent-types = { path = "../../crates/agent-types" }
 compact = { path = "../../crates/compact" }
 xiaoo-core = { path = "../../crates/core" }
-hooker = { path = "../../crates/hooker" }
+hooker = { path = "../../crates/hooker", features = ["plugin_hook"] }
 llm-client = { path = "../../crates/llm-client" }
 memory = { path = "../../crates/memory" }
 prompt = { path = "../../crates/prompt" }

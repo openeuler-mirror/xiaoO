@@ -73,6 +73,20 @@ enum Commands {
         format: Format,
     },
 
+    #[command(about = "Show detailed information for a span ID or prefix")]
+    Span {
+        /// Path to the SQLite database
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+
+        #[arg(long, value_name = "ID", help = "Span ID or prefix to look up")]
+        span_id: String,
+
+        /// Output format
+        #[arg(long, value_name = "FORMAT", default_value = "json")]
+        format: Format,
+    },
+
     /// Serve traces via HTTP API
     Serve {
         /// Path to the SQLite database
@@ -106,6 +120,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format,
         } => {
             cmd_export(&db, &trace_id, format).await?;
+        }
+        Commands::Span {
+            db,
+            span_id,
+            format,
+        } => {
+            cmd_span(&db, &span_id, format).await?;
         }
         Commands::Serve { db, port } => {
             cmd_serve(&db, port).await?;
@@ -332,9 +353,75 @@ async fn cmd_export(
     }
 }
 
+fn cli_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::other(message.into()))
+}
+
+async fn cmd_span(
+    db_path: &PathBuf,
+    span_id: &str,
+    format: Format,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let storage = SqliteStorage::new(db_path.to_str().unwrap())?;
+
+    let resolved_span_id = storage
+        .get_span_by_prefix(span_id)
+        .await
+        .map_err(|err| cli_error(err.to_string()))?
+        .ok_or_else(|| cli_error(format!("Span not found: {}", span_id)))?;
+
+    let span = storage
+        .get_span(&resolved_span_id)
+        .await
+        .map_err(|err| cli_error(err.to_string()))?
+        .ok_or_else(|| cli_error(format!("Span not found: {}", resolved_span_id)))?;
+
+    match format {
+        Format::Json => export_span_json(&span),
+        Format::Markdown => export_span_markdown(&span),
+    }
+}
+
 fn export_json(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
     let json = serde_json::to_string_pretty(spans)?;
     println!("{}", json);
+    Ok(())
+}
+
+fn export_span_json(span: &Span) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string_pretty(span)?;
+    println!("{}", json);
+    Ok(())
+}
+
+fn export_span_markdown(span: &Span) -> Result<(), Box<dyn std::error::Error>> {
+    println!("# Span: {}", span.span_id);
+    println!();
+    println!("## Summary");
+    println!();
+    println!("- **Span ID**: {}", span.span_id);
+    println!("- **Trace ID**: {}", span.trace_id);
+    match &span.parent_span_id {
+        Some(parent_span_id) => println!("- **Parent Span ID**: {}", parent_span_id),
+        None => println!("- **Parent Span ID**: (root)"),
+    }
+    println!("- **Type**: {}", span.span_type);
+    println!("- **Start Time**: {}", format_timestamp(span.start_time));
+    println!(
+        "- **Last Updated At**: {}",
+        format_timestamp(span.last_updated_at)
+    );
+    match span.end_time {
+        Some(end_time) => println!("- **End Time**: {}", format_timestamp(end_time)),
+        None => println!("- **End Time**: (ongoing)"),
+    }
+    println!("- **Created At**: {}", format_timestamp(span.created_at));
+    println!();
+    println!("## Extras");
+    println!();
+    println!("```json");
+    println!("{}", serde_json::to_string_pretty(&span.extras)?);
+    println!("```");
     Ok(())
 }
 
