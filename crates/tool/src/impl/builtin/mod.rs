@@ -11,5 +11,6 @@ mod print_hello_world;
 mod spawn_subagent;
 mod tool_source;
 mod webfetch;
+mod websearch;
 
 pub use tool_source::BuiltinToolSource;

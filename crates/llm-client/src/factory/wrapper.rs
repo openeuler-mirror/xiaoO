@@ -1,6 +1,8 @@
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_contracts::runtime::RuntimeView;
+use agent_contracts::trace::{TraceOutcome, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::hooker::HookPointId;
 use agent_types::hooker::{HookInvokeInput, HookInvokeOutput};
@@ -17,6 +19,7 @@ use super::trace::{
     llm_error_kind, merge_trace_fields, response_trace_fields, stream_trace_fields,
     trace_outcome_for_error, update_trace_span, StreamTraceStats,
 };
+
 
 pub struct LlmProviderWrapper {
     inner: Arc<dyn LlmProvider>,
@@ -113,6 +116,19 @@ impl LlmProviderWrapper {
         let mut results = Vec::new();
 
         for hooker in hookers {
+            let hook_span = runtime_view
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("llm_pre_hook"),
+                    json!({
+                        "hook_kind": "llm_pre",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                    }),
+                )
+                .await;
+
             let input = HookInvokeInput::LlmPre(PreLlmHookInput {
                 request: request.clone(),
             });
@@ -126,6 +142,14 @@ impl LlmProviderWrapper {
                         hook_point.0,
                         e
                     );
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": e.to_string()}),
+                        )
+                        .await;
                     continue;
                 }
             };
@@ -139,6 +163,14 @@ impl LlmProviderWrapper {
                         other,
                         hook_point.0
                     );
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": "unexpected output variant"}),
+                        )
+                        .await;
                     continue;
                 }
             };
@@ -146,11 +178,19 @@ impl LlmProviderWrapper {
             match pre_result {
                 PreLlmHookResult::Allow => {
                     results.push(PreLlmHookResult::Allow);
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "allow"}))
+                        .await;
                 }
                 PreLlmHookResult::Transform {
                     ref modified_request,
                 } => {
                     *request = modified_request.clone();
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "transform"}))
+                        .await;
                     results.push(pre_result);
                 }
             }
@@ -207,12 +247,25 @@ impl LlmProviderWrapper {
         let mut results = Vec::new();
 
         for hooker in hookers {
+            let hook_span = runtime_view
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("llm_post_hook"),
+                    json!({
+                        "hook_kind": "llm_post",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                    }),
+                )
+                .await;
+
             let input = HookInvokeInput::LlmPost(PostLlmHookInput {
                 request: request.clone(),
                 response: response.clone(),
             });
 
-            let output = hooker
+            let output = match hooker
                 .invoke(input, runtime_view.as_ref())
                 .await
                 .map_err(|e| LlmError::RequestFailed {
@@ -222,30 +275,60 @@ impl LlmProviderWrapper {
                         hook_point.0,
                         e
                     ),
-                })?;
+                }) {
+                Ok(o) => o,
+                Err(e) => {
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": e.to_string()}),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            };
 
             let post_result = match output {
                 HookInvokeOutput::LlmPost(r) => r,
                 other => {
-                    return Err(LlmError::RequestFailed {
+                    let err = LlmError::RequestFailed {
                         message: format!(
                             "llm post-hooker '{}' returned unexpected output {:?} for hook_point '{}'",
                             hooker.id(),
                             other,
                             hook_point.0
                         ),
-                    });
+                    };
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": err.to_string()}),
+                        )
+                        .await;
+                    return Err(err);
                 }
             };
 
             match post_result {
                 PostLlmHookResult::Accept => {
                     results.push(PostLlmHookResult::Accept);
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "accept"}))
+                        .await;
                 }
                 PostLlmHookResult::Transform {
                     ref modified_response,
                 } => {
                     *response = modified_response.clone();
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(hook_span, TraceOutcome::Ok, json!({"result": "transform"}))
+                        .await;
                     results.push(post_result);
                 }
             }
@@ -302,12 +385,26 @@ impl LlmProviderWrapper {
         let mut results = Vec::new();
 
         for hooker in hookers {
+            let hook_span = runtime_view
+                .trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Hook,
+                    Cow::Borrowed("llm_error_hook"),
+                    json!({
+                        "hook_kind": "llm_error",
+                        "hooker_id": hooker.id().to_string(),
+                        "hook_point": hook_point.0,
+                        "error": error.to_string(),
+                    }),
+                )
+                .await;
+
             let input = HookInvokeInput::LlmError(ErrorLlmHookInput {
                 request: request.clone(),
                 error: error.clone(),
             });
 
-            let output = hooker
+            let output = match hooker
                 .invoke(input, runtime_view.as_ref())
                 .await
                 .map_err(|e| LlmError::RequestFailed {
@@ -317,21 +414,52 @@ impl LlmProviderWrapper {
                         hook_point.0,
                         e
                     ),
-                })?;
+                }) {
+                Ok(o) => o,
+                Err(e) => {
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": e.to_string()}),
+                        )
+                        .await;
+                    return Err(e);
+                }
+            };
 
             let error_result = match output {
                 HookInvokeOutput::LlmError(r) => r,
                 other => {
-                    return Err(LlmError::RequestFailed {
+                    let err = LlmError::RequestFailed {
                         message: format!(
                             "llm error-hooker '{}' returned unexpected output {:?} for hook_point '{}'",
                             hooker.id(),
                             other,
                             hook_point.0
                         ),
-                    });
+                    };
+                    runtime_view
+                        .trace_recorder()
+                        .end_span(
+                            hook_span,
+                            TraceOutcome::Error,
+                            json!({"error": err.to_string()}),
+                        )
+                        .await;
+                    return Err(err);
                 }
             };
+
+            let (trace_outcome, result_label) = match &error_result {
+                ErrorLlmHookResult::Propagate => (TraceOutcome::Ok, "propagate"),
+                ErrorLlmHookResult::Recover { .. } => (TraceOutcome::Ok, "recover"),
+            };
+            runtime_view
+                .trace_recorder()
+                .end_span(hook_span, trace_outcome, json!({"result": result_label}))
+                .await;
 
             results.push(error_result);
         }
@@ -591,7 +719,7 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
                 };
 
                 end_trace_span(
@@ -672,7 +800,7 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
                 };
 
                 end_trace_span(

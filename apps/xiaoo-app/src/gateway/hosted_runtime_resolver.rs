@@ -153,7 +153,11 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .clone()
             .unwrap_or_else(|| self.config.descriptor.agent_id.clone());
         let llm_provider = match self.config.llm_provider.clone() {
-            Some(provider) => provider,
+            Some(provider) => Arc::new(LlmProviderWrapper::new(
+                provider.inner(),
+                Some(agent_id.0.clone()),
+                None,
+            )),
             None => {
                 let api_key = self.resolve_api_key()?;
                 let llm_config = LlmProviderConfig {
