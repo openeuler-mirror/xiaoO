@@ -121,12 +121,30 @@ impl GatewayRuntime {
         state.chat_state.messages.get_mut(index)
     }
 
+    fn ensure_stream_message(&mut self, state: &mut AppState) {
+        let has_valid_stream_message = self
+            .stream_message_index
+            .and_then(|index| state.chat_state.messages.get(index))
+            .map(|message| message.role == crate::chat::MessageRole::Assistant)
+            .unwrap_or(false);
+        if has_valid_stream_message {
+            return;
+        }
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        self.stream_message_index = Some(state.chat_state.messages.len().saturating_sub(1));
+    }
+
     fn set_stream_message_content(
         &mut self,
         state: &mut AppState,
         content: impl Into<String>,
         streaming: bool,
     ) {
+        self.ensure_stream_message(state);
         if let Some(message) = self.stream_message_mut(state) {
             message.content = content.into();
             message.is_streaming = streaming;
@@ -167,7 +185,41 @@ impl GatewayRuntime {
         }
     }
 
+    fn finalize_stream_message_before_aux(&mut self, state: &mut AppState) {
+        let Some(index) = self.stream_message_index.take() else {
+            return;
+        };
+
+        let remove_empty_message = state
+            .chat_state
+            .messages
+            .get(index)
+            .map(|message| {
+                message.role == crate::chat::MessageRole::Assistant
+                    && message.is_streaming
+                    && message.content.trim().is_empty()
+                    && message.thinking_content.trim().is_empty()
+                    && message.tool_state.is_none()
+                    && message.todo_state.is_none()
+                    && message.completion_check_state.is_none()
+            })
+            .unwrap_or(false);
+
+        if remove_empty_message {
+            state.chat_state.messages.remove(index);
+            return;
+        }
+
+        if let Some(message) = state.chat_state.messages.get_mut(index) {
+            if message.role == crate::chat::MessageRole::Assistant && message.is_streaming {
+                message.is_streaming = false;
+            }
+        }
+    }
+
     fn apply_tool_update(&mut self, state: &mut AppState, update: ToolExecutionUpdate) {
+        self.finalize_stream_message_before_aux(state);
+
         if let Some(existing) = state.chat_state.messages.iter_mut().find(|message| {
             message
                 .tool_state
@@ -253,5 +305,86 @@ impl GatewayRuntime {
                 done.total_tokens,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::app_state::AppState;
+    use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolExecutionUpdate};
+
+    use super::GatewayRuntime;
+
+    fn test_state() -> AppState {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("test app state should initialize");
+        state.chat_state.messages.clear();
+        state
+    }
+
+    fn sample_tool_update(call_id: &str) -> ToolExecutionUpdate {
+        ToolExecutionUpdate {
+            call_id: call_id.to_string(),
+            tool: "shell".to_string(),
+            summary: "running".to_string(),
+            args_preview: String::new(),
+            command_preview: None,
+            command: None,
+            detail: String::new(),
+            status: ToolExecutionStatus::Running,
+            exit_code: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn tool_update_preserves_previous_assistant_message() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+        runtime.set_stream_message_content(&mut state, "before tool", true);
+
+        runtime.apply_tool_update(&mut state, sample_tool_update("call-1"));
+        runtime.set_stream_message_content(&mut state, "after tool", true);
+
+        assert_eq!(state.chat_state.messages.len(), 3);
+        assert_eq!(state.chat_state.messages[0].role, MessageRole::Assistant);
+        assert_eq!(state.chat_state.messages[0].content, "before tool");
+        assert!(!state.chat_state.messages[0].is_streaming);
+
+        let tool_state = state.chat_state.messages[1]
+            .tool_state
+            .as_ref()
+            .expect("second message should be tool state");
+        assert_eq!(tool_state.call_id, "call-1");
+
+        assert_eq!(state.chat_state.messages[2].role, MessageRole::Assistant);
+        assert_eq!(state.chat_state.messages[2].content, "after tool");
+        assert!(state.chat_state.messages[2].is_streaming);
+    }
+
+    #[test]
+    fn tool_update_drops_empty_streaming_placeholder() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+
+        runtime.apply_tool_update(&mut state, sample_tool_update("call-2"));
+
+        assert_eq!(state.chat_state.messages.len(), 1);
+        assert!(state.chat_state.messages[0].tool_state.is_some());
+        assert!(runtime.stream_message_index.is_none());
     }
 }
