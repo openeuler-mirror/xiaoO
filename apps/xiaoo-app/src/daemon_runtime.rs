@@ -20,8 +20,9 @@ use std::sync::Arc;
 use std::{fs, path::Path};
 use tool::{load_tool_sources, ToolRegistryBuilderImpl};
 use xiaoo_app::gateway::{
-    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
-    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
+    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
+    SessionRuntimeResolver,
 };
 use xiaoo_core::EmptySkillRegistry;
 
@@ -120,7 +121,11 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(self.agent.id.clone()),
                 model: self.agent.model.clone(),
-                system_prompt: build_system_prompt(&self.agent.system_prompt, request),
+                system_prompt: build_system_prompt(
+                    &self.agent.system_prompt,
+                    &self.agent.workspace_root,
+                    request,
+                ),
                 feature_flags: self.feature_flags.clone(),
 
                 token_budget: self.token_budget.clone(),
@@ -167,7 +172,12 @@ fn build_token_budget(
     }
 }
 
-fn build_system_prompt(base_prompt: &str, request: &SessionRuntimeBuildInput) -> String {
+fn build_system_prompt(
+    base_prompt: &str,
+    workspace_root: &Path,
+    request: &SessionRuntimeBuildInput,
+) -> String {
+    let base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
     let base_prompt = base_prompt.trim();
     let channel_prompt = request.channel.as_deref().map(|channel| {
         let mut prompt = compose_channel_system_prompt(ChannelPromptSections {
@@ -254,7 +264,10 @@ fn build_compression_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::build_token_budget;
+    use super::{build_system_prompt, build_token_budget};
+    use std::fs;
+    use tempfile::tempdir;
+    use xiaoo_app::gateway::{GatewayEntryContext, SessionRuntimeBuildInput};
 
     #[test]
     fn token_budget_caps_output_to_preserve_prompt_budget() {
@@ -270,5 +283,28 @@ mod tests {
         assert_eq!(budget.total_budget, 65536);
         assert_eq!(budget.reserved_for_output, 8192);
         assert_eq!(budget.reserved_for_system, 2048);
+    }
+
+    #[test]
+    fn build_system_prompt_includes_workspace_agents_before_channel_rules() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "repo rules").unwrap();
+        let request = SessionRuntimeBuildInput {
+            session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            sender_id: "sender".to_string(),
+            channel: Some("feishu".to_string()),
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext::channel(None),
+            agent_id_override: None,
+        };
+
+        let prompt = build_system_prompt("base rules", temp.path(), &request);
+
+        assert!(prompt.contains("base rules"));
+        assert!(prompt.contains("repo rules"));
+        assert!(prompt.contains("当前通道"));
+        assert!(prompt.find("repo rules").unwrap() < prompt.find("## 当前通道").unwrap());
     }
 }

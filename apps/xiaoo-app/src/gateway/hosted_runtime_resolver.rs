@@ -1,6 +1,7 @@
 use crate::gateway::{
-    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
-    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
+    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
+    SessionRuntimeResolver,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
@@ -178,6 +179,8 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .clone();
         let mut descriptor = self.config.descriptor.clone();
         descriptor.agent_id = agent_id.clone();
+        descriptor.system_prompt =
+            compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
 
         Ok(ResolvedSessionRuntime {
             descriptor,

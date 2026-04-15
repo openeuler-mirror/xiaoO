@@ -119,6 +119,9 @@ pub fn compose_system_text(
     if let Some(tool_section) = compose_tool_section(tools) {
         sections.push(tool_section);
     }
+    if let Some(subagent_section) = compose_subagent_section(context, tools) {
+        sections.push(subagent_section);
+    }
 
     sections.join("\n\n")
 }
@@ -320,6 +323,35 @@ fn compose_tool_section(tools: &[Arc<dyn ToolSpecView>]) -> Option<String> {
     Some(format!("# Tools\n{}", lines.join("\n\n")))
 }
 
+fn compose_subagent_section(
+    _context: &PromptContext,
+    tools: &[Arc<dyn ToolSpecView>],
+) -> Option<String> {
+    let has_spawn_subagent = tools.iter().any(|tool| tool.name().0 == "spawn_subagent");
+    let has_join_subagent = tools.iter().any(|tool| tool.name().0 == "join_subagent");
+    if !has_spawn_subagent || !has_join_subagent {
+        return None;
+    }
+
+    let lines = vec![
+        "- Use `spawn_subagent` when the user explicitly asks for subagents, parallel work, split workflows, or multiple independent workers.".to_string(),
+        "- Prefer `spawn_subagent` when the work decomposes into 2 or more independent read-only branches and the parent agent must later compare, sort, or aggregate the results.".to_string(),
+        "- For independent branches, spawn all needed subagents first, then join them and aggregate only after each branch finishes.".to_string(),
+        "- Keep tiny single-step lookups local. Do not use `spawn_subagent` when one ordinary tool call can finish the job.".to_string(),
+        "- Do not create nested or recursive delegation. If you are already working on one bounded delegated task, finish it directly.".to_string(),
+        "- When a delegated task needs a count, total, or directory statistic, require an exact result. A truncated list or an \"at least N\" answer is not an acceptable final value.".to_string(),
+        "- If a `join_subagent` result contains uncertainty or truncation language, do not aggregate it. Re-run with a more exact method or explicitly report that no exact value is available.".to_string(),
+    ];
+
+    Some(format!("# Subagent Guidance
+{}", lines.join("
+")))
+}
+
+
+
+
+
 fn render_history_messages(messages: &[ChatMessage]) -> String {
     messages
         .iter()
@@ -427,6 +459,8 @@ mod tests {
         }
     }
 
+    
+    
     #[test]
     #[ignore]
     fn channel_prompt_keeps_existing_rule_sections() {
@@ -497,4 +531,5 @@ mod tests {
         assert!(text.contains("- policy: be precise"));
         assert!(!text.contains("score="));
     }
+
 }

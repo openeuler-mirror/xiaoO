@@ -218,6 +218,8 @@ LLM → 调用 skill 工具: { skill: "code-review", args: "src/main.rs" }
      → LLM 根据 prompt 使用 grep/file_read 等工具完成 review
 ```
 
+如果当前 workspace 目录，以及它到最近 Git 根目录之间的父目录中存在 `AGENTS.md`，运行时也会自动把这些内容注入 system prompt；越靠近当前 workspace 的文件优先级越高。不在 Git 仓库里时，只读取当前目录的 `AGENTS.md`。
+
 ## Gateway HTTP API
 
 Gateway 以 **daemon 模式**运行，提供 RESTful API 供外部系统（如飞书 Webhook）接入。
