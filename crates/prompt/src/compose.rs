@@ -343,14 +343,15 @@ fn compose_subagent_section(
         "- If a `join_subagent` result contains uncertainty or truncation language, do not aggregate it. Re-run with a more exact method or explicitly report that no exact value is available.".to_string(),
     ];
 
-    Some(format!("# Subagent Guidance
-{}", lines.join("
-")))
+    Some(format!(
+        "# Subagent Guidance
+{}",
+        lines.join(
+            "
+"
+        )
+    ))
 }
-
-
-
-
 
 fn render_history_messages(messages: &[ChatMessage]) -> String {
     messages
@@ -459,8 +460,6 @@ mod tests {
         }
     }
 
-    
-    
     #[test]
     #[ignore]
     fn channel_prompt_keeps_existing_rule_sections() {
@@ -531,5 +530,4 @@ mod tests {
         assert!(text.contains("- policy: be precise"));
         assert!(!text.contains("score="));
     }
-
 }

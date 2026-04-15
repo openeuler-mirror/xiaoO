@@ -1,8 +1,8 @@
 use axum::{
-    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use moirai::{Span, SpanStorage, SqliteStorage, TraceSummary};
 use serde::{Deserialize, Serialize};
