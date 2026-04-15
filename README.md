@@ -1,11 +1,11 @@
 <div align="center">
-  <img src="./img/logo.jpeg" width="150" alt="xiaoO" style="border-radius: 6px;">
+  <img src="./img/logo.jpeg" width="180" alt="xiaoO" style="border-radius: 6px;">
 </div>
 
-# xiaoO - Open-source Agent OS Butler
+# xiaoO - Open-source AgentOS Butler
 
 ## What is xiaoO?
-xiaoO is the butler of Agent OS. Unlike agent runtimes that merely run on an OS, xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof. One binary. One system. One butler.
+xiaoO is the butler of AgentOS. Unlike agent runtimes that merely run on an OS, xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof. One binary. One system. One butler.
 
 > The butler that is the house.
 
