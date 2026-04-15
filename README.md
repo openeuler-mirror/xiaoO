@@ -4,7 +4,7 @@
 
 # xiaoO - Open-source Intelligence Hub of AgentOS
 ## What is xiaoO?
-It is the intelligence hub of AgentOS, delivering self-governing system management, seamless agent orchestration, and ready-to-use smart capabilities across all user channels. xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof. One binary. One system. One butler.
+It is the intelligence hub of AgentOS, delivering self-governing system management, seamless agent orchestration, and ready-to-use smart capabilities across all user channels. xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof.
 
 > The butler that is the house.
 
