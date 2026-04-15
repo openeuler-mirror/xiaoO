@@ -13,9 +13,6 @@ It is the intelligence hub of AgentOS, delivering self-governing system manageme
 <a href="https://gitcode.com/openeuler/xiaoO"><img src="https://img.shields.io/badge/version-v0.0.1-red" alt="Version v0.0.1" /></a>
 ---
 
-<!-- ## Architecture
-
-![XiaoO 架构图](./img/architecture.png) -->
 
 ## Prerequisites
 - Cargo >= 1.7 installed

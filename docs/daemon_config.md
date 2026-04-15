@@ -36,7 +36,7 @@ summary_max_tokens = 1024            # Max token budget for summary
 summary_preserve_tail = 4            # Number of recent messages to preserve after summary
 snip_stale_after_ms = 3600000        # History snip timeout (milliseconds)
 
-[[agents]]
+[agents]
 id = "main"                          # Agent ID
 default = true                       # Mark as default agent
 model = "z-ai/glm-5"                 # Optional, override global model
