@@ -26,6 +26,7 @@ impl GatewayRuntime {
 
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(Instant::now());
+        self.first_token_latency_recorded = false;
         state.chat_state.messages.push(Message::user(prompt));
         state.chat_state.input.reset();
         state.chat_state.is_loading = true;

@@ -70,7 +70,9 @@ pub async fn run_agent_loop(
 
     // Detect `/skill-name` prefix and expand skill prompt inline.
     if input.append_user_message {
-        if let Some(expanded) = try_expand_skill_prefix(&input.user_message, &*snapshot.skill_registry) {
+        if let Some(expanded) =
+            try_expand_skill_prefix(&input.user_message, &*snapshot.skill_registry)
+        {
             input.user_message = expanded;
         }
         state.messages.push(ChatMessage::text(
@@ -1000,10 +1002,7 @@ fn try_expand_skill_prefix(
 
     // Provide the skill directory so the LLM knows where to run commands.
     if let Some(location) = spec.location() {
-        expanded.push_str(&format!(
-            "[Skill directory: {}]\n\n",
-            location.display()
-        ));
+        expanded.push_str(&format!("[Skill directory: {}]\n\n", location.display()));
     }
 
     expanded.push_str(spec.full_prompt());
