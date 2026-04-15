@@ -24,6 +24,7 @@ pub struct GatewayRuntime {
     pub(super) pending_stream_done: Option<PendingStreamDone>,
     pub(super) cancel_flag: Option<Arc<AtomicBool>>,
     pub(super) request_start: Option<Instant>,
+    pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
 }
 
@@ -37,6 +38,7 @@ impl GatewayRuntime {
             pending_stream_done: None,
             cancel_flag: None,
             request_start: None,
+            first_token_latency_recorded: false,
             interaction_reply_tx: None,
         }
     }
