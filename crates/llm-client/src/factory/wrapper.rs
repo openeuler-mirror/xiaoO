@@ -20,7 +20,6 @@ use super::trace::{
     trace_outcome_for_error, update_trace_span, StreamTraceStats,
 };
 
-
 pub struct LlmProviderWrapper {
     inner: Arc<dyn LlmProvider>,
     /// Present only when hooks are enabled.
@@ -719,7 +718,10 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
+                    Err(poisoned) => {
+                        let stats: StreamTraceStats = poisoned.into_inner();
+                        stream_trace_fields(&stats)
+                    }
                 };
 
                 end_trace_span(
@@ -800,7 +802,10 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
+                    Err(poisoned) => {
+                        let stats: StreamTraceStats = poisoned.into_inner();
+                        stream_trace_fields(&stats)
+                    }
                 };
 
                 end_trace_span(

@@ -358,12 +358,11 @@ impl ToolCallImpl {
                 outcome: current_outcome,
             });
 
-            let output = match hooker
-                .invoke(input, runtime)
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed {
+            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
+                ToolExecutionError::ExecutionFailed {
                     message: e.to_string(),
-                }) {
+                }
+            }) {
                 Ok(o) => o,
                 Err(e) => {
                     runtime
@@ -482,12 +481,11 @@ impl ToolCallImpl {
                 error: execution_error.clone(),
             });
 
-            let output = match hooker
-                .invoke(input, runtime)
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed {
+            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
+                ToolExecutionError::ExecutionFailed {
                     message: e.to_string(),
-                }) {
+                }
+            }) {
                 Ok(o) => o,
                 Err(e) => {
                     runtime
