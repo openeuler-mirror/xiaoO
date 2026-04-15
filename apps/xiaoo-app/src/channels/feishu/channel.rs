@@ -16,6 +16,8 @@ pub struct FeishuAdapter {
     client: FeishuClient,
 }
 
+const ACK_REACTION_EMOJI_TYPE: &str = "Get";
+
 impl FeishuAdapter {
     pub fn new(config: FeishuConfig) -> ChannelResult<Self> {
         config.validate().map_err(|error| ChannelError::Config {
@@ -62,7 +64,9 @@ impl ChannelAdapter for FeishuAdapter {
     }
 
     async fn acknowledge_message(&self, message_id: &str) -> ChannelResult<()> {
-        self.client.add_reaction(message_id, "ROSE").await
+        self.client
+            .add_reaction(message_id, ACK_REACTION_EMOJI_TYPE)
+            .await
     }
 
     async fn add_reaction(&self, message_id: &str, emoji_type: &str) -> ChannelResult<()> {

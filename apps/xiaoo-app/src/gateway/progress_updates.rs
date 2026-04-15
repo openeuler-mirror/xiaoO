@@ -67,6 +67,17 @@ impl ChannelProgressRelayHandle {
         self.publish_current_progress().await
     }
 
+    pub async fn mark_received(&self) -> ChannelResult<()> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .expect("progress relay state lock poisoned");
+            state.tracker.mark_received();
+        }
+        self.publish_current_progress().await
+    }
+
     pub async fn mark_delivered(&self) -> ChannelResult<()> {
         {
             let mut state = self
@@ -205,6 +216,10 @@ impl LoopEventSink for ChannelProgressRelayHandle {
 }
 
 impl ChannelProgressTracker {
+    fn mark_received(&mut self) {
+        self.push_status("已接收请求，正在处理".to_string());
+    }
+
     fn mark_failed(&mut self, error: &str) {
         self.terminal_error = Some(truncate_line(error));
         self.delivered = false;

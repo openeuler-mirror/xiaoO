@@ -242,6 +242,18 @@ async fn handle_feishu_events(
         }
         Ok((adapter_response, maybe_message)) => {
             if let Some(message) = maybe_message {
+                if runtime.capabilities.supports_reactions {
+                    if let Err(error) = runtime.adapter.acknowledge_message(&message.message_id).await
+                    {
+                        warn!(
+                            "failed to acknowledge channel message: channel={} id={} conversation={} error={}",
+                            runtime.meta.id,
+                            message.message_id,
+                            message.conversation_id,
+                            error
+                        );
+                    }
+                }
                 if runtime.capabilities.requires_async_processing {
                     let state = state.clone();
                     let runtime = runtime.clone();
@@ -270,7 +282,6 @@ async fn process_channel_message(
     let adapter = runtime.adapter.clone();
     let conversation_id = message.conversation_id.clone();
     let reply_to_message_id = message.reply_to_message_id.clone();
-    let channel_identity_prompt = build_channel_identity_prompt(&runtime, &message).await;
     let progress_relay = runtime.capabilities.supports_progress_updates.then(|| {
         ChannelProgressRelayHandle::new(
             adapter.clone(),
@@ -278,6 +289,12 @@ async fn process_channel_message(
             reply_to_message_id.clone(),
         )
     });
+    if let Some(progress_relay) = progress_relay.as_ref() {
+        if let Err(error) = progress_relay.mark_received().await {
+            warn!("failed to publish initial progress update: {error}");
+        }
+    }
+    let channel_identity_prompt = build_channel_identity_prompt(&runtime, &message).await;
     let event_sink = progress_relay
         .as_ref()
         .map(|relay| Arc::new(relay.clone()) as Arc<dyn LoopEventSink>);
