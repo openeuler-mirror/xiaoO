@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanKind};
@@ -719,7 +719,7 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
                 };
 
                 end_trace_span(
@@ -800,7 +800,7 @@ impl LlmProviderWrapper {
 
                 let stream_trace_fields = match stream_stats.into_inner() {
                     Ok(stats) => stream_trace_fields(&stats),
-                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                    Err(poisoned) => { let stats: StreamTraceStats = poisoned.into_inner(); stream_trace_fields(&stats) },
                 };
 
                 end_trace_span(
