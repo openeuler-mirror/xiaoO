@@ -62,11 +62,15 @@ pub struct LoopContext<'a> {
 pub async fn run_agent_loop(
     runtime: &AgentRuntime,
     state: &mut LoopState,
-    input: AgentLoopInput,
+    mut input: AgentLoopInput,
 ) -> Result<LoopRunResult, AgentError> {
     let snapshot = runtime.snapshot();
 
+    // Detect `/skill-name` prefix and expand skill prompt inline.
     if input.append_user_message {
+        if let Some(expanded) = try_expand_skill_prefix(&input.user_message, &*snapshot.skill_registry) {
+            input.user_message = expanded;
+        }
         state.messages.push(ChatMessage::text(
             MessageRole::User,
             &input.user_message,
@@ -673,6 +677,56 @@ fn emit_loop_end(ctx: &LoopContext<'_>, stop_reason: &str) {
             },
         );
     }
+}
+
+/// Detect `/skill-name [args]` prefix in user message and expand to skill prompt.
+///
+/// Returns `Some(expanded_message)` if a valid skill invocation is detected,
+/// `None` otherwise (message is passed through unchanged).
+fn try_expand_skill_prefix(
+    user_message: &str,
+    skill_registry: &dyn agent_contracts::SkillRegistry,
+) -> Option<String> {
+    let trimmed = user_message.trim();
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+
+    // Extract skill name (first token after '/') and remaining args.
+    let without_slash = &trimmed[1..];
+    let (skill_name, args) = match without_slash.find(|c: char| c.is_whitespace()) {
+        Some(pos) => (&without_slash[..pos], without_slash[pos..].trim()),
+        None => (without_slash, ""),
+    };
+
+    if skill_name.is_empty() {
+        return None;
+    }
+
+    let spec = skill_registry.get_skill(skill_name)?;
+
+    if !spec.user_invocable() {
+        return None;
+    }
+
+    let mut expanded = String::new();
+
+    // Provide the skill directory so the LLM knows where to run commands.
+    if let Some(location) = spec.location() {
+        expanded.push_str(&format!(
+            "[Skill directory: {}]\n\n",
+            location.display()
+        ));
+    }
+
+    expanded.push_str(spec.full_prompt());
+
+    if !args.is_empty() {
+        expanded.push_str("\n\nUser request: ");
+        expanded.push_str(args);
+    }
+
+    Some(expanded)
 }
 
 fn now_ms() -> u64 {
