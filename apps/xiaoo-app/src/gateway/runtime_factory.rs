@@ -9,7 +9,6 @@ use agent_contracts::{
 use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::common::{AgentMetadata, BuildError};
 use agent_types::events::ToolLifecycleEvent;
-use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::ToolStateStoreConfig;
 use agent_types::tool::{EffectProfile, InputSchemaRef, OutputContract};
@@ -77,10 +76,7 @@ impl AppRuntimeFactory {
 
         let runtime_view = {
             let hookers = HookerRegistryBuilderImpl::new()
-                .with_config(HookerRegistryConfig {
-                    default: HookerDefaultMode::None,
-                    ..HookerRegistryConfig::default()
-                })
+                .with_config(resolved.hooker.clone())
                 .build()?;
             let agent_context = BasicAgentContext::new(
                 loop_state

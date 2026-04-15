@@ -1,3 +1,5 @@
+use agent_types::hooker::HookerRegistryConfig;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -10,6 +12,7 @@ pub struct FileConfig {
     pub skills: Option<SkillsSection>,
     #[serde(default)]
     pub trace: Option<Value>,
+    pub hooker: Option<HookerRegistryConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -53,12 +56,18 @@ impl FileConfig {
             },
         };
         match std::fs::read_to_string(&path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(cfg) => {
+            Ok(content) => match toml::from_str::<toml::Value>(&content) {
+                Ok(root) => {
                     if debug {
                         eprintln!("[config] loaded {}", path.display());
                     }
-                    cfg
+                    Self {
+                        llm: parse_optional_section(&root, "llm", &path, debug),
+                        compact: parse_optional_section(&root, "compact", &path, debug),
+                        trace: parse_optional_section(&root, "trace", &path, debug),
+                        skills: parse_optional_section(&root, "skills", &path, debug),
+                        hooker: parse_optional_section(&root, "hooker", &path, debug),
+                    }
                 }
                 Err(e) => {
                     eprintln!("[config] parse error in {}: {}", path.display(), e);
@@ -73,5 +82,34 @@ impl FileConfig {
     pub fn resolve_api_key(&self) -> Option<String> {
         let env_name = self.llm.as_ref()?.api_key_env.as_deref()?;
         std::env::var(env_name).ok().filter(|v| !v.is_empty())
+    }
+}
+
+fn parse_optional_section<T>(
+    root: &toml::Value,
+    key: &str,
+    path: &std::path::Path,
+    debug: bool,
+) -> Option<T>
+where
+    T: DeserializeOwned,
+{
+    let section = root.get(key)?.clone();
+
+    match section.try_into() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            if debug {
+                eprintln!(
+                    "[config] parse error in {} [{}]: {}",
+                    path.display(),
+                    key,
+                    error
+                );
+            } else {
+                eprintln!("[config] parse error in {} [{}]", path.display(), key);
+            }
+            None
+        }
     }
 }

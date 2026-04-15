@@ -4,7 +4,7 @@ use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::skill::registry::SkillContext;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
-use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError};
+use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 use async_trait::async_trait;
 
 use super::input::SkillToolInput;
@@ -31,7 +31,7 @@ impl ToolExecutor for SkillToolExecutor {
         &self,
         call: &FinalToolCall,
         runtime: &dyn RuntimeView,
-    ) -> Result<RawToolOutcome, ToolExecutionError> {
+    ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: SkillToolInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
                 message: format!("failed to parse skill tool input: {}", e),
@@ -54,11 +54,13 @@ impl ToolExecutor for SkillToolExecutor {
 
         // 3. Check invocation permission
         if spec.disable_model_invocation() {
-            return Ok(RawToolOutcome::Error {
-                message: format!(
-                    "skill '{}' can only be invoked by user, not by model",
-                    input.skill
-                ),
+            return Ok(ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Error {
+                    message: format!(
+                        "skill '{}' can only be invoked by user, not by model",
+                        input.skill
+                    ),
+                },
             });
         }
 
@@ -67,11 +69,15 @@ impl ToolExecutor for SkillToolExecutor {
 
         // 5. Execute based on context mode
         match spec.context() {
-            SkillContext::Inline => Ok(RawToolOutcome::Success { output: prompt }),
+            SkillContext::Inline => Ok(ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Success { output: prompt },
+            }),
             SkillContext::Fork => {
                 // TODO: Fork execution not yet implemented
-                Ok(RawToolOutcome::Error {
-                    message: "fork context is not yet supported".into(),
+                Ok(ToolExecutorOutput::Completed {
+                    raw_outcome: RawToolOutcome::Error {
+                        message: "fork context is not yet supported".into(),
+                    },
                 })
             }
         }

@@ -10,7 +10,9 @@ pub struct SpawnSubagentRequest {
     pub session_id: String,
     pub parent_agent_id: AgentId,
     pub description: String,
-    pub prompt: String,
+    pub task_goal: String,
+    pub task_context: String,
+    pub output_schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

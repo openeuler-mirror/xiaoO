@@ -5,6 +5,7 @@ use crate::gateway::{
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::hooker::HookerRegistryConfig;
 use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub struct ResolvedSessionRuntime {
     pub bindings: SessionRuntimeBindings,
     pub compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     pub trace: Value,
+    pub hooker: HookerRegistryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

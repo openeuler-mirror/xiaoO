@@ -6,9 +6,21 @@ use rusqlite::{Connection, Row};
 use super::super::storage_trait::{SpanStorage, TraceSummary};
 use crate::{MoiraiError, Result, Span};
 
+const SPAN_PREFIX_SUGGESTION_LIMIT: usize = 5;
+
 #[derive(Clone)]
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceSegment {
+    trace_id: String,
+    start_time: i64,
+    end_time: Option<i64>,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    end_message: Option<String>,
 }
 
 impl SqliteStorage {
@@ -67,6 +79,172 @@ impl SqliteStorage {
             extras,
             created_at: row.get(8)?,
         })
+    }
+
+    fn trace_segment_from_row(row: &Row) -> Result<TraceSegment> {
+        Ok(TraceSegment {
+            trace_id: row.get(0)?,
+            start_time: row.get(1)?,
+            end_time: row.get(2)?,
+            session_id: row.get(3)?,
+            agent_id: row.get(4)?,
+            end_message: row.get(5)?,
+        })
+    }
+
+    fn load_trace_segment(conn: &Connection, trace_id: &str) -> Result<Option<TraceSegment>> {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                s.trace_id,
+                MIN(s.start_time) AS start_time,
+                COALESCE(
+                    (SELECT end_time
+                     FROM spans end_spans
+                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
+                     LIMIT 1),
+                    MAX(COALESCE(s.end_time, s.start_time))
+                ) AS end_time,
+                (SELECT json_extract(meta.extras, '$.session_id')
+                 FROM spans meta
+                 WHERE meta.trace_id = s.trace_id
+                   AND json_extract(meta.extras, '$.session_id') IS NOT NULL
+                 LIMIT 1) AS session_id,
+                (SELECT json_extract(meta.extras, '$.agent_id')
+                 FROM spans meta
+                 WHERE meta.trace_id = s.trace_id
+                   AND json_extract(meta.extras, '$.agent_id') IS NOT NULL
+                 LIMIT 1) AS agent_id,
+                (SELECT json_extract(meta.extras, '$.message')
+                 FROM spans meta
+                 WHERE meta.trace_id = s.trace_id AND meta.span_type = 'END'
+                 LIMIT 1) AS end_message
+            FROM spans s
+            WHERE s.trace_id = ?1
+            GROUP BY s.trace_id
+            "#,
+        )?;
+
+        let mut rows = stmt.query(rusqlite::params![trace_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::trace_segment_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn find_previous_trace_segment(
+        conn: &Connection,
+        session_id: &str,
+        agent_id: &str,
+        before_start_time: i64,
+    ) -> Result<Option<TraceSegment>> {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT trace_id, start_time, end_time, session_id, agent_id, end_message
+            FROM (
+                SELECT
+                    s.trace_id AS trace_id,
+                    MIN(s.start_time) AS start_time,
+                    COALESCE(
+                        (SELECT end_spans.end_time
+                         FROM spans end_spans
+                         WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
+                         LIMIT 1),
+                        MAX(COALESCE(s.end_time, s.start_time))
+                    ) AS end_time,
+                    ?1 AS session_id,
+                    ?2 AS agent_id,
+                    (SELECT json_extract(end_spans.extras, '$.message')
+                     FROM spans end_spans
+                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
+                     LIMIT 1) AS end_message
+                FROM spans s
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM spans meta
+                    WHERE meta.trace_id = s.trace_id
+                      AND json_extract(meta.extras, '$.session_id') = ?1
+                      AND json_extract(meta.extras, '$.agent_id') = ?2
+                )
+                GROUP BY s.trace_id
+            )
+            WHERE start_time < ?3
+            ORDER BY start_time DESC
+            LIMIT 1
+            "#,
+        )?;
+
+        let mut rows = stmt.query(rusqlite::params![session_id, agent_id, before_start_time])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::trace_segment_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn find_next_trace_segment(
+        conn: &Connection,
+        session_id: &str,
+        agent_id: &str,
+        after_end_time: i64,
+    ) -> Result<Option<TraceSegment>> {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT trace_id, start_time, end_time, session_id, agent_id, end_message
+            FROM (
+                SELECT
+                    s.trace_id AS trace_id,
+                    MIN(s.start_time) AS start_time,
+                    COALESCE(
+                        (SELECT end_spans.end_time
+                         FROM spans end_spans
+                         WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
+                         LIMIT 1),
+                        MAX(COALESCE(s.end_time, s.start_time))
+                    ) AS end_time,
+                    ?1 AS session_id,
+                    ?2 AS agent_id,
+                    (SELECT json_extract(end_spans.extras, '$.message')
+                     FROM spans end_spans
+                     WHERE end_spans.trace_id = s.trace_id AND end_spans.span_type = 'END'
+                     LIMIT 1) AS end_message
+                FROM spans s
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM spans meta
+                    WHERE meta.trace_id = s.trace_id
+                      AND json_extract(meta.extras, '$.session_id') = ?1
+                      AND json_extract(meta.extras, '$.agent_id') = ?2
+                )
+                GROUP BY s.trace_id
+            )
+            WHERE start_time > ?3
+            ORDER BY start_time ASC
+            LIMIT 1
+            "#,
+        )?;
+
+        let mut rows = stmt.query(rusqlite::params![session_id, agent_id, after_end_time])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::trace_segment_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn load_trace_spans(conn: &Connection, trace_id: &str) -> Result<Vec<Span>> {
+        let mut stmt = conn.prepare(
+            "SELECT span_id, trace_id, parent_span_id, span_type, start_time, last_updated_at, end_time, extras, created_at
+             FROM spans WHERE trace_id = ?1 ORDER BY created_at ASC",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![trace_id], |row| {
+            Ok(SqliteStorage::span_from_row(row))
+        })?;
+
+        let mut spans = Vec::new();
+        for row_result in rows {
+            spans.push(row_result??);
+        }
+        Ok(spans)
     }
 }
 
@@ -369,6 +547,53 @@ impl SpanStorage for SqliteStorage {
         .map_err(|e| MoiraiError::Storage(e.to_string()))?
     }
 
+    async fn get_span_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        let conn = self.conn.clone();
+        let prefix = prefix.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            let pattern = format!("{}%", prefix);
+
+            let total_matches: usize = conn.query_row(
+                "SELECT COUNT(*) FROM spans WHERE span_id LIKE ?1",
+                rusqlite::params![&pattern],
+                |row| row.get(0),
+            )?;
+
+            if total_matches == 0 {
+                return Ok(None);
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT span_id FROM spans WHERE span_id LIKE ?1 ORDER BY span_id LIMIT ?2",
+            )?;
+
+            let matches: Vec<String> = stmt
+                .query_map(
+                    rusqlite::params![&pattern, SPAN_PREFIX_SUGGESTION_LIMIT],
+                    |row| row.get(0),
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+
+            if total_matches == 1 {
+                return Ok(matches.into_iter().next());
+            }
+
+            Err(MoiraiError::InvalidState(format!(
+                "Multiple spans match prefix '{}': {} ({} total matches)",
+                prefix,
+                matches.join(", "),
+                total_matches
+            )))
+        })
+        .await
+        .map_err(|e| MoiraiError::Storage(e.to_string()))?
+    }
+
     async fn get_last_span_id(&self, trace_id: &str) -> Result<Option<String>> {
         let conn = self.conn.clone();
         let trace_id = trace_id.to_string();
@@ -418,6 +643,135 @@ impl SpanStorage for SqliteStorage {
 }
 
 impl SqliteStorage {
+    pub async fn get_suspend_resume_trace_chain(&self, trace_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.clone();
+        let trace_id = trace_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            let current = Self::load_trace_segment(&conn, &trace_id)?
+                .ok_or_else(|| MoiraiError::NotFound(format!("Trace not found: {}", trace_id)))?;
+            let Some(session_id) = current.session_id.clone() else {
+                return Ok(vec![current.trace_id]);
+            };
+            let Some(agent_id) = current.agent_id.clone() else {
+                return Ok(vec![current.trace_id]);
+            };
+
+            let mut previous_ids = Vec::new();
+            let mut backward_cursor = current.clone();
+            while let Some(previous) = Self::find_previous_trace_segment(
+                &conn,
+                &session_id,
+                &agent_id,
+                backward_cursor.start_time,
+            )? {
+                if previous.end_message.as_deref() != Some("suspended") {
+                    break;
+                }
+                previous_ids.push(previous.trace_id.clone());
+                backward_cursor = previous;
+            }
+            previous_ids.reverse();
+
+            let mut chain = previous_ids;
+            chain.push(current.trace_id.clone());
+
+            let mut forward_cursor = current;
+            while forward_cursor.end_message.as_deref() == Some("suspended") {
+                let boundary = forward_cursor.end_time.unwrap_or(forward_cursor.start_time);
+                let Some(next) =
+                    Self::find_next_trace_segment(&conn, &session_id, &agent_id, boundary)?
+                else {
+                    break;
+                };
+                if chain.last() != Some(&next.trace_id) {
+                    chain.push(next.trace_id.clone());
+                }
+                forward_cursor = next;
+            }
+
+            Ok(chain)
+        })
+        .await
+        .map_err(|e| MoiraiError::Storage(e.to_string()))?
+    }
+
+    pub async fn get_trace_spans_with_related_segments(&self, trace_id: &str) -> Result<Vec<Span>> {
+        let conn = self.conn.clone();
+        let trace_id = trace_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+
+            let chain = {
+                let current = Self::load_trace_segment(&conn, &trace_id)?.ok_or_else(|| {
+                    MoiraiError::NotFound(format!("Trace not found: {}", trace_id))
+                })?;
+                let Some(session_id) = current.session_id.clone() else {
+                    return Self::load_trace_spans(&conn, &trace_id);
+                };
+                let Some(agent_id) = current.agent_id.clone() else {
+                    return Self::load_trace_spans(&conn, &trace_id);
+                };
+
+                let mut previous_ids = Vec::new();
+                let mut backward_cursor = current.clone();
+                while let Some(previous) = Self::find_previous_trace_segment(
+                    &conn,
+                    &session_id,
+                    &agent_id,
+                    backward_cursor.start_time,
+                )? {
+                    if previous.end_message.as_deref() != Some("suspended") {
+                        break;
+                    }
+                    previous_ids.push(previous.trace_id.clone());
+                    backward_cursor = previous;
+                }
+                previous_ids.reverse();
+
+                let mut chain = previous_ids;
+                chain.push(current.trace_id.clone());
+
+                let mut forward_cursor = current;
+                while forward_cursor.end_message.as_deref() == Some("suspended") {
+                    let boundary = forward_cursor.end_time.unwrap_or(forward_cursor.start_time);
+                    let Some(next) =
+                        Self::find_next_trace_segment(&conn, &session_id, &agent_id, boundary)?
+                    else {
+                        break;
+                    };
+                    if chain.last() != Some(&next.trace_id) {
+                        chain.push(next.trace_id.clone());
+                    }
+                    forward_cursor = next;
+                }
+
+                chain
+            };
+
+            let mut spans = Vec::new();
+            for segment_trace_id in chain {
+                spans.extend(Self::load_trace_spans(&conn, &segment_trace_id)?);
+            }
+            spans.sort_by(|left, right| {
+                left.start_time
+                    .cmp(&right.start_time)
+                    .then(left.created_at.cmp(&right.created_at))
+                    .then(left.span_id.cmp(&right.span_id))
+            });
+            Ok(spans)
+        })
+        .await
+        .map_err(|e| MoiraiError::Storage(e.to_string()))?
+    }
+
     pub async fn delete_old_spans(&self, cutoff_timestamp_ms: i64) -> Result<usize> {
         let conn = self.conn.clone();
 
@@ -455,5 +809,195 @@ impl SqliteStorage {
         })
         .await
         .map_err(|e| MoiraiError::Storage(e.to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SqliteStorage;
+    use crate::{Span, SpanStorage};
+
+    fn span(
+        span_id: &str,
+        trace_id: &str,
+        parent_span_id: Option<&str>,
+        span_type: &str,
+        start_time: i64,
+        end_time: Option<i64>,
+        extras: serde_json::Value,
+    ) -> Span {
+        Span {
+            span_id: span_id.to_string(),
+            trace_id: trace_id.to_string(),
+            parent_span_id: parent_span_id.map(ToString::to_string),
+            span_type: span_type.to_string(),
+            start_time,
+            last_updated_at: end_time.unwrap_or(start_time),
+            end_time,
+            extras,
+            created_at: start_time,
+        }
+    }
+
+    #[tokio::test]
+    async fn suspend_resume_chain_includes_previous_and_next_segments() {
+        let storage = SqliteStorage::new(":memory:").unwrap();
+
+        storage
+            .insert_span(&span(
+                "root-a",
+                "trace-a",
+                None,
+                "USER",
+                100,
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "tool-a",
+                "trace-a",
+                Some("root-a"),
+                "TOOL_CALL",
+                110,
+                Some(120),
+                serde_json::json!({
+                    "session_id": "session-1",
+                    "agent_id": "main",
+                    "tool_name": "spawn_subagent"
+                }),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "end-a",
+                "trace-a",
+                Some("root-a"),
+                "END",
+                130,
+                Some(130),
+                serde_json::json!({
+                    "message": "suspended"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        storage
+            .insert_span(&span(
+                "root-b",
+                "trace-b",
+                None,
+                "USER",
+                200,
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "tool-b",
+                "trace-b",
+                Some("root-b"),
+                "TOOL_CALL",
+                210,
+                Some(220),
+                serde_json::json!({
+                    "session_id": "session-1",
+                    "agent_id": "main",
+                    "tool_name": "join_subagent"
+                }),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "end-b",
+                "trace-b",
+                Some("root-b"),
+                "END",
+                230,
+                Some(230),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        storage
+            .insert_span(&span(
+                "root-c",
+                "trace-c",
+                None,
+                "USER",
+                300,
+                None,
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "tool-c",
+                "trace-c",
+                Some("root-c"),
+                "TOOL_CALL",
+                310,
+                Some(320),
+                serde_json::json!({
+                    "session_id": "session-1",
+                    "agent_id": "main",
+                    "tool_name": "bash"
+                }),
+            ))
+            .await
+            .unwrap();
+        storage
+            .insert_span(&span(
+                "end-c",
+                "trace-c",
+                Some("root-c"),
+                "END",
+                330,
+                Some(330),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+
+        let chain_from_first = storage
+            .get_suspend_resume_trace_chain("trace-a")
+            .await
+            .unwrap();
+        assert_eq!(
+            chain_from_first,
+            vec!["trace-a".to_string(), "trace-b".to_string()]
+        );
+
+        let chain_from_second = storage
+            .get_suspend_resume_trace_chain("trace-b")
+            .await
+            .unwrap();
+        assert_eq!(
+            chain_from_second,
+            vec!["trace-a".to_string(), "trace-b".to_string()]
+        );
+
+        let spans = storage
+            .get_trace_spans_with_related_segments("trace-b")
+            .await
+            .unwrap();
+        let tool_names = spans
+            .iter()
+            .filter_map(|span| {
+                span.extras
+                    .get("tool_name")
+                    .and_then(|value| value.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, vec!["spawn_subagent", "join_subagent"]);
     }
 }

@@ -1,3 +1,4 @@
+use agent_types::hooker::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,6 +17,8 @@ pub struct Config {
     pub trace: Option<Value>,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub hooker: HookerRegistryConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

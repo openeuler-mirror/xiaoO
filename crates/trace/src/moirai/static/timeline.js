@@ -3,7 +3,9 @@ const SPAN_COLORS = {
     'QUEST': { bg: '#e9d5ff', border: '#a855f7', hover: '#d8b4fe', text: '#6b21a8' },
     'SPAWNED': { bg: '#cffafe', border: '#06b6d4', hover: '#a5f3fc', text: '#0e7490' },
     'THINK': { bg: '#c7d2fe', border: '#6366f1', hover: '#a5b4fc', text: '#4338ca' },
+    'LLM_CALL': { bg: '#c7d2fe', border: '#6366f1', hover: '#a5b4fc', text: '#4338ca' },
     'TOOL': { bg: '#bbf7d0', border: '#22c55e', hover: '#86efac', text: '#166534' },
+    'TOOL_CALL': { bg: '#bbf7d0', border: '#22c55e', hover: '#86efac', text: '#166534' },
     'AgentCOMM': { bg: '#99f6e4', border: '#14b8a6', hover: '#5eead4', text: '#115e59' },
     'SPAWN': { bg: '#fef08a', border: '#eab308', hover: '#fde047', text: '#a16207' },
     'MERGE': { bg: '#fed7aa', border: '#f97316', hover: '#fdba74', text: '#c2410c' },
@@ -30,6 +32,88 @@ let timelineAnimationState = {
     animationStartTime: 0,
     ongoingAnimationId: null
 };
+
+const SPAN_TYPE_ALIASES = {
+    'LLM_CALL': 'THINK',
+    'TOOL_CALL': 'TOOL'
+};
+
+const DEDICATED_DETAIL_KEYS = {
+    'THINK': ['input_preview', 'effective_request', 'output_preview', 'final_response'],
+    'TOOL': ['tool_name', 'input', 'effective_input', 'output', 'final_output', 'stdout', 'stderr', 'success', 'result_kind']
+};
+
+function getCompatibleSpanType(spanType) {
+    return SPAN_TYPE_ALIASES[spanType] || spanType;
+}
+
+function getAliasedExtraValue(extras, keys) {
+    if (!extras) {
+        return undefined;
+    }
+
+    for (const key of keys) {
+        if (extras[key] !== undefined) {
+            return extras[key];
+        }
+    }
+
+    return undefined;
+}
+
+function formatExtraValue(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+}
+
+function getToolStatus(extras) {
+    if (!extras) {
+        return null;
+    }
+
+    if (typeof extras.success === 'boolean') {
+        return extras.success
+            ? { text: '✓ Success', className: 'text-green-600 bg-green-100', success: true }
+            : { text: '✗ Failed', className: 'text-red-600 bg-red-100', success: false };
+    }
+
+    if (typeof extras.result_kind === 'string' && extras.result_kind !== '') {
+        if (extras.result_kind === 'success') {
+            return { text: '✓ Success', className: 'text-green-600 bg-green-100', success: true };
+        }
+
+        return {
+            text: extras.result_kind,
+            className: 'text-red-600 bg-red-100',
+            success: false
+        };
+    }
+
+    return null;
+}
+
+function getSpanDetailCompatibility(span) {
+    const extras = span.extras || null;
+    const compatibleType = getCompatibleSpanType(span.span_type);
+    const promotedKeys = new Set(DEDICATED_DETAIL_KEYS[compatibleType] || []);
+
+    return {
+        compatibleType,
+        extras,
+        promotedKeys,
+        llmInput: getAliasedExtraValue(extras, ['effective_request', 'input_preview']),
+        llmOutput: getAliasedExtraValue(extras, ['final_response', 'output_preview']),
+        toolName: getAliasedExtraValue(extras, ['tool_name']),
+        toolInput: getAliasedExtraValue(extras, ['effective_input', 'input']),
+        toolOutput: getAliasedExtraValue(extras, ['final_output', 'output']),
+        toolStdout: getAliasedExtraValue(extras, ['stdout']),
+        toolStderr: getAliasedExtraValue(extras, ['stderr']),
+        toolStatus: getToolStatus(extras)
+    };
+}
 
 function renderTimeline(spans, animate = false) {
     try {
@@ -227,7 +311,7 @@ function renderTimeline(spans, animate = false) {
             });
 
             spanData.forEach((data, idx) => {
-                const colors = SPAN_COLORS[data.span.span_type] || SPAN_COLORS['END'];
+                const colors = SPAN_COLORS[data.span.span_type] || SPAN_COLORS[getCompatibleSpanType(data.span.span_type)] || SPAN_COLORS['END'];
                 const isHovered = idx === hoveredIdx;
 
                 let x = data.x;
@@ -374,31 +458,34 @@ async function showSpanDetailsInline(spanId) {
         const response = await fetch(`/api/spans/${spanId}`);
         const span = await response.json();
         currentSpan = span;
+        const detailCompat = getSpanDetailCompatibility(span);
         
         let inputOutputHtml = '';
-        if (span.span_type === 'THINK' && span.extras) {
-            const extras = span.extras;
-            if (extras.input_preview !== undefined) {
+        if (detailCompat.compatibleType === 'THINK' && detailCompat.extras) {
+            const llmInput = formatExtraValue(detailCompat.llmInput);
+            const llmOutput = formatExtraValue(detailCompat.llmOutput);
+
+            if (llmInput !== null) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Input:</label>
                         <div class="bg-blue-50 border border-blue-200 rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4 border-b-4 border-blue-100 hover:border-blue-300 transition-colors" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(String(extras.input_preview))}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(llmInput)}</pre>
                             </div>
                         </div>
                     </div>
                 `;
             }
-            if (extras.output_preview !== undefined) {
+            if (llmOutput !== null) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Output:</label>
                         <div class="bg-green-50 border border-green-200 rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4 border-b-4 border-green-100 hover:border-green-300 transition-colors" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(String(extras.output_preview))}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(llmOutput)}</pre>
                             </div>
                         </div>
                     </div>
@@ -406,81 +493,81 @@ async function showSpanDetailsInline(spanId) {
             }
         }
         
-        if (span.span_type === 'TOOL' && span.extras) {
-            const extras = span.extras;
-            if (extras.tool_name !== undefined) {
+        if (detailCompat.compatibleType === 'TOOL' && detailCompat.extras) {
+            const toolName = formatExtraValue(detailCompat.toolName);
+            const toolInput = formatExtraValue(detailCompat.toolInput);
+            const toolOutput = formatExtraValue(detailCompat.toolOutput);
+            const toolStdout = formatExtraValue(detailCompat.toolStdout);
+            const toolStderr = formatExtraValue(detailCompat.toolStderr);
+            const toolStatus = detailCompat.toolStatus;
+            const toolResultClass = toolStatus && toolStatus.success === true ? 'bg-green-50 border-green-200' :
+                toolStatus && toolStatus.success === false ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200';
+
+            if (toolName !== null) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Tool Name:</label>
-                        <p class="font-mono text-sm bg-gray-100 px-3 py-2 rounded">${escapeHtml(String(extras.tool_name))}</p>
+                        <p class="font-mono text-sm bg-gray-100 px-3 py-2 rounded">${escapeHtml(toolName)}</p>
                     </div>
                 `;
             }
-            if (extras.input !== undefined && extras.input !== null) {
-                const inputStr = typeof extras.input === 'object' ? JSON.stringify(extras.input, null, 2) : String(extras.input);
+            if (toolInput !== null) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Tool Input:</label>
                         <div class="bg-blue-50 border border-blue-200 rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4 border-b-4 border-blue-100 hover:border-blue-300 transition-colors" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(inputStr)}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolInput)}</pre>
                             </div>
                         </div>
                     </div>
                 `;
             }
-            if (extras.output !== undefined && extras.output !== null) {
-                const outputStr = typeof extras.output === 'object' ? JSON.stringify(extras.output, null, 2) : String(extras.output);
-                const successClass = extras.success === true ? 'bg-green-50 border-green-200' : 
-                                    extras.success === false ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200';
+            if (toolOutput !== null) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Tool Output:</label>
-                        <div class="${successClass} border rounded-lg overflow-hidden">
+                        <div class="${toolResultClass} border rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(outputStr)}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolOutput)}</pre>
                             </div>
                         </div>
                     </div>
                 `;
             }
-            if (extras.stdout !== undefined && extras.stdout !== null && extras.stdout !== '') {
-                const successClass = extras.success === true ? 'bg-green-50 border-green-200' : 
-                                    extras.success === false ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200';
+            if (toolStdout !== null && toolStdout !== '') {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Stdout:</label>
-                        <div class="${successClass} border rounded-lg overflow-hidden">
+                        <div class="${toolResultClass} border rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(String(extras.stdout))}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolStdout)}</pre>
                             </div>
                         </div>
                     </div>
                 `;
             }
-            if (extras.stderr !== undefined && extras.stderr !== null && extras.stderr !== '') {
+            if (toolStderr !== null && toolStderr !== '') {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Stderr:</label>
                         <div class="bg-red-50 border border-red-200 rounded-lg overflow-hidden">
                             <div class="overflow-auto p-4" 
                                  style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono text-red-800">${escapeHtml(String(extras.stderr))}</pre>
+                                <pre class="whitespace-pre-wrap text-sm font-mono text-red-800">${escapeHtml(toolStderr)}</pre>
                             </div>
                         </div>
                     </div>
                 `;
             }
-            if (extras.success !== undefined) {
-                const statusClass = extras.success ? 'text-green-600 bg-green-100' : 'text-red-600 bg-red-100';
-                const statusText = extras.success ? '✓ Success' : '✗ Failed';
+            if (toolStatus) {
                 inputOutputHtml += `
                     <div class="mb-4">
                         <label class="font-semibold text-gray-700 mb-2 block">Status:</label>
-                        <span class="px-3 py-1 rounded text-sm font-semibold ${statusClass}">${statusText}</span>
+                        <span class="px-3 py-1 rounded text-sm font-semibold ${toolStatus.className}">${escapeHtml(toolStatus.text)}</span>
                     </div>
                 `;
             }
@@ -489,15 +576,8 @@ async function showSpanDetailsInline(spanId) {
         let extrasDisplay = '';
         if (span.extras && Object.keys(span.extras).length > 0) {
             let filteredExtras = { ...span.extras };
-            if (span.span_type === 'THINK') {
-                delete filteredExtras.input_preview;
-                delete filteredExtras.output_preview;
-            }
-            if (span.span_type === 'TOOL') {
-                delete filteredExtras.tool_name;
-                delete filteredExtras.input;
-                delete filteredExtras.output;
-                delete filteredExtras.success;
+            for (const key of detailCompat.promotedKeys) {
+                delete filteredExtras[key];
             }
             if (Object.keys(filteredExtras).length > 0) {
                 extrasDisplay = `
@@ -518,7 +598,7 @@ async function showSpanDetailsInline(spanId) {
                     </div>
                     <div>
                         <label class="font-semibold text-gray-700">Type:</label>
-                        <p><span class="px-2 py-0.5 rounded text-xs font-semibold ${getSpanTypeColor(span.span_type)}">${span.span_type}</span></p>
+                        <p><span class="px-2 py-0.5 rounded text-xs font-semibold ${getSpanTypeColor(getCompatibleSpanType(span.span_type))}">${span.span_type}</span></p>
                     </div>
                     <div>
                         <label class="font-semibold text-gray-700">Start Time:</label>

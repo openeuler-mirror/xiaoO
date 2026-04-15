@@ -19,7 +19,10 @@ pub(crate) struct MoiraiSqliteBackend {
 }
 
 impl MoiraiSqliteBackend {
-    pub(crate) async fn new(config: &TraceRecorderConfig) -> Result<Self, BuildError> {
+    pub(crate) async fn new(
+        config: &TraceRecorderConfig,
+        trace_id: String,
+    ) -> Result<Self, BuildError> {
         let db_path = config
             .db_path
             .as_deref()
@@ -45,8 +48,10 @@ impl MoiraiSqliteBackend {
                 message: format!("failed to create moirai sqlite storage: {error}"),
             })?
         });
-        let context = AgentContext::new_user_with_config(
+        let context = AgentContext::new_user_with_explicit_trace(
             agent_id,
+            trace_id,
+            None,
             storage,
             ContextConfig {
                 buffer_size: 1,
@@ -78,7 +83,7 @@ impl TraceBackend for MoiraiSqliteBackend {
     ) {
         let persisted_span_id = self
             .context
-            .record_span_at(
+            .record_span_at_with_parent(
                 span_kind_to_moirai_type(kind),
                 merge_json_fields(
                     fields,
@@ -90,6 +95,7 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
                 Some(span.span_id().to_string()),
+                span.parent_span_id().map(ToString::to_string),
             )
             .await
             .unwrap_or_else(|error| panic!("moirai begin_span failed: {error}"));
@@ -161,7 +167,13 @@ impl TraceBackend for MoiraiSqliteBackend {
             .unwrap_or_else(|error| panic!("moirai end_span failed: {error}"));
     }
 
-    async fn finalize_trace(&self, _occurred_at_ms: u64, outcome: TraceOutcome, fields: Value) {
+    async fn finalize_trace(
+        &self,
+        _occurred_at_ms: u64,
+        final_parent_span_id: Option<String>,
+        outcome: TraceOutcome,
+        fields: Value,
+    ) {
         let mut finalized = self.trace_finalized.lock().await;
         if *finalized {
             return;
@@ -185,7 +197,7 @@ impl TraceBackend for MoiraiSqliteBackend {
         let success = matches!(outcome, TraceOutcome::Ok);
 
         self.context
-            .end(success, message.as_deref())
+            .end_with_parent(success, message.as_deref(), final_parent_span_id)
             .await
             .unwrap_or_else(|error| panic!("moirai trace finalization failed: {error}"));
 
@@ -195,6 +207,7 @@ impl TraceBackend for MoiraiSqliteBackend {
     async fn force_finalize_trace(
         &self,
         _occurred_at_ms: u64,
+        final_parent_span_id: Option<String>,
         outcome: TraceOutcome,
         fields: Value,
     ) {
@@ -240,7 +253,7 @@ impl TraceBackend for MoiraiSqliteBackend {
         let success = matches!(outcome, TraceOutcome::Ok);
 
         self.context
-            .end(success, message.as_deref())
+            .end_with_parent(success, message.as_deref(), final_parent_span_id)
             .await
             .unwrap_or_else(|error| panic!("moirai force trace finalization failed: {error}"));
 

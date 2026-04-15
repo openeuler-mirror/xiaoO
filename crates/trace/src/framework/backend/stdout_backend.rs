@@ -90,12 +90,19 @@ impl TraceBackend for StdoutBackend {
         spans.remove(span.span_id());
     }
 
-    async fn finalize_trace(&self, occurred_at_ms: u64, outcome: TraceOutcome, fields: Value) {
+    async fn finalize_trace(
+        &self,
+        occurred_at_ms: u64,
+        final_parent_span_id: Option<String>,
+        outcome: TraceOutcome,
+        fields: Value,
+    ) {
         println!(
             "{}",
             json!({
                 "record_type": "trace_finalization",
                 "occurred_at_ms": occurred_at_ms,
+                "final_parent_span_id": final_parent_span_id,
                 "outcome": format!("{:?}", outcome),
                 "fields": fields,
             })
@@ -105,6 +112,7 @@ impl TraceBackend for StdoutBackend {
     async fn force_finalize_trace(
         &self,
         occurred_at_ms: u64,
+        final_parent_span_id: Option<String>,
         outcome: TraceOutcome,
         fields: Value,
     ) {
@@ -113,6 +121,7 @@ impl TraceBackend for StdoutBackend {
             json!({
                 "record_type": "trace_force_finalization",
                 "occurred_at_ms": occurred_at_ms,
+                "final_parent_span_id": final_parent_span_id,
                 "outcome": format!("{:?}", outcome),
                 "fields": fields,
             })
