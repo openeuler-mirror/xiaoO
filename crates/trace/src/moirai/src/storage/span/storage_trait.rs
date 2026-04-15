@@ -60,6 +60,8 @@ pub trait SpanStorage: Send + Sync {
     /// Returns Err with list of matches if multiple traces match the prefix
     async fn get_trace_by_prefix(&self, prefix: &str) -> Result<Option<String>>;
 
+    async fn get_span_by_prefix(&self, prefix: &str) -> Result<Option<String>>;
+
     /// Get the last span ID of a trace (the most recently started span)
     /// Returns Ok(Some(span_id)) if the trace has spans
     /// Returns Ok(None) if the trace has no spans

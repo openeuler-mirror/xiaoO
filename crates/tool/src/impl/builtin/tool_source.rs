@@ -10,8 +10,10 @@ use super::glob::discover_glob;
 use super::grep::discover_grep;
 use super::join_subagent::discover_join_subagent;
 use super::print_hello_world::discover_print_hello_world;
+use super::skill::discover_skill;
 use super::spawn_subagent::discover_spawn_subagent;
 use super::webfetch::discover_webfetch;
+use super::websearch::discover_web_search;
 use crate::r#impl::ToolRuntimeServices;
 
 /// A built-in tool source.
@@ -39,8 +41,10 @@ impl ToolSource for BuiltinToolSource {
             discover_glob(),
             discover_grep(),
             discover_webfetch(),
+            discover_web_search(),
             discover_spawn_subagent(self.services.clone()),
             discover_join_subagent(self.services.clone()),
+            discover_skill(),
         ]
     }
 }

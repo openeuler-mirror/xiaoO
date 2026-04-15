@@ -2,7 +2,7 @@ use super::input::SpawnSubagentInput;
 
 pub mod error_code {
     pub const DESCRIPTION_EMPTY: u32 = 1;
-    pub const PROMPT_EMPTY: u32 = 2;
+    pub const TASK_GOAL_EMPTY: u32 = 2;
 }
 
 #[derive(Debug, Clone)]
@@ -38,8 +38,8 @@ pub fn validate_input(input: &SpawnSubagentInput) -> ValidationResult {
         );
     }
 
-    if input.prompt.trim().is_empty() {
-        return ValidationResult::error("prompt must not be empty", error_code::PROMPT_EMPTY);
+    if input.task_goal.trim().is_empty() {
+        return ValidationResult::error("task_goal must not be empty", error_code::TASK_GOAL_EMPTY);
     }
 
     ValidationResult::ok()

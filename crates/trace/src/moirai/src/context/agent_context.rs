@@ -45,11 +45,13 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         storage: Arc<S>,
         span_type: impl Into<String>,
         extras: serde_json::Value,
+        trace_id: Option<String>,
+        root_span_id: Option<String>,
         config: ContextConfig,
     ) -> Result<Self> {
         let span_type = span_type.into();
-        let span_id = Self::generate_span_id();
-        let trace_id = span_id.clone();
+        let trace_id = trace_id.unwrap_or_else(Self::generate_span_id);
+        let span_id = root_span_id.unwrap_or_else(|| trace_id.clone());
         let now = Self::current_time_ms();
 
         let root_span = Span {
@@ -59,8 +61,8 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             span_type,
             start_time: now,
             last_updated_at: now,
-            end_time: None,
-            extras,
+            end_time: Some(now),
+            extras: root_span_extras(extras),
             created_at: now,
         };
 
@@ -69,9 +71,9 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         let inner = Inner {
             trace_id: trace_id.clone(),
             agent_id,
-            head_span_id: span_id.clone(),
+            chronology_tail_span_id: span_id.clone(),
             root_span_start_time: now,
-            open_spans: vec![span_id],
+            open_spans: Vec::new(),
             buffer: Vec::new(),
             pending_updates: std::collections::HashMap::new(),
             config,
@@ -100,6 +102,27 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             storage,
             span_types::USER,
             serde_json::json!({}),
+            None,
+            None,
+            config,
+        )
+        .await
+    }
+
+    pub async fn new_user_with_explicit_trace(
+        agent_id: &str,
+        trace_id: String,
+        root_span_id: Option<String>,
+        storage: Arc<S>,
+        config: ContextConfig,
+    ) -> Result<Self> {
+        Self::create_with_root_span(
+            agent_id.to_string(),
+            storage,
+            span_types::USER,
+            serde_json::json!({}),
+            Some(trace_id),
+            root_span_id,
             config,
         )
         .await
@@ -120,6 +143,8 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             storage,
             span_types::QUEST,
             serde_json::json!({ "quest_id": quest_id }),
+            None,
+            None,
             config,
         )
         .await
@@ -156,6 +181,8 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
                 "parent_trace_id": parent_trace_id,
                 "parent_span_id": parent_span_id
             }),
+            None,
+            None,
             config,
         )
         .await
@@ -166,7 +193,7 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     pub async fn head_span_id(&self) -> String {
-        self.inner.lock().await.head_span_id.clone()
+        self.inner.lock().await.chronology_tail_span_id.clone()
     }
 
     pub(super) fn merge_extras(target: &mut serde_json::Value, update: &serde_json::Value) {
@@ -228,15 +255,34 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         started_at: i64,
         span_id: Option<String>,
     ) -> Result<String> {
+        self.record_span_at_with_parent(span_type, extras, started_at, span_id, None)
+            .await
+    }
+
+    pub async fn record_span_at_with_parent(
+        &self,
+        span_type: impl Into<String>,
+        extras: serde_json::Value,
+        started_at: i64,
+        span_id: Option<String>,
+        parent_span_id: Option<String>,
+    ) -> Result<String> {
         let span_type = span_type.into();
         let span_id = span_id.unwrap_or_else(Self::generate_span_id);
 
         let mut inner = self.inner.lock().await;
+        if inner.ended {
+            return Err(crate::MoiraiError::InvalidState(
+                "cannot record span after end()".to_string(),
+            ));
+        }
+        let effective_parent_span_id =
+            parent_span_id.unwrap_or_else(|| inner.chronology_tail_span_id.clone());
 
         let span = Span {
             span_id: span_id.clone(),
             trace_id: inner.trace_id.clone(),
-            parent_span_id: Some(inner.head_span_id.clone()),
+            parent_span_id: Some(effective_parent_span_id),
             span_type,
             start_time: started_at,
             last_updated_at: started_at,
@@ -246,7 +292,7 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         };
 
         inner.buffer.push(span);
-        inner.head_span_id = span_id.clone();
+        inner.chronology_tail_span_id = span_id.clone();
         inner.open_spans.push(span_id.clone());
 
         if inner.config.immediate_flush || inner.buffer.len() >= inner.config.buffer_size {
@@ -258,6 +304,22 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         }
 
         Ok(span_id)
+    }
+}
+
+fn root_span_extras(extras: serde_json::Value) -> serde_json::Value {
+    match extras {
+        serde_json::Value::Object(mut map) => {
+            map.insert(
+                "parent_semantics".to_string(),
+                serde_json::Value::String("chronology_chain".to_string()),
+            );
+            serde_json::Value::Object(map)
+        }
+        other => serde_json::json!({
+            "value": other,
+            "parent_semantics": "chronology_chain",
+        }),
     }
 }
 

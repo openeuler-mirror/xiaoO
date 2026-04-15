@@ -1,9 +1,11 @@
 use crate::gateway::{
-    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
-    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
+    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
+    SessionRuntimeResolver,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
+use agent_types::hooker::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
 use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
@@ -27,6 +29,7 @@ pub struct HostedSessionRuntimeConfig {
     pub compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     pub llm_provider: Option<Arc<LlmProviderWrapper>>,
     pub trace: Value,
+    pub hooker: HookerRegistryConfig,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -151,7 +154,11 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .clone()
             .unwrap_or_else(|| self.config.descriptor.agent_id.clone());
         let llm_provider = match self.config.llm_provider.clone() {
-            Some(provider) => provider,
+            Some(provider) => Arc::new(LlmProviderWrapper::new(
+                provider.inner(),
+                Some(agent_id.0.clone()),
+                None,
+            )),
             None => {
                 let api_key = self.resolve_api_key()?;
                 let llm_config = LlmProviderConfig {
@@ -176,6 +183,8 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .clone();
         let mut descriptor = self.config.descriptor.clone();
         descriptor.agent_id = agent_id.clone();
+        descriptor.system_prompt =
+            compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
 
         Ok(ResolvedSessionRuntime {
             descriptor,
@@ -186,6 +195,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             bindings: self.bindings.clone(),
             trace: self.config.trace.clone(),
             compression_pipeline: self.config.compression_pipeline.clone(),
+            hooker: self.config.hooker.clone(),
         })
     }
 }

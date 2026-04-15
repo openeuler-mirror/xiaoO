@@ -90,11 +90,19 @@ impl TraceBackend for NoopBackend {
         spans.remove(span.span_id());
     }
 
-    async fn finalize_trace(&self, _occurred_at_ms: u64, _outcome: TraceOutcome, _fields: Value) {}
+    async fn finalize_trace(
+        &self,
+        _occurred_at_ms: u64,
+        _final_parent_span_id: Option<String>,
+        _outcome: TraceOutcome,
+        _fields: Value,
+    ) {
+    }
 
     async fn force_finalize_trace(
         &self,
         _occurred_at_ms: u64,
+        _final_parent_span_id: Option<String>,
         _outcome: TraceOutcome,
         _fields: Value,
     ) {

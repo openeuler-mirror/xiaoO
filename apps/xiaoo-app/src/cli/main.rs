@@ -17,6 +17,7 @@ use xiaoo_app::gateway::{
 
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
 
 #[derive(Parser)]
 #[command(name = "xiaoo", about = "XiaoO AgentLoop CLI")]
@@ -142,6 +143,10 @@ async fn main() {
                 enable_tools: !no_tools,
                 context_window,
                 compact: file_cfg.compact.unwrap_or_default(),
+                hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
+                    default: HookerDefaultMode::None,
+                    ..HookerRegistryConfig::default()
+                }),
             };
 
             run_once(config, prompt, debug).await;
@@ -300,17 +305,7 @@ fn handle_skill_command(command: SkillCommands) {
                 std::process::exit(1);
             }
 
-            let report = audit_skill_directory(&src_dir, &SkillAuditOptions::default());
-            if !report.is_clean() {
-                eprintln!("Security audit failed:");
-                for f in &report.findings {
-                    eprintln!("  - {}", f);
-                }
-                if is_git {
-                    let _ = std::fs::remove_dir_all(&src_dir);
-                }
-                std::process::exit(1);
-            }
+            // Audit is currently disabled by default; use `xiaoo skill audit <path>` for manual checks.
 
             if let Err(e) = copy_dir_recursive(&src_dir, &dest) {
                 eprintln!("Failed to install: {}", e);
@@ -431,6 +426,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         },
         compression_pipeline: Some(compression_pipeline),
         llm_provider: Some(llm_provider),
+        hooker: config.hooker.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

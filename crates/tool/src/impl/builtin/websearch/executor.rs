@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
-use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError};
+use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
 use super::constants::{
     BASE_URL, DEFAULT_NUM_RESULTS, DEFAULT_TIMEOUT_MS, MCP_TOOL_NAME, SEARCH_ENDPOINT,
@@ -192,7 +192,7 @@ impl ToolExecutor for WebSearchExecutor {
         &self,
         call: &FinalToolCall,
         _runtime: &dyn RuntimeView,
-    ) -> Result<RawToolOutcome, ToolExecutionError> {
+    ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: WebSearchInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
                 message: format!("Failed to parse input: {}", e),
@@ -205,8 +205,10 @@ impl ToolExecutor for WebSearchExecutor {
                 .message
                 .unwrap_or_else(|| "Validation failed".to_string());
             let error_code = validation_result.error_code.unwrap_or(0);
-            return Ok(RawToolOutcome::Error {
-                message: format!("[error_code={}] {}", error_code, error_message),
+            return Ok(ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Error {
+                    message: format!("[error_code={}] {}", error_code, error_message),
+                },
             });
         }
 
@@ -219,6 +221,8 @@ impl ToolExecutor for WebSearchExecutor {
                 message: format!("Failed to serialize output: {}", e),
             })?;
 
-        Ok(RawToolOutcome::Success { output: serialized })
+        Ok(ToolExecutorOutput::Completed {
+            raw_outcome: RawToolOutcome::Success { output: serialized },
+        })
     }
 }

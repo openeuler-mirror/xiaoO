@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use agent_contracts::CompressionPipeline;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::hooker::HookerRegistryConfig;
 use agent_types::CompletionConfig;
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
@@ -72,6 +73,7 @@ pub struct CliConfig {
     pub enable_tools: bool,
     pub context_window: usize,
     pub compact: config::CompactSection,
+    pub hooker: HookerRegistryConfig,
 }
 
 // ---------------------------------------------------------------------------

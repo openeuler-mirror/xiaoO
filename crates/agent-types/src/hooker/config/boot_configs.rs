@@ -15,4 +15,5 @@ pub struct HookerRegistryConfig {
     pub enabled: Vec<HookerId>,
     pub disabled: Vec<HookerId>,
     pub policies: HashMap<HookerId, serde_json::Value>,
+    pub plugins: Vec<String>,
 }

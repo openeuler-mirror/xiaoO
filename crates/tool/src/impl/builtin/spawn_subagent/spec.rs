@@ -19,20 +19,28 @@ impl SpawnSubagentToolSpec {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "A short description of the delegated task"
+                    "description": "A short label for the delegated branch or subtask"
                 },
-                "prompt": {
+                "task_goal": {
                     "type": "string",
-                    "description": "The full instruction for the subagent"
+                    "description": "The exact core goal the subagent needs to accomplish. When the task needs a count, comparison, or directory statistic, explicitly require an exact result and forbid approximate or truncated answers."
+                },
+                "task_context": {
+                    "type": "string",
+                    "description": "Any necessary contextual information to perform the task"
+                },
+                "output_schema": {
+                    "type": "object",
+                    "description": "The strict JSON schema that the subagent MUST follow when returning its final result"
                 }
             },
-            "required": ["description", "prompt"]
+            "required": ["description", "task_goal", "task_context", "output_schema"]
         });
 
         Self {
             id: ToolId("builtin_spawn_subagent".to_string()),
             name: ToolName("spawn_subagent".to_string()),
-            description: "Spawns an asynchronous subagent inside the current session".to_string(),
+            description: "Spawns an asynchronous subagent inside the current session. Use it when the request explicitly asks for subagents or parallel work, or when the work cleanly splits into multiple independent read-only branches whose results will later be compared, sorted, or aggregated. Do not use it for tiny single-step lookups, and do not attempt nested delegation from inside an already delegated subtask.".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
                 description: "Serialized JSON containing the spawned subagent agent_id".to_string(),
