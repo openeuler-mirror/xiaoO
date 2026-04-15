@@ -2,10 +2,10 @@ use std::borrow::Cow;
 use std::sync::{Arc, Mutex, RwLock};
 
 use agent_contracts::runtime::RuntimeView;
-use agent_contracts::trace::{TraceOutcome, TraceSpanKind};
+use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeInput, HookInvokeOutput};
+use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::llm::{
     ErrorLlmHookInput, ErrorLlmHookResult, LlmError, LlmRequest, LlmResponse, PostLlmHookInput,
     PostLlmHookResult, PreLlmHookInput, PreLlmHookResult, StreamChunk,
@@ -128,9 +128,12 @@ impl LlmProviderWrapper {
                 )
                 .await;
 
-            let input = HookInvokeInput::LlmPre(PreLlmHookInput {
-                request: request.clone(),
-            });
+            let input = HookInvokeInput::LlmPre {
+                input: PreLlmHookInput {
+                    request: request.clone(),
+                },
+                metadata: hook_invoke_metadata(&hook_span),
+            };
 
             let output = match hooker.invoke(input, runtime_view.as_ref()).await {
                 Ok(o) => o,
@@ -259,10 +262,13 @@ impl LlmProviderWrapper {
                 )
                 .await;
 
-            let input = HookInvokeInput::LlmPost(PostLlmHookInput {
-                request: request.clone(),
-                response: response.clone(),
-            });
+            let input = HookInvokeInput::LlmPost {
+                input: PostLlmHookInput {
+                    request: request.clone(),
+                    response: response.clone(),
+                },
+                metadata: hook_invoke_metadata(&hook_span),
+            };
 
             let output = match hooker
                 .invoke(input, runtime_view.as_ref())
@@ -398,10 +404,13 @@ impl LlmProviderWrapper {
                 )
                 .await;
 
-            let input = HookInvokeInput::LlmError(ErrorLlmHookInput {
-                request: request.clone(),
-                error: error.clone(),
-            });
+            let input = HookInvokeInput::LlmError {
+                input: ErrorLlmHookInput {
+                    request: request.clone(),
+                    error: error.clone(),
+                },
+                metadata: hook_invoke_metadata(&hook_span),
+            };
 
             let output = match hooker
                 .invoke(input, runtime_view.as_ref())
@@ -464,6 +473,14 @@ impl LlmProviderWrapper {
         }
 
         Ok(results)
+    }
+}
+
+fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
+    HookInvokeMetadata {
+        trace_id: Some(hook_span.trace_id().to_string()),
+        span_id: Some(hook_span.span_id().to_string()),
+        parent_span_id: hook_span.parent_span_id().map(ToString::to_string),
     }
 }
 

@@ -6,7 +6,7 @@ use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
 use agent_types::common::HookerId;
 use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeOutput};
+use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
@@ -53,14 +53,14 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
         match (category, input) {
-            (HookPointCategory::ToolPre, HookInvokeInput::Pre(input)) => {
-                self.invoke_pre(&input, runtime).await
+            (HookPointCategory::ToolPre, HookInvokeInput::Pre { input, metadata }) => {
+                self.invoke_pre(&input, &metadata, runtime).await
             }
-            (HookPointCategory::ToolPost, HookInvokeInput::Post(input)) => {
-                self.invoke_post(&input, runtime).await
+            (HookPointCategory::ToolPost, HookInvokeInput::Post { input, metadata }) => {
+                self.invoke_post(&input, &metadata, runtime).await
             }
-            (HookPointCategory::ToolError, HookInvokeInput::Error(input)) => {
-                self.invoke_error(&input, runtime).await
+            (HookPointCategory::ToolError, HookInvokeInput::Error { input, metadata }) => {
+                self.invoke_error(&input, &metadata, runtime).await
             }
             (category, _) => Err(ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -74,9 +74,10 @@ impl PluginToolHookerAdaptor {
     async fn invoke_pre(
         &self,
         input: &PreToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
-        let payload = self.build_pre_payload(input, runtime)?;
+        let payload = self.build_pre_payload(input, metadata, runtime)?;
         let output = self.run_plugin_command(&payload)?;
         Ok(HookInvokeOutput::Pre(self.parse_pre_result(&output)?))
     }
@@ -84,9 +85,10 @@ impl PluginToolHookerAdaptor {
     async fn invoke_post(
         &self,
         input: &PostToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
-        let payload = self.build_post_payload(input, runtime)?;
+        let payload = self.build_post_payload(input, metadata, runtime)?;
         let output = self.run_plugin_command(&payload)?;
         Ok(HookInvokeOutput::Post(self.parse_post_result(&output)?))
     }
@@ -94,9 +96,10 @@ impl PluginToolHookerAdaptor {
     async fn invoke_error(
         &self,
         input: &ErrorToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
-        let payload = self.build_error_payload(input, runtime)?;
+        let payload = self.build_error_payload(input, metadata, runtime)?;
         let output = self.run_plugin_command(&payload)?;
         Ok(HookInvokeOutput::Error(self.parse_error_result(&output)?))
     }
@@ -104,11 +107,13 @@ impl PluginToolHookerAdaptor {
     fn build_pre_payload(
         &self,
         input: &PreToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
         Ok(json!({
             "stage": "pre",
             "hooker": self.serialize_hooker_info(runtime),
+            "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
                 message: format!("failed to serialize pre-hook call payload for '{}': {}", self.id.0, error),
             })?,
@@ -120,11 +125,13 @@ impl PluginToolHookerAdaptor {
     fn build_post_payload(
         &self,
         input: &PostToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
         Ok(json!({
             "stage": "post",
             "hooker": self.serialize_hooker_info(runtime),
+            "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
                 message: format!("failed to serialize post-hook call payload for '{}': {}", self.id.0, error),
             })?,
@@ -137,11 +144,13 @@ impl PluginToolHookerAdaptor {
     fn build_error_payload(
         &self,
         input: &ErrorToolHookInput,
+        metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
         Ok(json!({
             "stage": "error",
             "hooker": self.serialize_hooker_info(runtime),
+            "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
                 message: format!("failed to serialize error-hook call payload for '{}': {}", self.id.0, error),
             })?,
@@ -157,6 +166,14 @@ impl PluginToolHookerAdaptor {
             "hook_point": self.hook_point.0,
             "command": self.command,
             "agent_id": runtime.agent_context().metadata().agent_id,
+        })
+    }
+
+    fn serialize_metadata(&self, metadata: &HookInvokeMetadata) -> Value {
+        json!({
+            "trace_id": metadata.trace_id,
+            "span_id": metadata.span_id,
+            "parent_span_id": metadata.parent_span_id,
         })
     }
 

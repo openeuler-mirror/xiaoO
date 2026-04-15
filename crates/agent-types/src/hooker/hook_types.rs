@@ -17,16 +17,54 @@ pub enum HookInvokeError {
     Llm(#[from] LlmError),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HookInvokeMetadata {
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub parent_span_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub enum HookInvokeInput {
     // Tool hook variants
-    Pre(PreToolHookInput),
-    Post(PostToolHookInput),
-    Error(ErrorToolHookInput),
+    Pre {
+        input: PreToolHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    Post {
+        input: PostToolHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    Error {
+        input: ErrorToolHookInput,
+        metadata: HookInvokeMetadata,
+    },
     // LLM hook variants
-    LlmPre(PreLlmHookInput),
-    LlmPost(PostLlmHookInput),
-    LlmError(ErrorLlmHookInput),
+    LlmPre {
+        input: PreLlmHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    LlmPost {
+        input: PostLlmHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    LlmError {
+        input: ErrorLlmHookInput,
+        metadata: HookInvokeMetadata,
+    },
+}
+
+impl HookInvokeInput {
+    pub fn metadata(&self) -> &HookInvokeMetadata {
+        match self {
+            Self::Pre { metadata, .. }
+            | Self::Post { metadata, .. }
+            | Self::Error { metadata, .. }
+            | Self::LlmPre { metadata, .. }
+            | Self::LlmPost { metadata, .. }
+            | Self::LlmError { metadata, .. } => metadata,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

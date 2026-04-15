@@ -39,7 +39,9 @@ impl Hooker for HelloWorldLlmPreHooker {
         _runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, HookInvokeError> {
         match input {
-            HookInvokeInput::LlmPre(pre_input) => {
+            HookInvokeInput::LlmPre {
+                input: pre_input, ..
+            } => {
                 println!(
                     "[HelloWorldLlmPreHooker] hook triggered at '{}', messages={}",
                     self.hook_point.0,
