@@ -30,6 +30,7 @@ impl GatewayRuntime {
                         self.stream_reveal_buffer.clear();
                         self.pending_stream_done = None;
                         self.set_stream_message_content(state, content, true);
+                        self.record_first_token_latency_if_needed(state);
                         state.chat_state.stick_to_bottom = true;
                     }
                 }
@@ -93,6 +94,7 @@ impl GatewayRuntime {
         self.pending_stream_done = None;
         self.interaction_reply_tx = None;
         self.request_start = None;
+        self.first_token_latency_recorded = false;
         if let Some(index) = stream_message_index {
             if let Some(message) = state.chat_state.messages.get_mut(index) {
                 if message.is_streaming {
@@ -151,6 +153,31 @@ impl GatewayRuntime {
         }
     }
 
+    fn record_first_token_latency_if_needed(&mut self, state: &mut AppState) {
+        if self.first_token_latency_recorded {
+            return;
+        }
+
+        let Some(index) = self.stream_message_index else {
+            return;
+        };
+        let has_content = state
+            .chat_state
+            .messages
+            .get(index)
+            .map(|message| !message.content.is_empty())
+            .unwrap_or(false);
+        if !has_content {
+            return;
+        }
+
+        let Some(start) = self.request_start.as_ref() else {
+            return;
+        };
+        state.status_panel.last_latency_ms = start.elapsed().as_millis() as u64;
+        self.first_token_latency_recorded = true;
+    }
+
     fn handle_stream_disconnect(&mut self, state: &mut AppState) {
         tracing::warn!("TUI: stream channel disconnected before Done/Err");
 
@@ -173,6 +200,7 @@ impl GatewayRuntime {
         self.stream_rx = None;
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
+        self.first_token_latency_recorded = false;
         state.status_panel.update_metrics(0, 0, 0, 0);
     }
 
@@ -296,12 +324,12 @@ impl GatewayRuntime {
         self.stream_rx = None;
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
-        if let Some(start) = self.request_start.take() {
-            let latency_ms = start.elapsed().as_millis() as u64;
+        self.first_token_latency_recorded = false;
+        if self.request_start.take().is_some() {
             state.status_panel.update_metrics(
                 done.prompt_tokens,
                 done.completion_tokens,
-                latency_ms,
+                state.status_panel.last_latency_ms,
                 done.total_tokens,
             );
         }
@@ -311,11 +339,12 @@ impl GatewayRuntime {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use crate::app_state::AppState;
     use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolExecutionUpdate};
 
-    use super::GatewayRuntime;
+    use super::{GatewayRuntime, PendingStreamDone};
 
     fn test_state() -> AppState {
         let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
@@ -386,5 +415,43 @@ mod tests {
         assert_eq!(state.chat_state.messages.len(), 1);
         assert!(state.chat_state.messages[0].tool_state.is_some());
         assert!(runtime.stream_message_index.is_none());
+    }
+
+    #[test]
+    fn first_token_latency_is_recorded_once_and_survives_completion() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+        runtime.request_start = Some(Instant::now() - Duration::from_millis(20));
+
+        runtime.set_stream_message_content(&mut state, "H", true);
+        runtime.record_first_token_latency_if_needed(&mut state);
+        let first_token_latency_ms = state.status_panel.last_latency_ms;
+        assert!(first_token_latency_ms >= 20);
+        assert!(runtime.first_token_latency_recorded);
+
+        runtime.request_start = Some(Instant::now() - Duration::from_millis(80));
+        runtime.record_first_token_latency_if_needed(&mut state);
+        assert_eq!(state.status_panel.last_latency_ms, first_token_latency_ms);
+
+        runtime.finish_stream_done(
+            &mut state,
+            PendingStreamDone {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 42,
+                messages: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.status_panel.last_latency_ms, first_token_latency_ms);
+        assert_eq!(state.status_panel.prompt_tokens, 10);
+        assert_eq!(state.status_panel.completion_tokens, 5);
+        assert_eq!(state.status_panel.context_tokens, 42);
     }
 }
