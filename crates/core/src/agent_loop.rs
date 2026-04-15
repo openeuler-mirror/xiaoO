@@ -548,15 +548,9 @@ fn decide(ctx: &mut LoopContext<'_>) {
         return;
     }
 
-    let policy = &ctx.snapshot.token_budget_policy;
-    let available = policy
-        .total_budget()
-        .saturating_sub(policy.reserved_for_output())
-        .saturating_sub(policy.reserved_for_system());
-    if ctx.state.token_usage.total_tokens > available {
-        ctx.turn.decision = Some(LoopDecision::ReturnBudgetExhausted);
-        return;
-    }
+    // NOTE: no cumulative token budget check here.
+    // Context window pressure is handled by the compression pipeline
+    // (compress/microcompact) at the start of each turn.
 
     if let Some(ref msg) = ctx.turn.assistant_message {
         let can_execute_tool_calls = ctx.snapshot.feature_flags.tool_execution

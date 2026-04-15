@@ -330,6 +330,7 @@ impl SessionSupervisor {
                     parent_agent_id: _,
                     description: _,
                     prompt,
+                    output_schema: _,
                 } => {
                     self.spawn_subagent_task(agent_id, prompt);
                 }

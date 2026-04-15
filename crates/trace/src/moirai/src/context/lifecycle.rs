@@ -5,17 +5,34 @@ use super::agent_context::AgentContext;
 
 impl<S: SpanStorage + 'static> AgentContext<S> {
     pub async fn end(&self, success: bool, message: Option<&str>) -> Result<String> {
+        self.end_with_parent(success, message, None).await
+    }
+
+    pub async fn end_with_parent(
+        &self,
+        success: bool,
+        message: Option<&str>,
+        parent_span_id: Option<String>,
+    ) -> Result<String> {
         let span_id = Self::generate_span_id();
         let now = Self::current_time_ms();
 
-        let (trace_id, head_span_id, root_span_start_time, open_spans_count) = {
-            let inner = self.inner.lock().await;
+        let (trace_id, root_span_start_time, open_spans_count, parent_span_id) = {
+            let mut inner = self.inner.lock().await;
+            if inner.ended {
+                return Err(crate::MoiraiError::InvalidState(
+                    "end() already called".to_string(),
+                ));
+            }
+            inner.ended = true;
+            self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+
             let open_spans_count = inner.open_spans.len() as u32;
             (
                 inner.trace_id.clone(),
-                inner.head_span_id.clone(),
                 inner.root_span_start_time,
                 open_spans_count,
+                parent_span_id.unwrap_or_else(|| inner.chronology_tail_span_id.clone()),
             )
         };
 
@@ -33,7 +50,7 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         let end_span = Span {
             span_id: span_id.clone(),
             trace_id,
-            parent_span_id: Some(head_span_id),
+            parent_span_id: Some(parent_span_id),
             span_type: span_types::END.to_string(),
             start_time: now,
             last_updated_at: now,
@@ -43,15 +60,8 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         };
 
         let mut inner = self.inner.lock().await;
-        if inner.ended {
-            return Err(crate::MoiraiError::InvalidState(
-                "end() already called".to_string(),
-            ));
-        }
         inner.buffer.push(end_span);
-        inner.head_span_id = span_id.clone();
-        inner.ended = true;
-        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        inner.chronology_tail_span_id = span_id.clone();
 
         let spans_to_flush: Vec<Span> = inner.buffer.drain(..).collect();
         drop(inner);

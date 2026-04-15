@@ -18,15 +18,20 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         let now = Self::current_time_ms();
 
         let mut inner = self.inner.lock().await;
+        if inner.ended {
+            return Err(crate::MoiraiError::InvalidState(
+                "cannot spawn after end()".to_string(),
+            ));
+        }
         let parent_trace_id = inner.trace_id.clone();
-        let parent_span_id = inner.head_span_id.clone();
+        let parent_span_id = inner.chronology_tail_span_id.clone();
 
         let child_trace_id = Self::generate_span_id();
 
         let spawn_span = Span {
             span_id: span_id.clone(),
             trace_id: inner.trace_id.clone(),
-            parent_span_id: Some(inner.head_span_id.clone()),
+            parent_span_id: Some(inner.chronology_tail_span_id.clone()),
             span_type: span_types::SPAWN.to_string(),
             start_time: now,
             last_updated_at: now,
@@ -40,7 +45,7 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         };
 
         inner.buffer.push(spawn_span);
-        inner.head_span_id = span_id.clone();
+        inner.chronology_tail_span_id = span_id.clone();
 
         if inner.config.immediate_flush || inner.buffer.len() >= inner.config.buffer_size {
             let spans_to_flush: Vec<Span> = inner.buffer.drain(..).collect();
@@ -68,13 +73,19 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     pub async fn merge(&self, child_trace_id: &str, child_agent_id: &str) -> Result<String> {
-        let child_last_span_id = self.storage.get_last_span_id(child_trace_id).await?;
         let current_head_span_id = {
             let inner = self.inner.lock().await;
-            inner.head_span_id.clone()
+            if inner.ended {
+                return Err(crate::MoiraiError::InvalidState(
+                    "cannot merge after end()".to_string(),
+                ));
+            }
+            inner.chronology_tail_span_id.clone()
         };
 
-        let mut parent_span_ids = vec![current_head_span_id];
+        let child_last_span_id = self.storage.get_last_span_id(child_trace_id).await?;
+
+        let mut parent_span_ids = vec![current_head_span_id.clone()];
         if let Some(span_id) = child_last_span_id {
             parent_span_ids.push(span_id);
         }
@@ -84,7 +95,14 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             "child_agent_id": child_agent_id,
             "parent_span_ids": parent_span_ids
         });
-        self.record_span(span_types::MERGE, extras).await
+        self.record_span_at_with_parent(
+            span_types::MERGE,
+            extras,
+            Self::current_time_ms(),
+            None,
+            Some(current_head_span_id),
+        )
+        .await
     }
 
     pub async fn merge_multi(
@@ -93,10 +111,15 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     ) -> Result<String> {
         let current_head_span_id = {
             let inner = self.inner.lock().await;
-            inner.head_span_id.clone()
+            if inner.ended {
+                return Err(crate::MoiraiError::InvalidState(
+                    "cannot merge after end()".to_string(),
+                ));
+            }
+            inner.chronology_tail_span_id.clone()
         };
 
-        let mut parent_span_ids = vec![current_head_span_id];
+        let mut parent_span_ids = vec![current_head_span_id.clone()];
         for (child_trace_id, _) in children {
             if let Some(span_id) = self
                 .storage
@@ -114,7 +137,14 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
             "child_agent_ids": child_agent_ids,
             "parent_span_ids": parent_span_ids
         });
-        self.record_span(span_types::MERGE, extras).await
+        self.record_span_at_with_parent(
+            span_types::MERGE,
+            extras,
+            Self::current_time_ms(),
+            None,
+            Some(current_head_span_id),
+        )
+        .await
     }
 
     pub async fn merge_with_parents(

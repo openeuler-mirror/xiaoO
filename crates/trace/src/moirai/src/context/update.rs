@@ -12,13 +12,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         let mut inner = self.inner.lock().await;
 
         inner.open_spans.retain(|id| id != span_id);
-        if inner.head_span_id == span_id {
-            inner.head_span_id = inner
-                .open_spans
-                .last()
-                .cloned()
-                .unwrap_or_else(|| inner.trace_id.clone());
-        }
 
         if let Some(buffered_span) = inner.buffer.iter_mut().find(|s| s.span_id == span_id) {
             buffered_span.last_updated_at = ended_at;

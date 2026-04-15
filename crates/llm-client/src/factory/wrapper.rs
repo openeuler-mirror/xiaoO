@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -10,6 +10,13 @@ use agent_types::llm::{
 };
 use async_trait::async_trait;
 use hooker::{resolve_hook_point_category, HookPointCategory};
+use serde_json::json;
+
+use super::trace::{
+    begin_trace_span, effective_request_trace_fields, end_trace_span, error_trace_fields,
+    llm_error_kind, merge_trace_fields, response_trace_fields, stream_trace_fields,
+    trace_outcome_for_error, update_trace_span, StreamTraceStats,
+};
 
 pub struct LlmProviderWrapper {
     inner: Arc<dyn LlmProvider>,
@@ -52,6 +59,11 @@ impl LlmProviderWrapper {
         self.agent_id
             .as_deref()
             .map(|id| HookPointId(format!("{}.Llm.complete.{}", id, stage)))
+    }
+
+    fn runtime_view(&self) -> Option<Arc<dyn RuntimeView>> {
+        let guard = self.runtime_view.read().unwrap();
+        guard.as_ref().cloned()
     }
 
     async fn run_pre_hook_sequence(
@@ -331,49 +343,156 @@ impl LlmProviderWrapper {
 impl LlmProviderWrapper {
     pub async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let mut effective_request = request.clone();
+        let runtime_view = self.runtime_view();
+        let runtime_ref = runtime_view.as_deref();
+        let mut trace_span = begin_trace_span(
+            runtime_ref,
+            &self.capabilities().model_name,
+            &effective_request,
+            false,
+        )
+        .await;
+        let mut pre_hook_count = 0;
+        let mut post_hook_count = 0;
+        let mut error_hook_count = 0;
+        let mut pre_hook_error = None;
+        let mut post_hook_error = None;
+        let mut error_hook_error = None;
 
-        if self.runtime_view.read().unwrap().is_some() {
+        if runtime_view.is_some() {
             match self.run_pre_hook_sequence(&mut effective_request).await {
-                Ok(_) => {}
+                Ok(results) => {
+                    pre_hook_count = results.len();
+                }
                 Err(e) => {
+                    pre_hook_error = Some(e.to_string());
                     eprintln!("llm pre-hook phase failed: {}", e);
                 }
             }
+
+            update_trace_span(
+                runtime_ref,
+                trace_span.as_ref(),
+                merge_trace_fields(
+                    json!({
+                        "phase": "pre_hooks_done",
+                        "pre_hook_count": pre_hook_count,
+                        "pre_hook_error": pre_hook_error,
+                    }),
+                    effective_request_trace_fields(&effective_request),
+                ),
+            )
+            .await;
         }
 
         match self.inner.complete(&effective_request).await {
             Ok(mut response) => {
-                if self.runtime_view.read().unwrap().is_some() {
+                update_trace_span(
+                    runtime_ref,
+                    trace_span.as_ref(),
+                    json!({
+                        "phase": "provider_completed",
+                    }),
+                )
+                .await;
+
+                if runtime_view.is_some() {
                     match self
                         .run_post_hook_sequence(&effective_request, &mut response)
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(results) => {
+                            post_hook_count = results.len();
+                        }
                         Err(e) => {
+                            post_hook_error = Some(e.to_string());
                             eprintln!("llm post-hook phase failed: {}", e);
                         }
                     }
                 }
+
+                end_trace_span(
+                    runtime_ref,
+                    &mut trace_span,
+                    agent_contracts::TraceOutcome::Ok,
+                    merge_trace_fields(
+                        json!({
+                            "phase": "finished",
+                            "pre_hook_count": pre_hook_count,
+                            "post_hook_count": post_hook_count,
+                            "error_hook_count": error_hook_count,
+                            "pre_hook_error": pre_hook_error,
+                            "post_hook_error": post_hook_error,
+                            "error_hook_error": error_hook_error,
+                            "recovered": false,
+                        }),
+                        response_trace_fields(&response),
+                    ),
+                )
+                .await;
                 Ok(response)
             }
             Err(error) => {
-                if self.runtime_view.read().unwrap().is_some() {
+                if runtime_view.is_some() {
                     match self
                         .run_error_hook_sequence(&effective_request, &error)
                         .await
                     {
                         Ok(results) => {
+                            error_hook_count = results.len();
                             for result in results {
                                 if let ErrorLlmHookResult::Recover { response } = result {
+                                    end_trace_span(
+                                        runtime_ref,
+                                        &mut trace_span,
+                                        agent_contracts::TraceOutcome::Ok,
+                                        merge_trace_fields(
+                                            json!({
+                                                "phase": "finished",
+                                                "pre_hook_count": pre_hook_count,
+                                                "post_hook_count": post_hook_count,
+                                                "error_hook_count": error_hook_count,
+                                                "pre_hook_error": pre_hook_error,
+                                                "post_hook_error": post_hook_error,
+                                                "error_hook_error": error_hook_error,
+                                                "recovered": true,
+                                                "original_error_kind": llm_error_kind(&error),
+                                                "original_error_message": error.to_string(),
+                                            }),
+                                            response_trace_fields(&response),
+                                        ),
+                                    )
+                                    .await;
                                     return Ok(response);
                                 }
                             }
                         }
                         Err(e) => {
+                            error_hook_error = Some(e.to_string());
                             eprintln!("llm error-hook phase failed: {}", e);
                         }
                     }
                 }
+
+                end_trace_span(
+                    runtime_ref,
+                    &mut trace_span,
+                    trace_outcome_for_error(&error),
+                    merge_trace_fields(
+                        json!({
+                            "phase": "finished",
+                            "pre_hook_count": pre_hook_count,
+                            "post_hook_count": post_hook_count,
+                            "error_hook_count": error_hook_count,
+                            "pre_hook_error": pre_hook_error,
+                            "post_hook_error": post_hook_error,
+                            "error_hook_error": error_hook_error,
+                            "recovered": false,
+                        }),
+                        error_trace_fields(&error),
+                    ),
+                )
+                .await;
                 Err(error)
             }
         }
@@ -385,53 +504,199 @@ impl LlmProviderWrapper {
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
         let mut effective_request = request.clone();
+        let runtime_view = self.runtime_view();
+        let runtime_ref = runtime_view.as_deref();
+        let mut trace_span = begin_trace_span(
+            runtime_ref,
+            &self.capabilities().model_name,
+            &effective_request,
+            true,
+        )
+        .await;
+        let mut pre_hook_count = 0;
+        let mut post_hook_count = 0;
+        let mut error_hook_count = 0;
+        let mut pre_hook_error = None;
+        let mut post_hook_error = None;
+        let mut error_hook_error = None;
+        let stream_stats = Mutex::new(StreamTraceStats::default());
+        let traced_on_chunk = |chunk: StreamChunk| {
+            if let Ok(mut stats) = stream_stats.lock() {
+                stats.chunk_count += 1;
+                if let Some(text) = chunk.delta_text.as_ref() {
+                    stats.text_bytes += text.len();
+                }
+                if chunk.delta_tool_call.is_some() {
+                    stats.saw_tool_call_delta = true;
+                }
+            }
+            on_chunk(chunk);
+        };
 
-        if self.runtime_view.read().unwrap().is_some() {
+        if runtime_view.is_some() {
             match self.run_pre_hook_sequence(&mut effective_request).await {
-                Ok(_) => {}
+                Ok(results) => {
+                    pre_hook_count = results.len();
+                }
                 Err(e) => {
+                    pre_hook_error = Some(e.to_string());
                     eprintln!("llm pre-hook phase failed (stream): {}", e);
                 }
             }
+
+            update_trace_span(
+                runtime_ref,
+                trace_span.as_ref(),
+                merge_trace_fields(
+                    json!({
+                        "phase": "pre_hooks_done",
+                        "pre_hook_count": pre_hook_count,
+                        "pre_hook_error": pre_hook_error,
+                    }),
+                    effective_request_trace_fields(&effective_request),
+                ),
+            )
+            .await;
         }
 
         match self
             .inner
-            .complete_stream(&effective_request, on_chunk)
+            .complete_stream(&effective_request, &traced_on_chunk)
             .await
         {
             Ok(mut response) => {
-                if self.runtime_view.read().unwrap().is_some() {
+                update_trace_span(
+                    runtime_ref,
+                    trace_span.as_ref(),
+                    json!({
+                        "phase": "provider_completed",
+                    }),
+                )
+                .await;
+
+                if runtime_view.is_some() {
                     match self
                         .run_post_hook_sequence(&effective_request, &mut response)
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(results) => {
+                            post_hook_count = results.len();
+                        }
                         Err(e) => {
+                            post_hook_error = Some(e.to_string());
                             eprintln!("llm post-hook phase failed (stream): {}", e);
                         }
                     }
                 }
+
+                let stream_trace_fields = match stream_stats.into_inner() {
+                    Ok(stats) => stream_trace_fields(&stats),
+                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                };
+
+                end_trace_span(
+                    runtime_ref,
+                    &mut trace_span,
+                    agent_contracts::TraceOutcome::Ok,
+                    merge_trace_fields(
+                        merge_trace_fields(
+                            json!({
+                                "phase": "finished",
+                                "pre_hook_count": pre_hook_count,
+                                "post_hook_count": post_hook_count,
+                                "error_hook_count": error_hook_count,
+                                "pre_hook_error": pre_hook_error,
+                                "post_hook_error": post_hook_error,
+                                "error_hook_error": error_hook_error,
+                                "recovered": false,
+                            }),
+                            response_trace_fields(&response),
+                        ),
+                        stream_trace_fields,
+                    ),
+                )
+                .await;
                 Ok(response)
             }
             Err(error) => {
-                if self.runtime_view.read().unwrap().is_some() {
+                if runtime_view.is_some() {
                     match self
                         .run_error_hook_sequence(&effective_request, &error)
                         .await
                     {
                         Ok(results) => {
+                            error_hook_count = results.len();
                             for result in results {
                                 if let ErrorLlmHookResult::Recover { response } = result {
+                                    let stream_trace_fields = match stream_stats.into_inner() {
+                                        Ok(stats) => stream_trace_fields(&stats),
+                                        Err(poisoned) => {
+                                            stream_trace_fields(&poisoned.into_inner())
+                                        }
+                                    };
+
+                                    end_trace_span(
+                                        runtime_ref,
+                                        &mut trace_span,
+                                        agent_contracts::TraceOutcome::Ok,
+                                        merge_trace_fields(
+                                            merge_trace_fields(
+                                                json!({
+                                                    "phase": "finished",
+                                                    "pre_hook_count": pre_hook_count,
+                                                    "post_hook_count": post_hook_count,
+                                                    "error_hook_count": error_hook_count,
+                                                    "pre_hook_error": pre_hook_error,
+                                                    "post_hook_error": post_hook_error,
+                                                    "error_hook_error": error_hook_error,
+                                                    "recovered": true,
+                                                    "original_error_kind": llm_error_kind(&error),
+                                                    "original_error_message": error.to_string(),
+                                                }),
+                                                response_trace_fields(&response),
+                                            ),
+                                            stream_trace_fields,
+                                        ),
+                                    )
+                                    .await;
                                     return Ok(response);
                                 }
                             }
                         }
                         Err(e) => {
+                            error_hook_error = Some(e.to_string());
                             eprintln!("llm error-hook phase failed (stream): {}", e);
                         }
                     }
                 }
+
+                let stream_trace_fields = match stream_stats.into_inner() {
+                    Ok(stats) => stream_trace_fields(&stats),
+                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                };
+
+                end_trace_span(
+                    runtime_ref,
+                    &mut trace_span,
+                    trace_outcome_for_error(&error),
+                    merge_trace_fields(
+                        merge_trace_fields(
+                            json!({
+                                "phase": "finished",
+                                "pre_hook_count": pre_hook_count,
+                                "post_hook_count": post_hook_count,
+                                "error_hook_count": error_hook_count,
+                                "pre_hook_error": pre_hook_error,
+                                "post_hook_error": post_hook_error,
+                                "error_hook_error": error_hook_error,
+                                "recovered": false,
+                            }),
+                            error_trace_fields(&error),
+                        ),
+                        stream_trace_fields,
+                    ),
+                )
+                .await;
                 Err(error)
             }
         }
