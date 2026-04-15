@@ -45,7 +45,7 @@ context_window = 128000              # 可选，用于会话压缩预算
 
 [trace]
 storage_backend = "moirai-sqlite"    # 可选；未配置时由 trace 模块内部决定默认值
-db_path = "~/.config/xiaoo/traces.db"     # 可选；未配置时由 trace 模块内部决定默认值
+db_path = "/root/.config/xiaoo/traces.db"     # 可选；未配置时由 trace 模块内部决定默认值
 ```
 
 设置环境变量：

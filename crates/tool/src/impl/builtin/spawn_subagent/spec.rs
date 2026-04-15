@@ -19,14 +19,22 @@ impl SpawnSubagentToolSpec {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "A short description of the delegated task"
+                    "description": "A short, concise description of the delegated task"
                 },
-                "prompt": {
+                "task_goal": {
                     "type": "string",
-                    "description": "The full instruction for the subagent"
+                    "description": "The exact core goal the subagent needs to accomplish"
+                },
+                "task_context": {
+                    "type": "string",
+                    "description": "Any necessary contextual information to perform the task"
+                },
+                "output_schema": {
+                    "type": "object",
+                    "description": "The strict JSON schema that the subagent MUST follow when returning its final result"
                 }
             },
-            "required": ["description", "prompt"]
+            "required": ["description", "task_goal", "task_context", "output_schema"]
         });
 
         Self {

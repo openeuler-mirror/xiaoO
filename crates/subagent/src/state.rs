@@ -45,6 +45,8 @@ pub struct SubagentRecord {
     pub parent_agent_id: Option<AgentId>,
     pub description: String,
     pub prompt: String,
+    #[serde(default)]
+    pub output_schema: Option<serde_json::Value>,
     pub status: SubagentStatus,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
