@@ -334,6 +334,32 @@ async fn end_turn_span(ctx: &mut LoopContext<'_>, outcome: TraceOutcome, fields:
 }
 
 async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+    let agent_id_str = ctx
+        .input
+        .agent_id
+        .as_ref()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+
+    // begin span — 记录开始时的基础元数据
+    let compression_span = if let Some(rv) = ctx.input.runtime_view.clone() {
+        Some(
+            rv.trace_recorder()
+                .begin_span(
+                    TraceSpanKind::Compression,
+                    std::borrow::Cow::Borrowed("compression"),
+                    json!({
+                        "turn_number": ctx.turn.turn_number,
+                        "agent_id": agent_id_str,
+                        "message_count": ctx.state.messages.len(),
+                    }),
+                )
+                .await,
+        )
+    } else {
+        None
+    };
+
     let analysis = ctx
         .snapshot
         .compression_pipeline
@@ -348,7 +374,33 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         "compression analysis"
     );
 
+    // update span — 记录分析结果
+    if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span.as_ref()) {
+        rv.trace_recorder()
+            .update_span(
+                span,
+                json!({
+                    "estimated_tokens": analysis.estimated_tokens,
+                    "available_tokens": analysis.available_tokens,
+                    "usage_ratio": analysis.usage_ratio,
+                    "severity": format!("{:?}", analysis.severity),
+                    "needs_compression": analysis.needs_compression(),
+                }),
+            )
+            .await;
+    }
+
     if !analysis.needs_compression() {
+        // end span — 无需压缩，正常结束
+        if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
+            rv.trace_recorder()
+                .end_span(
+                    span,
+                    TraceOutcome::Ok,
+                    json!({ "skipped": true }),
+                )
+                .await;
+        }
         return Ok(());
     }
 
@@ -363,24 +415,59 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
             &ctx.state.compression_meta,
         )
         .await
-        .map_err(|e| AgentError::Compression(e.to_string()))?;
+        .map_err(|e| AgentError::Compression(e.to_string()));
 
-    tracing::info!(
-        severity = ?analysis.severity,
-        usage_ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
-        estimated_tokens = analysis.estimated_tokens,
-        messages_before = msg_count_before,
-        messages_after = view.messages.len(),
-        removed = view.removed_count,
-        has_summary = view.summary.is_some(),
-        "context compression triggered"
-    );
+    match view {
+        Ok(view) => {
+            tracing::info!(
+                severity = ?analysis.severity,
+                usage_ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
+                estimated_tokens = analysis.estimated_tokens,
+                messages_before = msg_count_before,
+                messages_after = view.messages.len(),
+                removed = view.removed_count,
+                has_summary = view.summary.is_some(),
+                "context compression triggered"
+            );
 
-    ctx.state.messages = view.messages.clone();
-    ctx.state.compression_meta = view.updated_meta.clone();
-    ctx.turn.compression_output = Some(view);
+            // end span — 压缩成功，记录输出信息
+            if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
+                rv.trace_recorder()
+                    .end_span(
+                        span,
+                        TraceOutcome::Ok,
+                        json!({
+                            "skipped": false,
+                            "messages_before": msg_count_before,
+                            "messages_after": view.messages.len(),
+                            "removed_count": view.removed_count,
+                            "has_summary": view.summary.is_some(),
+                            "estimated_tokens_after": view.estimated_tokens,
+                        }),
+                    )
+                    .await;
+            }
 
-    Ok(())
+            ctx.state.messages = view.messages.clone();
+            ctx.state.compression_meta = view.updated_meta.clone();
+            ctx.turn.compression_output = Some(view);
+
+            Ok(())
+        }
+        Err(e) => {
+            // end span — 压缩失败，记录错误信息
+            if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
+                rv.trace_recorder()
+                    .end_span(
+                        span,
+                        TraceOutcome::Error,
+                        json!({ "error": e.to_string() }),
+                    )
+                    .await;
+            }
+            Err(e)
+        }
+    }
 }
 
 fn microcompact(ctx: &mut LoopContext<'_>) {
