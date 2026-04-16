@@ -995,6 +995,7 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
 ]
