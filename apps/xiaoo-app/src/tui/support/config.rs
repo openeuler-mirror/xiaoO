@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_AGENT_ID: &str = "main";
 const LLM_SECRETS_FILE: &str = "llm_secrets.json";
+const DEFAULT_LLM_MAX_TOKENS: u32 = 4096;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -23,7 +24,7 @@ pub struct Config {
     pub hooker: HookerRegistryConfig,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default)]
     pub provider: String,
@@ -33,10 +34,23 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_base: String,
-    #[serde(default)]
+    #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
     pub context_window: Option<u32>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            api_key_env: None,
+            api_base: String::new(),
+            max_tokens: default_llm_max_tokens(),
+            context_window: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -255,6 +269,10 @@ fn llm_secrets_path(config_path: &Path) -> PathBuf {
 
 fn default_agent_id() -> String {
     DEFAULT_AGENT_ID.to_string()
+}
+
+fn default_llm_max_tokens() -> u32 {
+    DEFAULT_LLM_MAX_TOKENS
 }
 
 #[cfg(test)]
