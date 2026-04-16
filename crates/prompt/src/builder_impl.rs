@@ -4,7 +4,7 @@ use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
 use agent_types::{ChatMessage, ContentBlock, LlmRequest, ResponseFormat, Tool, ToolChoice};
 use async_trait::async_trait;
 
-use crate::compose::compose_system_text;
+use crate::compose::compose_system_messages;
 use crate::context::collect_prompt_context;
 use crate::decision::decide_prompt;
 
@@ -28,16 +28,16 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let system_text = compose_system_text(&input.system_prompt, &context, &input.visible_tools);
+        let system_messages = compose_system_messages(&input.system_prompt, &context);
 
-        if system_text.trim().is_empty() {
+        if system_messages.is_empty() {
             return Err(PromptBuildError::BuildFailed {
                 message: "missing required context: system_prompt".to_string(),
             });
         }
 
-        let mut messages = Vec::with_capacity(input.messages.len() + 1);
-        messages.push(ChatMessage::system(system_text.clone()));
+        let mut messages = Vec::with_capacity(input.messages.len() + system_messages.len());
+        messages.extend(system_messages.iter().cloned().map(ChatMessage::system));
         messages.extend(input.messages);
 
         let request = LlmRequest {

@@ -87,16 +87,13 @@ pub(crate) fn normalize_model_name(model: &str) -> String {
 
 pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> GeminiRequestBody {
     let wire_messages = crate::convert::chat_messages_to_wire(&request.messages);
-    let mut system_instruction = None;
+    let mut system_parts = Vec::new();
     let mut contents = Vec::new();
 
     for msg in &wire_messages {
         if msg.role == "system" {
             if let Some(ref content) = msg.content {
-                system_instruction = Some(GeminiContent {
-                    role: None,
-                    parts: vec![GeminiPart::text(content.clone())],
-                });
+                system_parts.push(content.clone());
             }
         } else {
             let role = match msg.role.as_str() {
@@ -136,6 +133,11 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
             }
         }
     }
+
+    let system_instruction = (!system_parts.is_empty()).then(|| GeminiContent {
+        role: None,
+        parts: vec![GeminiPart::text(system_parts.join("\n\n"))],
+    });
 
     let wire_format = crate::convert::response_format_to_wire(&request.response_format);
     let (response_mime_type, response_json_schema) = wire_format
@@ -249,6 +251,8 @@ pub(crate) fn extract_gemini_tool_call_deltas(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_llm::ChatMessageExt;
+    use agent_types::LlmRequest;
 
     #[test]
     fn test_sanitize_gemini_schema_uppercases_types() {
@@ -284,5 +288,31 @@ mod tests {
             normalize_model_name("models/gemini-pro"),
             "models/gemini-pro"
         );
+    }
+
+    #[test]
+    fn build_gemini_request_body_concatenates_multiple_system_messages() {
+        let request = LlmRequest {
+            messages: vec![
+                agent_types::ChatMessage::system("base system"),
+                agent_types::ChatMessage::system("workspace rules"),
+                agent_types::ChatMessage::user("hello"),
+            ],
+            tools: Vec::new(),
+            tool_choice: agent_types::ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            response_format: agent_types::ResponseFormat::Text,
+        };
+
+        let body = build_gemini_request_body(&request, "gemini-pro");
+
+        let system_instruction = body.system_instruction.expect("system instruction");
+        assert_eq!(system_instruction.parts.len(), 1);
+        assert_eq!(
+            system_instruction.parts[0].text.as_deref(),
+            Some("base system\n\nworkspace rules")
+        );
+        assert_eq!(body.contents.len(), 1);
     }
 }

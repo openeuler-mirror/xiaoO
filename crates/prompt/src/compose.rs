@@ -1,8 +1,3 @@
-use std::sync::Arc;
-
-use agent_contracts::ToolSpecView;
-use agent_types::{ChatMessage, ContentBlock, MessageRole};
-
 use crate::context::PromptContext;
 
 pub struct ChannelPromptSections<'a> {
@@ -10,6 +5,10 @@ pub struct ChannelPromptSections<'a> {
     pub identity_prompt: &'a str,
     pub group_session_context: Option<&'a str>,
 }
+
+// Keep these markers in sync with apps/xiaoo-app/src/gateway/workspace_prompt.rs.
+const WORKSPACE_PROMPT_MARKER_BEGIN: &str = "<xiaoo_workspace_prompt>";
+const WORKSPACE_PROMPT_MARKER_END: &str = "</xiaoo_workspace_prompt>";
 
 const CHANNEL_MEMORY_WRITE_INSTRUCTION: &str = r#"
 ## 记忆写入指令
@@ -98,32 +97,28 @@ const CHANNEL_CONTEXT_BOUNDARY_INSTRUCTION: &str = r#"
 - 除非用户明确要求查询某段历史时间，否则不要把旧时间条件带入“今天 / 现在 / 最新”类问题
 "#;
 
-pub fn compose_system_text(
-    base_system: &str,
-    context: &PromptContext,
-    tools: &[Arc<dyn ToolSpecView>],
-) -> String {
-    let mut sections = Vec::new();
+pub fn compose_system_messages(base_system: &str, context: &PromptContext) -> Vec<String> {
+    let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
+    let mut messages = Vec::new();
 
     let base_system = base_system.trim();
     if !base_system.is_empty() {
-        sections.push(base_system.to_string());
+        messages.push(base_system.to_string());
     }
 
     if let Some(context_section) = compose_context_section(context) {
-        sections.push(context_section);
-    }
-    if let Some(conversation_section) = compose_conversation_section(context) {
-        sections.push(conversation_section);
-    }
-    if let Some(tool_section) = compose_tool_section(tools) {
-        sections.push(tool_section);
-    }
-    if let Some(subagent_section) = compose_subagent_section(context, tools) {
-        sections.push(subagent_section);
+        messages.push(context_section);
     }
 
-    sections.join("\n\n")
+    if let Some(workspace_prompt) = workspace_prompt {
+        messages.push(workspace_prompt);
+    }
+
+    messages
+}
+
+pub fn compose_system_text(base_system: &str, context: &PromptContext) -> String {
+    compose_system_messages(base_system, context).join("\n\n")
 }
 
 pub fn compose_channel_system_prompt(sections: ChannelPromptSections<'_>) -> String {
@@ -178,6 +173,37 @@ fn compose_context_section(context: &PromptContext) -> Option<String> {
     } else {
         Some(format!("# Context\n{}", sections.join("\n\n")))
     }
+}
+
+fn split_workspace_prompt_block(base_system: &str) -> (String, Option<String>) {
+    let base_system = base_system.trim();
+    let Some(start_index) = base_system.find(WORKSPACE_PROMPT_MARKER_BEGIN) else {
+        return (base_system.to_string(), None);
+    };
+
+    let workspace_start = start_index + WORKSPACE_PROMPT_MARKER_BEGIN.len();
+    let Some(relative_end_index) = base_system[workspace_start..].find(WORKSPACE_PROMPT_MARKER_END)
+    else {
+        return (base_system.to_string(), None);
+    };
+    let workspace_end = workspace_start + relative_end_index;
+
+    let workspace_prompt = base_system[workspace_start..workspace_end].trim();
+    let before = base_system[..start_index].trim();
+    let after = base_system[workspace_end + WORKSPACE_PROMPT_MARKER_END.len()..].trim();
+
+    let mut remaining_sections = Vec::new();
+    if !before.is_empty() {
+        remaining_sections.push(before.to_string());
+    }
+    if !after.is_empty() {
+        remaining_sections.push(after.to_string());
+    }
+
+    (
+        remaining_sections.join("\n\n"),
+        (!workspace_prompt.is_empty()).then(|| workspace_prompt.to_string()),
+    )
 }
 
 fn compose_environment_section(context: &PromptContext) -> Option<String> {
@@ -272,139 +298,6 @@ fn compose_skill_section(context: &PromptContext) -> Option<String> {
     Some(section)
 }
 
-fn compose_conversation_section(context: &PromptContext) -> Option<String> {
-    let mut sections = Vec::new();
-
-    if let Some(summary) = context.history.summary.as_deref() {
-        let summary = summary.trim();
-        if !summary.is_empty() {
-            sections.push(format!("## Summary\n{}", summary));
-        }
-    }
-
-    if !context.history.compressed_messages.is_empty() {
-        sections.push(format!(
-            "## Compressed Messages\n{}",
-            render_history_messages(&context.history.compressed_messages)
-        ));
-    }
-
-    if !context.history.recent_tail.is_empty() {
-        sections.push(format!(
-            "## Recent Tail\n{}",
-            render_history_messages(&context.history.recent_tail)
-        ));
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(format!("# Conversation\n{}", sections.join("\n\n")))
-    }
-}
-
-fn compose_tool_section(tools: &[Arc<dyn ToolSpecView>]) -> Option<String> {
-    if tools.is_empty() {
-        return None;
-    }
-
-    let lines = tools
-        .iter()
-        .map(|tool| {
-            format!(
-                "## {}\n- description: {}\n- input_schema:\n```json\n{}\n```",
-                tool.name().0.trim(),
-                tool.description().trim(),
-                serde_json::to_string_pretty(&tool.input_schema().schema).unwrap_or_default(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    Some(format!("# Tools\n{}", lines.join("\n\n")))
-}
-
-fn compose_subagent_section(
-    _context: &PromptContext,
-    tools: &[Arc<dyn ToolSpecView>],
-) -> Option<String> {
-    let has_spawn_subagent = tools.iter().any(|tool| tool.name().0 == "spawn_subagent");
-    let has_join_subagent = tools.iter().any(|tool| tool.name().0 == "join_subagent");
-    if !has_spawn_subagent || !has_join_subagent {
-        return None;
-    }
-
-    let lines = vec![
-        "- Use `spawn_subagent` when the user explicitly asks for subagents, parallel work, split workflows, or multiple independent workers.".to_string(),
-        "- Prefer `spawn_subagent` when the work decomposes into 2 or more independent read-only branches and the parent agent must later compare, sort, or aggregate the results.".to_string(),
-        "- For independent branches, spawn all needed subagents first, then join them and aggregate only after each branch finishes.".to_string(),
-        "- Keep tiny single-step lookups local. Do not use `spawn_subagent` when one ordinary tool call can finish the job.".to_string(),
-        "- Do not create nested or recursive delegation. If you are already working on one bounded delegated task, finish it directly.".to_string(),
-        "- When a delegated task needs a count, total, or directory statistic, require an exact result. A truncated list or an \"at least N\" answer is not an acceptable final value.".to_string(),
-        "- If a `join_subagent` result contains uncertainty or truncation language, do not aggregate it. Re-run with a more exact method or explicitly report that no exact value is available.".to_string(),
-    ];
-
-    Some(format!(
-        "# Subagent Guidance
-{}",
-        lines.join(
-            "
-"
-        )
-    ))
-}
-
-fn render_history_messages(messages: &[ChatMessage]) -> String {
-    messages
-        .iter()
-        .map(render_history_message)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_history_message(message: &ChatMessage) -> String {
-    let role = match message.role {
-        MessageRole::System => "system",
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
-        MessageRole::Tool => "tool",
-    };
-
-    let content = message
-        .blocks
-        .iter()
-        .map(render_content_block)
-        .collect::<Vec<_>>()
-        .join(" | ");
-
-    format!("- {}: {}", role, content.trim())
-}
-
-fn render_content_block(block: &ContentBlock) -> String {
-    match block {
-        ContentBlock::Text { text } => text.trim().to_string(),
-        ContentBlock::ToolUse {
-            tool_name, input, ..
-        } => format!(
-            "[tool_use {} {}]",
-            tool_name.trim(),
-            serde_json::to_string(input).expect("tool input must be serializable"),
-        ),
-        ContentBlock::ToolResult {
-            tool_name,
-            output,
-            is_error,
-            ..
-        } => format!(
-            "[tool_result {} error={} {}]",
-            tool_name.trim(),
-            is_error,
-            output.trim(),
-        ),
-        ContentBlock::Image { description } => format!("[image {}]", description.trim()),
-        ContentBlock::Document { description } => format!("[document {}]", description.trim()),
-    }
-}
-
 fn normalize_memory_source(source: &str) -> String {
     let source = source.trim();
     if let Some(value) = source.strip_prefix("fact:") {
@@ -418,47 +311,8 @@ fn normalize_memory_source(source: &str) -> String {
 mod tests {
     use super::*;
     use agent_llm::ChatMessageExt;
-
-    use agent_types::common::ids::{ToolId, ToolName};
     use agent_types::context::prompt::{EnvironmentInfo, MemorySnippet, SkillSummary};
-    use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
-
-    struct TestToolSpec {
-        id: ToolId,
-        name: ToolName,
-        description: String,
-        input_schema: InputSchemaRef,
-    }
-
-    impl ToolSpecView for TestToolSpec {
-        fn id(&self) -> &ToolId {
-            &self.id
-        }
-        fn name(&self) -> &ToolName {
-            &self.name
-        }
-        fn description(&self) -> &str {
-            &self.description
-        }
-        fn input_schema(&self) -> &InputSchemaRef {
-            &self.input_schema
-        }
-        fn output_contract(&self) -> &OutputContract {
-            static DEFAULT: OutputContract = OutputContract {
-                description: String::new(),
-            };
-            &DEFAULT
-        }
-        fn effect_profile(&self) -> &EffectProfile {
-            static DEFAULT: EffectProfile = EffectProfile {
-                reads_filesystem: false,
-                writes_filesystem: false,
-                network_access: false,
-                side_effects: false,
-            };
-            &DEFAULT
-        }
-    }
+    use agent_types::ChatMessage;
 
     #[test]
     #[ignore]
@@ -479,7 +333,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn generic_system_text_uses_stable_section_order() {
+    fn generic_system_text_keeps_workspace_prompt_separate_and_skips_history_and_tools() {
         let context = PromptContext {
             environment: EnvironmentInfo {
                 model: "gpt-test".to_string(),
@@ -505,29 +359,27 @@ mod tests {
                 "hello",
             )]),
         };
-        let tools = vec![Arc::new(TestToolSpec {
-            id: ToolId("search".to_string()),
-            name: ToolName("search".to_string()),
-            description: "search docs".to_string(),
-            input_schema: InputSchemaRef {
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}}
-                }),
-            },
-        }) as Arc<dyn ToolSpecView>];
+        let messages = compose_system_messages(
+            &format!(
+                "base system\n\n{WORKSPACE_PROMPT_MARKER_BEGIN}\n## Workspace Instructions\n### /repo/AGENTS.md\nroot rules\n{WORKSPACE_PROMPT_MARKER_END}\n\n## 当前通道\n- 当前 channel: capture."
+            ),
+            &context,
+        );
 
-        let text = compose_system_text("base system", &context, &tools);
-
-        assert!(text.find("# Context").unwrap() > text.find("base system").unwrap());
-        assert!(text.find("## Environment").unwrap() > text.find("# Context").unwrap());
-        assert!(text.find("## Instructions").unwrap() > text.find("## Environment").unwrap());
-        assert!(text.find("## Memory").unwrap() > text.find("## Instructions").unwrap());
-        assert!(text.find("## Skills").unwrap() > text.find("## Memory").unwrap());
-        assert!(text.find("# Conversation").unwrap() > text.find("# Context").unwrap());
-        assert!(text.find("# Tools").unwrap() > text.find("# Conversation").unwrap());
-        assert!(text.contains("[fact/repo] remember this"));
-        assert!(text.contains("- policy: be precise"));
-        assert!(!text.contains("score="));
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].starts_with("base system"));
+        assert!(messages[0].contains("当前 channel: capture."));
+        assert!(messages[1].starts_with("# Context"));
+        assert!(messages[1].contains("## Environment"));
+        assert!(messages[1].contains("## Instructions"));
+        assert!(messages[1].contains("## Memory"));
+        assert!(messages[1].contains("## Available Skills"));
+        assert!(messages[2].starts_with("## Workspace Instructions"));
+        assert!(messages[2].contains("/repo/AGENTS.md"));
+        assert!(messages[1].contains("[fact/repo] remember this"));
+        assert!(messages[1].contains("- policy: be precise"));
+        assert!(!messages[1].contains("score="));
+        assert!(!messages[1].contains("# Conversation"));
+        assert!(!messages[1].contains("# Tools"));
     }
 }
