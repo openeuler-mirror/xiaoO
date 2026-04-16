@@ -195,13 +195,13 @@ fn resolve_allowed_tool_names(
         all_tool_names.iter().map(|name| name.0.clone()).collect();
     let mut visible_names: BTreeSet<String> = available_names.clone();
     for (configured_name, enabled) in &agent_role.tools {
-        let Some(tool_name) = canonical_tool_name(configured_name, &available_names) else {
+        if !available_names.contains(configured_name) {
             continue;
-        };
+        }
         if *enabled {
-            visible_names.insert(tool_name);
+            visible_names.insert(configured_name.clone());
         } else {
-            visible_names.remove(&tool_name);
+            visible_names.remove(configured_name);
         }
     }
 
@@ -210,29 +210,6 @@ fn resolve_allowed_tool_names(
         .filter(|tool_name| visible_names.contains(tool_name.0.as_str()))
         .cloned()
         .collect()
-}
-
-fn canonical_tool_name(
-    configured_name: &str,
-    available_names: &BTreeSet<String>,
-) -> Option<String> {
-    let normalized = configured_name
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_");
-    let mut candidates = vec![normalized.clone()];
-    match normalized.as_str() {
-        "read" => candidates.push("file_read".to_string()),
-        "write" => candidates.push("file_write".to_string()),
-        "edit" => candidates.push("file_edit".to_string()),
-        "search" | "websearch" => candidates.push("web_search".to_string()),
-        "fetch" => candidates.push("webfetch".to_string()),
-        _ => {}
-    }
-
-    candidates
-        .into_iter()
-        .find(|candidate| available_names.contains(candidate))
 }
 
 fn build_token_budget(
@@ -355,9 +332,12 @@ fn build_compression_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, build_token_budget, canonical_tool_name, resolve_agent_role};
+    use super::{
+        build_system_prompt, build_token_budget, resolve_agent_role, resolve_allowed_tool_names,
+    };
     use crate::daemon_config::AgentRoleConfig;
-    use std::collections::{BTreeMap, BTreeSet};
+    use agent_types::common::ids::ToolName;
+    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
     use xiaoo_app::gateway::{GatewayEntryContext, SessionRuntimeBuildInput};
@@ -402,30 +382,25 @@ mod tests {
     }
 
     #[test]
-    fn canonical_tool_name_supports_common_aliases() {
-        let available = BTreeSet::from([
-            "bash".to_string(),
-            "file_edit".to_string(),
-            "file_write".to_string(),
-            "web_search".to_string(),
-        ]);
+    fn resolve_allowed_tool_names_requires_exact_tool_names() {
+        let all_tool_names = vec![
+            ToolName("file_edit".to_string()),
+            ToolName("file_write".to_string()),
+        ];
+        let agent_role = AgentRoleConfig {
+            description: String::new(),
+            prompt: None,
+            tools: BTreeMap::from([
+                ("write".to_string(), false),
+                ("file_write".to_string(), false),
+            ]),
+        };
 
-        assert_eq!(
-            canonical_tool_name("write", &available).as_deref(),
-            Some("file_write")
-        );
-        assert_eq!(
-            canonical_tool_name("edit", &available).as_deref(),
-            Some("file_edit")
-        );
-        assert_eq!(
-            canonical_tool_name("web-search", &available).as_deref(),
-            Some("web_search")
-        );
-        assert_eq!(
-            canonical_tool_name("bash", &available).as_deref(),
-            Some("bash")
-        );
+        let allowed = resolve_allowed_tool_names(&all_tool_names, Some(&agent_role));
+        let allowed: Vec<_> = allowed.into_iter().map(|tool| tool.0).collect();
+
+        assert!(allowed.contains(&"file_edit".to_string()));
+        assert!(!allowed.contains(&"file_write".to_string()));
     }
 
     #[test]

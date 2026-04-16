@@ -44,8 +44,8 @@ description = "Reviews code for best practices and potential issues"
 prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
 
 [agent.code-reviewer.tools]
-write = false
-edit = false
+file_write = false
+file_edit = false
 ```
 
 Set environment variables

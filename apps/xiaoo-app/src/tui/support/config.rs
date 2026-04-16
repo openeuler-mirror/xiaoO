@@ -330,8 +330,8 @@ description = "Reviews code for best practices and potential issues"
 prompt = "You are a code reviewer."
 
 [agent.code-reviewer.tools]
-write = false
-edit = false
+file_write = false
+file_edit = false
 "#,
         )
         .expect("agent role config should parse");
@@ -344,7 +344,7 @@ edit = false
             "Reviews code for best practices and potential issues"
         );
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
-        assert_eq!(role.tools.get("write"), Some(&false));
-        assert_eq!(role.tools.get("edit"), Some(&false));
+        assert_eq!(role.tools.get("file_write"), Some(&false));
+        assert_eq!(role.tools.get("file_edit"), Some(&false));
     }
 }

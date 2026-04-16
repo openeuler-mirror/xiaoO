@@ -229,10 +229,6 @@ impl DaemonConfig {
         self.app.channels.interaction_timeout_secs.unwrap_or(600)
     }
 
-    pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
-        self.app.agent.get(role_id)
-    }
-
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {
         let Some(feishu) = self.app.channels.feishu.as_ref() else {
             return Ok(None);
@@ -414,5 +410,35 @@ mod tests {
         }
 
         assert_eq!(resolved, config_path);
+    }
+
+    #[test]
+    fn parses_agent_role_presets() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [agent.code-reviewer]
+            description = "Reviews code for best practices and potential issues"
+            prompt = "You are a code reviewer."
+
+            [agent.code-reviewer.tools]
+            file_write = false
+            file_edit = false
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let role = config
+            .agent
+            .get("code-reviewer")
+            .expect("code-reviewer role should exist");
+        assert_eq!(
+            role.description,
+            "Reviews code for best practices and potential issues"
+        );
+        assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.tools.get("file_write"), Some(&false));
+        assert_eq!(role.tools.get("file_edit"), Some(&false));
     }
 }

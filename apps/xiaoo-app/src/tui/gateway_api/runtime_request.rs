@@ -158,35 +158,17 @@ fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
     let mut visible_tool_names = all_tool_names.clone();
 
     for (configured_name, enabled) in &role.tools {
-        let Some(tool_name) = canonical_tool_name(configured_name, &all_tool_names) else {
+        if !all_tool_names.contains(configured_name) {
             continue;
-        };
+        }
         if *enabled {
-            visible_tool_names.insert(tool_name);
+            visible_tool_names.insert(configured_name.clone());
         } else {
-            visible_tool_names.remove(&tool_name);
+            visible_tool_names.remove(configured_name);
         }
     }
 
     Some(visible_tool_names.into_iter().collect())
-}
-
-fn canonical_tool_name(configured_name: &str, available: &BTreeSet<String>) -> Option<String> {
-    let normalized = configured_name
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_");
-    let mut candidates = vec![normalized.clone()];
-    match normalized.as_str() {
-        "read" => candidates.push("file_read".to_string()),
-        "write" => candidates.push("file_write".to_string()),
-        "edit" => candidates.push("file_edit".to_string()),
-        "search" | "websearch" => candidates.push("web_search".to_string()),
-        "fetch" => candidates.push("webfetch".to_string()),
-        _ => {}
-    }
-
-    candidates.into_iter().find(|name| available.contains(name))
 }
 
 pub(super) fn resolve_agent_id(
@@ -227,34 +209,36 @@ pub(super) fn resolve_agent_id(
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_tool_name;
-    use std::collections::BTreeSet;
+    use super::resolve_visible_tool_names;
+    use crate::app_state::AppState;
+    use crate::config::{AgentRoleConfig, Config};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
 
     #[test]
-    fn canonical_tool_name_supports_common_aliases() {
-        let available = BTreeSet::from([
-            "bash".to_string(),
-            "file_edit".to_string(),
-            "file_write".to_string(),
-            "web_search".to_string(),
-        ]);
+    fn resolve_visible_tool_names_requires_exact_tool_names() {
+        let mut config = Config::default();
+        config.agent.insert(
+            "code-reviewer".to_string(),
+            AgentRoleConfig {
+                description: String::new(),
+                prompt: None,
+                tools: BTreeMap::from([
+                    ("write".to_string(), false),
+                    ("file_write".to_string(), false),
+                ]),
+            },
+        );
 
-        assert_eq!(
-            canonical_tool_name("write", &available).as_deref(),
-            Some("file_write")
-        );
-        assert_eq!(
-            canonical_tool_name("edit", &available).as_deref(),
-            Some("file_edit")
-        );
-        assert_eq!(
-            canonical_tool_name("web-search", &available).as_deref(),
-            Some("web_search")
-        );
-        assert_eq!(
-            canonical_tool_name("bash", &available).as_deref(),
-            Some("bash")
-        );
-        assert!(canonical_tool_name("missing", &available).is_none());
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
+        state.active_agent_role = Some("code-reviewer".to_string());
+
+        let visible = resolve_visible_tool_names(&state).expect("tool visibility should resolve");
+        let visible: BTreeSet<_> = visible.into_iter().collect();
+
+        assert!(visible.contains("file_edit"));
+        assert!(!visible.contains("file_write"));
     }
 }
