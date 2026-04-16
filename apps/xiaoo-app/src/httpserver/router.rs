@@ -1,7 +1,7 @@
 use crate::channels::feishu::{FeishuAdapter, FeishuConfig};
 use crate::channels::{
-    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError, ChannelResult,
-    ChannelRuntime,
+    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError,
+    ChannelOutboundAttachment, ChannelOutboundAttachmentKind, ChannelResult, ChannelRuntime,
 };
 use crate::gateway::channel_interaction::{
     resolve_interaction_from_text, ChannelInteractionHandle,
@@ -13,7 +13,7 @@ use crate::httpserver::channel_ingress::{
     GatewayChannelMessage,
 };
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use agent_contracts::LoopEventSink;
+use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
     extract::State,
@@ -43,7 +43,7 @@ impl GatewayAppState {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: None,
             pending_interactions,
-            interaction_timeout_secs: 120,
+            interaction_timeout_secs: 600,
         }
     }
 
@@ -72,7 +72,7 @@ impl GatewayAppState {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: Some(runtime),
             pending_interactions: Arc::new(PendingInteractionStore::new()),
-            interaction_timeout_secs: 120,
+            interaction_timeout_secs: 600,
         }
     }
 }
@@ -154,16 +154,6 @@ pub struct TestChatResponse {
 
 pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
     create_router_from_state(GatewayAppState::new(session_service))
-}
-
-pub fn create_router_with_feishu(
-    session_service: Arc<dyn SessionService>,
-    feishu_config: FeishuConfig,
-) -> ChannelResult<Router> {
-    Ok(create_router_from_state(GatewayAppState::with_feishu(
-        session_service,
-        feishu_config,
-    )?))
 }
 
 pub fn create_router_with_feishu_and_timeout(
@@ -347,7 +337,16 @@ async fn process_channel_message(
 
     let turn_response = match state
         .gateway_service
-        .handle_channel_message_with_interaction(gateway_message, event_sink, interaction_handle)
+        .handle_channel_message_with_interaction(
+            gateway_message,
+            event_sink,
+            interaction_handle,
+            Some(Arc::new(AdapterFileSender {
+                adapter: adapter.clone(),
+                conversation_id: conversation_id.clone(),
+                reply_to_message_id: reply_to_message_id.clone(),
+            })),
+        )
         .await
     {
         Ok(response) => response,
@@ -603,6 +602,43 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
         ChannelMessageProcessingError::ChannelIngress(error) => map_channel_ingress_error(error),
         ChannelMessageProcessingError::Gateway(error) => map_gateway_error(error),
         ChannelMessageProcessingError::Channel(error) => map_channel_error(error),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdapterFileSender — wraps a ChannelAdapter to implement ChannelFileSender
+// ---------------------------------------------------------------------------
+
+struct AdapterFileSender {
+    adapter: Arc<dyn ChannelAdapter>,
+    conversation_id: String,
+    reply_to_message_id: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl ChannelFileSender for AdapterFileSender {
+    async fn send_file(
+        &self,
+        file_path: &str,
+        label: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let attachment = ChannelOutboundAttachment {
+            kind: ChannelOutboundAttachmentKind::File,
+            path: file_path.to_string(),
+            label: label.map(ToString::to_string),
+        };
+        self.adapter
+            .send_attachment(
+                &self.conversation_id,
+                &attachment,
+                self.reply_to_message_id.as_deref(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn conversation_id(&self) -> &str {
+        &self.conversation_id
     }
 }
 

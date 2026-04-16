@@ -4,7 +4,7 @@ use crate::gateway::{
     SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
     SessionStore, SessionStoreError,
 };
-use agent_contracts::{InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -127,6 +127,7 @@ impl CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
+        channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let existing = self.session_store.load(&request.session_id).await;
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
@@ -140,7 +141,7 @@ impl CoreBackedSessionService {
         let supervisor = self.get_or_create_supervisor(seed_session).await;
         supervisor.prepare_root_turn(&request, &resolved).await;
         supervisor
-            .run_root_turn(request, event_sink, interaction_handle)
+            .run_root_turn(request, event_sink, interaction_handle, channel_file_sender)
             .await
     }
 }
@@ -151,7 +152,7 @@ impl SessionService for CoreBackedSessionService {
         &self,
         request: AppTurnRequest,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, None, None).await
+        self.run_turn_inner(request, None, None, None).await
     }
 
     async fn run_turn_with_events(
@@ -159,7 +160,7 @@ impl SessionService for CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, None).await
+        self.run_turn_inner(request, event_sink, None, None).await
     }
 
     async fn run_turn_with_interaction(
@@ -167,8 +168,9 @@ impl SessionService for CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
+        channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, interaction_handle)
+        self.run_turn_inner(request, event_sink, interaction_handle, channel_file_sender)
             .await
     }
 }

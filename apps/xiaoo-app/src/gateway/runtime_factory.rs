@@ -67,10 +67,21 @@ impl AppRuntimeFactory {
         let token_budget_policy: Arc<dyn TokenBudgetPolicy> = Arc::new(
             CompactionPolicy::from_budget(&resolved.descriptor.token_budget),
         );
+        let is_channel_session = session.channel.is_some();
         let visible_tools = tool_registry
             .filter_for(&resolved.descriptor.agent_id)
             .visible_tools()
             .into_iter()
+            .filter(|spec| {
+                // Hide channel-only tools when not in a channel session.
+                if !is_channel_session {
+                    let name = spec.name().0.as_str();
+                    if CHANNEL_ONLY_TOOLS.contains(&name) {
+                        return false;
+                    }
+                }
+                true
+            })
             .map(|spec| Arc::new(DetachedToolSpec::from(spec)) as Arc<dyn ToolSpecView>)
             .collect::<Vec<_>>();
 
@@ -126,6 +137,7 @@ impl AppRuntimeFactory {
             let runtime_view: Arc<dyn RuntimeView> = Arc::new(SkillAwareRuntimeView {
                 inner,
                 skill_registry: skill_registry.clone(),
+                channel_file_sender: resolved.bindings.channel_file_sender.clone(),
             });
 
             Some(runtime_view)
@@ -267,9 +279,13 @@ impl InteractionHandle for SharedInteractionHandle {
 // SkillAwareRuntimeView — delegates to BasicRuntimeView, overrides skill_registry()
 // ---------------------------------------------------------------------------
 
+/// Tools that should only be visible in channel sessions (e.g. Feishu).
+const CHANNEL_ONLY_TOOLS: &[&str] = &["send_file"];
+
 struct SkillAwareRuntimeView {
     inner: BasicRuntimeView,
     skill_registry: Arc<dyn SkillRegistry>,
+    channel_file_sender: Option<Arc<dyn agent_contracts::ChannelFileSender>>,
 }
 
 impl RuntimeView for SkillAwareRuntimeView {
@@ -293,5 +309,8 @@ impl RuntimeView for SkillAwareRuntimeView {
     }
     fn skill_registry(&self) -> Option<&dyn SkillRegistry> {
         Some(self.skill_registry.as_ref())
+    }
+    fn channel_file_sender(&self) -> Option<&dyn agent_contracts::ChannelFileSender> {
+        self.channel_file_sender.as_deref()
     }
 }
