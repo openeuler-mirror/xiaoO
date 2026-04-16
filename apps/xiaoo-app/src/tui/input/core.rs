@@ -106,7 +106,12 @@ impl Input {
     /// selected.
     pub fn delete_selected(&mut self) -> Option<String> {
         let range = self.selected_range()?;
-        let deleted: String = self.value.chars().skip(range.start).take(range.end - range.start).collect();
+        let deleted: String = self
+            .value
+            .chars()
+            .skip(range.start)
+            .take(range.end - range.start)
+            .collect();
         let before: String = self.value.chars().take(range.start).collect();
         let after: String = self.value.chars().skip(range.end).collect();
         self.value = format!("{}{}", before, after);
@@ -220,7 +225,11 @@ impl EventHandler for Input {
                 }
                 // Move to start of current line.
                 let before: Vec<char> = self.value.chars().take(self.cursor).collect();
-                let line_start = before.iter().rposition(|&c| c == '\n').map(|p| p + 1).unwrap_or(0);
+                let line_start = before
+                    .iter()
+                    .rposition(|&c| c == '\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 self.cursor = line_start;
             }
             // Shift+End – extend selection to end of line
@@ -230,7 +239,10 @@ impl EventHandler for Input {
                 }
                 let total = self.value.chars().count();
                 let rest_start = self.cursor;
-                let line_end = self.value.chars().skip(rest_start)
+                let line_end = self
+                    .value
+                    .chars()
+                    .skip(rest_start)
                     .position(|c| c == '\n')
                     .map(|p| rest_start + p)
                     .unwrap_or(total);
@@ -256,14 +268,21 @@ impl EventHandler for Input {
             }
             KeyCode::Home => {
                 let before: Vec<char> = self.value.chars().take(self.cursor).collect();
-                let line_start = before.iter().rposition(|&c| c == '\n').map(|p| p + 1).unwrap_or(0);
+                let line_start = before
+                    .iter()
+                    .rposition(|&c| c == '\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 self.cursor = line_start;
                 self.selection_anchor = None;
             }
             KeyCode::End => {
                 let total = self.value.chars().count();
                 let rest_start = self.cursor;
-                let line_end = self.value.chars().skip(rest_start)
+                let line_end = self
+                    .value
+                    .chars()
+                    .skip(rest_start)
                     .position(|c| c == '\n')
                     .map(|p| rest_start + p)
                     .unwrap_or(total);

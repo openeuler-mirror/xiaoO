@@ -8,8 +8,8 @@ use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
-use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::selection::TranscriptSelection;
+use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
@@ -19,6 +19,13 @@ pub enum InputMode {
     Editing,
     ProviderSelection,
     InteractionPrompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatusLight {
+    Idle,
+    Running,
+    AwaitingInteraction,
 }
 
 pub struct ApiKeyDialogState {
@@ -184,7 +191,13 @@ impl AppState {
         let mut segments: Vec<String> = Vec::new();
         for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
             // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
-            if self.render_state.line_is_header.get(line_idx).copied().unwrap_or(false) {
+            if self
+                .render_state
+                .line_is_header
+                .get(line_idx)
+                .copied()
+                .unwrap_or(false)
+            {
                 continue;
             }
             let line = &lines[line_idx];
@@ -204,7 +217,11 @@ impl AppState {
 
         let result = segments.join("\n");
         let result = result.trim_matches('\n');
-        if result.is_empty() { None } else { Some(result.to_owned()) }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result.to_owned())
+        }
     }
 
     pub fn open_interaction_prompt(
@@ -347,5 +364,51 @@ impl AppState {
             role_ids.get(next_index - 1).cloned()
         };
         true
+    }
+
+    pub fn runtime_status_light(&self) -> RuntimeStatusLight {
+        if self.interaction_prompt.is_some() {
+            RuntimeStatusLight::AwaitingInteraction
+        } else if self.chat_state.is_loading {
+            RuntimeStatusLight::Running
+        } else {
+            RuntimeStatusLight::Idle
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, RuntimeStatusLight};
+    use crate::interaction_prompt::demo_prompt_request;
+    use std::path::PathBuf;
+
+    #[test]
+    fn runtime_status_light_is_idle_by_default() {
+        let state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Idle);
+    }
+
+    #[test]
+    fn runtime_status_light_is_running_while_loading() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.is_loading = true;
+        assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Running);
+    }
+
+    #[test]
+    fn runtime_status_light_prefers_interaction_when_prompt_is_open() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.is_loading = true;
+        state
+            .open_interaction_prompt(demo_prompt_request(), true)
+            .expect("interaction prompt should open");
+        assert_eq!(
+            state.runtime_status_light(),
+            RuntimeStatusLight::AwaitingInteraction
+        );
     }
 }

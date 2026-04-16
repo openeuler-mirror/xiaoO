@@ -129,7 +129,12 @@ impl App {
                 // Selection protection: if a non-empty selection already exists, the first
                 // click dismisses it without triggering tool toggles (mirrors opencode's
                 // dismiss-guard on dialog / message click handlers).
-                if self.state.transcript_selection.as_ref().is_some_and(|s| !s.is_empty()) {
+                if self
+                    .state
+                    .transcript_selection
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty())
+                {
                     self.state.transcript_selection = None;
                     return;
                 }
@@ -211,7 +216,12 @@ impl App {
                         self.state.set_copy_notice();
                     }
                     self.state.transcript_selection = None;
-                } else if self.state.transcript_selection.as_ref().is_some_and(|s| s.is_empty()) {
+                } else if self
+                    .state
+                    .transcript_selection
+                    .as_ref()
+                    .is_some_and(|s| s.is_empty())
+                {
                     self.state.transcript_selection = None;
                 }
             }
@@ -266,7 +276,8 @@ fn mouse_to_line_col(
         let chars: Vec<char> = text.chars().collect();
 
         // Display width of this logical line (sum of per-character widths).
-        let display_width: usize = chars.iter()
+        let display_width: usize = chars
+            .iter()
             .map(|ch| UnicodeWidthChar::width(*ch).unwrap_or(0))
             .sum();
 

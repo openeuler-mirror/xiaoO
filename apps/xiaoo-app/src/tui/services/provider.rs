@@ -112,7 +112,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
             return Ok(());
         }
         Err(err) => {
-            tracing::debug!("arboard clipboard unavailable ({}), falling back to OSC 52", err);
+            tracing::debug!(
+                "arboard clipboard unavailable ({}), falling back to OSC 52",
+                err
+            );
         }
     }
 

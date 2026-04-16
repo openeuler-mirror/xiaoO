@@ -23,7 +23,13 @@ impl App {
             || key.code == KeyCode::Char('\x03')
         {
             // Check input selection first.
-            if let Some(text) = self.state.chat_state.input.selected_text().map(str::to_owned) {
+            if let Some(text) = self
+                .state
+                .chat_state
+                .input
+                .selected_text()
+                .map(str::to_owned)
+            {
                 self.state.chat_state.input.clear_selection();
                 if let Err(e) = copy_to_clipboard(&text) {
                     tracing::warn!("copy_to_clipboard failed: {}", e);
