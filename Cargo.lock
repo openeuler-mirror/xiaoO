@@ -1541,6 +1541,7 @@ dependencies = [
  "futures",
  "hooker",
  "mockito",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
