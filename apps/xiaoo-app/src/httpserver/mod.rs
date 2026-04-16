@@ -1,6 +1,7 @@
 pub mod channel_ingress;
 pub mod router;
 pub mod service;
+pub mod sse_sink;
 
 pub use channel_ingress::{
     build_channel_turn_request, build_gateway_channel_message, GatewayChannelIngressError,
