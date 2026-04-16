@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::convert::{chat_messages_to_wire, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_reqwest_error, map_serde_error, LlmError};
+use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -52,8 +52,10 @@ impl AnthropicProvider {
 
         let system_message = wire_messages
             .iter()
-            .find(|m| m.role == "system")
-            .and_then(|m| m.content.clone());
+            .filter(|m| m.role == "system")
+            .filter_map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         let other_messages: Vec<_> = wire_messages
             .iter()
@@ -71,8 +73,8 @@ impl AnthropicProvider {
             body["stream"] = serde_json::json!(true);
         }
 
-        if let Some(system) = system_message {
-            body["system"] = serde_json::json!(system);
+        if !system_message.is_empty() {
+            body["system"] = serde_json::json!(system_message);
         }
 
         if !request.tools.is_empty() {
@@ -118,15 +120,8 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         let resp_body = response.text().await.unwrap_or_default();
 
-        if status == 429 {
-            return Err(LlmError::RateLimited { retry_after_ms: 0 });
-        }
-
         if !status.is_success() {
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, resp_body, body_str
-            )));
+            return Err(map_api_status_error(status, &resp_body, &body_str));
         }
 
         let anthropic_response: serde_json::Value =
@@ -205,10 +200,7 @@ impl LlmProvider for AnthropicProvider {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, error_body, body_str
-            )));
+            return Err(map_api_status_error(status, &error_body, &body_str));
         }
 
         let mut full_text = String::new();
@@ -383,6 +375,8 @@ impl AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_llm::ChatMessageExt;
+    use agent_types::LlmRequest;
 
     fn make_provider() -> AnthropicProvider {
         AnthropicProvider::new(
@@ -465,6 +459,28 @@ mod tests {
         assert!(chunk.content.is_none());
         assert!(chunk.finish_reason.is_none());
         assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn build_body_concatenates_multiple_system_messages() {
+        let provider = make_provider();
+        let request = LlmRequest {
+            messages: vec![
+                agent_types::ChatMessage::system("base system"),
+                agent_types::ChatMessage::system("workspace rules"),
+                agent_types::ChatMessage::user("hello"),
+            ],
+            tools: Vec::new(),
+            tool_choice: agent_types::ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            response_format: agent_types::ResponseFormat::Text,
+        };
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["system"], "base system\n\nworkspace rules");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
 
     #[test]

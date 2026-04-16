@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_AGENT_ID: &str = "main";
 const LLM_SECRETS_FILE: &str = "llm_secrets.json";
+const DEFAULT_LLM_MAX_TOKENS: u32 = 4096;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -16,12 +17,14 @@ pub struct Config {
     #[serde(default)]
     pub trace: Option<Value>,
     #[serde(default)]
+    pub agent: BTreeMap<String, AgentRoleConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LlmConfig {
     #[serde(default)]
     pub provider: String,
@@ -31,10 +34,23 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub api_base: String,
-    #[serde(default)]
+    #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
     pub context_window: Option<u32>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            model: String::new(),
+            api_key_env: None,
+            api_base: String::new(),
+            max_tokens: default_llm_max_tokens(),
+            context_window: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +66,16 @@ pub struct AgentConfig {
     pub id: String,
     #[serde(default)]
     pub workspace_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
 }
 
 impl Default for AgentsConfig {
@@ -118,6 +144,14 @@ impl Config {
             default_agent_id,
             ids
         )
+    }
+
+    pub fn agent_role_ids(&self) -> Vec<String> {
+        self.agent.keys().cloned().collect()
+    }
+
+    pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
+        self.agent.get(role_id)
     }
 }
 
@@ -237,6 +271,10 @@ fn default_agent_id() -> String {
     DEFAULT_AGENT_ID.to_string()
 }
 
+fn default_llm_max_tokens() -> u32 {
+    DEFAULT_LLM_MAX_TOKENS
+}
+
 #[cfg(test)]
 mod tests {
     use super::{require_tui_bootstrap_config, Config};
@@ -293,5 +331,38 @@ mod tests {
                 .contains("agents.default_agent_id validation failed"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn parses_agent_role_presets() {
+        let config: Config = toml::from_str(
+            r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+max_tokens = 4096
+context_window = 128000
+
+[agent.code-reviewer]
+description = "Reviews code for best practices and potential issues"
+prompt = "You are a code reviewer."
+
+[agent.code-reviewer.tools]
+file_write = false
+file_edit = false
+"#,
+        )
+        .expect("agent role config should parse");
+
+        let role = config
+            .agent_role("code-reviewer")
+            .expect("code-reviewer role should exist");
+        assert_eq!(
+            role.description,
+            "Reviews code for best practices and potential issues"
+        );
+        assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.tools.get("file_write"), Some(&false));
+        assert_eq!(role.tools.get("file_edit"), Some(&false));
     }
 }

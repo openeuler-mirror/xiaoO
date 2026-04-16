@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::r#impl::path_resolver::expand_path_from_base;
+
 use super::input::GrepInput;
 
 pub mod error_code {
@@ -33,26 +35,14 @@ impl ValidationResult {
     }
 }
 
-pub fn expand_path(path: &str) -> String {
+pub fn expand_path(path: &str, base_dir: &Path) -> String {
     let path = path.trim();
 
     if is_unc_path(path) {
         return path.to_string();
     }
 
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-
-    if Path::new(path).is_relative() {
-        if let Ok(cwd) = std::env::current_dir() {
-            return cwd.join(path).to_string_lossy().into_owned();
-        }
-    }
-
-    path.to_string()
+    expand_path_from_base(path, base_dir)
 }
 
 pub fn validate_pattern(input: &GrepInput) -> ValidationResult {
@@ -66,9 +56,9 @@ pub fn is_unc_path(path: &str) -> bool {
     path.starts_with("\\\\") || path.starts_with("//")
 }
 
-pub fn validate_path(input: &GrepInput) -> ValidationResult {
+pub fn validate_path(input: &GrepInput, base_dir: &Path) -> ValidationResult {
     if let Some(ref path) = input.path {
-        let absolute_path = expand_path(path);
+        let absolute_path = expand_path(path, base_dir);
 
         if is_unc_path(&absolute_path) {
             return ValidationResult::error(
@@ -90,13 +80,13 @@ pub fn validate_path(input: &GrepInput) -> ValidationResult {
     }
 }
 
-pub fn validate_input(input: &GrepInput) -> ValidationResult {
+pub fn validate_input_with_base(input: &GrepInput, base_dir: &Path) -> ValidationResult {
     let pattern_result = validate_pattern(input);
     if !pattern_result.result {
         return pattern_result;
     }
 
-    let path_result = validate_path(input);
+    let path_result = validate_path(input, base_dir);
     if !path_result.result {
         return path_result;
     }

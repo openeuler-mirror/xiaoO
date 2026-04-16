@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::r#impl::path_resolver::{expand_path_from_base, runtime_workspace_root};
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
@@ -42,7 +43,11 @@ impl BashExecutor {
         Ok(buffer)
     }
 
-    async fn execute_with_shell(shell: &str, input: &BashInput) -> Result<BashOutput, String> {
+    async fn execute_with_shell(
+        shell: &str,
+        input: &BashInput,
+        base_dir: &std::path::Path,
+    ) -> Result<BashOutput, String> {
         let timeout_ms = input.timeout.unwrap_or_else(default_timeout_ms);
 
         let mut command = Command::new(shell);
@@ -53,9 +58,12 @@ impl BashExecutor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        if let Some(cwd) = input.cwd.as_deref() {
-            command.current_dir(cwd);
-        }
+        let resolved_cwd = input
+            .cwd
+            .as_deref()
+            .map(|cwd| expand_path_from_base(cwd, base_dir))
+            .unwrap_or_else(|| base_dir.to_string_lossy().into_owned());
+        command.current_dir(resolved_cwd);
 
         let mut child = command
             .spawn()
@@ -119,7 +127,7 @@ impl ToolExecutor for BashExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: BashInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
@@ -127,7 +135,8 @@ impl ToolExecutor for BashExecutor {
             }
         })?;
 
-        let validation_result = validation::validate_input(&input);
+        let workspace_root = runtime_workspace_root(runtime);
+        let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -141,7 +150,7 @@ impl ToolExecutor for BashExecutor {
             });
         }
 
-        let output = Self::execute_with_shell("bash", &input)
+        let output = Self::execute_with_shell("bash", &input, workspace_root)
             .await
             .map_err(|message| ToolExecutionError::ExecutionFailed { message })?;
 

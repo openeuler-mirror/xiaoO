@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use crate::r#impl::path_resolver::expand_path_from_base;
+
 use super::constants::{error_code, SECRET_DETECTED_MESSAGE, SECRET_PATTERNS};
 use super::input::FileWriteInput;
 
@@ -45,24 +47,8 @@ impl ValidationResult {
 /// - Relative paths are resolved to absolute paths
 ///
 /// Uses std::env::var("HOME") for home directory (no external dependencies)
-pub fn expand_path(path: &str) -> String {
-    let path = path.trim();
-
-    // Handle tilde expansion
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-
-    // Handle relative paths
-    if Path::new(path).is_relative() {
-        if let Ok(cwd) = std::env::current_dir() {
-            return cwd.join(path).to_string_lossy().into_owned();
-        }
-    }
-
-    path.to_string()
+pub fn expand_path(path: &str, base_dir: &Path) -> String {
+    expand_path_from_base(path, base_dir)
 }
 
 /// Checks if a path is a UNC path (Windows network share path).
@@ -108,8 +94,8 @@ fn contains_secret(content: &str) -> bool {
 ///
 /// # Returns
 /// * `ValidationResult` indicating whether the input is valid
-pub fn validate_input(input: &FileWriteInput) -> ValidationResult {
-    let expanded_path = expand_path(&input.file_path);
+pub fn validate_input_with_base(input: &FileWriteInput, base_dir: &Path) -> ValidationResult {
+    let expanded_path = expand_path(&input.file_path, base_dir);
 
     // UNC paths are allowed (like TypeScript implementation)
     if is_unc_path(&expanded_path) {

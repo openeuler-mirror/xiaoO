@@ -136,6 +136,59 @@ curl -X POST http://localhost:8080/api/v1/chat \
 
 ---
 
+#### `POST /api/v1/chat/stream`
+
+Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **Server-Sent Events (SSE)** stream with real-time updates for LLM text generation and tool execution.
+
+**Request Body:** Same as `/api/v1/chat`.
+
+**Response:** `200 OK`, Content-Type `text/event-stream`
+
+**SSE Event Types:**
+
+| Event | Fields | Description |
+|-------|--------|-------------|
+| `turn_start` | `agent_id`, `turn` | Emitted at the start of each agent loop turn |
+| `text_delta` | `delta`, `snapshot` | Emitted for each LLM text chunk. `delta` is the incremental text, `snapshot` is the cumulative text so far |
+| `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `stop_reason` | Emitted when the agent loop finishes. Stream closes after this event |
+| `error` | `error` | Emitted on failure. Stream closes after this event |
+
+**Example Request:**
+
+```bash
+curl -N -X POST http://localhost:8080/api/v1/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Hello",
+    "channel": "test",
+    "sender_id": "user-1",
+    "conversation_id": "conv-demo"
+  }'
+```
+
+**Example SSE Output:**
+
+```
+event: turn_start
+data: {"type":"turn_start","agent_id":"main","turn":1}
+
+event: text_delta
+data: {"type":"text_delta","delta":"Hello","snapshot":"Hello"}
+
+event: text_delta
+data: {"type":"text_delta","delta":"! How can I help you?","snapshot":"Hello! How can I help you?"}
+
+event: done
+data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! How can I help you?","conversation_id":"conv-demo","session_id":"test:conv-demo","turn_count":1,"total_tokens":150,"stop_reason":"complete"}
+```
+
+**Error Responses:**
+
+- `400 Bad Request` — Same validation errors as `/api/v1/chat`
+
+---
+
 #### `POST /api/v1/channels/feishu/events`
 
 Feishu event callback endpoint. Only available when `[channels.feishu]` is enabled in Daemon configuration.

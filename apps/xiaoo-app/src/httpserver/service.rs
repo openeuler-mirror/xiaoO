@@ -67,4 +67,13 @@ impl GatewayService {
             visible_reply,
         })
     }
+
+    pub async fn handle_channel_message_with_events(
+        &self,
+        message: GatewayChannelMessage,
+        event_sink: Option<Arc<dyn LoopEventSink>>,
+    ) -> Result<GatewayTurnResponse, GatewayServiceError> {
+        self.handle_channel_message_with_interaction(message, event_sink, None, None)
+            .await
+    }
 }

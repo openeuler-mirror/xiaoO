@@ -1,12 +1,15 @@
 use anyhow::Result;
 use ratatui::layout::Rect;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, MessageRole};
-use crate::config::Config;
+use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::selection::TranscriptSelection;
+use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
@@ -16,6 +19,13 @@ pub enum InputMode {
     Editing,
     ProviderSelection,
     InteractionPrompt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatusLight {
+    Idle,
+    Running,
+    AwaitingInteraction,
 }
 
 pub struct ApiKeyDialogState {
@@ -38,6 +48,13 @@ pub struct RenderState {
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
     pub interaction_prompt_supplement_area: Option<Rect>,
+    /// Cached plain-text content for each rendered line in the transcript.
+    /// Rebuilt every frame by `render_chat`.
+    pub line_texts: Vec<String>,
+    /// Parallel to `line_texts`: `true` for the first line of every message
+    /// entry (the "▎ Role  HH:MM:SS" header).  These lines are excluded from
+    /// copied text even when visually highlighted.
+    pub line_is_header: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -56,6 +73,7 @@ pub struct AppState {
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
+    pub active_agent_role: Option<String>,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
@@ -63,6 +81,11 @@ pub struct AppState {
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
+    /// Active text selection in the transcript area, if any.
+    pub transcript_selection: Option<TranscriptSelection>,
+    /// Set when text is copied to clipboard; drives the toast notification.
+    pub copy_notice: Option<Instant>,
+    pub external_commands: Vec<ExternalCommand>,
 }
 
 impl AppState {
@@ -77,6 +100,7 @@ impl AppState {
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
+            active_agent_role: None,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -84,6 +108,9 @@ impl AppState {
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
+            transcript_selection: None,
+            copy_notice: None,
+            external_commands: load_external_commands(),
         })
     }
 
@@ -118,6 +145,7 @@ impl AppState {
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
+            active_agent_role: None,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -125,7 +153,75 @@ impl AppState {
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
+            external_commands: load_external_commands(),
+            transcript_selection: None,
+            copy_notice: None,
         })
+    }
+
+    /// Mark that text was just copied; shows the toast for 1.5 s.
+    pub fn set_copy_notice(&mut self) {
+        self.copy_notice = Some(Instant::now());
+    }
+
+    /// Returns `true` while the copy toast should still be visible.
+    pub fn copy_notice_active(&self) -> bool {
+        self.copy_notice
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false)
+    }
+
+    /// Extract the plain text covered by the current transcript selection.
+    /// Returns `None` if there is no active selection or the selection is empty.
+    ///
+    /// Role-header lines ("▎ You  HH:MM:SS" etc.) are excluded from the result
+    /// even when they fall inside the highlighted range.
+    pub fn transcript_selected_text(&self) -> Option<String> {
+        let sel = self.transcript_selection.as_ref()?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (start_line, start_col, end_line, end_col) = sel.normalised();
+        let lines = &self.render_state.line_texts;
+
+        if start_line >= lines.len() {
+            return None;
+        }
+
+        let mut segments: Vec<String> = Vec::new();
+        for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+            // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
+            if self
+                .render_state
+                .line_is_header
+                .get(line_idx)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let line = &lines[line_idx];
+            let col_start = if line_idx == start_line { start_col } else { 0 };
+            let col_end = if line_idx == end_line {
+                end_col.min(line.chars().count())
+            } else {
+                line.chars().count()
+            };
+            let segment: String = line
+                .chars()
+                .skip(col_start)
+                .take(col_end.saturating_sub(col_start))
+                .collect();
+            segments.push(segment);
+        }
+
+        let result = segments.join("\n");
+        let result = result.trim_matches('\n');
+        if result.is_empty() {
+            None
+        } else {
+            Some(result.to_owned())
+        }
     }
 
     pub fn open_interaction_prompt(
@@ -160,7 +256,7 @@ impl AppState {
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return false;
         };
-        !candidates_for_prefix(&prefix).is_empty()
+        !candidates_for_prefix(&prefix, &self.external_commands).is_empty()
     }
 
     pub fn slash_popup_height(&self) -> u16 {
@@ -172,7 +268,9 @@ impl AppState {
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return 0;
         };
-        let candidate_count = candidates_for_prefix(&prefix).len().min(6);
+        let candidate_count = candidates_for_prefix(&prefix, &self.external_commands)
+            .len()
+            .min(6);
         if candidate_count == 0 {
             return 0;
         }
@@ -183,7 +281,7 @@ impl AppState {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         slash_typed_prefix(value, cursor)
-            .map(|prefix| candidates_for_prefix(&prefix).len())
+            .map(|prefix| candidates_for_prefix(&prefix, &self.external_commands).len())
             .unwrap_or(0)
     }
 
@@ -204,7 +302,7 @@ impl AppState {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         if let Some(prefix) = slash_typed_prefix(value, cursor) {
-            let candidates = candidates_for_prefix(&prefix);
+            let candidates = candidates_for_prefix(&prefix, &self.external_commands);
             if let Some(chosen) = candidates.get(self.slash.selected) {
                 apply_slash_pick(&mut self.chat_state.input, chosen);
                 self.note_input_changed();
@@ -223,5 +321,94 @@ impl AppState {
                     && !message.content.is_empty()
             })
             .map(|message| message.content.clone())
+    }
+
+    pub fn agent_tab_labels(&self) -> Vec<String> {
+        let mut tabs = vec!["Chat".to_string()];
+        tabs.extend(self.agent_config.agent_role_ids());
+        tabs
+    }
+
+    pub fn active_agent_tab_label(&self) -> &str {
+        self.active_agent_role.as_deref().unwrap_or("Chat")
+    }
+
+    pub fn active_agent_role_config(&self) -> Option<&AgentRoleConfig> {
+        self.active_agent_role
+            .as_deref()
+            .and_then(|role_id| self.agent_config.agent_role(role_id))
+    }
+
+    pub fn cycle_agent_role(&mut self, reverse: bool) -> bool {
+        let role_ids = self.agent_config.agent_role_ids();
+        if role_ids.is_empty() {
+            return false;
+        }
+
+        let total_tabs = role_ids.len() + 1;
+        let current_index = self
+            .active_agent_role
+            .as_ref()
+            .and_then(|current| role_ids.iter().position(|role_id| role_id == current))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let next_index = if reverse {
+            (current_index + total_tabs - 1) % total_tabs
+        } else {
+            (current_index + 1) % total_tabs
+        };
+
+        self.active_agent_role = if next_index == 0 {
+            None
+        } else {
+            role_ids.get(next_index - 1).cloned()
+        };
+        true
+    }
+
+    pub fn runtime_status_light(&self) -> RuntimeStatusLight {
+        if self.interaction_prompt.is_some() {
+            RuntimeStatusLight::AwaitingInteraction
+        } else if self.chat_state.is_loading {
+            RuntimeStatusLight::Running
+        } else {
+            RuntimeStatusLight::Idle
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, RuntimeStatusLight};
+    use crate::interaction_prompt::demo_prompt_request;
+    use std::path::PathBuf;
+
+    #[test]
+    fn runtime_status_light_is_idle_by_default() {
+        let state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Idle);
+    }
+
+    #[test]
+    fn runtime_status_light_is_running_while_loading() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.is_loading = true;
+        assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Running);
+    }
+
+    #[test]
+    fn runtime_status_light_prefers_interaction_when_prompt_is_open() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.is_loading = true;
+        state
+            .open_interaction_prompt(demo_prompt_request(), true)
+            .expect("interaction prompt should open");
+        assert_eq!(
+            state.runtime_status_light(),
+            RuntimeStatusLight::AwaitingInteraction
+        );
     }
 }

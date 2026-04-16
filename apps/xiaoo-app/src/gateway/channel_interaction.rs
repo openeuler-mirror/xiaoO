@@ -166,9 +166,7 @@ impl ChannelInteractionHandle {
     fn timeout_response(&self, request: &InteractionRequest) -> InteractionResponse {
         let sentinel = self.timeout_sentinel();
         match request {
-            InteractionRequest::Confirm { .. } => {
-                InteractionResponse::Confirmed { allowed: false }
-            }
+            InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
             InteractionRequest::TextInput { .. } => InteractionResponse::Text {
                 value: Some(sentinel),
             },

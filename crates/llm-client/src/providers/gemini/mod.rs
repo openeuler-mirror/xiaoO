@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 
 use crate::convert::{parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_reqwest_error, LlmError};
+use crate::error::{map_api_status_error, map_reqwest_error, LlmError};
 use crate::wire_types::{ParsedChunk, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -68,15 +68,9 @@ impl LlmProvider for GeminiProvider {
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
-        if status == 429 {
-            return Err(LlmError::RateLimited { retry_after_ms: 0 });
-        }
         if !status.is_success() {
             let resp_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, resp_body, body_str
-            )));
+            return Err(map_api_status_error(status, &resp_body, &body_str));
         }
 
         let gemini_response: GeminiResponseBody =
@@ -169,10 +163,7 @@ impl LlmProvider for GeminiProvider {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, error_body, body_str
-            )));
+            return Err(map_api_status_error(status, &error_body, &body_str));
         }
 
         let mut full_text = String::new();

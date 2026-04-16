@@ -12,13 +12,17 @@ use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
     GatewayChannelMessage,
 };
+use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
 use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -105,6 +109,8 @@ pub struct TestChatTurnRequest {
     #[serde(default)]
     pub channel_instance_id: Option<String>,
     pub sender_id: String,
+    #[serde(default)]
+    pub agent: Option<String>,
     pub conversation_id: String,
     #[serde(default)]
     pub message_id: Option<String>,
@@ -125,6 +131,8 @@ pub struct TestChatRequest {
     pub channel_instance_id: Option<String>,
     #[serde(default)]
     pub sender_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
@@ -169,7 +177,8 @@ pub fn create_router_with_feishu_and_timeout(
 fn create_router_from_state(state: GatewayAppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health_check))
-        .route("/api/v1/chat", post(handle_test_chat))
+        .route("/api/v1/chat", post(handle_chat))
+        .route("/api/v1/chat/stream", post(handle_chat_stream))
         .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
         .with_state(Arc::new(state))
 }
@@ -181,7 +190,7 @@ async fn health_check() -> Json<GatewayHealthResponse> {
     })
 }
 
-async fn handle_test_chat(
+async fn handle_chat(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<TestChatRequest>,
 ) -> Response {
@@ -201,6 +210,7 @@ async fn handle_test_chat(
         channel_instance_id: request.channel_instance_id,
         conversation_id: request.conversation_id,
         sender_id: request.sender_id,
+        agent_preset_id: request.agent,
         message_id: request
             .message_id
             .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
@@ -230,6 +240,79 @@ async fn handle_test_chat(
     }
 }
 
+async fn handle_chat_stream(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<TestChatRequest>,
+) -> Response {
+    let request = match validate_test_chat_request(payload) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(GatewayErrorResponse { error }),
+            )
+                .into_response();
+        }
+    };
+
+    let conversation_id = request.conversation_id.clone();
+    let message = GatewayChannelMessage {
+        channel: request.channel,
+        channel_instance_id: request.channel_instance_id,
+        conversation_id,
+        sender_id: request.sender_id,
+        agent_preset_id: request.agent,
+        message_id: request
+            .message_id
+            .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
+        text: request.text,
+        channel_identity_prompt: None,
+        reply_to_message_id: request.reply_to_message_id,
+        root_message_id: request.root_message_id,
+        mentions: request
+            .mentions
+            .into_iter()
+            .map(|mention| GatewayChannelMention {
+                id: mention.id,
+                display_name: mention.display_name,
+            })
+            .collect(),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
+    let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
+
+    tokio::spawn(async move {
+        match state
+            .gateway_service
+            .handle_channel_message_with_interaction(message, Some(sink.clone()), None, None)
+            .await
+        {
+            Ok(response) => {
+                let summary = sink.take_loop_summary();
+                let _ = tx.send(SseStreamEvent::Done {
+                    reply: response.visible_reply,
+                    raw_reply: response.raw_reply,
+                    conversation_id: response.conversation_id,
+                    session_id: response.session_id,
+                    turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
+                    total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
+                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(SseStreamEvent::Error {
+                    error: error.to_string(),
+                });
+            }
+        }
+    });
+
+    Sse::new(sse_stream_from_receiver(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 async fn handle_feishu_events(
     State(state): State<Arc<GatewayAppState>>,
     headers: HeaderMap,
@@ -254,7 +337,10 @@ async fn handle_feishu_events(
         Ok((adapter_response, maybe_message)) => {
             if let Some(message) = maybe_message {
                 if runtime.capabilities.supports_reactions {
-                    if let Err(error) = runtime.adapter.acknowledge_message(&message.message_id).await
+                    if let Err(error) = runtime
+                        .adapter
+                        .acknowledge_message(&message.message_id)
+                        .await
                     {
                         warn!(
                             "failed to acknowledge channel message: channel={} id={} conversation={} error={}",
@@ -536,6 +622,10 @@ fn validate_test_chat_request(payload: TestChatRequest) -> Result<TestChatTurnRe
         channel,
         channel_instance_id: payload.channel_instance_id,
         sender_id,
+        agent: payload
+            .agent
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         conversation_id,
         message_id: payload.message_id,
         reply_to_message_id: payload.reply_to_message_id,

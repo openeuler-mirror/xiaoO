@@ -1,5 +1,6 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::Color,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -7,6 +8,7 @@ use ratatui::{
 };
 
 use crate::app::App;
+use crate::app_state::RuntimeStatusLight;
 use crate::status_panel::StatusPanel;
 
 impl App {
@@ -24,7 +26,7 @@ impl App {
             .constraints([
                 Constraint::Length(14),
                 Constraint::Min(1),
-                Constraint::Length(10),
+                Constraint::Length(20),
             ])
             .split(inner);
 
@@ -36,17 +38,59 @@ impl App {
         )]));
         frame.render_widget(title, inner_chunks[0]);
 
-        let tab = Paragraph::new(Line::from(vec![Span::styled(
-            " Chat ",
-            self.state.theme.tab_style(true),
-        )]));
-        frame.render_widget(tab, inner_chunks[1]);
+        let mut tabs = Vec::new();
+        for (index, label) in self.state.agent_tab_labels().iter().enumerate() {
+            if index > 0 {
+                tabs.push(Span::raw(" "));
+            }
+            tabs.push(Span::styled(
+                format!(" {label} "),
+                self.state
+                    .theme
+                    .tab_style(label == self.state.active_agent_tab_label()),
+            ));
+        }
+        if let Some(role) = self.state.active_agent_role_config() {
+            if !role.description.trim().is_empty() {
+                tabs.push(Span::raw("  "));
+                tabs.push(Span::styled(
+                    role.description.as_str(),
+                    Style::default().fg(self.state.theme.muted),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(tabs)), inner_chunks[1]);
 
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
-        let status = Paragraph::new(Line::from(vec![Span::styled(
-            now,
-            Style::default().fg(self.state.theme.muted),
-        )]))
+        let (status_light_color, status_label, status_label_style) =
+            match self.state.runtime_status_light() {
+                RuntimeStatusLight::Running => (
+                    self.state.theme.success,
+                    "RUN",
+                    Style::default()
+                        .fg(self.state.theme.success)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                RuntimeStatusLight::AwaitingInteraction => (
+                    self.state.theme.gradient_yellow,
+                    "ASK",
+                    Style::default()
+                        .fg(self.state.theme.gradient_yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                RuntimeStatusLight::Idle => (
+                    Color::White,
+                    "IDLE",
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
+        let status = Paragraph::new(Line::from(vec![
+            Span::styled("● ", Style::default().fg(status_light_color)),
+            Span::styled(format!("{status_label} "), status_label_style),
+            Span::styled(now, Style::default().fg(self.state.theme.muted)),
+        ]))
         .alignment(Alignment::Right);
         frame.render_widget(status, inner_chunks[2]);
     }

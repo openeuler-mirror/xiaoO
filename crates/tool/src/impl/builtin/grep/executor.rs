@@ -13,6 +13,7 @@ use super::input::{GrepInput, OutputMode};
 use super::output::GrepOutput;
 use super::spec::GrepToolSpec;
 use super::validation;
+use crate::r#impl::path_resolver::runtime_workspace_root;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSearchTarget {
@@ -128,15 +129,17 @@ impl GrepExecutor {
         }
     }
 
-    fn resolve_search_target(path: Option<&str>) -> Result<ResolvedSearchTarget, String> {
+    fn resolve_search_target(
+        path: Option<&str>,
+        base_dir: &Path,
+    ) -> Result<ResolvedSearchTarget, String> {
         match path {
             None => Ok(ResolvedSearchTarget {
-                cwd: std::env::current_dir()
-                    .map_err(|e| format!("Failed to resolve current directory: {}", e))?,
+                cwd: base_dir.to_path_buf(),
                 search_target: ".".to_string(),
             }),
             Some(path) => {
-                let expanded_path = PathBuf::from(validation::expand_path(path));
+                let expanded_path = PathBuf::from(validation::expand_path(path, base_dir));
 
                 if expanded_path.is_dir() {
                     return Ok(ResolvedSearchTarget {
@@ -324,7 +327,7 @@ impl ToolExecutor for GrepExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: GrepInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
@@ -332,7 +335,8 @@ impl ToolExecutor for GrepExecutor {
             }
         })?;
 
-        let validation_result = validation::validate_input(&input);
+        let workspace_root = runtime_workspace_root(runtime);
+        let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -346,7 +350,7 @@ impl ToolExecutor for GrepExecutor {
             });
         }
 
-        let resolved_target = Self::resolve_search_target(input.path.as_deref())
+        let resolved_target = Self::resolve_search_target(input.path.as_deref(), workspace_root)
             .map_err(|e| ToolExecutionError::ExecutionFailed { message: e })?;
 
         match self.call_inner(&input, &resolved_target) {
