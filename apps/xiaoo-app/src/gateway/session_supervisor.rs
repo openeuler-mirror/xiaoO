@@ -309,6 +309,12 @@ impl SessionSupervisor {
                                     tool_name: suspended_call.final_call.tool_name.clone(),
                                     output_preview,
                                     is_error,
+                                    args_preview: serde_json::to_string_pretty(
+                                        &suspended_call.final_call.input,
+                                    )
+                                    .unwrap_or_else(|_| {
+                                        suspended_call.final_call.input.to_string()
+                                    }),
                                 },
                             );
                         }

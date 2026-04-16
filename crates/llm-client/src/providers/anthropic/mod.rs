@@ -4,7 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::convert::{chat_messages_to_wire, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
+use crate::convert::{
+    chat_messages_to_wire, parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage,
+};
 use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -158,8 +160,7 @@ impl LlmProvider for AnthropicProvider {
             .map(|tc| ToolUseBlock {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
-                input: serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Null),
+                input: parse_tool_arguments(&tc.function.arguments),
             })
             .collect();
 
@@ -256,8 +257,7 @@ impl LlmProvider for AnthropicProvider {
             .map(|tc| ToolUseBlock {
                 call_id: tc.id.clone(),
                 tool_name: tc.function.name.clone(),
-                input: serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Null),
+                input: parse_tool_arguments(&tc.function.arguments),
             })
             .collect();
 

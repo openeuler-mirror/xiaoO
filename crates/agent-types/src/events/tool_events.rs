@@ -6,24 +6,34 @@ pub enum ToolLifecycleEvent {
     Pending {
         call_id: String,
         tool_name: String,
+        #[serde(default)]
+        args_preview: String,
     },
     Running {
         call_id: String,
         tool_name: String,
+        #[serde(default)]
+        args_preview: String,
     },
     Denied {
         call_id: String,
         tool_name: String,
         reason: String,
+        #[serde(default)]
+        args_preview: String,
     },
     Completed {
         call_id: String,
         tool_name: String,
+        #[serde(default)]
+        args_preview: String,
     },
     Failed {
         call_id: String,
         tool_name: String,
         error: String,
+        #[serde(default)]
+        args_preview: String,
     },
 }
 
@@ -33,4 +43,6 @@ pub struct ToolResultEvent {
     pub tool_name: String,
     pub output_preview: String,
     pub is_error: bool,
+    #[serde(default)]
+    pub args_preview: String,
 }
