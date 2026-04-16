@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
 const AGENTS_FILE_NAME: &str = "AGENTS.md";
+// Keep these markers in sync with crates/prompt/src/compose.rs.
+const WORKSPACE_PROMPT_MARKER_BEGIN: &str = "<xiaoo_workspace_prompt>";
+const WORKSPACE_PROMPT_MARKER_END: &str = "</xiaoo_workspace_prompt>";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspacePromptFile {
@@ -20,7 +23,10 @@ pub fn compose_workspace_system_prompt(base_prompt: &str, workspace_root: &Path)
     if !base_prompt.is_empty() {
         sections.push(base_prompt.to_string());
     }
-    sections.push(render_workspace_prompt_section(&prompt_files));
+    sections.push(format!(
+        "{WORKSPACE_PROMPT_MARKER_BEGIN}\n{}\n{WORKSPACE_PROMPT_MARKER_END}",
+        render_workspace_prompt_section(&prompt_files)
+    ));
 
     sections.join("\n\n")
 }
