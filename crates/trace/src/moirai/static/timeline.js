@@ -13,7 +13,11 @@ const SPAN_COLORS = {
     'VERIFY': { bg: '#d9f99d', border: '#84cc16', hover: '#bef264', text: '#3f6212' },
     'ALERT': { bg: '#fecaca', border: '#ef4444', hover: '#fca5a5', text: '#991b1b' },
     'ERR': { bg: '#fca5a5', border: '#dc2626', hover: '#f87171', text: '#7f1d1d' },
-    'END': { bg: '#e5e7eb', border: '#6b7280', hover: '#d1d5db', text: '#374151' }
+    'END': { bg: '#e5e7eb', border: '#6b7280', hover: '#d1d5db', text: '#374151' },
+    'TURN': { bg: '#dbeafe', border: '#3b82f6', hover: '#bfdbfe', text: '#1e40af' },
+    'COMPRESSION': { bg: '#fef9c3', border: '#ca8a04', hover: '#fef08a', text: '#854d0e' },
+    'PROMPT_BUILD': { bg: '#f3e8ff', border: '#9333ea', hover: '#e9d5ff', text: '#6b21a8' },
+    'HOOK': { bg: '#ffedd5', border: '#ea580c', hover: '#fed7aa', text: '#9a3412' }
 };
 
 function easeOutCubic(t) {
@@ -38,9 +42,16 @@ const SPAN_TYPE_ALIASES = {
     'TOOL_CALL': 'TOOL'
 };
 
+// Fields added by the backend to every span — redundant with span header, hide from Other Info
+const GLOBAL_NOISE_KEYS = new Set(['name', 'trace_id', 'parent_span_id']);
+
 const DEDICATED_DETAIL_KEYS = {
     'THINK': ['input_preview', 'effective_request', 'output_preview', 'final_response'],
-    'TOOL': ['tool_name', 'input', 'effective_input', 'output', 'final_output', 'stdout', 'stderr', 'success', 'result_kind']
+    'TOOL': ['tool_name', 'input', 'effective_input', 'output', 'final_output', 'stdout', 'stderr', 'success', 'result_kind'],
+    'TURN': ['turn_number', 'agent_id', 'prompt_tokens', 'completion_tokens', 'total_tokens', 'has_tool_calls', 'stop_reason', 'outcome'],
+    'COMPRESSION': ['turn_number', 'agent_id', 'message_count', 'estimated_tokens', 'available_tokens', 'usage_ratio', 'severity', 'needs_compression', 'skipped', 'messages_before', 'messages_after', 'removed_count', 'has_summary', 'estimated_tokens_after', 'error', 'outcome'],
+    'PROMPT_BUILD': ['turn_number', 'agent_id', 'message_count', 'visible_tool_count', 'skill_count', 'has_system_prompt', 'estimated_input_tokens', 'request_message_count', 'error', 'outcome'],
+    'HOOK': ['hook_kind', 'hooker_id', 'hook_point', 'tool_name', 'call_id', 'result', 'error', 'outcome'],
 };
 
 function getCompatibleSpanType(spanType) {
@@ -98,7 +109,9 @@ function getToolStatus(extras) {
 function getSpanDetailCompatibility(span) {
     const extras = span.extras || null;
     const compatibleType = getCompatibleSpanType(span.span_type);
-    const promotedKeys = new Set(DEDICATED_DETAIL_KEYS[compatibleType] || []);
+    const dedicatedKeys = DEDICATED_DETAIL_KEYS[compatibleType] || [];
+    // promoted = type-specific keys + global noise — all hidden from "Other Info"
+    const promotedKeys = new Set([...dedicatedKeys, ...GLOBAL_NOISE_KEYS]);
 
     return {
         compatibleType,
@@ -113,6 +126,197 @@ function getSpanDetailCompatibility(span) {
         toolStderr: getAliasedExtraValue(extras, ['stderr']),
         toolStatus: getToolStatus(extras)
     };
+}
+
+// ============ Structured Span Detail Renderers ============
+
+const ROLE_BADGE = {
+    'system':    'bg-gray-200 text-gray-700',
+    'user':      'bg-blue-200 text-blue-800',
+    'assistant': 'bg-green-200 text-green-800',
+    'tool':      'bg-yellow-200 text-yellow-800',
+};
+const ROLE_BORDER = {
+    'system':    'border-l-4 border-gray-300 bg-gray-50',
+    'user':      'border-l-4 border-blue-300 bg-blue-50',
+    'assistant': 'border-l-4 border-green-300 bg-green-50',
+    'tool':      'border-l-4 border-yellow-300 bg-yellow-50',
+};
+
+function renderContentBlockHtml(block) {
+    if (!block || typeof block !== 'object') return '';
+    switch (block.type) {
+        case 'text':
+            return `<pre class="whitespace-pre-wrap text-sm font-mono break-words m-0">${escapeHtml(block.text || '')}</pre>`;
+        case 'tool_use':
+            return `<div class="my-1 bg-green-50 border border-green-200 rounded p-2">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="font-semibold text-green-700 text-xs font-mono">${escapeHtml(block.tool_name || '')}</span>
+                    <span class="text-gray-400 text-xs">${escapeHtml(block.call_id || '')}</span>
+                </div>
+                <pre class="text-xs font-mono bg-white p-1 rounded overflow-auto max-h-32">${escapeHtml(JSON.stringify(block.input, null, 2))}</pre>
+            </div>`;
+        case 'tool_result': {
+            const errCls = block.is_error ? 'border-red-200 bg-red-50' : 'border-gray-200 bg-white';
+            const errLabel = block.is_error ? '<span class="text-xs text-red-500 font-semibold ml-1">error</span>' : '';
+            return `<div class="my-1 border ${errCls} rounded p-2">
+                <div class="flex items-center gap-1 mb-1">
+                    <span class="font-semibold text-xs font-mono text-gray-700">${escapeHtml(block.tool_name || '')} result</span>
+                    <span class="text-gray-400 text-xs">${escapeHtml(block.call_id || '')}</span>${errLabel}
+                </div>
+                <pre class="text-xs font-mono overflow-auto max-h-32 whitespace-pre-wrap">${escapeHtml(block.output || '')}</pre>
+            </div>`;
+        }
+        case 'image':
+            return `<span class="text-xs text-gray-400 italic">[Image: ${escapeHtml(block.description || '')}]</span>`;
+        case 'document':
+            return `<span class="text-xs text-gray-400 italic">[Document: ${escapeHtml(block.description || '')}]</span>`;
+        default:
+            return `<pre class="text-xs">${escapeHtml(JSON.stringify(block, null, 2))}</pre>`;
+    }
+}
+
+function renderChatMessageHtml(msg, index) {
+    const role = msg.role || 'unknown';
+    const badgeCls = ROLE_BADGE[role] || 'bg-gray-200 text-gray-700';
+    const borderCls = ROLE_BORDER[role] || 'border-l-4 border-gray-300 bg-gray-50';
+    const blocks = Array.isArray(msg.blocks) ? msg.blocks : [];
+    const blocksHtml = blocks.map(renderContentBlockHtml).join('');
+    const meta = msg.api_usage_tokens
+        ? `<span class="text-xs text-gray-400 ml-1">${msg.api_usage_tokens} tokens</span>` : '';
+
+    // System messages are long — collapse by default
+    if (role === 'system') {
+        return `<details class="mb-1 rounded overflow-hidden">
+            <summary class="cursor-pointer flex items-center gap-2 px-3 py-2 ${borderCls} select-none" style="list-style:none">
+                <span class="px-2 py-0.5 rounded text-xs font-semibold uppercase ${badgeCls}">${escapeHtml(role)}</span>
+                <span class="text-xs text-gray-400">${blocks.length} block(s) — click to expand</span>
+            </summary>
+            <div class="px-3 py-2 ${borderCls}">${blocksHtml}</div>
+        </details>`;
+    }
+    return `<div class="mb-1 px-3 py-2 ${borderCls} rounded-r">
+        <div class="flex items-center mb-1">
+            <span class="px-2 py-0.5 rounded text-xs font-semibold uppercase ${badgeCls}">${escapeHtml(role)}</span>${meta}
+        </div>
+        <div class="space-y-1">${blocksHtml}</div>
+    </div>`;
+}
+
+// Render a LlmRequest JSON value as structured HTML
+function renderLlmRequestHtml(val) {
+    let req;
+    try { req = typeof val === 'string' ? JSON.parse(val) : val; } catch (_) { req = null; }
+    if (!req || typeof req !== 'object') {
+        const raw = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+        return `<pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(raw)}</pre>`;
+    }
+
+    const messages = Array.isArray(req.messages) ? req.messages : [];
+    const tools = Array.isArray(req.tools) ? req.tools : [];
+
+    // Config bar: only show non-default values
+    const configItems = [];
+    if (req.tool_choice && req.tool_choice !== 'auto') configItems.push(`tool_choice: ${JSON.stringify(req.tool_choice)}`);
+    if (req.max_tokens != null) configItems.push(`max_tokens: ${req.max_tokens}`);
+    if (req.temperature != null) configItems.push(`temperature: ${req.temperature}`);
+    const rf = req.response_format;
+    if (rf && rf !== 'text') {
+        const rfStr = typeof rf === 'object' ? Object.keys(rf)[0] : String(rf);
+        configItems.push(`format: ${rfStr}`);
+    }
+    const configHtml = configItems.length > 0
+        ? `<div class="flex flex-wrap gap-3 mb-2 px-3 py-1 bg-gray-100 rounded text-xs text-gray-600">${configItems.map(c => `<span>${escapeHtml(c)}</span>`).join('')}</div>`
+        : '';
+
+    // Tools list (collapsible)
+    let toolsHtml = '';
+    if (tools.length > 0) {
+        const toolItems = tools.map(t => `<details class="ml-2">
+            <summary class="cursor-pointer text-xs font-mono font-semibold text-green-700 hover:underline" style="list-style:none">${escapeHtml(t.name || '')}</summary>
+            <p class="text-xs text-gray-500 ml-2 mt-0.5 mb-1">${escapeHtml(t.description || '')}</p>
+        </details>`).join('');
+        toolsHtml = `<details class="mb-2">
+            <summary class="cursor-pointer text-xs font-semibold text-gray-500 bg-gray-100 px-3 py-1 rounded" style="list-style:none">${tools.length} tool(s) available</summary>
+            <div class="mt-1 border-l-2 border-gray-200 pl-2 py-1">${toolItems}</div>
+        </details>`;
+    }
+
+    const messagesHtml = messages.map((m, i) => renderChatMessageHtml(m, i)).join('');
+    return `${configHtml}${toolsHtml}<div>${messagesHtml}</div>`;
+}
+
+// Render an AssistantMessage JSON value as structured HTML
+function renderLlmResponseHtml(val) {
+    let resp;
+    try { resp = typeof val === 'string' ? JSON.parse(val) : val; } catch (_) { resp = null; }
+    if (!resp || typeof resp !== 'object') {
+        const raw = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+        return `<pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(raw)}</pre>`;
+    }
+
+    const usage = resp.usage || {};
+    const stopReason = resp.stop_reason || '';
+    const stopCls = stopReason === 'end_turn' ? 'bg-green-100 text-green-700'
+        : stopReason === 'tool_use' ? 'bg-blue-100 text-blue-700'
+        : stopReason === 'max_tokens' ? 'bg-yellow-100 text-yellow-700'
+        : 'bg-gray-100 text-gray-600';
+
+    const parts = [];
+
+    // Usage + stop reason bar
+    const stats = [];
+    if (stopReason) stats.push(`<span class="px-2 py-0.5 rounded text-xs font-semibold ${stopCls}">${escapeHtml(stopReason)}</span>`);
+    if (usage.prompt_tokens != null) stats.push(`<span class="text-xs text-gray-500">↑ ${usage.prompt_tokens} prompt</span>`);
+    if (usage.completion_tokens != null) stats.push(`<span class="text-xs text-gray-500">↓ ${usage.completion_tokens} completion</span>`);
+    if (usage.total_tokens != null) stats.push(`<span class="text-xs text-gray-600 font-semibold">= ${usage.total_tokens} total</span>`);
+    if (stats.length) parts.push(`<div class="flex flex-wrap items-center gap-2 mb-2">${stats.join('')}</div>`);
+
+    // Text response
+    if (resp.text) {
+        parts.push(`<pre class="whitespace-pre-wrap text-sm font-mono break-words">${escapeHtml(resp.text)}</pre>`);
+    }
+
+    // Tool calls
+    const toolCalls = Array.isArray(resp.tool_calls) ? resp.tool_calls : [];
+    if (toolCalls.length > 0) {
+        const callsHtml = toolCalls.map(tc => `<div class="border border-green-200 rounded p-2 mb-1 bg-white">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="font-semibold text-green-700 text-xs font-mono">${escapeHtml(tc.tool_name || '')}</span>
+                <span class="text-xs text-gray-400">${escapeHtml(tc.call_id || '')}</span>
+            </div>
+            <pre class="text-xs font-mono bg-gray-50 p-1 rounded overflow-auto max-h-40">${escapeHtml(JSON.stringify(tc.input, null, 2))}</pre>
+        </div>`).join('');
+        parts.push(`<div class="mt-2"><div class="text-xs font-semibold text-gray-600 mb-1">${toolCalls.length} tool call(s):</div>${callsHtml}</div>`);
+    }
+
+    return parts.join('');
+}
+
+// Render a key-value grid for structured span types (TURN, COMPRESSION, etc.)
+// items: [{label, value, badge?, wide?}]  — items with null/undefined value are skipped
+function renderKvGridHtml(items) {
+    const cells = items.filter(item => item.value !== undefined && item.value !== null && item.value !== '').map(item => {
+        const valueHtml = item.badge
+            ? `<span class="inline-block px-2 py-0.5 rounded text-xs font-semibold ${item.badge}">${escapeHtml(String(item.value))}</span>`
+            : `<span class="text-sm font-mono break-all">${escapeHtml(String(item.value))}</span>`;
+        return `<div class="${item.wide ? 'col-span-2' : ''}">
+            <div class="text-xs text-gray-500 mb-0.5">${escapeHtml(item.label)}</div>
+            ${valueHtml}
+        </div>`;
+    }).join('');
+    return cells
+        ? `<div class="grid grid-cols-2 gap-x-6 gap-y-3 bg-gray-50 rounded p-3">${cells}</div>`
+        : '<p class="text-xs text-gray-400">No fields recorded.</p>';
+}
+
+function outcomeBadge(outcome) {
+    if (!outcome) return null;
+    return outcome === 'Ok' ? 'bg-green-100 text-green-700'
+        : outcome === 'Error' ? 'bg-red-100 text-red-700'
+        : outcome === 'Cancelled' ? 'bg-yellow-100 text-yellow-700'
+        : outcome === 'Denied' ? 'bg-orange-100 text-orange-700'
+        : 'bg-gray-100 text-gray-600';
 }
 
 function renderTimeline(spans, animate = false) {
@@ -462,31 +666,22 @@ async function showSpanDetailsInline(spanId) {
         
         let inputOutputHtml = '';
         if (detailCompat.compatibleType === 'THINK' && detailCompat.extras) {
-            const llmInput = formatExtraValue(detailCompat.llmInput);
-            const llmOutput = formatExtraValue(detailCompat.llmOutput);
-
-            if (llmInput !== null) {
+            if (detailCompat.llmInput != null) {
                 inputOutputHtml += `
                     <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Input:</label>
-                        <div class="bg-blue-50 border border-blue-200 rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4 border-b-4 border-blue-100 hover:border-blue-300 transition-colors" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(llmInput)}</pre>
-                            </div>
+                        <label class="font-semibold text-gray-700 mb-2 block">Request:</label>
+                        <div class="bg-blue-50 border border-blue-200 rounded-lg overflow-auto p-4" style="max-height: 80vh;">
+                            ${renderLlmRequestHtml(detailCompat.llmInput)}
                         </div>
                     </div>
                 `;
             }
-            if (llmOutput !== null) {
+            if (detailCompat.llmOutput != null) {
                 inputOutputHtml += `
                     <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Output:</label>
-                        <div class="bg-green-50 border border-green-200 rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4 border-b-4 border-green-100 hover:border-green-300 transition-colors" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(llmOutput)}</pre>
-                            </div>
+                        <label class="font-semibold text-gray-700 mb-2 block">Response:</label>
+                        <div class="bg-green-50 border border-green-200 rounded-lg overflow-auto p-4" style="max-height: 80vh;">
+                            ${renderLlmResponseHtml(detailCompat.llmOutput)}
                         </div>
                     </div>
                 `;
@@ -573,6 +768,79 @@ async function showSpanDetailsInline(spanId) {
             }
         }
         
+        if (detailCompat.compatibleType === 'TURN' && detailCompat.extras) {
+            const e = detailCompat.extras;
+            inputOutputHtml += `<div class="mb-4">${renderKvGridHtml([
+                { label: 'Turn #', value: e.turn_number },
+                { label: 'Agent', value: e.agent_id },
+                { label: 'Outcome', value: e.outcome, badge: outcomeBadge(e.outcome) },
+                { label: 'Stop Reason', value: e.stop_reason },
+                { label: '↑ Prompt Tokens', value: e.prompt_tokens },
+                { label: '↓ Completion Tokens', value: e.completion_tokens },
+                { label: '= Total Tokens', value: e.total_tokens },
+                { label: 'Has Tool Calls', value: e.has_tool_calls != null ? String(e.has_tool_calls) : undefined },
+            ])}</div>`;
+        }
+
+        if (detailCompat.compatibleType === 'COMPRESSION' && detailCompat.extras) {
+            const e = detailCompat.extras;
+            const usageRatio = e.usage_ratio != null ? `${(e.usage_ratio * 100).toFixed(1)}%` : undefined;
+            const skippedBadge = e.skipped === true ? 'bg-gray-100 text-gray-600'
+                : e.skipped === false ? 'bg-orange-100 text-orange-700' : null;
+            const skippedLabel = e.skipped === true ? 'skipped' : e.skipped === false ? 'compressed' : undefined;
+            inputOutputHtml += `<div class="mb-4">${renderKvGridHtml([
+                { label: 'Status', value: skippedLabel, badge: skippedBadge },
+                { label: 'Outcome', value: e.outcome, badge: outcomeBadge(e.outcome) },
+                { label: 'Severity', value: e.severity },
+                { label: 'Usage Ratio', value: usageRatio },
+                { label: 'Estimated Tokens', value: e.estimated_tokens },
+                { label: 'Available Tokens', value: e.available_tokens },
+                { label: 'Messages (before)', value: e.messages_before },
+                { label: 'Messages (after)', value: e.messages_after },
+                { label: 'Removed', value: e.removed_count },
+                { label: 'Has Summary', value: e.has_summary != null ? String(e.has_summary) : undefined },
+                { label: 'Tokens After', value: e.estimated_tokens_after },
+                { label: 'Error', value: e.error, wide: true },
+            ])}</div>`;
+        }
+
+        if (detailCompat.compatibleType === 'PROMPT_BUILD' && detailCompat.extras) {
+            const e = detailCompat.extras;
+            inputOutputHtml += `<div class="mb-4">${renderKvGridHtml([
+                { label: 'Turn #', value: e.turn_number },
+                { label: 'Agent', value: e.agent_id },
+                { label: 'Outcome', value: e.outcome, badge: outcomeBadge(e.outcome) },
+                { label: 'Messages', value: e.message_count },
+                { label: 'Visible Tools', value: e.visible_tool_count },
+                { label: 'Skills', value: e.skill_count },
+                { label: 'Has System Prompt', value: e.has_system_prompt != null ? String(e.has_system_prompt) : undefined },
+                { label: 'Est. Input Tokens', value: e.estimated_input_tokens },
+                { label: 'Request Messages', value: e.request_message_count },
+                { label: 'Error', value: e.error, wide: true },
+            ])}</div>`;
+        }
+
+        if (detailCompat.compatibleType === 'HOOK' && detailCompat.extras) {
+            const e = detailCompat.extras;
+            const resultGood = new Set(['allow', 'accept', 'transform', 'recover']);
+            const resultBad  = new Set(['deny', 'propagate']);
+            const resultBadge = e.result
+                ? (resultGood.has(e.result) ? 'bg-green-100 text-green-700'
+                   : resultBad.has(e.result) ? 'bg-red-100 text-red-700'
+                   : 'bg-gray-100 text-gray-600')
+                : null;
+            inputOutputHtml += `<div class="mb-4">${renderKvGridHtml([
+                { label: 'Hook Kind', value: e.hook_kind },
+                { label: 'Result', value: e.result, badge: resultBadge },
+                { label: 'Outcome', value: e.outcome, badge: outcomeBadge(e.outcome) },
+                { label: 'Hooker ID', value: e.hooker_id, wide: true },
+                { label: 'Hook Point', value: e.hook_point, wide: true },
+                { label: 'Tool Name', value: e.tool_name },
+                { label: 'Call ID', value: e.call_id },
+                { label: 'Error', value: e.error, wide: true },
+            ])}</div>`;
+        }
+
         let extrasDisplay = '';
         if (span.extras && Object.keys(span.extras).length > 0) {
             let filteredExtras = { ...span.extras };
