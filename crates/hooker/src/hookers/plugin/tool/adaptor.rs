@@ -2,8 +2,8 @@ use std::any::Any;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use agent_contracts::Hooker;
 use agent_contracts::runtime::runtime_view::RuntimeView;
+use agent_contracts::Hooker;
 use agent_types::common::HookerId;
 use agent_types::hooker::HookPointId;
 use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
@@ -15,9 +15,9 @@ use agent_types::tool::{
 };
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use crate::{HookPointCategory, resolve_hook_point_category};
+use crate::{resolve_hook_point_category, HookPointCategory};
 
 pub(crate) struct PluginToolHookerAdaptor {
     id: HookerId,
@@ -581,10 +581,10 @@ mod tests {
     use agent_contracts::runtime::runtime_view::RuntimeView;
     use agent_contracts::tool::state::ToolStateStore;
     use agent_contracts::trace::{TraceOutcome, TraceRecorder, TraceSpanHandle, TraceSpanKind};
-    use agent_types::ChatMessage;
     use agent_types::common::{AgentMetadata, WorkspaceRef};
     use agent_types::events::ToolLifecycleEvent;
     use agent_types::tool::FinalToolCall;
+    use agent_types::ChatMessage;
 
     struct TestConversation;
 
@@ -907,11 +907,9 @@ else:
             }))
             .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("response must contain field 'continuation'")
-        );
+        assert!(error
+            .to_string()
+            .contains("response must contain field 'continuation'"));
     }
 
     #[test]
