@@ -41,6 +41,7 @@ chrono = "0.4"
 crossterm = { version = "0.28", features = ["event-stream"] }
 toml = "0.8"
 futures-util = "0.3"
+tokio-stream = "0.1"
 ratatui = "0.28"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ulid = "1.1"
