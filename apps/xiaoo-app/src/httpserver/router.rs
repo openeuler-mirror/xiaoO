@@ -156,15 +156,6 @@ pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
     create_router_from_state(GatewayAppState::new(session_service))
 }
 
-pub fn create_router_with_feishu(
-    session_service: Arc<dyn SessionService>,
-    feishu_config: FeishuConfig,
-) -> ChannelResult<Router> {
-    Ok(create_router_from_state(GatewayAppState::with_feishu(
-        session_service,
-        feishu_config,
-    )?))
-}
 
 pub fn create_router_with_feishu_and_timeout(
     session_service: Arc<dyn SessionService>,
