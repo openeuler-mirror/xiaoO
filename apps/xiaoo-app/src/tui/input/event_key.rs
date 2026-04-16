@@ -340,7 +340,7 @@ impl App {
         }
 
         if first_token_is_dir_command(user_input.trim()) {
-            match resolve_dir_command(user_input.trim()) {
+            match resolve_dir_command(user_input.trim(), &self.state.workspace) {
                 Ok(path) => {
                     self.state.workspace = path;
                     self.state.status_panel.set_workspace(&self.state.workspace);
