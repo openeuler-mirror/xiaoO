@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
@@ -63,6 +64,7 @@ pub struct AppState {
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
+    pub external_commands: Vec<ExternalCommand>,
 }
 
 impl AppState {
@@ -84,6 +86,7 @@ impl AppState {
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
+            external_commands: load_external_commands(),
         })
     }
 
@@ -125,6 +128,7 @@ impl AppState {
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
+            external_commands: load_external_commands(),
         })
     }
 
@@ -160,7 +164,7 @@ impl AppState {
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return false;
         };
-        !candidates_for_prefix(&prefix).is_empty()
+        !candidates_for_prefix(&prefix, &self.external_commands).is_empty()
     }
 
     pub fn slash_popup_height(&self) -> u16 {
@@ -172,7 +176,9 @@ impl AppState {
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return 0;
         };
-        let candidate_count = candidates_for_prefix(&prefix).len().min(6);
+        let candidate_count = candidates_for_prefix(&prefix, &self.external_commands)
+            .len()
+            .min(6);
         if candidate_count == 0 {
             return 0;
         }
@@ -183,7 +189,7 @@ impl AppState {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         slash_typed_prefix(value, cursor)
-            .map(|prefix| candidates_for_prefix(&prefix).len())
+            .map(|prefix| candidates_for_prefix(&prefix, &self.external_commands).len())
             .unwrap_or(0)
     }
 
@@ -204,7 +210,7 @@ impl AppState {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         if let Some(prefix) = slash_typed_prefix(value, cursor) {
-            let candidates = candidates_for_prefix(&prefix);
+            let candidates = candidates_for_prefix(&prefix, &self.external_commands);
             if let Some(chosen) = candidates.get(self.slash.selected) {
                 apply_slash_pick(&mut self.chat_state.input, chosen);
                 self.note_input_changed();

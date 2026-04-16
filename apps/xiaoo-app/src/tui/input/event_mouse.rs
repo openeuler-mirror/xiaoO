@@ -71,7 +71,10 @@ impl App {
                 let value = self.state.chat_state.input.value();
                 let cursor = self.state.chat_state.input.cursor();
                 if let Some(prefix) = crate::slash_complete::slash_typed_prefix(value, cursor) {
-                    let candidates = crate::slash_complete::candidates_for_prefix(&prefix);
+                    let candidates = crate::slash_complete::candidates_for_prefix(
+                        &prefix,
+                        &self.state.external_commands,
+                    );
                     if row < candidates.len() {
                         self.state.slash.selected = row;
                         self.state.apply_slash_selection();
