@@ -2,8 +2,11 @@ use crate::gateway::{
     AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolver, SessionServiceError,
 };
+use agent_contracts::LoopEventSink;
 use agent_types::common::ids::AgentId;
+use agent_types::events::{LoopEndSummary, ToolResultEvent};
 use memory::{MemoryManager, MemorySnapshot};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use xiaoo_core::{run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot};
 
@@ -13,6 +16,7 @@ pub struct SessionWorkerInput {
     pub agent_id: AgentId,
     pub user_message: String,
     pub append_user_message: bool,
+    pub loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
 }
@@ -41,6 +45,11 @@ impl SessionWorker {
             resolved.bindings.loop_event_sink = None;
             resolved.bindings.tool_event_sink = None;
             resolved.bindings.interaction_handle = None;
+        } else {
+            resolved.bindings.loop_event_sink = merge_loop_event_sinks(
+                resolved.bindings.loop_event_sink.clone(),
+                input.loop_event_sink_override.clone(),
+            );
         }
         let assembly =
             AppRuntimeFactory::build(&resolved, &input.session, input.loop_state.as_ref()).await?;
@@ -98,6 +107,50 @@ impl SessionWorker {
             loop_state: loop_state.to_snapshot(),
             memory_snapshot: memory_manager.snapshot().clone(),
         })
+    }
+}
+
+#[derive(Clone)]
+struct FanoutLoopEventSink {
+    sinks: Vec<Arc<dyn LoopEventSink>>,
+}
+
+impl LoopEventSink for FanoutLoopEventSink {
+    fn on_turn_start(&self, agent_id: &AgentId, turn: u32) {
+        for sink in &self.sinks {
+            sink.on_turn_start(agent_id, turn);
+        }
+    }
+
+    fn on_assistant_message(&self, agent_id: &AgentId, text: &str) {
+        for sink in &self.sinks {
+            sink.on_assistant_message(agent_id, text);
+        }
+    }
+
+    fn on_tool_result(&self, agent_id: &AgentId, event: &ToolResultEvent) {
+        for sink in &self.sinks {
+            sink.on_tool_result(agent_id, event);
+        }
+    }
+
+    fn on_loop_end(&self, agent_id: &AgentId, summary: &LoopEndSummary) {
+        for sink in &self.sinks {
+            sink.on_loop_end(agent_id, summary);
+        }
+    }
+}
+
+fn merge_loop_event_sinks(
+    primary: Option<Arc<dyn LoopEventSink>>,
+    secondary: Option<Arc<dyn LoopEventSink>>,
+) -> Option<Arc<dyn LoopEventSink>> {
+    match (primary, secondary) {
+        (None, None) => None,
+        (Some(sink), None) | (None, Some(sink)) => Some(sink),
+        (Some(primary), Some(secondary)) => Some(Arc::new(FanoutLoopEventSink {
+            sinks: vec![primary, secondary],
+        })),
     }
 }
 
