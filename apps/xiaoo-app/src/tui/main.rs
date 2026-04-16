@@ -32,6 +32,7 @@ pub(crate) use services::provider as provider_service;
 pub(crate) use services::workspace as workspace_service;
 pub(crate) use state::app_state;
 pub(crate) use state::chat;
+pub(crate) use state::selection;
 pub(crate) use support::config;
 pub(crate) use support::debug_log;
 

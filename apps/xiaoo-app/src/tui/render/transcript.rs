@@ -332,8 +332,47 @@ impl App {
         }
 
         let mut all_lines: Vec<Line> = Vec::new();
+        let mut line_is_header: Vec<bool> = Vec::new();
         for (_, lines, _) in &message_entries {
-            all_lines.extend(lines.clone());
+            for (i, line) in lines.iter().enumerate() {
+                all_lines.push(line.clone());
+                // The first line of every entry is the "▎ Role  HH:MM:SS" header.
+                // Mark it so that selection extraction can skip it.
+                line_is_header.push(i == 0);
+            }
+        }
+
+        // Cache the plain-text content of every rendered line so that
+        // transcript selection can extract text without re-rendering.
+        self.state.render_state.line_texts = all_lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect();
+        self.state.render_state.line_is_header = line_is_header;
+
+        // Apply selection highlighting to the line copies used for rendering.
+        if let Some(sel) = &self.state.transcript_selection {
+            let (start_line, start_col, end_line, end_col) = sel.normalised();
+            let sel_style = Style::default()
+                .fg(self.state.theme.background)
+                .bg(self.state.theme.foreground)
+                .add_modifier(Modifier::BOLD);
+            for (line_idx, line) in all_lines.iter_mut().enumerate() {
+                if line_idx < start_line || line_idx > end_line {
+                    continue;
+                }
+                let col_start = if line_idx == start_line { start_col } else { 0 };
+                let line_char_len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                let col_end = if line_idx == end_line {
+                    end_col.min(line_char_len)
+                } else {
+                    line_char_len
+                };
+                if col_start >= col_end {
+                    continue;
+                }
+                *line = highlight_line_selection(line.clone(), col_start, col_end, sel_style);
+            }
         }
 
         let total_lines = rendered_line_count(&all_lines, inner_area.width);
@@ -396,4 +435,46 @@ impl App {
             &mut self.state.chat_state.scrollbar_state,
         );
     }
+}
+
+/// Restyle the characters in `col_start..col_end` (char indices) within a
+/// ratatui `Line` that may contain multiple spans.  Characters outside the
+/// range keep their original style.
+fn highlight_line_selection(line: Line<'_>, col_start: usize, col_end: usize, sel_style: Style) -> Line<'_> {
+    let mut new_spans: Vec<Span<'_>> = Vec::new();
+    let mut char_offset: usize = 0;
+
+    for span in line.spans {
+        let span_len = span.content.chars().count();
+        let span_end = char_offset + span_len;
+
+        let ov_start = col_start.max(char_offset);
+        let ov_end = col_end.min(span_end);
+
+        if ov_start >= ov_end {
+            // No overlap – keep span as-is.
+            new_spans.push(span.clone());
+        } else {
+            let local_start = ov_start - char_offset;
+            let local_end = ov_end - char_offset;
+
+            let before: String = span.content.chars().take(local_start).collect();
+            let selected: String = span.content.chars().skip(local_start).take(local_end - local_start).collect();
+            let after: String = span.content.chars().skip(local_end).collect();
+
+            if !before.is_empty() {
+                new_spans.push(Span::styled(before, span.style));
+            }
+            if !selected.is_empty() {
+                new_spans.push(Span::styled(selected, sel_style));
+            }
+            if !after.is_empty() {
+                new_spans.push(Span::styled(after, span.style));
+            }
+        }
+
+        char_offset = span_end;
+    }
+
+    Line::from(new_spans)
 }

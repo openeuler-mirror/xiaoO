@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ratatui::layout::Rect;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, MessageRole};
 use crate::config::Config;
@@ -8,6 +9,7 @@ use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
+use crate::selection::TranscriptSelection;
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
@@ -39,6 +41,13 @@ pub struct RenderState {
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
     pub interaction_prompt_supplement_area: Option<Rect>,
+    /// Cached plain-text content for each rendered line in the transcript.
+    /// Rebuilt every frame by `render_chat`.
+    pub line_texts: Vec<String>,
+    /// Parallel to `line_texts`: `true` for the first line of every message
+    /// entry (the "▎ Role  HH:MM:SS" header).  These lines are excluded from
+    /// copied text even when visually highlighted.
+    pub line_is_header: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -64,6 +73,10 @@ pub struct AppState {
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
+    /// Active text selection in the transcript area, if any.
+    pub transcript_selection: Option<TranscriptSelection>,
+    /// Set when text is copied to clipboard; drives the toast notification.
+    pub copy_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
 }
 
@@ -86,6 +99,8 @@ impl AppState {
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
+            transcript_selection: None,
+            copy_notice: None,
             external_commands: load_external_commands(),
         })
     }
@@ -129,7 +144,64 @@ impl AppState {
             interaction_prompt: None,
             render_state: RenderState::default(),
             external_commands: load_external_commands(),
+            transcript_selection: None,
+            copy_notice: None,
         })
+    }
+
+    /// Mark that text was just copied; shows the toast for 1.5 s.
+    pub fn set_copy_notice(&mut self) {
+        self.copy_notice = Some(Instant::now());
+    }
+
+    /// Returns `true` while the copy toast should still be visible.
+    pub fn copy_notice_active(&self) -> bool {
+        self.copy_notice
+            .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false)
+    }
+
+    /// Extract the plain text covered by the current transcript selection.
+    /// Returns `None` if there is no active selection or the selection is empty.
+    ///
+    /// Role-header lines ("▎ You  HH:MM:SS" etc.) are excluded from the result
+    /// even when they fall inside the highlighted range.
+    pub fn transcript_selected_text(&self) -> Option<String> {
+        let sel = self.transcript_selection.as_ref()?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (start_line, start_col, end_line, end_col) = sel.normalised();
+        let lines = &self.render_state.line_texts;
+
+        if start_line >= lines.len() {
+            return None;
+        }
+
+        let mut segments: Vec<String> = Vec::new();
+        for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+            // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
+            if self.render_state.line_is_header.get(line_idx).copied().unwrap_or(false) {
+                continue;
+            }
+            let line = &lines[line_idx];
+            let col_start = if line_idx == start_line { start_col } else { 0 };
+            let col_end = if line_idx == end_line {
+                end_col.min(line.chars().count())
+            } else {
+                line.chars().count()
+            };
+            let segment: String = line
+                .chars()
+                .skip(col_start)
+                .take(col_end.saturating_sub(col_start))
+                .collect();
+            segments.push(segment);
+        }
+
+        let result = segments.join("\n");
+        let result = result.trim_matches('\n');
+        if result.is_empty() { None } else { Some(result.to_owned()) }
     }
 
     pub fn open_interaction_prompt(
