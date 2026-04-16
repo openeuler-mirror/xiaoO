@@ -1,7 +1,7 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout},
-    style::Style,
-    widgets::Block,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
+    widgets::{Block, Paragraph},
     Frame,
 };
 
@@ -41,16 +41,6 @@ impl App {
         self.render_input(frame, input_chunk);
         self.render_status_bar(frame, chunks[3]);
 
-        if self.state.provider_dialog.is_some()
-            || self.state.api_key_dialog.is_some()
-            || self.state.interaction_prompt.is_some()
-            || self.state.slash_menu_visible()
-        {
-            let overlay =
-                Block::default().style(Style::default().bg(ratatui::style::Color::Rgb(5, 5, 10)));
-            frame.render_widget(overlay, size);
-        }
-
         if self.state.provider_dialog.is_none() && self.state.api_key_dialog.is_none() {
             self.render_interaction_prompt_dialog(frame, frame.area());
             self.render_slash_popup_dialog(frame, frame.area());
@@ -61,5 +51,26 @@ impl App {
         if let Some(dialog) = self.state.api_key_dialog.as_ref() {
             self.render_api_key_dialog(frame, frame.area(), dialog);
         }
+
+        // Copy-to-clipboard toast (mirrors opencode's toast.show after copy).
+        if self.state.copy_notice_active() {
+            self.render_copy_toast(frame, size);
+        }
+    }
+
+    fn render_copy_toast(&self, frame: &mut Frame, area: Rect) {
+        let message = " Copied to clipboard ";
+        let width = message.chars().count() as u16;
+        // Float in the bottom-right corner, just above the 3-row status bar.
+        let x = area.x.saturating_add(area.width).saturating_sub(width + 1);
+        let y = area.y.saturating_add(area.height).saturating_sub(4);
+        let toast_area = Rect { x, y, width, height: 1 };
+        let paragraph = Paragraph::new(message).style(
+            Style::default()
+                .fg(self.state.theme.background)
+                .bg(self.state.theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        );
+        frame.render_widget(paragraph, toast_area);
     }
 }

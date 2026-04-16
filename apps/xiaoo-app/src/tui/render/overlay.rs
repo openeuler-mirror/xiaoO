@@ -1,8 +1,8 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
+    text::{Line, Span, Text},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,6 +12,34 @@ use crate::interaction_prompt::{interaction_prompt_outer_height, render_interact
 use crate::provider_dialog::ProviderDialog;
 
 use super::utils::{cursor_row_col, line_prefix_width};
+
+fn expand_popup_area(area: Rect, bounds: Rect, margin: u16) -> Rect {
+    let left = area.x.saturating_sub(margin).max(bounds.x);
+    let top = area.y.saturating_sub(margin).max(bounds.y);
+    let right = area
+        .x
+        .saturating_add(area.width)
+        .saturating_add(margin)
+        .min(bounds.x.saturating_add(bounds.width));
+    let bottom = area
+        .y
+        .saturating_add(area.height)
+        .saturating_add(margin)
+        .min(bounds.y.saturating_add(bounds.height));
+
+    Rect {
+        x: left,
+        y: top,
+        width: right.saturating_sub(left),
+        height: bottom.saturating_sub(top),
+    }
+}
+
+fn render_popup_backdrop(frame: &mut Frame, area: Rect, bounds: Rect, bg: ratatui::style::Color) {
+    let backdrop = expand_popup_area(area, bounds, 1);
+    frame.render_widget(Clear, backdrop);
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), backdrop);
+}
 
 impl App {
     pub(crate) fn render_interaction_prompt_dialog(&mut self, frame: &mut Frame, area: Rect) {
@@ -39,6 +67,7 @@ impl App {
             height,
         };
 
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         render_interaction_prompt(
             frame,
             dialog_area,
@@ -57,8 +86,10 @@ impl App {
 
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
-        let candidates: Vec<&str> = crate::slash_complete::slash_typed_prefix(&value, cursor)
-            .map(|prefix| crate::slash_complete::candidates_for_prefix(&prefix))
+        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(&value, cursor)
+            .map(|prefix| {
+                crate::slash_complete::candidates_for_prefix(&prefix, &self.state.external_commands)
+            })
             .unwrap_or_default();
         if candidates.is_empty() {
             self.state.render_state.slash_popup_inner = None;
@@ -83,7 +114,9 @@ impl App {
             height,
         };
 
-        self.render_slash_popup(frame, dialog_area, &candidates, self.state.slash.selected);
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        self.render_slash_popup(frame, dialog_area, &refs, self.state.slash.selected);
     }
 
     pub(crate) fn render_slash_popup(
@@ -123,7 +156,10 @@ impl App {
                     format!("{command:<width$}", width = max_command_width),
                     style,
                 )];
-                if let Some(summary) = crate::slash_complete::summary_for_command(command) {
+                if let Some(summary) = crate::slash_complete::summary_for_command(
+                    command,
+                    &self.state.external_commands,
+                ) {
                     spans.push(Span::styled(
                         format!("  {}", summary),
                         Style::default().fg(self.state.theme.muted),
@@ -170,6 +206,7 @@ impl App {
         let inner = block.inner(area);
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
+        let selection = self.state.chat_state.input.selected_range();
         let (row, col) = cursor_row_col(value, cursor);
         let lines: Vec<&str> = value.split('\n').collect();
         let line = lines.get(row).copied().unwrap_or("");
@@ -181,10 +218,23 @@ impl App {
         let visual_x = line_prefix_width(line, col);
         let scroll_x = visual_x.max(max_width) - max_width;
 
-        let paragraph = Paragraph::new(value)
-            .style(input_style)
-            .scroll((scroll_y as u16, scroll_x as u16))
-            .block(block);
+        let selection_style = Style::default()
+            .fg(self.state.theme.background)
+            .bg(self.state.theme.foreground)
+            .add_modifier(Modifier::BOLD);
+
+        let paragraph = if let Some(sel_range) = selection {
+            // Build a Text with selection highlighting.
+            let text = build_input_text_with_selection(value, &sel_range, input_style, selection_style);
+            Paragraph::new(text)
+                .scroll((scroll_y as u16, scroll_x as u16))
+                .block(block)
+        } else {
+            Paragraph::new(value)
+                .style(input_style)
+                .scroll((scroll_y as u16, scroll_x as u16))
+                .block(block)
+        };
         frame.render_widget(paragraph, area);
 
         if !self.state.chat_state.is_loading
@@ -225,6 +275,7 @@ impl App {
             height: dialog_height,
         };
 
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let dialog_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -312,6 +363,7 @@ impl App {
             height,
         };
 
+        render_popup_backdrop(frame, rect, area, self.state.theme.background);
         let title = format!(" Enter API key — {} / {} ", dialog.provider, dialog.model);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -360,4 +412,54 @@ impl App {
             frame.render_widget(error_paragraph, chunks[2]);
         }
     }
+}
+
+/// Build a ratatui `Text` value for the input box where the characters in
+/// `sel_range` (char indices) are highlighted with `sel_style`.
+fn build_input_text_with_selection(
+    value: &str,
+    sel_range: &std::ops::Range<usize>,
+    normal_style: Style,
+    sel_style: Style,
+) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut char_offset: usize = 0;
+
+    for source_line in value.split('\n') {
+        let line_len = source_line.chars().count();
+        let line_end = char_offset + line_len;
+
+        let overlap_start = sel_range.start.max(char_offset);
+        let overlap_end = sel_range.end.min(line_end);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if overlap_start >= overlap_end {
+            // No selection overlap on this line.
+            spans.push(Span::styled(source_line.to_owned(), normal_style));
+        } else {
+            // Before selection
+            let before: String = source_line.chars().take(overlap_start - char_offset).collect();
+            if !before.is_empty() {
+                spans.push(Span::styled(before, normal_style));
+            }
+            // Selected portion
+            let sel_local_start = overlap_start - char_offset;
+            let sel_local_end = overlap_end - char_offset;
+            let selected: String = source_line.chars().skip(sel_local_start).take(sel_local_end - sel_local_start).collect();
+            if !selected.is_empty() {
+                spans.push(Span::styled(selected, sel_style));
+            }
+            // After selection
+            let after: String = source_line.chars().skip(sel_local_end).collect();
+            if !after.is_empty() {
+                spans.push(Span::styled(after, normal_style));
+            }
+        }
+
+        lines.push(Line::from(spans));
+        // +1 accounts for the '\n' that was consumed by split.
+        char_offset = line_end + 1;
+    }
+
+    Text::from(lines)
 }

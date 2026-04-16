@@ -752,14 +752,90 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
 
     append_assistant_to_history(ctx);
 
-    let agent_id = match ctx.input.agent_id {
-        Some(ref id) => id,
-        None => return Ok(None),
+    if ctx.input.agent_id.is_none() {
+        return Ok(None);
+    }
+
+    // Partition tool calls into valid (non-empty name) and invalid (empty name).
+    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
+        .into_iter()
+        .partition(|tc| is_valid_tool_name(&tc.tool_name));
+
+    // Handle the case where ALL tool calls are invalid and there is exactly one:
+    // retry the LLM request once.
+    let (valid_calls, invalid_calls) = if valid_calls.is_empty() && invalid_calls.len() == 1 {
+        tracing::warn!(
+            call_id = %invalid_calls[0].call_id,
+            "LLM returned a single tool call with empty name; retrying LLM request"
+        );
+
+        // Push error tool_result for the invalid call so conversation stays well-formed.
+        ctx.state
+            .messages
+            .push(build_invalid_tool_name_result(&invalid_calls[0]));
+
+        // Re-build prompt (includes the error result) and re-call LLM.
+        build_messages(ctx)
+            .await
+            .map_err(|e| AgentError::PromptBuild(format!("retry after empty tool name: {e}")))?;
+        llm_call(ctx).await?;
+
+        let retry_tool_calls: Vec<ToolUseBlock> = ctx
+            .turn
+            .assistant_message
+            .as_ref()
+            .map(|m| m.tool_calls.clone())
+            .unwrap_or_default();
+
+        append_assistant_to_history(ctx);
+
+        let (retry_valid, retry_invalid): (Vec<_>, Vec<_>) = retry_tool_calls
+            .into_iter()
+            .partition(|tc| is_valid_tool_name(&tc.tool_name));
+
+        if retry_valid.is_empty() && !retry_invalid.is_empty() {
+            // Retry also failed — push error results for conversation completeness, then bail.
+            for inv in &retry_invalid {
+                ctx.state.messages.push(build_invalid_tool_name_result(inv));
+            }
+            return Err(AgentError::ToolExecution(
+                "LLM returned tool call(s) with empty name after retry".to_string(),
+            ));
+        }
+
+        (retry_valid, retry_invalid)
+    } else {
+        (valid_calls, invalid_calls)
     };
 
+    // Push error tool_results for all remaining invalid calls (covers the "mixed" case).
+    for inv in &invalid_calls {
+        tracing::warn!(
+            call_id = %inv.call_id,
+            "Discarding tool call with empty/invalid name"
+        );
+        ctx.state.messages.push(build_invalid_tool_name_result(inv));
+
+        if let Some(ref sink) = ctx.input.event_sink {
+            let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
+            let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+            sink.on_tool_result(
+                agent_id,
+                &ToolResultEvent {
+                    call_id: inv.call_id.clone(),
+                    tool_name: inv.tool_name.clone(),
+                    output_preview: "invalid empty tool name".to_string(),
+                    is_error: true,
+                },
+            );
+        }
+    }
+
+    // Execute valid tool calls (original logic).
+    let agent_id = ctx.input.agent_id.as_ref().unwrap();
     let runtime_view = ctx.input.runtime_view.as_ref().unwrap();
 
-    for tc in &tool_calls {
+    for tc in &valid_calls {
         let raw_tool_call = RawToolCall {
             call_id: tc.call_id.clone(),
             tool_name: tc.tool_name.clone(),
@@ -828,6 +904,23 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     Ok(None)
+}
+
+/// Check whether a tool name from the LLM response is valid (non-empty, non-whitespace).
+fn is_valid_tool_name(name: &str) -> bool {
+    !name.trim().is_empty()
+}
+
+/// Build an error tool_result message for a tool call whose name was empty/invalid.
+/// This keeps the conversation history well-formed (every tool_use gets a tool_result).
+fn build_invalid_tool_name_result(tc: &ToolUseBlock) -> ChatMessage {
+    ChatMessage::tool_result(
+        tc.call_id.clone(),
+        tc.tool_name.clone(),
+        "Error: tool call was discarded because the tool name was empty or invalid.",
+        true,
+        now_ms(),
+    )
 }
 
 fn decide(ctx: &mut LoopContext<'_>) {

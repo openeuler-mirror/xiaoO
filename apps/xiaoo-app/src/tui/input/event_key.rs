@@ -7,7 +7,8 @@ use crate::input::EventHandler;
 use crate::interaction_prompt::{demo_prompt_request, PromptFocus, PromptResolution};
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
 use crate::provider_service::{
-    persist_active_provider_selection, persisted_selection_settings, validate_and_connect_api_key,
+    copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
+    validate_and_connect_api_key,
 };
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
 
@@ -16,10 +17,40 @@ impl App {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return Ok(());
         }
+
+        // Ctrl+C: copy selected input text when selection exists, otherwise quit.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL)
             || key.code == KeyCode::Char('\x03')
         {
+            // Check input selection first.
+            if let Some(text) = self.state.chat_state.input.selected_text().map(str::to_owned) {
+                self.state.chat_state.input.clear_selection();
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                return Ok(());
+            }
+            // Check transcript selection.
+            if let Some(text) = self.state.transcript_selected_text() {
+                self.state.transcript_selection = None;
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                return Ok(());
+            }
+            // No selection → quit.
             self.state.should_quit = true;
+            return Ok(());
+        }
+
+        // Ctrl+X: cut selected input text.
+        if key.code == KeyCode::Char('x') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            if let Some(text) = self.state.chat_state.input.delete_selected() {
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                self.state.note_input_changed();
+            }
             return Ok(());
         }
 
@@ -194,13 +225,37 @@ impl App {
 
     async fn handle_editing_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.code == KeyCode::Tab {
-            if self.state.slash_menu_visible() {
-                self.state.apply_slash_selection();
+            let has_slash_prefix = crate::slash_complete::slash_typed_prefix(
+                self.state.chat_state.input.value(),
+                self.state.chat_state.input.cursor(),
+            )
+            .is_some();
+            if has_slash_prefix {
+                if self.state.slash_menu_visible() {
+                    self.state.apply_slash_selection();
+                } else {
+                    crate::slash_complete::apply_slash_tab(
+                        &mut self.state.chat_state.input,
+                        &self.state.external_commands,
+                    );
+                }
+                self.state.note_input_changed();
             } else {
-                crate::slash_complete::apply_slash_tab(&mut self.state.chat_state.input);
+                self.state.cycle_agent_role(false);
             }
-            self.state.note_input_changed();
             return Ok(());
+        }
+
+        if key.code == KeyCode::BackTab {
+            if crate::slash_complete::slash_typed_prefix(
+                self.state.chat_state.input.value(),
+                self.state.chat_state.input.cursor(),
+            )
+            .is_none()
+            {
+                self.state.cycle_agent_role(true);
+                return Ok(());
+            }
         }
 
         if self.state.slash_menu_visible() {
@@ -231,7 +286,10 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {}
+            KeyCode::Esc => {
+                // Esc clears an active transcript selection (mirrors opencode's Esc handler).
+                self.state.transcript_selection = None;
+            }
             KeyCode::Enter => self.submit_editing_input().await?,
             _ => {
                 self.state.chat_state.input.handle_event(&Event::Key(key));
@@ -282,7 +340,7 @@ impl App {
         }
 
         if first_token_is_dir_command(user_input.trim()) {
-            match resolve_dir_command(user_input.trim()) {
+            match resolve_dir_command(user_input.trim(), &self.state.workspace) {
                 Ok(path) => {
                     self.state.workspace = path;
                     self.state.status_panel.set_workspace(&self.state.workspace);
@@ -308,27 +366,32 @@ impl App {
             return Ok(());
         }
 
-        if user_input.trim().starts_with("/create-skill") {
-            let rest = user_input
-                .trim()
-                .strip_prefix("/create-skill")
-                .unwrap_or("")
-                .trim();
-            let prompt = if rest.is_empty() {
-                "Create a new skill.".to_string()
-            } else {
-                format!("Create a new skill. User request: {rest}")
-            };
-            if let Err(error) = self.gateway.start_turn(&mut self.state, prompt).await {
-                self.state
-                    .chat_state
-                    .messages
-                    .push(crate::chat::Message::system(format!(
-                        "无法启动当前请求: {error}"
-                    )));
-                self.state.chat_state.stick_to_bottom = true;
+        // NOTE: /create-skill is not yet implemented; disabled until ready.
+        // if user_input.trim().starts_with("/create-skill") { ... }
+
+        // External commands from ~/.xiaoo/command/
+        {
+            let trimmed = user_input.trim();
+            let cmd_name = trimmed.strip_prefix('/').unwrap_or("");
+            if let Some(cmd) = self
+                .state
+                .external_commands
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(cmd_name))
+            {
+                let body = cmd.body.clone();
+                self.state.chat_state.input.reset();
+                if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(format!(
+                            "无法启动当前请求: {error}"
+                        )));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
 
         if let Err(error) = self.gateway.start_turn(&mut self.state, user_input).await {

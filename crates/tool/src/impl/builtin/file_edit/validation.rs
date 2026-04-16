@@ -12,6 +12,8 @@
 
 use std::path::Path;
 
+use crate::r#impl::path_resolver::expand_path_from_base;
+
 use super::super::file_read::dedup::{get_file_mtime, DedupStateStore};
 use super::constants::MAX_EDIT_FILE_SIZE;
 use super::input::FileEditInput;
@@ -100,24 +102,8 @@ const SECRET_PATTERNS: &[&str] = &[
 /// - Relative paths are resolved to absolute paths
 ///
 /// Uses std::env::var("HOME") for home directory (no external dependencies)
-pub fn expand_path(path: &str) -> String {
-    let path = path.trim();
-
-    // Handle tilde expansion
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-
-    // Handle relative paths
-    if Path::new(path).is_relative() {
-        if let Ok(cwd) = std::env::current_dir() {
-            return cwd.join(path).to_string_lossy().into_owned();
-        }
-    }
-
-    path.to_string()
+pub fn expand_path(path: &str, base_dir: &Path) -> String {
+    expand_path_from_base(path, base_dir)
 }
 
 /// Checks if a string contains a secret pattern.
@@ -433,8 +419,9 @@ pub fn validate_input(
     input: &FileEditInput,
     content: Option<&str>,
     dedup_store: Option<&DedupStateStore>,
+    base_dir: &Path,
 ) -> ValidationResult {
-    let expanded_path = expand_path(&input.file_path);
+    let expanded_path = expand_path(&input.file_path, base_dir);
 
     // Check: No change (old_string == new_string)
     let result = validate_no_change(input);

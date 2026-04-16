@@ -14,6 +14,7 @@ use super::output::GlobOutput;
 use super::spec::GlobToolSpec;
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::path_resolver::runtime_workspace_root;
 
 /// Executor for GlobTool.
 pub struct GlobToolExecutor {
@@ -84,7 +85,7 @@ impl ToolExecutor for GlobToolExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: GlobInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
@@ -93,7 +94,8 @@ impl ToolExecutor for GlobToolExecutor {
         })?;
 
         // Validate input
-        let validation_result = validation::validate_input(&input);
+        let workspace_root = runtime_workspace_root(runtime);
+        let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -111,12 +113,8 @@ impl ToolExecutor for GlobToolExecutor {
         let search_path = input
             .path
             .as_ref()
-            .map(|p| expand_path(p))
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .map(|c| c.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            });
+            .map(|p| expand_path(p, workspace_root))
+            .unwrap_or_else(|| workspace_root.to_string_lossy().into_owned());
 
         // Execute glob search
         let start = std::time::Instant::now();

@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
@@ -50,6 +53,8 @@ pub struct LlmConfig {
 pub struct ChannelsConfig {
     #[serde(default)]
     pub feishu: Option<FeishuChannelConfig>,
+    #[serde(default)]
+    pub interaction_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +98,16 @@ pub struct AgentConfig {
     pub model: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -208,6 +223,10 @@ impl DaemonConfig {
             system_prompt,
             workspace_root,
         })
+    }
+
+    pub fn interaction_timeout_secs(&self) -> u64 {
+        self.app.channels.interaction_timeout_secs.unwrap_or(600)
     }
 
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {
@@ -391,5 +410,35 @@ mod tests {
         }
 
         assert_eq!(resolved, config_path);
+    }
+
+    #[test]
+    fn parses_agent_role_presets() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [agent.code-reviewer]
+            description = "Reviews code for best practices and potential issues"
+            prompt = "You are a code reviewer."
+
+            [agent.code-reviewer.tools]
+            file_write = false
+            file_edit = false
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let role = config
+            .agent
+            .get("code-reviewer")
+            .expect("code-reviewer role should exist");
+        assert_eq!(
+            role.description,
+            "Reviews code for best practices and potential issues"
+        );
+        assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.tools.get("file_write"), Some(&false));
+        assert_eq!(role.tools.get("file_edit"), Some(&false));
     }
 }
