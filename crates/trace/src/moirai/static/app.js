@@ -238,7 +238,11 @@ function getSpanTypeColor(type) {
         'VERIFY': 'bg-lime-200 text-lime-800',
         'ALERT': 'bg-red-200 text-red-800',
         'ERR': 'bg-red-300 text-red-900',
-        'END': 'bg-gray-200 text-gray-800'
+        'END': 'bg-gray-200 text-gray-800',
+        'TURN': 'bg-blue-200 text-blue-800',
+        'COMPRESSION': 'bg-yellow-200 text-yellow-800',
+        'PROMPT_BUILD': 'bg-purple-200 text-purple-800',
+        'HOOK': 'bg-orange-200 text-orange-800'
     };
     return colors[type] || 'bg-gray-200 text-gray-800';
 }
