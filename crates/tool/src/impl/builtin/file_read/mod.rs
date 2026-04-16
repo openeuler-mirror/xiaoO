@@ -23,4 +23,4 @@ pub use output::{
 pub use spec::FileReadToolSpec;
 pub use tokenizer::estimate_tokens;
 pub use validation::error_code;
-pub use validation::{validate_input, ValidationResult};
+pub use validation::{validate_input_with_base, ValidationResult};

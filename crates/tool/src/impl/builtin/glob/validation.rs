@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use crate::r#impl::path_resolver::expand_path_from_base;
+
 use super::input::GlobInput;
 
 /// Error codes for validation failures.
@@ -54,7 +56,7 @@ impl ValidationResult {
 /// - UNC paths (// or \\) are preserved as-is for security
 ///
 /// Uses std::env::current_dir() for path resolution (no external dependencies)
-pub fn expand_path(path: &str) -> String {
+pub fn expand_path(path: &str, base_dir: &Path) -> String {
     let path = path.trim();
 
     // SECURITY: Preserve UNC paths as-is (network shares like \\server\share)
@@ -63,21 +65,7 @@ pub fn expand_path(path: &str) -> String {
         return path.to_string();
     }
 
-    // Handle tilde expansion
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-
-    // Handle relative paths
-    if Path::new(path).is_relative() {
-        if let Ok(cwd) = std::env::current_dir() {
-            return cwd.join(path).to_string_lossy().into_owned();
-        }
-    }
-
-    path.to_string()
+    expand_path_from_base(path, base_dir)
 }
 
 /// Checks if a path is a UNC path (network share path).
@@ -99,9 +87,9 @@ fn is_unc_path(path: &str) -> bool {
 ///
 /// # Returns
 /// * `ValidationResult` indicating whether the input is valid
-pub fn validate_input(input: &GlobInput) -> ValidationResult {
+pub fn validate_input_with_base(input: &GlobInput, base_dir: &Path) -> ValidationResult {
     if let Some(ref path) = input.path {
-        let absolute_path = expand_path(path);
+        let absolute_path = expand_path(path, base_dir);
 
         // SECURITY: Skip validation for UNC paths (network shares)
         if is_unc_path(&absolute_path) {

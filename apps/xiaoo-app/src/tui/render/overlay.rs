@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,6 +12,34 @@ use crate::interaction_prompt::{interaction_prompt_outer_height, render_interact
 use crate::provider_dialog::ProviderDialog;
 
 use super::utils::{cursor_row_col, line_prefix_width};
+
+fn expand_popup_area(area: Rect, bounds: Rect, margin: u16) -> Rect {
+    let left = area.x.saturating_sub(margin).max(bounds.x);
+    let top = area.y.saturating_sub(margin).max(bounds.y);
+    let right = area
+        .x
+        .saturating_add(area.width)
+        .saturating_add(margin)
+        .min(bounds.x.saturating_add(bounds.width));
+    let bottom = area
+        .y
+        .saturating_add(area.height)
+        .saturating_add(margin)
+        .min(bounds.y.saturating_add(bounds.height));
+
+    Rect {
+        x: left,
+        y: top,
+        width: right.saturating_sub(left),
+        height: bottom.saturating_sub(top),
+    }
+}
+
+fn render_popup_backdrop(frame: &mut Frame, area: Rect, bounds: Rect, bg: ratatui::style::Color) {
+    let backdrop = expand_popup_area(area, bounds, 1);
+    frame.render_widget(Clear, backdrop);
+    frame.render_widget(Block::default().style(Style::default().bg(bg)), backdrop);
+}
 
 impl App {
     pub(crate) fn render_interaction_prompt_dialog(&mut self, frame: &mut Frame, area: Rect) {
@@ -39,6 +67,7 @@ impl App {
             height,
         };
 
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         render_interaction_prompt(
             frame,
             dialog_area,
@@ -85,6 +114,7 @@ impl App {
             height,
         };
 
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
         self.render_slash_popup(frame, dialog_area, &refs, self.state.slash.selected);
     }
@@ -245,6 +275,7 @@ impl App {
             height: dialog_height,
         };
 
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
         let dialog_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -332,6 +363,7 @@ impl App {
             height,
         };
 
+        render_popup_backdrop(frame, rect, area, self.state.theme.background);
         let title = format!(" Enter API key — {} / {} ", dialog.provider, dialog.model);
         let block = Block::default()
             .borders(Borders::ALL)

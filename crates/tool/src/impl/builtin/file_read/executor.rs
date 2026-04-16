@@ -18,6 +18,7 @@ use super::output::FileReadOutput;
 use super::readers;
 use super::spec::FileReadToolSpec;
 use super::validation;
+use crate::r#impl::path_resolver::{expand_path_from_base, runtime_workspace_root};
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::executor::ToolExecutor;
 use agent_contracts::tool::spec::ToolSpecView;
@@ -202,7 +203,7 @@ impl ToolExecutor for FileReadExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: FileReadInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
@@ -210,7 +211,8 @@ impl ToolExecutor for FileReadExecutor {
             }
         })?;
 
-        let validation_result = validation::validate_input(&input);
+        let workspace_root = runtime_workspace_root(runtime);
+        let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -225,19 +227,19 @@ impl ToolExecutor for FileReadExecutor {
         }
 
         let full_file_path = Self::normalize_path(&input.file_path);
-        let resolved_file_path = &full_file_path;
+        let resolved_file_path = expand_path_from_base(&full_file_path, workspace_root);
 
-        let ext = Self::get_extension(&full_file_path).unwrap_or_default();
+        let ext = Self::get_extension(&resolved_file_path).unwrap_or_default();
 
         if Self::dedup_applies(&ext) {
             let dedup_store = self.get_dedup_store().await;
 
-            if let Some(state) = dedup_store.get_read_state(&full_file_path) {
+            if let Some(state) = dedup_store.get_read_state(&resolved_file_path) {
                 if state.offset.is_some() {
-                    let current_mtime = get_file_mtime(Path::new(&full_file_path)).unwrap_or(0);
+                    let current_mtime = get_file_mtime(Path::new(&resolved_file_path)).unwrap_or(0);
 
                     let is_unchanged = dedup_store.is_file_unchanged(
-                        &full_file_path,
+                        &resolved_file_path,
                         current_mtime,
                         input.offset,
                         input.limit,
@@ -267,8 +269,8 @@ impl ToolExecutor for FileReadExecutor {
         match self
             .call_inner(
                 &input,
-                &full_file_path,
-                resolved_file_path,
+                &resolved_file_path,
+                &resolved_file_path,
                 &ext,
                 DEFAULT_MAX_SIZE_BYTES,
                 DEFAULT_MAX_TOKENS,

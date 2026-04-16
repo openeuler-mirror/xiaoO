@@ -41,16 +41,6 @@ impl App {
         self.render_input(frame, input_chunk);
         self.render_status_bar(frame, chunks[3]);
 
-        if self.state.provider_dialog.is_some()
-            || self.state.api_key_dialog.is_some()
-            || self.state.interaction_prompt.is_some()
-            || self.state.slash_menu_visible()
-        {
-            let overlay =
-                Block::default().style(Style::default().bg(ratatui::style::Color::Rgb(5, 5, 10)));
-            frame.render_widget(overlay, size);
-        }
-
         if self.state.provider_dialog.is_none() && self.state.api_key_dialog.is_none() {
             self.render_interaction_prompt_dialog(frame, frame.area());
             self.render_slash_popup_dialog(frame, frame.area());
