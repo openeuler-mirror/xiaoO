@@ -64,7 +64,12 @@ impl App {
         // Float in the bottom-right corner, just above the 3-row status bar.
         let x = area.x.saturating_add(area.width).saturating_sub(width + 1);
         let y = area.y.saturating_add(area.height).saturating_sub(4);
-        let toast_area = Rect { x, y, width, height: 1 };
+        let toast_area = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
         let paragraph = Paragraph::new(message).style(
             Style::default()
                 .fg(self.state.theme.background)

@@ -11,7 +11,7 @@ use agent_types::events::ToolResultEvent;
 use agent_types::outcome::{AgentError, AgentOutcome};
 use agent_types::tool::{RawToolCall, RawToolOutcome, ToolExecutionResult};
 use agent_types::{
-    AssistantMessage, ChatMessage, ContentBlock, MessageRole, StreamChunk, ToolUseBlock,
+    AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk, ToolUseBlock,
 };
 use serde_json::json;
 use tool::ToolCallBuilderImpl;
@@ -98,7 +98,7 @@ pub async fn run_agent_loop(
             let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
             sink.on_turn_start(agent_id, ctx.turn.turn_number);
         }
-        if let Err(error) = compress(&mut ctx).await {
+        if let Err(error) = compress(&mut ctx, CompressionTrigger::Automatic).await {
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Error,
@@ -130,7 +130,7 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
-        if let Err(error) = llm_call(&mut ctx).await {
+        if let Err(error) = llm_call_with_context_limit_recovery(&mut ctx).await {
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Error,
@@ -398,7 +398,29 @@ async fn end_turn_span(
         .await;
 }
 
-async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+#[derive(Clone, Copy)]
+enum CompressionTrigger {
+    Automatic,
+    ContextLimitRetry,
+}
+
+impl CompressionTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::ContextLimitRetry => "context_limit_retry",
+        }
+    }
+
+    fn is_forced(self) -> bool {
+        matches!(self, Self::ContextLimitRetry)
+    }
+}
+
+async fn compress(
+    ctx: &mut LoopContext<'_>,
+    trigger: CompressionTrigger,
+) -> Result<(), AgentError> {
     let agent_id_str = ctx
         .input
         .agent_id
@@ -417,6 +439,7 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                         "turn_number": ctx.turn.turn_number,
                         "agent_id": agent_id_str,
                         "message_count": ctx.state.messages.len(),
+                        "trigger": trigger.as_str(),
                     }),
                 )
                 .await,
@@ -450,12 +473,13 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                     "usage_ratio": analysis.usage_ratio,
                     "severity": format!("{:?}", analysis.severity),
                     "needs_compression": analysis.needs_compression(),
+                    "forced": trigger.is_forced(),
                 }),
             )
             .await;
     }
 
-    if !analysis.needs_compression() {
+    if !trigger.is_forced() && !analysis.needs_compression() {
         // end span — 无需压缩，正常结束
         if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
             rv.trace_recorder()
@@ -488,6 +512,7 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                 messages_after = view.messages.len(),
                 removed = view.removed_count,
                 has_summary = view.summary.is_some(),
+                trigger = trigger.as_str(),
                 "context compression triggered"
             );
 
@@ -499,6 +524,7 @@ async fn compress(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                         TraceOutcome::Ok,
                         json!({
                             "skipped": false,
+                            "forced": trigger.is_forced(),
                             "messages_before": msg_count_before,
                             "messages_after": view.messages.len(),
                             "removed_count": view.removed_count,
@@ -648,7 +674,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
     }
 }
 
-async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     if ctx.state.cancel.is_cancelled() {
         return Ok(());
     }
@@ -674,8 +700,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                 .clone();
             stream_assistant_text(event_sink.as_deref(), &agent_id, &streamed_text, chunk);
         })
-        .await
-        .map_err(|e| AgentError::LlmProvider(e.to_string()))?;
+        .await?;
 
     ctx.state.token_usage.prompt_tokens += response.message.usage.prompt_tokens;
     ctx.state.token_usage.completion_tokens += response.message.usage.completion_tokens;
@@ -696,6 +721,25 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
 
     ctx.turn.assistant_message = Some(response.message);
     Ok(())
+}
+
+async fn llm_call_with_context_limit_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+    match llm_call(ctx).await {
+        Ok(()) => Ok(()),
+        Err(LlmError::ContextLengthExceeded { message }) => {
+            tracing::warn!(
+                turn = ctx.turn.turn_number,
+                "LLM request exceeded provider context limit; forcing compression retry: {message}"
+            );
+
+            compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
+            build_messages(ctx).await?;
+            llm_call(ctx)
+                .await
+                .map_err(|error| AgentError::LlmProvider(error.to_string()))
+        }
+        Err(error) => Err(AgentError::LlmProvider(error.to_string())),
+    }
 }
 
 fn stream_assistant_text(
@@ -778,7 +822,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         build_messages(ctx)
             .await
             .map_err(|e| AgentError::PromptBuild(format!("retry after empty tool name: {e}")))?;
-        llm_call(ctx).await?;
+        llm_call_with_context_limit_recovery(ctx).await?;
 
         let retry_tool_calls: Vec<ToolUseBlock> = ctx
             .turn
@@ -1157,7 +1201,7 @@ fn build_outcome_cancelled(ctx: &LoopContext<'_>) -> AgentOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use agent_contracts::context::budget::TokenBudgetPolicy;
     use agent_contracts::{
@@ -1235,6 +1279,76 @@ mod tests {
         }
     }
 
+    struct ContextLimitThenSuccessProvider {
+        capabilities: ProviderCapabilities,
+        call_count: Arc<StdMutex<usize>>,
+    }
+
+    impl ContextLimitThenSuccessProvider {
+        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "context-limit-test".to_string(),
+                },
+                call_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ContextLimitThenSuccessProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut count = self
+                    .call_count
+                    .lock()
+                    .expect("provider call count mutex should not be poisoned");
+                *count += 1;
+                *count
+            };
+
+            if call_number == 1 {
+                return Err(LlmError::ContextLengthExceeded {
+                    message: "provider context limit exceeded".to_string(),
+                });
+            }
+
+            on_chunk(StreamChunk {
+                delta_text: Some("Recovered".to_string()),
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some("Recovered".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: Usage {
+                        prompt_tokens: 5,
+                        completion_tokens: 1,
+                        total_tokens: 6,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
     struct FixedPromptBuilder;
 
     #[async_trait]
@@ -1291,6 +1405,69 @@ mod tests {
 
         fn history_limit(&self) -> Result<usize, BudgetError> {
             self.available_budget()
+        }
+    }
+
+    struct ForceRetryCompressionPipeline {
+        forced_count: Arc<StdMutex<usize>>,
+    }
+
+    impl ForceRetryCompressionPipeline {
+        fn new(forced_count: Arc<StdMutex<usize>>) -> Self {
+            Self { forced_count }
+        }
+    }
+
+    #[async_trait]
+    impl CompressionPipeline for ForceRetryCompressionPipeline {
+        fn analyze(
+            &self,
+            messages: &[ChatMessage],
+            budget: &dyn TokenBudgetPolicy,
+        ) -> agent_types::compression::ContextAnalysis {
+            agent_types::compression::ContextAnalysis {
+                severity: agent_types::compression::ContextSeverity::Normal,
+                estimated_tokens: messages.len(),
+                should_compact: false,
+                total_tokens: messages.len(),
+                available_tokens: budget.available_budget().unwrap_or(0),
+                usage_ratio: 0.0,
+            }
+        }
+
+        async fn compress(
+            &self,
+            messages: &[ChatMessage],
+            _budget: &dyn TokenBudgetPolicy,
+            meta: &agent_types::compression::CompressionMeta,
+        ) -> Result<CompressedView, agent_contracts::CompressionError> {
+            let mut count = self
+                .forced_count
+                .lock()
+                .expect("compression counter mutex should not be poisoned");
+            *count += 1;
+
+            Ok(CompressedView {
+                messages: messages.to_vec(),
+                removed_count: 0,
+                summary: Some("forced retry compression".to_string()),
+                updated_meta: meta.clone(),
+                estimated_tokens: messages.len(),
+            })
+        }
+
+        fn microcompact(
+            &self,
+            messages: &[ChatMessage],
+            _now_ms: u64,
+        ) -> agent_types::compression::MicroCompactResult {
+            agent_types::compression::MicroCompactResult {
+                applied: false,
+                removed_count: 0,
+                removed_call_ids: Vec::new(),
+                messages: messages.to_vec(),
+                token_delta: 0,
+            }
         }
     }
 

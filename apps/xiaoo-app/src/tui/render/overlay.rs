@@ -225,7 +225,8 @@ impl App {
 
         let paragraph = if let Some(sel_range) = selection {
             // Build a Text with selection highlighting.
-            let text = build_input_text_with_selection(value, &sel_range, input_style, selection_style);
+            let text =
+                build_input_text_with_selection(value, &sel_range, input_style, selection_style);
             Paragraph::new(text)
                 .scroll((scroll_y as u16, scroll_x as u16))
                 .block(block)
@@ -438,14 +439,21 @@ fn build_input_text_with_selection(
             spans.push(Span::styled(source_line.to_owned(), normal_style));
         } else {
             // Before selection
-            let before: String = source_line.chars().take(overlap_start - char_offset).collect();
+            let before: String = source_line
+                .chars()
+                .take(overlap_start - char_offset)
+                .collect();
             if !before.is_empty() {
                 spans.push(Span::styled(before, normal_style));
             }
             // Selected portion
             let sel_local_start = overlap_start - char_offset;
             let sel_local_end = overlap_end - char_offset;
-            let selected: String = source_line.chars().skip(sel_local_start).take(sel_local_end - sel_local_start).collect();
+            let selected: String = source_line
+                .chars()
+                .skip(sel_local_start)
+                .take(sel_local_end - sel_local_start)
+                .collect();
             if !selected.is_empty() {
                 spans.push(Span::styled(selected, sel_style));
             }
