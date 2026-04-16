@@ -346,7 +346,12 @@ impl App {
         // transcript selection can extract text without re-rendering.
         self.state.render_state.line_texts = all_lines
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         self.state.render_state.line_is_header = line_is_header;
 
@@ -362,7 +367,8 @@ impl App {
                     continue;
                 }
                 let col_start = if line_idx == start_line { start_col } else { 0 };
-                let line_char_len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+                let line_char_len: usize =
+                    line.spans.iter().map(|s| s.content.chars().count()).sum();
                 let col_end = if line_idx == end_line {
                     end_col.min(line_char_len)
                 } else {
@@ -440,7 +446,12 @@ impl App {
 /// Restyle the characters in `col_start..col_end` (char indices) within a
 /// ratatui `Line` that may contain multiple spans.  Characters outside the
 /// range keep their original style.
-fn highlight_line_selection(line: Line<'_>, col_start: usize, col_end: usize, sel_style: Style) -> Line<'_> {
+fn highlight_line_selection(
+    line: Line<'_>,
+    col_start: usize,
+    col_end: usize,
+    sel_style: Style,
+) -> Line<'_> {
     let mut new_spans: Vec<Span<'_>> = Vec::new();
     let mut char_offset: usize = 0;
 
@@ -459,7 +470,12 @@ fn highlight_line_selection(line: Line<'_>, col_start: usize, col_end: usize, se
             let local_end = ov_end - char_offset;
 
             let before: String = span.content.chars().take(local_start).collect();
-            let selected: String = span.content.chars().skip(local_start).take(local_end - local_start).collect();
+            let selected: String = span
+                .content
+                .chars()
+                .skip(local_start)
+                .take(local_end - local_start)
+                .collect();
             let after: String = span.content.chars().skip(local_end).collect();
 
             if !before.is_empty() {

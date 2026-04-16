@@ -3,7 +3,7 @@ use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLifecycleStatus, SessionRecord,
     SessionRuntimeBuildInput, SessionRuntimeResolver, SessionServiceError, SessionStore,
 };
-use agent_contracts::{InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::outcome::AgentOutcome;
 use agent_types::tool::{RawToolOutcome, ToolExecutionResult};
@@ -33,6 +33,7 @@ struct LaneRunInput {
     append_user_message: bool,
     loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
+    channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
 }
 
 struct LaneTerminal {
@@ -176,6 +177,7 @@ impl SessionSupervisor {
         request: AppTurnRequest,
         loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
         interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
+        channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let _guard = self.root_turn_lock.lock().await;
         self.set_session_status(SessionLifecycleStatus::Running, None)
@@ -194,6 +196,7 @@ impl SessionSupervisor {
                 append_user_message: true,
                 loop_event_sink_override,
                 interaction_handle_override,
+                channel_file_sender_override,
             })
             .await;
 
@@ -232,6 +235,7 @@ impl SessionSupervisor {
                     append_user_message,
                     loop_event_sink_override: input.loop_event_sink_override.clone(),
                     interaction_handle_override: input.interaction_handle_override.clone(),
+                    channel_file_sender_override: input.channel_file_sender_override.clone(),
                     loop_state: loop_state.clone(),
                     memory_snapshot: memory_snapshot.clone(),
                 },
@@ -386,6 +390,7 @@ impl SessionSupervisor {
                     append_user_message: true,
                     loop_event_sink_override: None,
                     interaction_handle_override: None,
+                    channel_file_sender_override: None,
                 })
                 .await;
 

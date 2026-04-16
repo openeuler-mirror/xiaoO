@@ -5,7 +5,8 @@ use crate::channels::feishu::types::{
 };
 use crate::channels::{
     AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelError, ChannelMember,
-    ChannelMessage, ChannelMeta, ChannelProgressUpdate, ChannelResult, ChannelTextFormat,
+    ChannelMessage, ChannelMeta, ChannelOutboundAttachment,
+    ChannelProgressUpdate, ChannelResult, ChannelTextFormat,
 };
 use async_trait::async_trait;
 use axum::http::HeaderMap;
@@ -111,6 +112,27 @@ impl ChannelAdapter for FeishuAdapter {
             .await
     }
 
+    async fn send_attachment(
+        &self,
+        conversation_id: &str,
+        attachment: &ChannelOutboundAttachment,
+        reply_to_message_id: Option<&str>,
+    ) -> ChannelResult<Option<String>> {
+        let file_name = std::path::Path::new(&attachment.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
+
+        let file_key = self
+            .client
+            .upload_file(&attachment.path, file_name)
+            .await?;
+
+        self.client
+            .send_file_message(conversation_id, &file_key, reply_to_message_id)
+            .await
+    }
+
     fn format_user_reference(&self, user_id: &str) -> Option<String> {
         Some(format!(r#"<at user_id="{user_id}">你</at>"#))
     }
@@ -136,7 +158,7 @@ pub fn capabilities() -> ChannelCapabilities {
         supports_group_messages: true,
         requires_async_processing: true,
         supports_threads: true,
-        supports_media: false,
+        supports_media: true,
         supports_member_listing: true,
         supports_reactions: true,
         supports_progress_updates: true,

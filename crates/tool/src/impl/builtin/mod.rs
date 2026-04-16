@@ -8,6 +8,7 @@ mod glob;
 mod grep;
 mod join_subagent;
 mod print_hello_world;
+mod send_file;
 mod skill;
 mod spawn_subagent;
 mod tool_source;

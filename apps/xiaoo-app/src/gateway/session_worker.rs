@@ -2,7 +2,7 @@ use crate::gateway::{
     AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolver, SessionServiceError,
 };
-use agent_contracts::{InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
 use memory::{MemoryManager, MemorySnapshot};
@@ -18,6 +18,7 @@ pub struct SessionWorkerInput {
     pub append_user_message: bool,
     pub loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     pub interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
+    pub channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
 }
@@ -47,9 +48,12 @@ impl SessionWorker {
             resolved.bindings.tool_event_sink = None;
             resolved.bindings.interaction_handle = None;
         } else {
-            // Merge interaction handle: override takes precedence.
+            // Merge overrides: override takes precedence.
             if let Some(override_handle) = input.interaction_handle_override.clone() {
                 resolved.bindings.interaction_handle = Some(override_handle);
+            }
+            if let Some(override_sender) = input.channel_file_sender_override.clone() {
+                resolved.bindings.channel_file_sender = Some(override_sender);
             }
             resolved.bindings.loop_event_sink = merge_loop_event_sinks(
                 resolved.bindings.loop_event_sink.clone(),
