@@ -53,6 +53,7 @@ impl SessionGateway {
                     updates_tx.clone(),
                     interaction_rx,
                 ))),
+                channel_file_sender: None,
             };
 
             let resolver = Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
