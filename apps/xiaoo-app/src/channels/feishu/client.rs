@@ -224,6 +224,124 @@ impl FeishuClient {
             })
     }
 
+    /// Upload a file to Feishu and return the file_key.
+    pub async fn upload_file(
+        &self,
+        file_path: &str,
+        file_name: &str,
+    ) -> ChannelResult<String> {
+        let token = self.fetch_tenant_access_token().await?;
+        let file_bytes =
+            tokio::fs::read(file_path)
+                .await
+                .map_err(|error| ChannelError::Transport {
+                    message: format!("failed to read file {file_path}: {error}"),
+                })?;
+
+        let mime_type = mime_guess::from_path(file_path)
+            .first_or_octet_stream()
+            .to_string();
+        let feishu_file_type = match std::path::Path::new(file_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+        {
+            Some(ref ext) if ext == "pdf" => "pdf",
+            Some(ref ext) if ext == "doc" || ext == "docx" => "doc",
+            Some(ref ext) if ext == "xls" || ext == "xlsx" => "xls",
+            Some(ref ext) if ext == "ppt" || ext == "pptx" => "ppt",
+            _ => "stream",
+        };
+
+        let file_part = reqwest::multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str(&mime_type)
+            .map_err(|error| ChannelError::Transport {
+                message: format!("failed to create multipart file part: {error}"),
+            })?;
+
+        let form = reqwest::multipart::Form::new()
+            .text("file_type", feishu_file_type.to_string())
+            .text("file_name", file_name.to_string())
+            .part("file", file_part);
+
+        let response = self
+            .client
+            .post(format!(
+                "{}/open-apis/im/v1/files",
+                self.config.base_url()
+            ))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|error| ChannelError::Transport {
+                message: format!("feishu upload_file request failed: {error}"),
+            })?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| ChannelError::Transport {
+                message: format!("failed to read feishu upload_file response: {error}"),
+            })?;
+
+        if !status.is_success() {
+            return Err(ChannelError::Delivery {
+                message: format!(
+                    "feishu upload_file failed with status {status}: {}",
+                    summarize_response_body(&body)
+                ),
+            });
+        }
+
+        let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
+            ChannelError::Transport {
+                message: format!("invalid feishu upload_file response: {error}"),
+            }
+        })?;
+
+        if payload.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
+            let msg = payload
+                .get("msg")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error");
+            return Err(ChannelError::Delivery {
+                message: format!("feishu upload_file failed: {msg}"),
+            });
+        }
+
+        payload
+            .get("data")
+            .and_then(|d| d.get("file_key"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .ok_or_else(|| ChannelError::Transport {
+                message: "feishu upload_file response missing data.file_key".to_string(),
+            })
+    }
+
+    /// Send a file message to a conversation using a previously uploaded file_key.
+    pub async fn send_file_message(
+        &self,
+        conversation_id: &str,
+        file_key: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> ChannelResult<Option<String>> {
+        let token = self.fetch_tenant_access_token().await?;
+        let content = serde_json::json!({"file_key": file_key}).to_string();
+        self.send_message_content(
+            &token,
+            conversation_id,
+            reply_to_message_id,
+            "file",
+            content,
+            "send_file",
+        )
+        .await
+    }
+
     async fn send_message_content(
         &self,
         token: &str,

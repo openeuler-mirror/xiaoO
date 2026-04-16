@@ -2,7 +2,7 @@ use crate::gateway::{
     AppTurnRequest, AppTurnResult, SessionOpenRequest, SessionRecord, SessionStreamMode,
     SessionSubmitReceipt, SessionSubscription,
 };
-use agent_contracts::{InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
@@ -41,6 +41,7 @@ pub trait SessionService: Send + Sync {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
         _interaction_handle: Option<Arc<dyn InteractionHandle>>,
+        _channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.run_turn_with_events(request, event_sink).await
     }
