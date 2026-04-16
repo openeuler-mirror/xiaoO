@@ -4,7 +4,7 @@ use crate::gateway::{
     SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
     SessionStore, SessionStoreError,
 };
-use agent_contracts::LoopEventSink;
+use agent_contracts::{InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -126,6 +126,7 @@ impl CoreBackedSessionService {
         &self,
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
+        interaction_handle: Option<Arc<dyn InteractionHandle>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let existing = self.session_store.load(&request.session_id).await;
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
@@ -138,7 +139,9 @@ impl CoreBackedSessionService {
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
         let supervisor = self.get_or_create_supervisor(seed_session).await;
         supervisor.prepare_root_turn(&request, &resolved).await;
-        supervisor.run_root_turn(request, event_sink).await
+        supervisor
+            .run_root_turn(request, event_sink, interaction_handle)
+            .await
     }
 }
 
@@ -148,7 +151,7 @@ impl SessionService for CoreBackedSessionService {
         &self,
         request: AppTurnRequest,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, None).await
+        self.run_turn_inner(request, None, None).await
     }
 
     async fn run_turn_with_events(
@@ -156,7 +159,17 @@ impl SessionService for CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink).await
+        self.run_turn_inner(request, event_sink, None).await
+    }
+
+    async fn run_turn_with_interaction(
+        &self,
+        request: AppTurnRequest,
+        event_sink: Option<Arc<dyn LoopEventSink>>,
+        interaction_handle: Option<Arc<dyn InteractionHandle>>,
+    ) -> Result<AppTurnResult, SessionServiceError> {
+        self.run_turn_inner(request, event_sink, interaction_handle)
+            .await
     }
 }
 

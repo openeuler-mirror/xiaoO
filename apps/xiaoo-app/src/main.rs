@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
-use xiaoo_app::httpserver::{create_router, create_router_with_feishu};
+use xiaoo_app::httpserver::{create_router, create_router_with_feishu_and_timeout};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,7 +28,11 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let app = AppBootstrap::from_session_components(session_store, resolver)?;
     let router = match config.feishu_config()? {
-        Some(feishu) => create_router_with_feishu(app.session_service, feishu)
+        Some(feishu) => create_router_with_feishu_and_timeout(
+            app.session_service,
+            feishu,
+            config.interaction_timeout_secs(),
+        )
             .map_err(anyhow::Error::new)
             .context("failed to create router with feishu")?,
         None => create_router(app.session_service),

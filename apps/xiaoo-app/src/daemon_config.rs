@@ -50,6 +50,8 @@ pub struct LlmConfig {
 pub struct ChannelsConfig {
     #[serde(default)]
     pub feishu: Option<FeishuChannelConfig>,
+    #[serde(default)]
+    pub interaction_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,6 +210,10 @@ impl DaemonConfig {
             system_prompt,
             workspace_root,
         })
+    }
+
+    pub fn interaction_timeout_secs(&self) -> u64 {
+        self.app.channels.interaction_timeout_secs.unwrap_or(600)
     }
 
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {

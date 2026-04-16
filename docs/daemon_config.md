@@ -169,3 +169,16 @@ session_id = "{channel_instance_id or channel}:{conversation_id}"
 - Same `(channel, conversation_id)` combination shares the same session (retains context history).
 - Different `conversation_id` creates independent sessions.
 - When `channel_instance_id` is configured, it is used as prefix (supports multi-instance deployment of same channel type, e.g., multiple Feishu apps).
+
+### Channel Interaction Timeout
+
+When the agent needs to ask the user a question (via `ask_user_question` tool), it sends the question to the channel (e.g., Feishu) and waits for the user's reply. If the user does not reply within the configured timeout, the interaction is cancelled.
+
+```toml
+[channels]
+interaction_timeout_secs = 600   # Timeout in seconds, default: 600 (10 minutes)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interaction_timeout_secs` | integer | `600` | Maximum seconds to wait for a user reply. The value is rounded **up** to the nearest whole minute (minimum 1 minute). For example, `10` → 1 minute, `90` → 2 minutes, `600` → 10 minutes. Both the actual timeout and the displayed prompt use the rounded value. When the timeout expires, the pending interaction is cancelled, the user is notified, and the agent stops the current task. |
