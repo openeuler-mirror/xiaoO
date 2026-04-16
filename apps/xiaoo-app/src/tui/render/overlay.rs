@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
 };
@@ -179,6 +179,7 @@ impl App {
         let inner = block.inner(area);
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
+        let selection = self.state.chat_state.input.selected_range();
         let (row, col) = cursor_row_col(value, cursor);
         let lines: Vec<&str> = value.split('\n').collect();
         let line = lines.get(row).copied().unwrap_or("");
@@ -190,10 +191,23 @@ impl App {
         let visual_x = line_prefix_width(line, col);
         let scroll_x = visual_x.max(max_width) - max_width;
 
-        let paragraph = Paragraph::new(value)
-            .style(input_style)
-            .scroll((scroll_y as u16, scroll_x as u16))
-            .block(block);
+        let selection_style = Style::default()
+            .fg(self.state.theme.background)
+            .bg(self.state.theme.foreground)
+            .add_modifier(Modifier::BOLD);
+
+        let paragraph = if let Some(sel_range) = selection {
+            // Build a Text with selection highlighting.
+            let text = build_input_text_with_selection(value, &sel_range, input_style, selection_style);
+            Paragraph::new(text)
+                .scroll((scroll_y as u16, scroll_x as u16))
+                .block(block)
+        } else {
+            Paragraph::new(value)
+                .style(input_style)
+                .scroll((scroll_y as u16, scroll_x as u16))
+                .block(block)
+        };
         frame.render_widget(paragraph, area);
 
         if !self.state.chat_state.is_loading
@@ -369,4 +383,54 @@ impl App {
             frame.render_widget(error_paragraph, chunks[2]);
         }
     }
+}
+
+/// Build a ratatui `Text` value for the input box where the characters in
+/// `sel_range` (char indices) are highlighted with `sel_style`.
+fn build_input_text_with_selection(
+    value: &str,
+    sel_range: &std::ops::Range<usize>,
+    normal_style: Style,
+    sel_style: Style,
+) -> Text<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut char_offset: usize = 0;
+
+    for source_line in value.split('\n') {
+        let line_len = source_line.chars().count();
+        let line_end = char_offset + line_len;
+
+        let overlap_start = sel_range.start.max(char_offset);
+        let overlap_end = sel_range.end.min(line_end);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if overlap_start >= overlap_end {
+            // No selection overlap on this line.
+            spans.push(Span::styled(source_line.to_owned(), normal_style));
+        } else {
+            // Before selection
+            let before: String = source_line.chars().take(overlap_start - char_offset).collect();
+            if !before.is_empty() {
+                spans.push(Span::styled(before, normal_style));
+            }
+            // Selected portion
+            let sel_local_start = overlap_start - char_offset;
+            let sel_local_end = overlap_end - char_offset;
+            let selected: String = source_line.chars().skip(sel_local_start).take(sel_local_end - sel_local_start).collect();
+            if !selected.is_empty() {
+                spans.push(Span::styled(selected, sel_style));
+            }
+            // After selection
+            let after: String = source_line.chars().skip(sel_local_end).collect();
+            if !after.is_empty() {
+                spans.push(Span::styled(after, normal_style));
+            }
+        }
+
+        lines.push(Line::from(spans));
+        // +1 accounts for the '\n' that was consumed by split.
+        char_offset = line_end + 1;
+    }
+
+    Text::from(lines)
 }

@@ -7,7 +7,8 @@ use crate::input::EventHandler;
 use crate::interaction_prompt::{demo_prompt_request, PromptFocus, PromptResolution};
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
 use crate::provider_service::{
-    persist_active_provider_selection, persisted_selection_settings, validate_and_connect_api_key,
+    copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
+    validate_and_connect_api_key,
 };
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
 
@@ -16,10 +17,40 @@ impl App {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return Ok(());
         }
+
+        // Ctrl+C: copy selected input text when selection exists, otherwise quit.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL)
             || key.code == KeyCode::Char('\x03')
         {
+            // Check input selection first.
+            if let Some(text) = self.state.chat_state.input.selected_text().map(str::to_owned) {
+                self.state.chat_state.input.clear_selection();
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                return Ok(());
+            }
+            // Check transcript selection.
+            if let Some(text) = self.state.transcript_selected_text() {
+                self.state.transcript_selection = None;
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                return Ok(());
+            }
+            // No selection → quit.
             self.state.should_quit = true;
+            return Ok(());
+        }
+
+        // Ctrl+X: cut selected input text.
+        if key.code == KeyCode::Char('x') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            if let Some(text) = self.state.chat_state.input.delete_selected() {
+                if let Err(e) = copy_to_clipboard(&text) {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                }
+                self.state.note_input_changed();
+            }
             return Ok(());
         }
 
@@ -234,7 +265,10 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Esc => {}
+            KeyCode::Esc => {
+                // Esc clears an active transcript selection (mirrors opencode's Esc handler).
+                self.state.transcript_selection = None;
+            }
             KeyCode::Enter => self.submit_editing_input().await?,
             _ => {
                 self.state.chat_state.input.handle_event(&Event::Key(key));

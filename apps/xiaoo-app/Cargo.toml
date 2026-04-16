@@ -17,6 +17,8 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 toml = "0.8"
 anyhow.workspace = true
+arboard = { workspace = true }
+base64.workspace = true
 async-trait.workspace = true
 axum = "0.7"
 regex = "1.11"
