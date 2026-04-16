@@ -80,6 +80,36 @@ function formatExtraValue(value) {
     return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 }
 
+function createCollapsiblePanel(id, title, content, bgColor, borderColor, textColor = '', defaultCollapsed = false) {
+    const collapsedClass = defaultCollapsed ? 'collapsed' : '';
+    return `
+        <div class="mb-4">
+            <div class="collapsible-panel ${bgColor} border ${borderColor}">
+                <div class="collapsible-header" onclick="toggleCollapsible('${id}')">
+                    <label class="font-semibold text-gray-700 cursor-pointer">${title}</label>
+                    <svg class="w-5 h-5 text-gray-500 collapsible-arrow ${collapsedClass}" id="arrow-${id}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                </div>
+                <div class="collapsible-content ${collapsedClass}" id="content-${id}">
+                    <div class="overflow-auto p-4" style="resize: vertical; min-height: 80px; max-height: 80vh;">
+                        <pre class="whitespace-pre-wrap text-sm font-mono ${textColor}">${escapeHtml(content)}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function toggleCollapsible(id) {
+    const content = document.getElementById('content-' + id);
+    const arrow = document.getElementById('arrow-' + id);
+    if (content && arrow) {
+        content.classList.toggle('collapsed');
+        arrow.classList.toggle('collapsed');
+    }
+}
+
 function getToolStatus(extras) {
     if (!extras) {
         return null;
@@ -707,56 +737,41 @@ async function showSpanDetailsInline(spanId) {
                 `;
             }
             if (toolInput !== null) {
-                inputOutputHtml += `
-                    <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Tool Input:</label>
-                        <div class="bg-blue-50 border border-blue-200 rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4 border-b-4 border-blue-100 hover:border-blue-300 transition-colors" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolInput)}</pre>
-                            </div>
-                        </div>
-                    </div>
-                `;
+                inputOutputHtml += createCollapsiblePanel(
+                    'tool-input-' + span.span_id,
+                    'Tool Input',
+                    toolInput,
+                    'bg-blue-50',
+                    'border-blue-200'
+                );
             }
             if (toolOutput !== null) {
-                inputOutputHtml += `
-                    <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Tool Output:</label>
-                        <div class="${toolResultClass} border rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolOutput)}</pre>
-                            </div>
-                        </div>
-                    </div>
-                `;
+                inputOutputHtml += createCollapsiblePanel(
+                    'tool-output-' + span.span_id,
+                    'Tool Output',
+                    toolOutput,
+                    toolResultClass.split(' ')[0] || 'bg-gray-50',
+                    toolResultClass.split(' ')[1] || 'border-gray-200'
+                );
             }
             if (toolStdout !== null && toolStdout !== '') {
-                inputOutputHtml += `
-                    <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Stdout:</label>
-                        <div class="${toolResultClass} border rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono">${escapeHtml(toolStdout)}</pre>
-                            </div>
-                        </div>
-                    </div>
-                `;
+                inputOutputHtml += createCollapsiblePanel(
+                    'stdout-' + span.span_id,
+                    'Stdout',
+                    toolStdout,
+                    toolResultClass.split(' ')[0] || 'bg-gray-50',
+                    toolResultClass.split(' ')[1] || 'border-gray-200'
+                );
             }
             if (toolStderr !== null && toolStderr !== '') {
-                inputOutputHtml += `
-                    <div class="mb-4">
-                        <label class="font-semibold text-gray-700 mb-2 block">Stderr:</label>
-                        <div class="bg-red-50 border border-red-200 rounded-lg overflow-hidden">
-                            <div class="overflow-auto p-4" 
-                                 style="resize: vertical; min-height: 80px; max-height: 80vh;">
-                                <pre class="whitespace-pre-wrap text-sm font-mono text-red-800">${escapeHtml(toolStderr)}</pre>
-                            </div>
-                        </div>
-                    </div>
-                `;
+                inputOutputHtml += createCollapsiblePanel(
+                    'stderr-' + span.span_id,
+                    'Stderr',
+                    toolStderr,
+                    'bg-red-50',
+                    'border-red-200',
+                    'text-red-800'
+                );
             }
             if (toolStatus) {
                 inputOutputHtml += `

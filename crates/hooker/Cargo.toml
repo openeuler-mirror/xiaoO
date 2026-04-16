@@ -13,4 +13,5 @@ agent-contracts = { path = "../agent-contracts" }
 agent-types = { path = "../agent-types" }
 async-trait.workspace = true
 thiserror.workspace = true
+serde.workspace = true
 serde_json.workspace = true
