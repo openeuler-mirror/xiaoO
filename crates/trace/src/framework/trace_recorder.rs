@@ -26,7 +26,7 @@ struct ChronologyState {
 
 impl TraceRecorderImpl {
     pub(crate) async fn new(config: &TraceRecorderConfig) -> Result<Self, BuildError> {
-        let trace_id = Ulid::new().to_string();
+        let _trace_id = Ulid::new().to_string();
         let trace_id = Ulid::new().to_string();
         let backend_type = TraceBackendType::parse(config.storage_backend.as_str())?;
         let backend: Box<dyn TraceBackend> = match backend_type {
