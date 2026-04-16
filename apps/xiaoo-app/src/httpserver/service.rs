@@ -1,6 +1,6 @@
 use crate::gateway::{AppTurnResult, SessionService, SessionServiceError};
 use crate::httpserver::channel_ingress::{build_channel_turn_request, GatewayChannelMessage};
-use agent_contracts::LoopEventSink;
+use agent_contracts::{InteractionHandle, LoopEventSink};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -31,13 +31,24 @@ impl GatewayService {
         &self,
         message: GatewayChannelMessage,
     ) -> Result<GatewayTurnResponse, GatewayServiceError> {
-        self.handle_channel_message_with_events(message, None).await
+        self.handle_channel_message_with_interaction(message, None, None)
+            .await
     }
 
     pub async fn handle_channel_message_with_events(
         &self,
         message: GatewayChannelMessage,
         event_sink: Option<Arc<dyn LoopEventSink>>,
+    ) -> Result<GatewayTurnResponse, GatewayServiceError> {
+        self.handle_channel_message_with_interaction(message, event_sink, None)
+            .await
+    }
+
+    pub async fn handle_channel_message_with_interaction(
+        &self,
+        message: GatewayChannelMessage,
+        event_sink: Option<Arc<dyn LoopEventSink>>,
+        interaction_handle: Option<Arc<dyn InteractionHandle>>,
     ) -> Result<GatewayTurnResponse, GatewayServiceError> {
         let request = build_channel_turn_request(&message);
         let session_id = request.session_id.clone();
@@ -49,7 +60,7 @@ impl GatewayService {
             ..
         } = self
             .session_service
-            .run_turn_with_events(request, event_sink)
+            .run_turn_with_interaction(request, event_sink, interaction_handle)
             .await?;
 
         Ok(GatewayTurnResponse {

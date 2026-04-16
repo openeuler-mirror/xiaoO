@@ -3,7 +3,11 @@ use crate::channels::{
     feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError, ChannelResult,
     ChannelRuntime,
 };
-use crate::gateway::{ChannelProgressRelayHandle, SessionService};
+use crate::gateway::channel_interaction::{
+    resolve_interaction_from_text, ChannelInteractionHandle,
+};
+use crate::gateway::pending_interaction::PendingInteractionStore;
+use crate::gateway::{channel_session_id, ChannelProgressRelayHandle, SessionService};
 use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
     GatewayChannelMessage,
@@ -28,13 +32,18 @@ use tracing::warn;
 pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
     feishu_runtime: Option<ChannelRuntime>,
+    pending_interactions: Arc<PendingInteractionStore>,
+    interaction_timeout_secs: u64,
 }
 
 impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
+        let pending_interactions = Arc::new(PendingInteractionStore::new());
         Self {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: None,
+            pending_interactions,
+            interaction_timeout_secs: 120,
         }
     }
 
@@ -62,6 +71,8 @@ impl GatewayAppState {
         Self {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: Some(runtime),
+            pending_interactions: Arc::new(PendingInteractionStore::new()),
+            interaction_timeout_secs: 120,
         }
     }
 }
@@ -153,6 +164,16 @@ pub fn create_router_with_feishu(
         session_service,
         feishu_config,
     )?))
+}
+
+pub fn create_router_with_feishu_and_timeout(
+    session_service: Arc<dyn SessionService>,
+    feishu_config: FeishuConfig,
+    interaction_timeout_secs: u64,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
+    state.interaction_timeout_secs = interaction_timeout_secs;
+    Ok(create_router_from_state(state))
 }
 
 fn create_router_from_state(state: GatewayAppState) -> Router {
@@ -282,6 +303,18 @@ async fn process_channel_message(
     let adapter = runtime.adapter.clone();
     let conversation_id = message.conversation_id.clone();
     let reply_to_message_id = message.reply_to_message_id.clone();
+
+    // --- Check for pending ask_user_question interaction ---
+    let session_id = channel_session_id(
+        &runtime.channel_id,
+        Some(&runtime.instance_id),
+        &conversation_id,
+    );
+    if let Some(pending) = state.pending_interactions.take(&session_id).await {
+        let response = resolve_interaction_from_text(&message.text, &pending.request);
+        let _ = pending.response_tx.send(response);
+        return Ok(());
+    }
     let progress_relay = runtime.capabilities.supports_progress_updates.then(|| {
         ChannelProgressRelayHandle::new(
             adapter.clone(),
@@ -300,9 +333,21 @@ async fn process_channel_message(
         .map(|relay| Arc::new(relay.clone()) as Arc<dyn LoopEventSink>);
     let mut gateway_message = build_gateway_channel_message(message)?;
     gateway_message.channel_identity_prompt = channel_identity_prompt;
+
+    // Create a ChannelInteractionHandle so ask_user_question works in Feishu.
+    let interaction_handle: Option<Arc<dyn agent_contracts::InteractionHandle>> =
+        Some(Arc::new(ChannelInteractionHandle::new(
+            state.interaction_timeout_secs,
+            session_id,
+            conversation_id.clone(),
+            reply_to_message_id.clone(),
+            state.pending_interactions.clone(),
+            adapter.clone(),
+        )));
+
     let turn_response = match state
         .gateway_service
-        .handle_channel_message_with_events(gateway_message, event_sink)
+        .handle_channel_message_with_interaction(gateway_message, event_sink, interaction_handle)
         .await
     {
         Ok(response) => response,

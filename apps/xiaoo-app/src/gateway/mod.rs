@@ -1,3 +1,5 @@
+pub mod channel_interaction;
+pub mod pending_interaction;
 pub mod bootstrap;
 pub mod core_session_service;
 pub mod hosted_runtime_resolver;
