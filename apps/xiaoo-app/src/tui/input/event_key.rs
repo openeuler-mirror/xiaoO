@@ -197,7 +197,10 @@ impl App {
             if self.state.slash_menu_visible() {
                 self.state.apply_slash_selection();
             } else {
-                crate::slash_complete::apply_slash_tab(&mut self.state.chat_state.input);
+                crate::slash_complete::apply_slash_tab(
+                    &mut self.state.chat_state.input,
+                    &self.state.external_commands,
+                );
             }
             self.state.note_input_changed();
             return Ok(());
@@ -308,27 +311,32 @@ impl App {
             return Ok(());
         }
 
-        if user_input.trim().starts_with("/create-skill") {
-            let rest = user_input
-                .trim()
-                .strip_prefix("/create-skill")
-                .unwrap_or("")
-                .trim();
-            let prompt = if rest.is_empty() {
-                "Create a new skill.".to_string()
-            } else {
-                format!("Create a new skill. User request: {rest}")
-            };
-            if let Err(error) = self.gateway.start_turn(&mut self.state, prompt).await {
-                self.state
-                    .chat_state
-                    .messages
-                    .push(crate::chat::Message::system(format!(
-                        "无法启动当前请求: {error}"
-                    )));
-                self.state.chat_state.stick_to_bottom = true;
+        // NOTE: /create-skill is not yet implemented; disabled until ready.
+        // if user_input.trim().starts_with("/create-skill") { ... }
+
+        // External commands from ~/.xiaoo/commands/
+        {
+            let trimmed = user_input.trim();
+            let cmd_name = trimmed.strip_prefix('/').unwrap_or("");
+            if let Some(cmd) = self
+                .state
+                .external_commands
+                .iter()
+                .find(|c| c.name.eq_ignore_ascii_case(cmd_name))
+            {
+                let body = cmd.body.clone();
+                self.state.chat_state.input.reset();
+                if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(format!(
+                            "无法启动当前请求: {error}"
+                        )));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+                return Ok(());
             }
-            return Ok(());
         }
 
         if let Err(error) = self.gateway.start_turn(&mut self.state, user_input).await {

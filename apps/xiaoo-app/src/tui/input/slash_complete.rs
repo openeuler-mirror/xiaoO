@@ -1,7 +1,8 @@
 //! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/create-skill`, `/dir`, `/prompt-demo`).
+//! `app.rs` (`/connect`, `/dir`, `/prompt-demo`).
 
 use crate::input::Input;
+use crate::services::command_loader::ExternalCommand;
 
 pub struct SlashCommandSpec {
     pub name: &'static str,
@@ -14,10 +15,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/connect",
         summary: "打开 provider / model 选择窗口并连接当前后端。",
     },
-    SlashCommandSpec {
-        name: "/create-skill",
-        summary: "引导 agent 生成一个新的 skill。",
-    },
+    // NOTE: /create-skill is not yet implemented; hidden from TUI until ready.
+    // SlashCommandSpec {
+    //     name: "/create-skill",
+    //     summary: "引导 agent 生成一个新的 skill。",
+    // },
     SlashCommandSpec {
         name: "/dir",
         summary: "切换当前工作目录。",
@@ -48,22 +50,37 @@ pub fn slash_typed_prefix(value: &str, cursor: usize) -> Option<String> {
 }
 
 /// Commands whose canonical form starts with `typed` (ASCII case-insensitive).
-pub fn candidates_for_prefix(typed: &str) -> Vec<&'static str> {
-    SLASH_COMMANDS
+/// Includes both built-in commands and external commands from `~/.xiaoo/commands/`.
+pub fn candidates_for_prefix(typed: &str, external: &[ExternalCommand]) -> Vec<String> {
+    let typed_lower = typed.to_ascii_lowercase();
+    let mut result: Vec<String> = SLASH_COMMANDS
         .iter()
         .map(|spec| spec.name)
-        .filter(|cmd| {
-            cmd.to_ascii_lowercase()
-                .starts_with(typed.to_ascii_lowercase().as_str())
-        })
-        .collect()
+        .filter(|cmd| cmd.to_ascii_lowercase().starts_with(&typed_lower))
+        .map(|s| s.to_string())
+        .collect();
+    for cmd in external {
+        let slash_name = format!("/{}", cmd.name);
+        if slash_name.to_ascii_lowercase().starts_with(&typed_lower) {
+            result.push(slash_name);
+        }
+    }
+    result
 }
 
-pub fn summary_for_command(command: &str) -> Option<&'static str> {
-    SLASH_COMMANDS
+/// Look up a summary/description for a command name, checking built-in then external.
+pub fn summary_for_command(command: &str, external: &[ExternalCommand]) -> Option<String> {
+    if let Some(spec) = SLASH_COMMANDS
         .iter()
         .find(|spec| spec.name.eq_ignore_ascii_case(command))
-        .map(|spec| spec.summary)
+    {
+        return Some(spec.summary.to_string());
+    }
+    let name = command.strip_prefix('/').unwrap_or(command);
+    external
+        .iter()
+        .find(|cmd| cmd.name.eq_ignore_ascii_case(name))
+        .map(|cmd| cmd.description.clone())
 }
 
 /// Replace the slash token on the current line with `chosen` (full command string).
@@ -94,20 +111,21 @@ pub fn apply_slash_pick(input: &mut Input, chosen: &str) {
 }
 
 /// Tab: longest-prefix expand (bash-style), or single match. Returns `true` if the buffer changed.
-pub fn apply_slash_tab(input: &mut Input) -> bool {
+pub fn apply_slash_tab(input: &mut Input, external: &[ExternalCommand]) -> bool {
     let value = input.value();
     let cursor = input.cursor();
     let Some(typed) = slash_typed_prefix(value, cursor) else {
         return false;
     };
-    let candidates: Vec<&str> = candidates_for_prefix(&typed);
+    let candidates = candidates_for_prefix(&typed, external);
     if candidates.is_empty() {
         return false;
     }
-    let new_token = if candidates.len() == 1 {
-        candidates[0].to_string()
+    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+    let new_token = if refs.len() == 1 {
+        refs[0].to_string()
     } else {
-        longest_common_prefix(&candidates)
+        longest_common_prefix(&refs)
     };
     if new_token == typed {
         return false;
@@ -159,47 +177,69 @@ fn longest_common_prefix(strs: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    const NO_EXT: &[ExternalCommand] = &[];
+
+    fn sample_external() -> Vec<ExternalCommand> {
+        vec![ExternalCommand {
+            name: "agent-start".to_string(),
+            description: "Start an agent project".to_string(),
+            body: "invoke the agent-start skill".to_string(),
+        }]
+    }
+
     #[test]
     fn con_to_connect() {
         let mut i: Input = "/con".into();
-        assert!(apply_slash_tab(&mut i));
+        assert!(apply_slash_tab(&mut i, NO_EXT));
         assert_eq!(i.value(), "/connect");
     }
 
     #[test]
-    fn c_stays_ambiguous() {
+    fn c_completes_to_connect() {
         let mut i: Input = "/c".into();
-        assert!(!apply_slash_tab(&mut i));
-        assert_eq!(i.value(), "/c");
-    }
-
-    #[test]
-    fn create_s_to_skill() {
-        let mut i: Input = "/create-s".into();
-        assert!(apply_slash_tab(&mut i));
-        assert_eq!(i.value(), "/create-skill");
+        assert!(apply_slash_tab(&mut i, NO_EXT));
+        assert_eq!(i.value(), "/connect");
     }
 
     #[test]
     fn leading_spaces() {
         let mut i = Input::default().with_value("  /con".to_string());
-        assert!(apply_slash_tab(&mut i));
+        assert!(apply_slash_tab(&mut i, NO_EXT));
         assert_eq!(i.value(), "  /connect");
     }
 
     #[test]
-    fn candidates_prefix() {
+    fn candidates_prefix_builtin() {
         assert_eq!(
-            candidates_for_prefix("/"),
-            vec!["/connect", "/create-skill", "/dir", "/prompt-demo"]
+            candidates_for_prefix("/", NO_EXT),
+            vec!["/connect", "/dir", "/prompt-demo"]
         );
+        assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
+        assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
+        assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir"]);
         assert_eq!(
-            candidates_for_prefix("/c"),
-            vec!["/connect", "/create-skill"]
+            candidates_for_prefix("/p", NO_EXT),
+            vec!["/prompt-demo"]
         );
-        assert_eq!(candidates_for_prefix("/con"), vec!["/connect"]);
-        assert_eq!(candidates_for_prefix("/d"), vec!["/dir"]);
-        assert_eq!(candidates_for_prefix("/p"), vec!["/prompt-demo"]);
+    }
+
+    #[test]
+    fn candidates_include_external() {
+        let ext = sample_external();
+        let all = candidates_for_prefix("/", &ext);
+        assert!(all.contains(&"/agent-start".to_string()));
+        assert!(all.contains(&"/connect".to_string()));
+
+        let a = candidates_for_prefix("/a", &ext);
+        assert_eq!(a, vec!["/agent-start"]);
+    }
+
+    #[test]
+    fn tab_completes_external() {
+        let ext = sample_external();
+        let mut i: Input = "/ag".into();
+        assert!(apply_slash_tab(&mut i, &ext));
+        assert_eq!(i.value(), "/agent-start");
     }
 
     #[test]
@@ -210,11 +250,20 @@ mod tests {
     }
 
     #[test]
-    fn summaries_are_available_for_known_commands() {
+    fn summaries_builtin() {
         assert_eq!(
-            summary_for_command("/connect"),
-            Some("打开 provider / model 选择窗口并连接当前后端。")
+            summary_for_command("/connect", NO_EXT),
+            Some("打开 provider / model 选择窗口并连接当前后端。".to_string())
         );
-        assert_eq!(summary_for_command("/missing"), None);
+        assert_eq!(summary_for_command("/missing", NO_EXT), None);
+    }
+
+    #[test]
+    fn summaries_external() {
+        let ext = sample_external();
+        assert_eq!(
+            summary_for_command("/agent-start", &ext),
+            Some("Start an agent project".to_string())
+        );
     }
 }

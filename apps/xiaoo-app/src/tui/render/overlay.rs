@@ -57,8 +57,13 @@ impl App {
 
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
-        let candidates: Vec<&str> = crate::slash_complete::slash_typed_prefix(&value, cursor)
-            .map(|prefix| crate::slash_complete::candidates_for_prefix(&prefix))
+        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(&value, cursor)
+            .map(|prefix| {
+                crate::slash_complete::candidates_for_prefix(
+                    &prefix,
+                    &self.state.external_commands,
+                )
+            })
             .unwrap_or_default();
         if candidates.is_empty() {
             self.state.render_state.slash_popup_inner = None;
@@ -83,7 +88,8 @@ impl App {
             height,
         };
 
-        self.render_slash_popup(frame, dialog_area, &candidates, self.state.slash.selected);
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        self.render_slash_popup(frame, dialog_area, &refs, self.state.slash.selected);
     }
 
     pub(crate) fn render_slash_popup(
@@ -123,7 +129,10 @@ impl App {
                     format!("{command:<width$}", width = max_command_width),
                     style,
                 )];
-                if let Some(summary) = crate::slash_complete::summary_for_command(command) {
+                if let Some(summary) = crate::slash_complete::summary_for_command(
+                    command,
+                    &self.state.external_commands,
+                ) {
                     spans.push(Span::styled(
                         format!("  {}", summary),
                         Style::default().fg(self.state.theme.muted),
