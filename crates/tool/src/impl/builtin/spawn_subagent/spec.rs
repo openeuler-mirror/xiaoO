@@ -19,7 +19,8 @@ impl SpawnSubagentToolSpec {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "A short label for the delegated branch or subtask"
+                    "description": "A short label for the delegated branch or subtask",
+                    "examples": ["Calculate total token usage"]
                 },
                 "task_goal": {
                     "type": "string",
@@ -31,7 +32,17 @@ impl SpawnSubagentToolSpec {
                 },
                 "output_schema": {
                     "type": "object",
-                    "description": "The strict JSON schema that the subagent MUST follow when returning its final result"
+                    "description": "The strict JSON schema that the subagent MUST follow when returning its final result. MUST be a valid JSON Schema object.",
+                    "examples": [{
+                        "type": "object",
+                        "properties": {
+                            "count": {
+                                "type": "number",
+                                "description": "The total count"
+                            }
+                        },
+                        "required": ["count"]
+                    }]
                 }
             },
             "required": ["description", "task_goal", "task_context", "output_schema"]
