@@ -72,3 +72,5 @@ xiaoo-app daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 More config details in [daemon.md](./docs/daemon_config.md)
+
+Feishu channel setup guide in [feishu_deploy.md](./docs/feishu_deploy.md)
