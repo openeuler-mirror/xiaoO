@@ -105,7 +105,36 @@ pub fn validate_and_connect_api_key(
 }
 
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    anyhow::bail!("clipboard integration is not available in apps/xiaoo-app build: {text}")
+    // Try arboard (native GUI clipboard) first.
+    match arboard::Clipboard::new() {
+        Ok(mut ctx) => {
+            ctx.set_text(text)?;
+            return Ok(());
+        }
+        Err(err) => {
+            tracing::debug!(
+                "arboard clipboard unavailable ({}), falling back to OSC 52",
+                err
+            );
+        }
+    }
+
+    // OSC 52 fallback: works in most modern terminals including Windows Terminal,
+    // iTerm2, kitty, Alacritty, and over SSH.
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    // Write directly to stdout while still in raw mode.
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    // When running inside tmux, wrap with a DCS passthrough so the outer
+    // terminal receives the OSC 52 sequence (mirrors opencode's behaviour).
+    if std::env::var("TMUX").is_ok() {
+        write!(out, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")?;
+    } else {
+        write!(out, "\x1b]52;c;{encoded}\x07")?;
+    }
+    out.flush()?;
+    Ok(())
 }
 
 #[cfg(test)]

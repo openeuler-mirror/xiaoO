@@ -434,6 +434,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         loop_event_sink: Some(Arc::new(CliEventSink { debug })),
         tool_event_sink: None,
         interaction_handle: None,
+        channel_file_sender: None,
     };
 
     // 5. Bootstrap gateway

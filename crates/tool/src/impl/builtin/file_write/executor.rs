@@ -16,6 +16,7 @@ use super::output::{CreateOutput, FileWriteOutput, Hunk, StructuredPatch, Update
 use super::spec::FileWriteToolSpec;
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::path_resolver::runtime_workspace_root;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::executor::ToolExecutor;
 use agent_contracts::tool::spec::ToolSpecView;
@@ -132,7 +133,7 @@ impl ToolExecutor for FileWriteExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         // Parse input from JSON
         let input: FileWriteInput = serde_json::from_value(call.input.clone()).map_err(|e| {
@@ -142,7 +143,8 @@ impl ToolExecutor for FileWriteExecutor {
         })?;
 
         // Run validation
-        let validation_result = validation::validate_input(&input);
+        let workspace_root = runtime_workspace_root(runtime);
+        let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -157,7 +159,7 @@ impl ToolExecutor for FileWriteExecutor {
         }
 
         let file_path = Self::normalize_path(&input.file_path);
-        let expanded_path = expand_path(&file_path);
+        let expanded_path = expand_path(&file_path, workspace_root);
         let path = Path::new(&expanded_path);
 
         // Check if file exists and read current content

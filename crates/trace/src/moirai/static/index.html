@@ -44,6 +44,46 @@
         .trace-row {
             transition: transform 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
         }
+
+        /* Collapsible panel styles */
+        .collapsible-panel {
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+        
+        .collapsible-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            user-select: none;
+            transition: background-color 0.2s;
+        }
+        
+        .collapsible-header:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        
+        .collapsible-arrow {
+            transition: transform 0.3s ease;
+        }
+        
+        .collapsible-arrow.collapsed {
+            transform: rotate(-90deg);
+        }
+        
+        .collapsible-content {
+            max-height: 1000px;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+        }
+        
+        .collapsible-content.collapsed {
+            max-height: 0;
+            padding-top: 0;
+            padding-bottom: 0;
+        }
     </style>
 </head>
 <body class="bg-gray-50">

@@ -19,7 +19,8 @@ impl JoinSubagentToolSpec {
             "properties": {
                 "target_agent_id": {
                     "type": "string",
-                    "description": "The subagent id to wait for"
+                    "description": "The subagent id to wait for",
+                    "examples": ["agent-5cd2e89..."]
                 }
             },
             "required": ["target_agent_id"]

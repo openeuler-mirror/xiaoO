@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::r#impl::path_resolver::expand_path_from_base;
+
 use super::constants::max_timeout_ms;
 use super::input::BashInput;
 
@@ -44,12 +46,13 @@ fn validate_command(input: &BashInput) -> ValidationResult {
     ValidationResult::ok()
 }
 
-fn validate_cwd(input: &BashInput) -> ValidationResult {
+fn validate_cwd(input: &BashInput, base_dir: &Path) -> ValidationResult {
     let Some(cwd) = input.cwd.as_deref() else {
         return ValidationResult::ok();
     };
 
-    let path = Path::new(cwd);
+    let resolved_cwd = expand_path_from_base(cwd, base_dir);
+    let path = Path::new(&resolved_cwd);
     if !path.exists() {
         return ValidationResult::error(
             format!("Working directory does not exist: {}", cwd),
@@ -93,13 +96,13 @@ fn validate_timeout(input: &BashInput) -> ValidationResult {
     ValidationResult::ok()
 }
 
-pub fn validate_input(input: &BashInput) -> ValidationResult {
+pub fn validate_input_with_base(input: &BashInput, base_dir: &Path) -> ValidationResult {
     let command_result = validate_command(input);
     if !command_result.result {
         return command_result;
     }
 
-    let cwd_result = validate_cwd(input);
+    let cwd_result = validate_cwd(input, base_dir);
     if !cwd_result.result {
         return cwd_result;
     }

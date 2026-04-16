@@ -7,7 +7,9 @@ use crate::convert::{
     llm_request_to_wire, parsed_chunk_to_stream_chunk, wire_response_to_llm_response,
     wire_usage_to_usage,
 };
-use crate::error::{map_reqwest_error, map_serde_error, LlmError};
+use crate::error::{
+    map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
+};
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -106,15 +108,8 @@ impl LlmProvider for OpenAiFamilyProvider {
         let status = response.status();
         let resp_body = response.text().await.unwrap_or_default();
 
-        if status == 429 {
-            return Err(LlmError::RateLimited { retry_after_ms: 0 });
-        }
-
         if !status.is_success() {
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, resp_body, body_str
-            )));
+            return Err(map_api_status_error(status, &resp_body, &body_str));
         }
 
         let wire_response: crate::wire_types::WireResponse =
@@ -142,14 +137,8 @@ impl LlmProvider for OpenAiFamilyProvider {
 
         let status = response.status();
         if !status.is_success() {
-            if status == 429 {
-                return Err(LlmError::RateLimited { retry_after_ms: 0 });
-            }
             let error_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, error_body, body_str
-            )));
+            return Err(map_api_status_error(status, &error_body, &body_str));
         }
 
         let mut full_text = String::new();
@@ -256,6 +245,10 @@ pub(crate) fn parse_openai_family_stream_line(line: &str) -> Result<Option<Parse
 
     if data == "[DONE]" {
         return Ok(None);
+    }
+
+    if let Some(error) = parse_stream_error(data) {
+        return Err(error);
     }
 
     let chunk: ChatCompletionChunk = serde_json::from_str(data)

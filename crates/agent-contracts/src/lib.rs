@@ -15,7 +15,7 @@ pub use events::{LoopEventSink, ToolEventSink};
 pub use hooker::{HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder};
 pub use interaction::InteractionHandle;
 pub use llm::{LlmProvider, ProviderCapabilities};
-pub use runtime::{AgentContext, ConversationView, RuntimeView};
+pub use runtime::{AgentContext, ChannelFileSender, ConversationView, RuntimeView};
 pub use skill::{SkillContext, SkillRegistry, SkillSpec};
 pub use tool::{
     ToolCall, ToolCallBuilder, ToolExecutor, ToolFilter, ToolRegistry, ToolRegistryBuilder,

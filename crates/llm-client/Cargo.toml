@@ -20,6 +20,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 uuid.workspace = true
 tracing.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }
+regex = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

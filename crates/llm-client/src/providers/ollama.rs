@@ -5,7 +5,7 @@ use futures::StreamExt;
 
 use super::openai_family::parse_openai_family_stream_line;
 use crate::convert::{chat_messages_to_wire, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
-use crate::error::{map_reqwest_error, LlmError};
+use crate::error::{map_api_status_error, map_reqwest_error, LlmError};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{AssistantMessage, LlmRequest, LlmResponse, StopReason, StreamChunk, Usage};
 
@@ -91,10 +91,7 @@ impl LlmProvider for OllamaProvider {
         let status = response.status();
         if !status.is_success() {
             let resp_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, resp_body, body_str
-            )));
+            return Err(map_api_status_error(status, &resp_body, &body_str));
         }
 
         let ollama_response: serde_json::Value =
@@ -135,10 +132,7 @@ impl LlmProvider for OllamaProvider {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(LlmError::ApiError(format!(
-                "HTTP {}: {}\nRequest body: {}",
-                status, error_body, body_str
-            )));
+            return Err(map_api_status_error(status, &error_body, &body_str));
         }
 
         let mut full_text = String::new();

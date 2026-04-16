@@ -1,20 +1,28 @@
 use crate::channels::feishu::{FeishuAdapter, FeishuConfig};
 use crate::channels::{
-    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError, ChannelResult,
-    ChannelRuntime,
+    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError,
+    ChannelOutboundAttachment, ChannelOutboundAttachmentKind, ChannelResult, ChannelRuntime,
 };
-use crate::gateway::{ChannelProgressRelayHandle, SessionService};
+use crate::gateway::channel_interaction::{
+    resolve_interaction_from_text, ChannelInteractionHandle,
+};
+use crate::gateway::pending_interaction::PendingInteractionStore;
+use crate::gateway::{channel_session_id, ChannelProgressRelayHandle, SessionService};
 use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
     GatewayChannelMessage,
 };
+use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use agent_contracts::LoopEventSink;
+use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post},
     Json, Router,
 };
@@ -28,13 +36,18 @@ use tracing::warn;
 pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
     feishu_runtime: Option<ChannelRuntime>,
+    pending_interactions: Arc<PendingInteractionStore>,
+    interaction_timeout_secs: u64,
 }
 
 impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
+        let pending_interactions = Arc::new(PendingInteractionStore::new());
         Self {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: None,
+            pending_interactions,
+            interaction_timeout_secs: 600,
         }
     }
 
@@ -62,6 +75,8 @@ impl GatewayAppState {
         Self {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             feishu_runtime: Some(runtime),
+            pending_interactions: Arc::new(PendingInteractionStore::new()),
+            interaction_timeout_secs: 600,
         }
     }
 }
@@ -94,6 +109,8 @@ pub struct TestChatTurnRequest {
     #[serde(default)]
     pub channel_instance_id: Option<String>,
     pub sender_id: String,
+    #[serde(default)]
+    pub agent: Option<String>,
     pub conversation_id: String,
     #[serde(default)]
     pub message_id: Option<String>,
@@ -114,6 +131,8 @@ pub struct TestChatRequest {
     pub channel_instance_id: Option<String>,
     #[serde(default)]
     pub sender_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
@@ -145,20 +164,21 @@ pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
     create_router_from_state(GatewayAppState::new(session_service))
 }
 
-pub fn create_router_with_feishu(
+pub fn create_router_with_feishu_and_timeout(
     session_service: Arc<dyn SessionService>,
     feishu_config: FeishuConfig,
+    interaction_timeout_secs: u64,
 ) -> ChannelResult<Router> {
-    Ok(create_router_from_state(GatewayAppState::with_feishu(
-        session_service,
-        feishu_config,
-    )?))
+    let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
+    state.interaction_timeout_secs = interaction_timeout_secs;
+    Ok(create_router_from_state(state))
 }
 
 fn create_router_from_state(state: GatewayAppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health_check))
-        .route("/api/v1/chat", post(handle_test_chat))
+        .route("/api/v1/chat", post(handle_chat))
+        .route("/api/v1/chat/stream", post(handle_chat_stream))
         .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
         .with_state(Arc::new(state))
 }
@@ -170,7 +190,7 @@ async fn health_check() -> Json<GatewayHealthResponse> {
     })
 }
 
-async fn handle_test_chat(
+async fn handle_chat(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<TestChatRequest>,
 ) -> Response {
@@ -190,6 +210,7 @@ async fn handle_test_chat(
         channel_instance_id: request.channel_instance_id,
         conversation_id: request.conversation_id,
         sender_id: request.sender_id,
+        agent_preset_id: request.agent,
         message_id: request
             .message_id
             .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
@@ -219,6 +240,79 @@ async fn handle_test_chat(
     }
 }
 
+async fn handle_chat_stream(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<TestChatRequest>,
+) -> Response {
+    let request = match validate_test_chat_request(payload) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(GatewayErrorResponse { error }),
+            )
+                .into_response();
+        }
+    };
+
+    let conversation_id = request.conversation_id.clone();
+    let message = GatewayChannelMessage {
+        channel: request.channel,
+        channel_instance_id: request.channel_instance_id,
+        conversation_id,
+        sender_id: request.sender_id,
+        agent_preset_id: request.agent,
+        message_id: request
+            .message_id
+            .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
+        text: request.text,
+        channel_identity_prompt: None,
+        reply_to_message_id: request.reply_to_message_id,
+        root_message_id: request.root_message_id,
+        mentions: request
+            .mentions
+            .into_iter()
+            .map(|mention| GatewayChannelMention {
+                id: mention.id,
+                display_name: mention.display_name,
+            })
+            .collect(),
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
+    let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
+
+    tokio::spawn(async move {
+        match state
+            .gateway_service
+            .handle_channel_message_with_interaction(message, Some(sink.clone()), None, None)
+            .await
+        {
+            Ok(response) => {
+                let summary = sink.take_loop_summary();
+                let _ = tx.send(SseStreamEvent::Done {
+                    reply: response.visible_reply,
+                    raw_reply: response.raw_reply,
+                    conversation_id: response.conversation_id,
+                    session_id: response.session_id,
+                    turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
+                    total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
+                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(SseStreamEvent::Error {
+                    error: error.to_string(),
+                });
+            }
+        }
+    });
+
+    Sse::new(sse_stream_from_receiver(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 async fn handle_feishu_events(
     State(state): State<Arc<GatewayAppState>>,
     headers: HeaderMap,
@@ -243,7 +337,10 @@ async fn handle_feishu_events(
         Ok((adapter_response, maybe_message)) => {
             if let Some(message) = maybe_message {
                 if runtime.capabilities.supports_reactions {
-                    if let Err(error) = runtime.adapter.acknowledge_message(&message.message_id).await
+                    if let Err(error) = runtime
+                        .adapter
+                        .acknowledge_message(&message.message_id)
+                        .await
                     {
                         warn!(
                             "failed to acknowledge channel message: channel={} id={} conversation={} error={}",
@@ -282,6 +379,18 @@ async fn process_channel_message(
     let adapter = runtime.adapter.clone();
     let conversation_id = message.conversation_id.clone();
     let reply_to_message_id = message.reply_to_message_id.clone();
+
+    // --- Check for pending ask_user_question interaction ---
+    let session_id = channel_session_id(
+        &runtime.channel_id,
+        Some(&runtime.instance_id),
+        &conversation_id,
+    );
+    if let Some(pending) = state.pending_interactions.take(&session_id).await {
+        let response = resolve_interaction_from_text(&message.text, &pending.request);
+        let _ = pending.response_tx.send(response);
+        return Ok(());
+    }
     let progress_relay = runtime.capabilities.supports_progress_updates.then(|| {
         ChannelProgressRelayHandle::new(
             adapter.clone(),
@@ -300,9 +409,30 @@ async fn process_channel_message(
         .map(|relay| Arc::new(relay.clone()) as Arc<dyn LoopEventSink>);
     let mut gateway_message = build_gateway_channel_message(message)?;
     gateway_message.channel_identity_prompt = channel_identity_prompt;
+
+    // Create a ChannelInteractionHandle so ask_user_question works in Feishu.
+    let interaction_handle: Option<Arc<dyn agent_contracts::InteractionHandle>> =
+        Some(Arc::new(ChannelInteractionHandle::new(
+            state.interaction_timeout_secs,
+            session_id,
+            conversation_id.clone(),
+            reply_to_message_id.clone(),
+            state.pending_interactions.clone(),
+            adapter.clone(),
+        )));
+
     let turn_response = match state
         .gateway_service
-        .handle_channel_message_with_events(gateway_message, event_sink)
+        .handle_channel_message_with_interaction(
+            gateway_message,
+            event_sink,
+            interaction_handle,
+            Some(Arc::new(AdapterFileSender {
+                adapter: adapter.clone(),
+                conversation_id: conversation_id.clone(),
+                reply_to_message_id: reply_to_message_id.clone(),
+            })),
+        )
         .await
     {
         Ok(response) => response,
@@ -492,6 +622,10 @@ fn validate_test_chat_request(payload: TestChatRequest) -> Result<TestChatTurnRe
         channel,
         channel_instance_id: payload.channel_instance_id,
         sender_id,
+        agent: payload
+            .agent
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         conversation_id,
         message_id: payload.message_id,
         reply_to_message_id: payload.reply_to_message_id,
@@ -561,6 +695,43 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
     }
 }
 
+// ---------------------------------------------------------------------------
+// AdapterFileSender — wraps a ChannelAdapter to implement ChannelFileSender
+// ---------------------------------------------------------------------------
+
+struct AdapterFileSender {
+    adapter: Arc<dyn ChannelAdapter>,
+    conversation_id: String,
+    reply_to_message_id: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl ChannelFileSender for AdapterFileSender {
+    async fn send_file(
+        &self,
+        file_path: &str,
+        label: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let attachment = ChannelOutboundAttachment {
+            kind: ChannelOutboundAttachmentKind::File,
+            path: file_path.to_string(),
+            label: label.map(ToString::to_string),
+        };
+        self.adapter
+            .send_attachment(
+                &self.conversation_id,
+                &attachment,
+                self.reply_to_message_id.as_deref(),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -589,6 +760,7 @@ mod tests {
             channel: None,
             channel_instance_id: None,
             sender_id: None,
+            agent: None,
             conversation_id: None,
             message_id: None,
             reply_to_message_id: None,
@@ -607,6 +779,7 @@ mod tests {
             channel: Some("feishu".to_string()),
             channel_instance_id: Some("ops-feishu".to_string()),
             sender_id: Some("user-1".to_string()),
+            agent: Some("test-agent".to_string()),
             conversation_id: Some("conv-1".to_string()),
             message_id: Some("msg-1".to_string()),
             reply_to_message_id: None,

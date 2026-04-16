@@ -22,6 +22,7 @@ use super::utils::{
 };
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::path_resolver::runtime_workspace_root;
 
 /// Executor for FileEditTool.
 pub struct FileEditExecutor {
@@ -70,7 +71,7 @@ impl ToolExecutor for FileEditExecutor {
     async fn invoke(
         &self,
         call: &FinalToolCall,
-        _runtime: &dyn RuntimeView,
+        runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: FileEditInput = serde_json::from_value(call.input.clone()).map_err(|e| {
             ToolExecutionError::ExecutionFailed {
@@ -79,16 +80,21 @@ impl ToolExecutor for FileEditExecutor {
         })?;
 
         let dedup_store = self.get_dedup_store().await;
+        let workspace_root = runtime_workspace_root(runtime);
 
-        let expanded_path = expand_path(&input.file_path);
+        let expanded_path = expand_path(&input.file_path, workspace_root);
         let file_content = if std::path::Path::new(&expanded_path).exists() {
             Some(Self::read_file_content(&expanded_path)?)
         } else {
             None
         };
 
-        let validation_result =
-            validation::validate_input(&input, file_content.as_deref(), Some(&dedup_store));
+        let validation_result = validation::validate_input(
+            &input,
+            file_content.as_deref(),
+            Some(&dedup_store),
+            workspace_root,
+        );
         if !validation_result.result {
             let error_message = validation_result
                 .message

@@ -10,6 +10,7 @@ use super::glob::discover_glob;
 use super::grep::discover_grep;
 use super::join_subagent::discover_join_subagent;
 use super::print_hello_world::discover_print_hello_world;
+use super::send_file::discover_send_file;
 use super::skill::discover_skill;
 use super::spawn_subagent::discover_spawn_subagent;
 use super::webfetch::discover_webfetch;
@@ -45,6 +46,7 @@ impl ToolSource for BuiltinToolSource {
             discover_spawn_subagent(self.services.clone()),
             discover_join_subagent(self.services.clone()),
             discover_skill(),
+            discover_send_file(),
         ]
     }
 }

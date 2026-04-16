@@ -1,4 +1,5 @@
 mod builtin;
+mod path_resolver;
 mod plugin;
 mod runtime_services;
 mod source_loader;

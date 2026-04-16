@@ -516,7 +516,7 @@ impl Default for ChatState {
     fn default() -> Self {
         Self {
             messages: vec![Message::system(
-                "Welcome to XiaoO TUI. Press Ctrl+P to select provider/model. Type your message and press Enter to send.",
+                "Welcome to XiaoO TUI. Type /connect to select provider/model. Type your message and press Enter to send.",
             )],
             input: Input::default(),
             scroll_offset: 0,

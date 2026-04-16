@@ -136,6 +136,59 @@ curl -X POST http://localhost:8080/api/v1/chat \
 
 ---
 
+#### `POST /api/v1/chat/stream`
+
+Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **Server-Sent Events (SSE)** stream with real-time updates for LLM text generation and tool execution.
+
+**Request Body:** Same as `/api/v1/chat`.
+
+**Response:** `200 OK`, Content-Type `text/event-stream`
+
+**SSE Event Types:**
+
+| Event | Fields | Description |
+|-------|--------|-------------|
+| `turn_start` | `agent_id`, `turn` | Emitted at the start of each agent loop turn |
+| `text_delta` | `delta`, `snapshot` | Emitted for each LLM text chunk. `delta` is the incremental text, `snapshot` is the cumulative text so far |
+| `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `stop_reason` | Emitted when the agent loop finishes. Stream closes after this event |
+| `error` | `error` | Emitted on failure. Stream closes after this event |
+
+**Example Request:**
+
+```bash
+curl -N -X POST http://localhost:8080/api/v1/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Hello",
+    "channel": "test",
+    "sender_id": "user-1",
+    "conversation_id": "conv-demo"
+  }'
+```
+
+**Example SSE Output:**
+
+```
+event: turn_start
+data: {"type":"turn_start","agent_id":"main","turn":1}
+
+event: text_delta
+data: {"type":"text_delta","delta":"Hello","snapshot":"Hello"}
+
+event: text_delta
+data: {"type":"text_delta","delta":"! How can I help you?","snapshot":"Hello! How can I help you?"}
+
+event: done
+data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! How can I help you?","conversation_id":"conv-demo","session_id":"test:conv-demo","turn_count":1,"total_tokens":150,"stop_reason":"complete"}
+```
+
+**Error Responses:**
+
+- `400 Bad Request` — Same validation errors as `/api/v1/chat`
+
+---
+
 #### `POST /api/v1/channels/feishu/events`
 
 Feishu event callback endpoint. Only available when `[channels.feishu]` is enabled in Daemon configuration.
@@ -169,3 +222,16 @@ session_id = "{channel_instance_id or channel}:{conversation_id}"
 - Same `(channel, conversation_id)` combination shares the same session (retains context history).
 - Different `conversation_id` creates independent sessions.
 - When `channel_instance_id` is configured, it is used as prefix (supports multi-instance deployment of same channel type, e.g., multiple Feishu apps).
+
+### Channel Interaction Timeout
+
+When the agent needs to ask the user a question (via `ask_user_question` tool), it sends the question to the channel (e.g., Feishu) and waits for the user's reply. If the user does not reply within the configured timeout, the interaction is cancelled.
+
+```toml
+[channels]
+interaction_timeout_secs = 600   # Timeout in seconds, default: 600 (10 minutes)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interaction_timeout_secs` | integer | `600` | Maximum seconds to wait for a user reply. The value is rounded **up** to the nearest whole minute (minimum 1 minute). For example, `10` → 1 minute, `90` → 2 minutes, `600` → 10 minutes. Both the actual timeout and the displayed prompt use the rounded value. When the timeout expires, the pending interaction is cancelled, the user is notified, and the agent stops the current task. |

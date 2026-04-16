@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use crate::gateway::{
 };
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use tool::load_tool_sources;
 
 use super::runtime::GatewayRuntime;
 
@@ -61,6 +63,10 @@ impl GatewayRuntime {
 
     fn build_runtime_config(&self, state: &AppState) -> Result<HostedSessionRuntimeConfig, String> {
         let agent_id = resolve_agent_id(None, None, &state.agent_config)?;
+        let system_prompt = state
+            .active_agent_role_config()
+            .and_then(|role| role.prompt.clone())
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
         let total_budget = state
             .agent_config
             .llm
@@ -75,7 +81,7 @@ impl GatewayRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(agent_id),
                 model: state.agent_config.llm.model.clone(),
-                system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+                system_prompt,
                 feature_flags: FeatureFlags::default(),
                 token_budget: TokenBudgetConfig {
                     total_budget,
@@ -95,7 +101,7 @@ impl GatewayRuntime {
             } else {
                 Some(state.agent_config.llm.api_base.clone())
             },
-            visible_tool_names: None,
+            visible_tool_names: resolve_visible_tool_names(state),
             compression_pipeline: None,
             llm_provider: None,
             trace: state
@@ -138,6 +144,33 @@ impl GatewayRuntime {
     }
 }
 
+fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
+    let role = state.active_agent_role_config()?;
+    if role.tools.is_empty() {
+        return None;
+    }
+
+    let all_tool_names: BTreeSet<String> = load_tool_sources()
+        .iter()
+        .flat_map(|source| source.discover())
+        .map(|tool| tool.spec.name().0.clone())
+        .collect();
+    let mut visible_tool_names = all_tool_names.clone();
+
+    for (configured_name, enabled) in &role.tools {
+        if !all_tool_names.contains(configured_name) {
+            continue;
+        }
+        if *enabled {
+            visible_tool_names.insert(configured_name.clone());
+        } else {
+            visible_tool_names.remove(configured_name);
+        }
+    }
+
+    Some(visible_tool_names.into_iter().collect())
+}
+
 pub(super) fn resolve_agent_id(
     explicit_id: Option<&str>,
     session_agent_id: Option<&str>,
@@ -172,4 +205,40 @@ pub(super) fn resolve_agent_id(
         .validate_default_agent_id()
         .map_err(|error| error.to_string())?;
     Ok(config.resolve_default_agent_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_visible_tool_names;
+    use crate::app_state::AppState;
+    use crate::config::{AgentRoleConfig, Config};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolve_visible_tool_names_requires_exact_tool_names() {
+        let mut config = Config::default();
+        config.agent.insert(
+            "code-reviewer".to_string(),
+            AgentRoleConfig {
+                description: String::new(),
+                prompt: None,
+                tools: BTreeMap::from([
+                    ("write".to_string(), false),
+                    ("file_write".to_string(), false),
+                ]),
+            },
+        );
+
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
+        state.active_agent_role = Some("code-reviewer".to_string());
+
+        let visible = resolve_visible_tool_names(&state).expect("tool visibility should resolve");
+        let visible: BTreeSet<_> = visible.into_iter().collect();
+
+        assert!(visible.contains("file_edit"));
+        assert!(!visible.contains("file_write"));
+    }
 }
