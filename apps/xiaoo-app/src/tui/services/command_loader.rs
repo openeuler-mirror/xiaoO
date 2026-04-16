@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-/// An external command loaded from `~/.xiaoo/commands/<name>.md`.
+/// An external command loaded from `~/.xiaoo/command/<name>.md`.
 #[derive(Debug, Clone)]
 pub struct ExternalCommand {
     /// Command name derived from filename (without `.md`).
@@ -11,7 +11,7 @@ pub struct ExternalCommand {
     pub body: String,
 }
 
-/// Scan `~/.xiaoo/commands/` and load all `.md` command files.
+/// Scan `~/.xiaoo/command/` and load all `.md` command files.
 ///
 /// Returns an empty Vec if the directory does not exist or cannot be read.
 pub fn load_external_commands() -> Vec<ExternalCommand> {

@@ -50,7 +50,7 @@ pub fn slash_typed_prefix(value: &str, cursor: usize) -> Option<String> {
 }
 
 /// Commands whose canonical form starts with `typed` (ASCII case-insensitive).
-/// Includes both built-in commands and external commands from `~/.xiaoo/commands/`.
+/// Includes both built-in commands and external commands from `~/.xiaoo/command/`.
 pub fn candidates_for_prefix(typed: &str, external: &[ExternalCommand]) -> Vec<String> {
     let typed_lower = typed.to_ascii_lowercase();
     let mut result: Vec<String> = SLASH_COMMANDS

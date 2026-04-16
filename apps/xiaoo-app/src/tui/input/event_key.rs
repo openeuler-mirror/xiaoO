@@ -314,7 +314,7 @@ impl App {
         // NOTE: /create-skill is not yet implemented; disabled until ready.
         // if user_input.trim().starts_with("/create-skill") { ... }
 
-        // External commands from ~/.xiaoo/commands/
+        // External commands from ~/.xiaoo/command/
         {
             let trimmed = user_input.trim();
             let cmd_name = trimmed.strip_prefix('/').unwrap_or("");
