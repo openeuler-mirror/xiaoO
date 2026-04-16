@@ -38,6 +38,14 @@ model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment variable
 max_tokens = 128000  # MaxToken for LLM API
 context_window = 128000 # Optional, used for session compression budget
+
+[agent.code-reviewer]
+description = "Reviews code for best practices and potential issues"
+prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
+
+[agent.code-reviewer.tools]
+file_write = false
+file_edit = false
 ```
 
 Set environment variables
@@ -52,6 +60,20 @@ xiaoo-tui
 
 # CLI Command
 xiaoo run -p "Your Command"
+```
+
+In TUI, press `Tab` / `Shift+Tab` to switch agent role presets. When the current line starts with a slash command, `Tab` still performs slash completion.
+
+HTTP requests can also select an agent role preset by passing `agent` in the JSON body:
+
+```json
+{
+  "text": "Review this patch for security issues",
+  "channel": "http",
+  "sender_id": "demo-user",
+  "conversation_id": "demo-conv",
+  "agent": "code-reviewer"
+}
 ```
 Example
 

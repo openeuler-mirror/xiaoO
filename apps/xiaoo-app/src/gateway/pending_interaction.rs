@@ -1,6 +1,5 @@
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{oneshot, RwLock};
 

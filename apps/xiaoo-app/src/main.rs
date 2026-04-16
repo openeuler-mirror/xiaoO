@@ -33,8 +33,8 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
             feishu,
             config.interaction_timeout_secs(),
         )
-            .map_err(anyhow::Error::new)
-            .context("failed to create router with feishu")?,
+        .map_err(anyhow::Error::new)
+        .context("failed to create router with feishu")?,
         None => create_router(app.session_service),
     };
 

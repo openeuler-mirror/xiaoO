@@ -757,8 +757,9 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Partition tool calls into valid (non-empty name) and invalid (empty name).
-    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) =
-        tool_calls.into_iter().partition(|tc| is_valid_tool_name(&tc.tool_name));
+    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
+        .into_iter()
+        .partition(|tc| is_valid_tool_name(&tc.tool_name));
 
     // Handle the case where ALL tool calls are invalid and there is exactly one:
     // retry the LLM request once.
@@ -769,7 +770,9 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         );
 
         // Push error tool_result for the invalid call so conversation stays well-formed.
-        ctx.state.messages.push(build_invalid_tool_name_result(&invalid_calls[0]));
+        ctx.state
+            .messages
+            .push(build_invalid_tool_name_result(&invalid_calls[0]));
 
         // Re-build prompt (includes the error result) and re-call LLM.
         build_messages(ctx)

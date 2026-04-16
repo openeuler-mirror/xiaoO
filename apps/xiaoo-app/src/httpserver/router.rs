@@ -109,6 +109,8 @@ pub struct TestChatTurnRequest {
     #[serde(default)]
     pub channel_instance_id: Option<String>,
     pub sender_id: String,
+    #[serde(default)]
+    pub agent: Option<String>,
     pub conversation_id: String,
     #[serde(default)]
     pub message_id: Option<String>,
@@ -129,6 +131,8 @@ pub struct TestChatRequest {
     pub channel_instance_id: Option<String>,
     #[serde(default)]
     pub sender_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
     #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
@@ -159,7 +163,6 @@ pub struct TestChatResponse {
 pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
     create_router_from_state(GatewayAppState::new(session_service))
 }
-
 
 pub fn create_router_with_feishu_and_timeout(
     session_service: Arc<dyn SessionService>,
@@ -207,6 +210,7 @@ async fn handle_chat(
         channel_instance_id: request.channel_instance_id,
         conversation_id: request.conversation_id,
         sender_id: request.sender_id,
+        agent_preset_id: request.agent,
         message_id: request
             .message_id
             .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
@@ -257,6 +261,7 @@ async fn handle_chat_stream(
         channel_instance_id: request.channel_instance_id,
         conversation_id,
         sender_id: request.sender_id,
+        agent_preset_id: request.agent,
         message_id: request
             .message_id
             .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
@@ -276,12 +281,11 @@ async fn handle_chat_stream(
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
     let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
-    let event_sink: Option<Arc<dyn LoopEventSink>> = Some(sink.clone());
 
     tokio::spawn(async move {
         match state
             .gateway_service
-            .handle_channel_message_with_events(message, event_sink)
+            .handle_channel_message_with_interaction(message, Some(sink.clone()), None)
             .await
         {
             Ok(response) => {
@@ -293,9 +297,7 @@ async fn handle_chat_stream(
                     session_id: response.session_id,
                     turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
                     total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
-                    stop_reason: summary
-                        .map(|s| s.stop_reason)
-                        .unwrap_or_default(),
+                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
                 });
             }
             Err(error) => {
@@ -335,7 +337,10 @@ async fn handle_feishu_events(
         Ok((adapter_response, maybe_message)) => {
             if let Some(message) = maybe_message {
                 if runtime.capabilities.supports_reactions {
-                    if let Err(error) = runtime.adapter.acknowledge_message(&message.message_id).await
+                    if let Err(error) = runtime
+                        .adapter
+                        .acknowledge_message(&message.message_id)
+                        .await
                     {
                         warn!(
                             "failed to acknowledge channel message: channel={} id={} conversation={} error={}",
@@ -608,6 +613,10 @@ fn validate_test_chat_request(payload: TestChatRequest) -> Result<TestChatTurnRe
         channel,
         channel_instance_id: payload.channel_instance_id,
         sender_id,
+        agent: payload
+            .agent
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
         conversation_id,
         message_id: payload.message_id,
         reply_to_message_id: payload.reply_to_message_id,
