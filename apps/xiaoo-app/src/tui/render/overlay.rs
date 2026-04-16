@@ -59,10 +59,7 @@ impl App {
         let cursor = self.state.chat_state.input.cursor();
         let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(&value, cursor)
             .map(|prefix| {
-                crate::slash_complete::candidates_for_prefix(
-                    &prefix,
-                    &self.state.external_commands,
-                )
+                crate::slash_complete::candidates_for_prefix(&prefix, &self.state.external_commands)
             })
             .unwrap_or_default();
         if candidates.is_empty() {

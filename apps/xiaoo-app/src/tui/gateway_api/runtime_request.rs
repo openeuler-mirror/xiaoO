@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,6 +14,7 @@ use crate::gateway::{
 };
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use tool::load_tool_sources;
 
 use super::runtime::GatewayRuntime;
 
@@ -61,6 +63,10 @@ impl GatewayRuntime {
 
     fn build_runtime_config(&self, state: &AppState) -> Result<HostedSessionRuntimeConfig, String> {
         let agent_id = resolve_agent_id(None, None, &state.agent_config)?;
+        let system_prompt = state
+            .active_agent_role_config()
+            .and_then(|role| role.prompt.clone())
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
         let total_budget = state
             .agent_config
             .llm
@@ -75,7 +81,7 @@ impl GatewayRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(agent_id),
                 model: state.agent_config.llm.model.clone(),
-                system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
+                system_prompt,
                 feature_flags: FeatureFlags::default(),
                 token_budget: TokenBudgetConfig {
                     total_budget,
@@ -95,7 +101,7 @@ impl GatewayRuntime {
             } else {
                 Some(state.agent_config.llm.api_base.clone())
             },
-            visible_tool_names: None,
+            visible_tool_names: resolve_visible_tool_names(state),
             compression_pipeline: None,
             llm_provider: None,
             trace: state
@@ -138,6 +144,51 @@ impl GatewayRuntime {
     }
 }
 
+fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
+    let role = state.active_agent_role_config()?;
+    if role.tools.is_empty() {
+        return None;
+    }
+
+    let all_tool_names: BTreeSet<String> = load_tool_sources()
+        .iter()
+        .flat_map(|source| source.discover())
+        .map(|tool| tool.spec.name().0.clone())
+        .collect();
+    let mut visible_tool_names = all_tool_names.clone();
+
+    for (configured_name, enabled) in &role.tools {
+        let Some(tool_name) = canonical_tool_name(configured_name, &all_tool_names) else {
+            continue;
+        };
+        if *enabled {
+            visible_tool_names.insert(tool_name);
+        } else {
+            visible_tool_names.remove(&tool_name);
+        }
+    }
+
+    Some(visible_tool_names.into_iter().collect())
+}
+
+fn canonical_tool_name(configured_name: &str, available: &BTreeSet<String>) -> Option<String> {
+    let normalized = configured_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    let mut candidates = vec![normalized.clone()];
+    match normalized.as_str() {
+        "read" => candidates.push("file_read".to_string()),
+        "write" => candidates.push("file_write".to_string()),
+        "edit" => candidates.push("file_edit".to_string()),
+        "search" | "websearch" => candidates.push("web_search".to_string()),
+        "fetch" => candidates.push("webfetch".to_string()),
+        _ => {}
+    }
+
+    candidates.into_iter().find(|name| available.contains(name))
+}
+
 pub(super) fn resolve_agent_id(
     explicit_id: Option<&str>,
     session_agent_id: Option<&str>,
@@ -172,4 +223,38 @@ pub(super) fn resolve_agent_id(
         .validate_default_agent_id()
         .map_err(|error| error.to_string())?;
     Ok(config.resolve_default_agent_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_tool_name;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn canonical_tool_name_supports_common_aliases() {
+        let available = BTreeSet::from([
+            "bash".to_string(),
+            "file_edit".to_string(),
+            "file_write".to_string(),
+            "web_search".to_string(),
+        ]);
+
+        assert_eq!(
+            canonical_tool_name("write", &available).as_deref(),
+            Some("file_write")
+        );
+        assert_eq!(
+            canonical_tool_name("edit", &available).as_deref(),
+            Some("file_edit")
+        );
+        assert_eq!(
+            canonical_tool_name("web-search", &available).as_deref(),
+            Some("web_search")
+        );
+        assert_eq!(
+            canonical_tool_name("bash", &available).as_deref(),
+            Some("bash")
+        );
+        assert!(canonical_tool_name("missing", &available).is_none());
+    }
 }

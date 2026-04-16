@@ -51,8 +51,7 @@ fn parse_command_file(path: &PathBuf) -> Result<ExternalCommand, String> {
         .map(|s| s.to_string())
         .ok_or_else(|| "cannot derive command name from filename".to_string())?;
 
-    let content =
-        std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+    let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
     let (frontmatter, body) = split_frontmatter(&content);
     let description = frontmatter

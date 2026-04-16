@@ -217,10 +217,7 @@ mod tests {
         assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir"]);
-        assert_eq!(
-            candidates_for_prefix("/p", NO_EXT),
-            vec!["/prompt-demo"]
-        );
+        assert_eq!(candidates_for_prefix("/p", NO_EXT), vec!["/prompt-demo"]);
     }
 
     #[test]

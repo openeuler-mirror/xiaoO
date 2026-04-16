@@ -14,6 +14,7 @@ pub struct GatewayChannelMessage {
     pub channel_instance_id: Option<String>,
     pub conversation_id: String,
     pub sender_id: String,
+    pub agent_preset_id: Option<String>,
     pub message_id: String,
     pub text: String,
     pub channel_identity_prompt: Option<String>,
@@ -53,6 +54,7 @@ pub fn build_gateway_channel_message(
         channel_instance_id,
         conversation_id,
         sender_id,
+        agent_preset_id: None,
         message_id,
         text,
         channel_identity_prompt: None,
@@ -75,7 +77,10 @@ pub fn build_channel_turn_request(message: &GatewayChannelMessage) -> AppTurnReq
             message.channel_instance_id.as_deref(),
             &message.conversation_id,
         ),
-        entry: GatewayEntryContext::channel(message.channel_instance_id.clone()),
+        entry: GatewayEntryContext {
+            runtime_profile_id: message.agent_preset_id.clone(),
+            ..GatewayEntryContext::channel(message.channel_instance_id.clone())
+        },
         channel: Some(message.channel.clone()),
         message_id: Some(message.message_id.clone()),
         conversation_id: message.conversation_id.clone(),
@@ -111,6 +116,7 @@ mod tests {
             channel_instance_id: Some("ops-feishu".to_string()),
             conversation_id: "conv-1".to_string(),
             sender_id: "user-1".to_string(),
+            agent_preset_id: Some("code-reviewer".to_string()),
             message_id: "msg-1".to_string(),
             text: "ping".to_string(),
             channel_identity_prompt: Some("<participant_directory />".to_string()),
@@ -126,6 +132,10 @@ mod tests {
 
         assert_eq!(request.session_id, "ops-feishu:conv-1");
         assert_eq!(request.entry.instance_id.as_deref(), Some("ops-feishu"));
+        assert_eq!(
+            request.entry.runtime_profile_id.as_deref(),
+            Some("code-reviewer")
+        );
         assert_eq!(request.channel.as_deref(), Some("feishu"));
         assert_eq!(request.message_id.as_deref(), Some("msg-1"));
         assert_eq!(
@@ -143,6 +153,7 @@ mod tests {
             channel_instance_id: None,
             conversation_id: "conv-2".to_string(),
             sender_id: "user-2".to_string(),
+            agent_preset_id: None,
             message_id: "msg-2".to_string(),
             text: "hello".to_string(),
             channel_identity_prompt: None,

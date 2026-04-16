@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
@@ -95,6 +98,16 @@ pub struct AgentConfig {
     pub model: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -214,6 +227,10 @@ impl DaemonConfig {
 
     pub fn interaction_timeout_secs(&self) -> u64 {
         self.app.channels.interaction_timeout_secs.unwrap_or(600)
+    }
+
+    pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
+        self.app.agent.get(role_id)
     }
 
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {

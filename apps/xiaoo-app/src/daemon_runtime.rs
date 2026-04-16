@@ -1,6 +1,6 @@
-use crate::daemon_config::{DaemonConfig, ResolvedAgentConfig};
+use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
-use agent_types::common::ids::AgentId;
+use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use agent_types::hooker::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
@@ -16,7 +16,7 @@ use llm_client::{
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
 use tool::{load_tool_sources, ToolRegistryBuilderImpl};
@@ -32,6 +32,7 @@ const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 
 pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
+    agent_roles: BTreeMap<String, AgentRoleConfig>,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
     feature_flags: FeatureFlags,
@@ -76,6 +77,7 @@ impl ConfiguredRuntimeResolver {
 
         Ok(Self {
             agent,
+            agent_roles: config.app.agent.clone(),
             llm_provider,
             token_budget,
             feature_flags: FeatureFlags::default(),
@@ -88,15 +90,17 @@ impl ConfiguredRuntimeResolver {
 
     fn build_tool_registry(
         &self,
+        agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let tool_sources = load_tool_sources();
-        let all_tool_names = tool_sources
+        let all_tool_names: Vec<ToolName> = tool_sources
             .iter()
             .flat_map(|source| source.discover())
             .map(|tool| tool.spec.name().clone())
             .collect();
+        let allowed_tool_names = resolve_allowed_tool_names(&all_tool_names, agent_role);
         let mut per_agent_allowed_tools = HashMap::new();
-        per_agent_allowed_tools.insert(AgentId(self.agent.id.clone()), all_tool_names);
+        per_agent_allowed_tools.insert(AgentId(self.agent.id.clone()), allowed_tool_names);
 
         let registry = ToolRegistryBuilderImpl::new()
             .with_sources(tool_sources)
@@ -121,12 +125,18 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         request: &SessionRuntimeBuildInput,
         _existing: Option<&SessionRecord>,
     ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+        let agent_role = resolve_agent_role(&self.agent_roles, request)?;
+        let system_prompt = agent_role
+            .and_then(|role| role.prompt.as_deref())
+            .filter(|prompt| !prompt.trim().is_empty())
+            .unwrap_or(self.agent.system_prompt.as_str());
+
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(self.agent.id.clone()),
                 model: self.agent.model.clone(),
                 system_prompt: build_system_prompt(
-                    &self.agent.system_prompt,
+                    system_prompt,
                     &self.agent.workspace_root,
                     request,
                 ),
@@ -138,7 +148,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: Arc::clone(&self.llm_provider),
-            tool_registry: self.build_tool_registry()?,
+            tool_registry: self.build_tool_registry(agent_role)?,
             skill_registry: Some(Arc::clone(&self.skill_registry)),
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: self.compression_pipeline.clone(),
@@ -146,6 +156,83 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             hooker: self.hooker.clone(),
         })
     }
+}
+
+fn resolve_agent_role<'a>(
+    agent_roles: &'a BTreeMap<String, AgentRoleConfig>,
+    request: &SessionRuntimeBuildInput,
+) -> Result<Option<&'a AgentRoleConfig>, SessionRuntimeResolveError> {
+    let Some(role_id) = request
+        .entry
+        .runtime_profile_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|role_id| !role_id.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    agent_roles
+        .get(role_id)
+        .map(Some)
+        .ok_or_else(|| SessionRuntimeResolveError::ResolveFailed {
+            message: format!("unknown agent role preset: {role_id}"),
+        })
+}
+
+fn resolve_allowed_tool_names(
+    all_tool_names: &[ToolName],
+    agent_role: Option<&AgentRoleConfig>,
+) -> Vec<ToolName> {
+    let Some(agent_role) = agent_role else {
+        return all_tool_names.to_vec();
+    };
+    if agent_role.tools.is_empty() {
+        return all_tool_names.to_vec();
+    }
+
+    let available_names: BTreeSet<String> =
+        all_tool_names.iter().map(|name| name.0.clone()).collect();
+    let mut visible_names: BTreeSet<String> = available_names.clone();
+    for (configured_name, enabled) in &agent_role.tools {
+        let Some(tool_name) = canonical_tool_name(configured_name, &available_names) else {
+            continue;
+        };
+        if *enabled {
+            visible_names.insert(tool_name);
+        } else {
+            visible_names.remove(&tool_name);
+        }
+    }
+
+    all_tool_names
+        .iter()
+        .filter(|tool_name| visible_names.contains(tool_name.0.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn canonical_tool_name(
+    configured_name: &str,
+    available_names: &BTreeSet<String>,
+) -> Option<String> {
+    let normalized = configured_name
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_");
+    let mut candidates = vec![normalized.clone()];
+    match normalized.as_str() {
+        "read" => candidates.push("file_read".to_string()),
+        "write" => candidates.push("file_write".to_string()),
+        "edit" => candidates.push("file_edit".to_string()),
+        "search" | "websearch" => candidates.push("web_search".to_string()),
+        "fetch" => candidates.push("webfetch".to_string()),
+        _ => {}
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| available_names.contains(candidate))
 }
 
 fn build_token_budget(
@@ -268,7 +355,9 @@ fn build_compression_pipeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, build_token_budget};
+    use super::{build_system_prompt, build_token_budget, canonical_tool_name, resolve_agent_role};
+    use crate::daemon_config::AgentRoleConfig;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use tempfile::tempdir;
     use xiaoo_app::gateway::{GatewayEntryContext, SessionRuntimeBuildInput};
@@ -310,5 +399,63 @@ mod tests {
         assert!(prompt.contains("repo rules"));
         assert!(prompt.contains("当前通道"));
         assert!(prompt.find("repo rules").unwrap() < prompt.find("## 当前通道").unwrap());
+    }
+
+    #[test]
+    fn canonical_tool_name_supports_common_aliases() {
+        let available = BTreeSet::from([
+            "bash".to_string(),
+            "file_edit".to_string(),
+            "file_write".to_string(),
+            "web_search".to_string(),
+        ]);
+
+        assert_eq!(
+            canonical_tool_name("write", &available).as_deref(),
+            Some("file_write")
+        );
+        assert_eq!(
+            canonical_tool_name("edit", &available).as_deref(),
+            Some("file_edit")
+        );
+        assert_eq!(
+            canonical_tool_name("web-search", &available).as_deref(),
+            Some("web_search")
+        );
+        assert_eq!(
+            canonical_tool_name("bash", &available).as_deref(),
+            Some("bash")
+        );
+    }
+
+    #[test]
+    fn resolve_agent_role_uses_runtime_profile_id() {
+        let mut agent_roles = BTreeMap::new();
+        agent_roles.insert(
+            "code-reviewer".to_string(),
+            AgentRoleConfig {
+                description: "Reviews code".to_string(),
+                prompt: Some("You are a code reviewer.".to_string()),
+                tools: BTreeMap::new(),
+            },
+        );
+        let request = SessionRuntimeBuildInput {
+            session_id: "session".to_string(),
+            conversation_id: "conversation".to_string(),
+            sender_id: "sender".to_string(),
+            channel: Some("http".to_string()),
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext {
+                runtime_profile_id: Some("code-reviewer".to_string()),
+                ..GatewayEntryContext::channel(None)
+            },
+            agent_id_override: None,
+        };
+
+        let resolved = resolve_agent_role(&agent_roles, &request)
+            .expect("agent role should resolve")
+            .expect("agent role should exist");
+        assert_eq!(resolved.prompt.as_deref(), Some("You are a code reviewer."));
     }
 }

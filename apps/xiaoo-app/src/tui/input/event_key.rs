@@ -194,16 +194,37 @@ impl App {
 
     async fn handle_editing_mode_key(&mut self, key: KeyEvent) -> Result<()> {
         if key.code == KeyCode::Tab {
-            if self.state.slash_menu_visible() {
-                self.state.apply_slash_selection();
+            let has_slash_prefix = crate::slash_complete::slash_typed_prefix(
+                self.state.chat_state.input.value(),
+                self.state.chat_state.input.cursor(),
+            )
+            .is_some();
+            if has_slash_prefix {
+                if self.state.slash_menu_visible() {
+                    self.state.apply_slash_selection();
+                } else {
+                    crate::slash_complete::apply_slash_tab(
+                        &mut self.state.chat_state.input,
+                        &self.state.external_commands,
+                    );
+                }
+                self.state.note_input_changed();
             } else {
-                crate::slash_complete::apply_slash_tab(
-                    &mut self.state.chat_state.input,
-                    &self.state.external_commands,
-                );
+                self.state.cycle_agent_role(false);
             }
-            self.state.note_input_changed();
             return Ok(());
+        }
+
+        if key.code == KeyCode::BackTab {
+            if crate::slash_complete::slash_typed_prefix(
+                self.state.chat_state.input.value(),
+                self.state.chat_state.input.cursor(),
+            )
+            .is_none()
+            {
+                self.state.cycle_agent_role(true);
+                return Ok(());
+            }
         }
 
         if self.state.slash_menu_visible() {

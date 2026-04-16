@@ -16,6 +16,8 @@ pub struct Config {
     #[serde(default)]
     pub trace: Option<Value>,
     #[serde(default)]
+    pub agent: BTreeMap<String, AgentRoleConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
@@ -50,6 +52,16 @@ pub struct AgentConfig {
     pub id: String,
     #[serde(default)]
     pub workspace_dir: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
 }
 
 impl Default for AgentsConfig {
@@ -118,6 +130,14 @@ impl Config {
             default_agent_id,
             ids
         )
+    }
+
+    pub fn agent_role_ids(&self) -> Vec<String> {
+        self.agent.keys().cloned().collect()
+    }
+
+    pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
+        self.agent.get(role_id)
     }
 }
 
@@ -293,5 +313,38 @@ mod tests {
                 .contains("agents.default_agent_id validation failed"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn parses_agent_role_presets() {
+        let config: Config = toml::from_str(
+            r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+max_tokens = 4096
+context_window = 128000
+
+[agent.code-reviewer]
+description = "Reviews code for best practices and potential issues"
+prompt = "You are a code reviewer."
+
+[agent.code-reviewer.tools]
+write = false
+edit = false
+"#,
+        )
+        .expect("agent role config should parse");
+
+        let role = config
+            .agent_role("code-reviewer")
+            .expect("code-reviewer role should exist");
+        assert_eq!(
+            role.description,
+            "Reviews code for best practices and potential issues"
+        );
+        assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.tools.get("write"), Some(&false));
+        assert_eq!(role.tools.get("edit"), Some(&false));
     }
 }

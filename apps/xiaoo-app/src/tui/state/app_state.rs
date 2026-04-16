@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use std::path::PathBuf;
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, MessageRole};
-use crate::config::Config;
+use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
@@ -57,6 +57,7 @@ pub struct AppState {
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
+    pub active_agent_role: Option<String>,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
@@ -79,6 +80,7 @@ impl AppState {
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
+            active_agent_role: None,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -121,6 +123,7 @@ impl AppState {
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
+            active_agent_role: None,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -229,5 +232,48 @@ impl AppState {
                     && !message.content.is_empty()
             })
             .map(|message| message.content.clone())
+    }
+
+    pub fn agent_tab_labels(&self) -> Vec<String> {
+        let mut tabs = vec!["Chat".to_string()];
+        tabs.extend(self.agent_config.agent_role_ids());
+        tabs
+    }
+
+    pub fn active_agent_tab_label(&self) -> &str {
+        self.active_agent_role.as_deref().unwrap_or("Chat")
+    }
+
+    pub fn active_agent_role_config(&self) -> Option<&AgentRoleConfig> {
+        self.active_agent_role
+            .as_deref()
+            .and_then(|role_id| self.agent_config.agent_role(role_id))
+    }
+
+    pub fn cycle_agent_role(&mut self, reverse: bool) -> bool {
+        let role_ids = self.agent_config.agent_role_ids();
+        if role_ids.is_empty() {
+            return false;
+        }
+
+        let total_tabs = role_ids.len() + 1;
+        let current_index = self
+            .active_agent_role
+            .as_ref()
+            .and_then(|current| role_ids.iter().position(|role_id| role_id == current))
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        let next_index = if reverse {
+            (current_index + total_tabs - 1) % total_tabs
+        } else {
+            (current_index + 1) % total_tabs
+        };
+
+        self.active_agent_role = if next_index == 0 {
+            None
+        } else {
+            role_ids.get(next_index - 1).cloned()
+        };
+        true
     }
 }
