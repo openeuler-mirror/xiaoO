@@ -12,7 +12,7 @@ pub struct SpawnSubagentRequest {
     pub description: String,
     pub task_goal: String,
     pub task_context: String,
-    pub output_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

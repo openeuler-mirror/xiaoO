@@ -45,7 +45,7 @@ impl SpawnSubagentToolSpec {
                     }]
                 }
             },
-            "required": ["description", "task_goal", "task_context", "output_schema"]
+            "required": ["description", "task_goal", "task_context"]
         });
 
         Self {
