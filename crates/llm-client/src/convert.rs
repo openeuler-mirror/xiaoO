@@ -125,6 +125,7 @@ pub(crate) fn response_format_to_wire(format: &ResponseFormat) -> Option<WireRes
     }
 }
 
+#[inline]
 pub(crate) fn parse_tool_arguments(arguments: &str) -> serde_json::Value {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
