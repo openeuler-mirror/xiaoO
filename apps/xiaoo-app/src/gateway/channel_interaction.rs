@@ -192,7 +192,7 @@ pub fn resolve_interaction_from_text(
                     | "\u{786e}\u{8ba4}"  // 确认
                     | "\u{597d}"          // 好
                     | "\u{597d}\u{7684}"  // 好的
-                    | "\u{884c}"          // 行
+                    | "\u{884c}" // 行
             );
             InteractionResponse::Confirmed { allowed: yes }
         }

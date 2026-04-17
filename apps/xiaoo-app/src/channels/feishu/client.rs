@@ -225,11 +225,7 @@ impl FeishuClient {
     }
 
     /// Upload a file to Feishu and return the file_key.
-    pub async fn upload_file(
-        &self,
-        file_path: &str,
-        file_name: &str,
-    ) -> ChannelResult<String> {
+    pub async fn upload_file(&self, file_path: &str, file_name: &str) -> ChannelResult<String> {
         let token = self.fetch_tenant_access_token().await?;
         let file_bytes =
             tokio::fs::read(file_path)
@@ -267,10 +263,7 @@ impl FeishuClient {
 
         let response = self
             .client
-            .post(format!(
-                "{}/open-apis/im/v1/files",
-                self.config.base_url()
-            ))
+            .post(format!("{}/open-apis/im/v1/files", self.config.base_url()))
             .bearer_auth(&token)
             .multipart(form)
             .send()
@@ -296,11 +289,10 @@ impl FeishuClient {
             });
         }
 
-        let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
-            ChannelError::Transport {
+        let payload =
+            serde_json::from_str::<Value>(&body).map_err(|error| ChannelError::Transport {
                 message: format!("invalid feishu upload_file response: {error}"),
-            }
-        })?;
+            })?;
 
         if payload.get("code").and_then(Value::as_i64).unwrap_or(-1) != 0 {
             let msg = payload
