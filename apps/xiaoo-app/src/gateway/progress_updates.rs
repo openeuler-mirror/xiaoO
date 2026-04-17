@@ -349,6 +349,7 @@ mod tests {
             tool_name: "search".to_string(),
             output_preview: "找到 3 条资料".to_string(),
             is_error: false,
+            args_preview: String::new(),
         });
         tracker.record_loop_end(LoopEndSummary {
             turn_count: 1,

@@ -870,6 +870,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                     tool_name: inv.tool_name.clone(),
                     output_preview: "invalid empty tool name".to_string(),
                     is_error: true,
+                    args_preview: serde_json::to_string_pretty(&inv.input)
+                        .unwrap_or_else(|_| inv.input.to_string()),
                 },
             );
         }
@@ -932,6 +934,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                         tool_name: result.tool_name().to_string(),
                         output_preview,
                         is_error,
+                        args_preview: format_tool_args_preview(result.final_call()),
                     },
                 );
             }
@@ -965,6 +968,10 @@ fn build_invalid_tool_name_result(tc: &ToolUseBlock) -> ChatMessage {
         true,
         now_ms(),
     )
+}
+
+fn format_tool_args_preview(call: &agent_types::tool::FinalToolCall) -> String {
+    serde_json::to_string_pretty(&call.input).unwrap_or_else(|_| call.input.to_string())
 }
 
 fn decide(ctx: &mut LoopContext<'_>) {

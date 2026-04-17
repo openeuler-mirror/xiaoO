@@ -1,6 +1,7 @@
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolCall, ToolExecutor, ToolSpecView};
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
+use agent_types::events::ToolLifecycleEvent;
 use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, FinalToolCall, PostHookResult, PostToolHookInput,
@@ -602,6 +603,10 @@ impl ToolCallImpl {
         }
     }
 
+    fn emit_tool_event(&self, runtime: &dyn RuntimeView, event: ToolLifecycleEvent) {
+        runtime.tool_events().emit(event);
+    }
+
     async fn begin_trace_span(&self, state: &mut ToolExecutionState, runtime: &dyn RuntimeView) {
         let span = runtime
             .trace_recorder()
@@ -761,6 +766,15 @@ impl ToolCall for ToolCallImpl {
             .any(|result| matches!(result, PreHookResult::Deny { .. }))
         {
             let result = self.build_denied_result(&state);
+            self.emit_tool_event(
+                runtime,
+                ToolLifecycleEvent::Denied {
+                    call_id: state.final_call.call_id.clone(),
+                    tool_name: state.final_call.tool_name.clone(),
+                    reason: denied_reason(&state),
+                    args_preview: format_tool_args_preview(&state.final_call),
+                },
+            );
             self.end_trace_span(
                 &mut state,
                 runtime,
@@ -776,6 +790,14 @@ impl ToolCall for ToolCallImpl {
             Ok(lifecycle_record) => {
                 state.lifecycle_record = Some(lifecycle_record);
                 self.mark_lifecycle_running(&mut state, runtime);
+                self.emit_tool_event(
+                    runtime,
+                    ToolLifecycleEvent::Running {
+                        call_id: state.final_call.call_id.clone(),
+                        tool_name: state.final_call.tool_name.clone(),
+                        args_preview: format_tool_args_preview(&state.final_call),
+                    },
+                );
                 self.update_trace_span(&state, runtime, "running").await;
             }
             Err(error) => {
@@ -794,6 +816,15 @@ impl ToolCall for ToolCallImpl {
                     }
                 }
                 let result = self.build_failed_result(&state, error);
+                self.emit_tool_event(
+                    runtime,
+                    ToolLifecycleEvent::Failed {
+                        call_id: state.final_call.call_id.clone(),
+                        tool_name: state.final_call.tool_name.clone(),
+                        error: result_error_message(&result),
+                        args_preview: format_tool_args_preview(&state.final_call),
+                    },
+                );
                 self.end_trace_span(
                     &mut state,
                     runtime,
@@ -835,6 +866,15 @@ impl ToolCall for ToolCallImpl {
                     .await;
                 let result = self.build_failed_result(&state, error);
                 self.persist_terminal_lifecycle(&mut state, &result, runtime);
+                self.emit_tool_event(
+                    runtime,
+                    ToolLifecycleEvent::Failed {
+                        call_id: state.final_call.call_id.clone(),
+                        tool_name: state.final_call.tool_name.clone(),
+                        error: result_error_message(&result),
+                        args_preview: format_tool_args_preview(&state.final_call),
+                    },
+                );
                 self.end_trace_span(
                     &mut state,
                     runtime,
@@ -855,6 +895,15 @@ impl ToolCall for ToolCallImpl {
                 .await;
             let result = self.build_failed_result(&state, execution_error);
             self.persist_terminal_lifecycle(&mut state, &result, runtime);
+            self.emit_tool_event(
+                runtime,
+                ToolLifecycleEvent::Failed {
+                    call_id: state.final_call.call_id.clone(),
+                    tool_name: state.final_call.tool_name.clone(),
+                    error: result_error_message(&result),
+                    args_preview: format_tool_args_preview(&state.final_call),
+                },
+            );
             self.end_trace_span(
                 &mut state,
                 runtime,
@@ -887,6 +936,14 @@ impl ToolCall for ToolCallImpl {
                             .expect("post-hook error should preserve completed raw_outcome"),
                     );
                     self.persist_terminal_lifecycle(&mut state, &result, runtime);
+                    self.emit_tool_event(
+                        runtime,
+                        ToolLifecycleEvent::Completed {
+                            call_id: state.final_call.call_id.clone(),
+                            tool_name: state.final_call.tool_name.clone(),
+                            args_preview: format_tool_args_preview(&state.final_call),
+                        },
+                    );
                     self.end_trace_span(
                         &mut state,
                         runtime,
@@ -908,6 +965,15 @@ impl ToolCall for ToolCallImpl {
                 .await;
             let result = self.build_failed_result(&state, execution_error);
             self.persist_terminal_lifecycle(&mut state, &result, runtime);
+            self.emit_tool_event(
+                runtime,
+                ToolLifecycleEvent::Failed {
+                    call_id: state.final_call.call_id.clone(),
+                    tool_name: state.final_call.tool_name.clone(),
+                    error: result_error_message(&result),
+                    args_preview: format_tool_args_preview(&state.final_call),
+                },
+            );
             self.end_trace_span(
                 &mut state,
                 runtime,
@@ -927,9 +993,46 @@ impl ToolCall for ToolCallImpl {
                 .expect("completed tool call should have raw_outcome"),
         );
         self.persist_terminal_lifecycle(&mut state, &result, runtime);
+        self.emit_tool_event(
+            runtime,
+            ToolLifecycleEvent::Completed {
+                call_id: state.final_call.call_id.clone(),
+                tool_name: state.final_call.tool_name.clone(),
+                args_preview: format_tool_args_preview(&state.final_call),
+            },
+        );
         self.end_trace_span(&mut state, runtime, TraceOutcome::Ok, &result, "completed")
             .await;
         Ok(result)
+    }
+}
+
+fn format_tool_args_preview(call: &FinalToolCall) -> String {
+    serde_json::to_string_pretty(&call.input).unwrap_or_else(|_| call.input.to_string())
+}
+
+fn denied_reason(state: &ToolExecutionState) -> String {
+    state
+        .pre_hook_results
+        .iter()
+        .find_map(|result| match result {
+            PreHookResult::Deny { reason } => Some(reason.clone()),
+            _ => None,
+        })
+        .or_else(|| state.execution_error.as_ref().map(ToString::to_string))
+        .unwrap_or_else(|| "tool execution denied".to_string())
+}
+
+fn result_error_message(result: &ToolExecutionResult) -> String {
+    match result {
+        ToolExecutionResult::Failed {
+            execution_error, ..
+        } => execution_error.to_string(),
+        ToolExecutionResult::Denied { error, .. } => error
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| "tool execution denied".to_string()),
+        _ => String::new(),
     }
 }
 
