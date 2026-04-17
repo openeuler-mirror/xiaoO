@@ -31,16 +31,18 @@ pub enum JoinDecision {
 
 pub struct SubagentPromptBuilder;
 
+const SUBAGENT_PROMPT_TEMPLATE: &str = include_str!("prompts/subagent_prompt_template.txt");
+
 impl SubagentPromptBuilder {
     pub fn build(task_goal: &str, task_context: &str, output_schema: &serde_json::Value) -> String {
-        format!(
-            "You are a subagent summoned by a parent agent. Your primary goal is:\n{task_goal}\n\n\
-             Task Context:\n{task_context}\n\n\
-             You MUST conclude your task by producing a final result that strictly adheres to the \
-             following JSON schema. Do not include any other explanatory text in your final finish/terminal reply, \
-             ONLY the JSON matching this schema:\n{}",
-            serde_json::to_string_pretty(output_schema).unwrap_or_else(|_| "{}".to_string())
-        )
+        SUBAGENT_PROMPT_TEMPLATE
+            .trim_end_matches(['\r', '\n'])
+            .replace("{{task_goal}}", task_goal)
+            .replace("{{task_context}}", task_context)
+            .replace(
+                "{{output_schema}}",
+                &serde_json::to_string_pretty(output_schema).unwrap_or_else(|_| "{}".to_string()),
+            )
     }
 }
 
@@ -262,5 +264,35 @@ fn terminal_kind_to_status(kind: &SubagentTerminalKind) -> SubagentStatus {
         SubagentTerminalKind::Cancelled => SubagentStatus::Cancelled,
         SubagentTerminalKind::MaxTurnsReached => SubagentStatus::MaxTurnsReached,
         SubagentTerminalKind::BudgetExhausted => SubagentStatus::BudgetExhausted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SubagentPromptBuilder;
+
+    #[test]
+    fn subagent_prompt_builder_matches_existing_output() {
+        let prompt = SubagentPromptBuilder::build(
+            "Count files",
+            "Use find",
+            &serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer" }
+                },
+                "required": ["count"]
+            }),
+        );
+
+        assert_eq!(
+            prompt,
+            "You are a subagent summoned by a parent agent. Your primary goal is:\n\
+Count files\n\n\
+Task Context:\n\
+Use find\n\n\
+You MUST conclude your task by producing a final result that strictly adheres to the following JSON schema. Do not include any other explanatory text in your final finish/terminal reply, ONLY the JSON matching this schema:\n\
+{\n  \"properties\": {\n    \"count\": {\n      \"type\": \"integer\"\n    }\n  },\n  \"required\": [\n    \"count\"\n  ],\n  \"type\": \"object\"\n}"
+        );
     }
 }

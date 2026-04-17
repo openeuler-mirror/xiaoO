@@ -18,7 +18,7 @@ use tool::load_tool_sources;
 
 use super::runtime::GatewayRuntime;
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding agent.";
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_system_prompt.txt");
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
@@ -66,7 +66,11 @@ impl GatewayRuntime {
         let system_prompt = state
             .active_agent_role_config()
             .and_then(|role| role.prompt.clone())
-            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+            .unwrap_or_else(|| {
+                DEFAULT_SYSTEM_PROMPT
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string()
+            });
         let total_budget = state
             .agent_config
             .llm
