@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use xiaoo_app::channels::feishu::FeishuConfig;
 
-const DEFAULT_OUTPUT_TOKENS: usize = 4096;
+const DEFAULT_OUTPUT_TOKENS: usize = 128000;
 const DEFAULT_SYSTEM_PROMPT: &str = "You are XiaoO, an enterprise agent operating system assistant. Respond clearly, accurately, and in plain text suitable for enterprise chat channels.";
 
 #[derive(Debug, Clone, Deserialize)]

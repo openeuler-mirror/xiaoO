@@ -15,7 +15,7 @@ model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read API key from this environment variable
 api_base = "https://..."             # Optional, custom API base URL
 context_window = 128000              # Optional, session compression budget
-max_tokens = 4096                    # Optional, max tokens per response
+max_tokens = 128000                   # Optional, max tokens per response
 
 [channels.feishu]                   # Optional, enable Feishu channel integration
 enabled = true
