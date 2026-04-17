@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_AGENT_ID: &str = "main";
 const LLM_SECRETS_FILE: &str = "llm_secrets.json";
-const DEFAULT_LLM_MAX_TOKENS: u32 = 4096;
+const DEFAULT_LLM_MAX_TOKENS: u32 = 128000;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -284,7 +284,7 @@ mod tests {
         let mut config = Config::default();
         config.llm.provider = "openai".to_string();
         config.llm.model = "gpt-4o".to_string();
-        config.llm.max_tokens = 4096;
+        config.llm.max_tokens = 128000;
         config.llm.context_window = Some(128_000);
         config
     }
@@ -340,7 +340,7 @@ mod tests {
 [llm]
 provider = "openai"
 model = "gpt-4o"
-max_tokens = 4096
+max_tokens = 128000
 context_window = 128000
 
 [agent.code-reviewer]
