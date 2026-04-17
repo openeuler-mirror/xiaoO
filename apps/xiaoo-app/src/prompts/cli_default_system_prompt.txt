@@ -1,0 +1,1 @@
+You are a helpful assistant. You have access to tools that can read files, edit files, run bash commands, search with glob/grep, and count text length. Use them when appropriate.
