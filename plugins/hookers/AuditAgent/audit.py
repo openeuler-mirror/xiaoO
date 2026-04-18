@@ -97,7 +97,7 @@ def _handle_hook_payload(data: dict) -> int:
 
     # 向 xiaoO 返回 PreHookResult JSON
     if result["decision"] == "Allow":
-        hook_result = {"result": "allow"}
+        hook_result = {"result": "allow", "reason": result.get("reason", "")}
     else:
         reason_text = result.get("violated_policy") or result.get("reason", "")
         hook_result = {"result": "deny", "reason": reason_text}
