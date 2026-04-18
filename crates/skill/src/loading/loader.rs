@@ -91,17 +91,24 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
 /// Prefers SKILL.toml over SKILL.md.
 fn load_skill_from_dir(skill_dir: &Path) -> Result<Skill, crate::error::SkillError> {
     let toml_path = skill_dir.join("SKILL.toml");
-    if toml_path.exists() {
-        return load_skill_toml(&toml_path, skill_dir);
-    }
-
     let md_path = skill_dir.join("SKILL.md");
-    if md_path.exists() {
-        return load_skill_md(&md_path, skill_dir);
-    }
 
-    Err(crate::error::SkillError::MissingField {
-        path: skill_dir.to_path_buf(),
-        field: "SKILL.md or SKILL.toml".into(),
-    })
+    let mut skill = if toml_path.exists() {
+        load_skill_toml(&toml_path, skill_dir)?
+    } else if md_path.exists() {
+        load_skill_md(&md_path, skill_dir)?
+    } else {
+        return Err(crate::error::SkillError::MissingField {
+            path: skill_dir.to_path_buf(),
+            field: "SKILL.md or SKILL.toml".into(),
+        });
+    };
+
+    skill.prompt = format!(
+        "{}\n<indicator>skill loaded from {}</indicator>",
+        skill.prompt,
+        skill_dir.display()
+    );
+
+    Ok(skill)
 }
