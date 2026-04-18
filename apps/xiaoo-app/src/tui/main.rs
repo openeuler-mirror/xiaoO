@@ -29,6 +29,7 @@ pub(crate) use render::provider_dialog;
 pub(crate) use render::status_panel;
 pub(crate) use render::theme;
 pub(crate) use services::provider as provider_service;
+pub(crate) use services::skills as skills_service;
 pub(crate) use services::workspace as workspace_service;
 pub(crate) use state::app_state;
 pub(crate) use state::chat;

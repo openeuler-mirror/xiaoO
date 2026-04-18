@@ -92,8 +92,8 @@ impl AppState {
     pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
         Ok(Self {
             theme: Theme::default(),
-            chat_state: ChatState::new(),
-            status_panel: StatusPanel::new(),
+            chat_state: build_chat_state(&Config::default()),
+            status_panel: build_status_panel(&Config::default()),
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
@@ -119,26 +119,10 @@ impl AppState {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Result<Self, anyhow::Error> {
-        let provider_name = config.llm.provider.clone();
-        let model = config.llm.model.clone();
-        let list = merge_config_provider(default_provider_list(), &provider_name, &model);
-        let mut chat_state = ChatState::new();
-        chat_state.available_providers = list;
-
-        let mut status_panel = StatusPanel::new();
-        let has_runtime_selection = !provider_name.trim().is_empty() && !model.trim().is_empty();
-        if has_runtime_selection {
-            status_panel.set_provider(&provider_name, &model);
-            chat_state.messages.push(crate::chat::Message::system(format!(
-                "Configured backend {} / {} from config. Messages now go through gateway/session interfaces.",
-                provider_name, model
-            )));
-        }
-
         Ok(Self {
             theme: Theme::default(),
-            chat_state,
-            status_panel,
+            chat_state: build_chat_state(config),
+            status_panel: build_status_panel(config),
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
@@ -157,6 +141,24 @@ impl AppState {
             transcript_selection: None,
             copy_notice: None,
         })
+    }
+
+    pub fn reset_for_new_session(&mut self) {
+        self.chat_state = build_chat_state(&self.agent_config);
+        self.status_panel = build_status_panel(&self.agent_config);
+        self.status_panel.set_workspace(&self.workspace);
+        self.input_mode = InputMode::Editing;
+        self.provider_dialog = None;
+        self.api_key_dialog = None;
+        self.loading_tick = 0;
+        self.session_messages.clear();
+        self.session_id = uuid::Uuid::new_v4().to_string();
+        self.slash = SlashState::default();
+        self.interaction_prompt = None;
+        self.render_state = RenderState::default();
+        self.transcript_selection = None;
+        self.copy_notice = None;
+        self.external_commands = load_external_commands();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -377,10 +379,37 @@ impl AppState {
     }
 }
 
+fn build_chat_state(config: &Config) -> ChatState {
+    let provider_name = config.llm.provider.clone();
+    let model = config.llm.model.clone();
+    let mut chat_state = ChatState::new();
+    chat_state.available_providers =
+        merge_config_provider(default_provider_list(), &provider_name, &model);
+
+    if !provider_name.trim().is_empty() && !model.trim().is_empty() {
+        chat_state.messages.push(crate::chat::Message::system(format!(
+            "Configured backend {} / {} from config. Messages now go through gateway/session interfaces.",
+            provider_name, model
+        )));
+    }
+
+    chat_state
+}
+
+fn build_status_panel(config: &Config) -> StatusPanel {
+    let mut status_panel = StatusPanel::new();
+    if !config.llm.provider.trim().is_empty() && !config.llm.model.trim().is_empty() {
+        status_panel.set_provider(&config.llm.provider, &config.llm.model);
+    }
+    status_panel
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AppState, RuntimeStatusLight};
-    use crate::interaction_prompt::demo_prompt_request;
+    use crate::interaction_prompt::{PromptChoice, PromptRequest};
+    use crate::selection::TranscriptSelection;
+    use agent_types::{ChatMessage, ContentBlock, MessageRole};
     use std::path::PathBuf;
 
     #[test]
@@ -404,11 +433,27 @@ mod tests {
             .expect("app state should initialize");
         state.chat_state.is_loading = true;
         state
-            .open_interaction_prompt(demo_prompt_request(), true)
+            .open_interaction_prompt(sample_prompt_request(), true)
             .expect("interaction prompt should open");
         assert_eq!(
             state.runtime_status_light(),
             RuntimeStatusLight::AwaitingInteraction
         );
+    }
+
+    fn sample_prompt_request() -> PromptRequest {
+        PromptRequest {
+            request_id: "demo-1".to_string(),
+            title: "示例交互".to_string(),
+            body: Some("请选择一个选项（可填写补充说明）。".to_string()),
+            choices: vec![PromptChoice {
+                id: "a".to_string(),
+                label: "选项 A".to_string(),
+                description: Some("快速路径".to_string()),
+            }],
+            allow_custom_input: true,
+            multi_select: false,
+            default_index: Some(0),
+        }
     }
 }

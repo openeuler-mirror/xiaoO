@@ -4,12 +4,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode};
 use crate::input::EventHandler;
-use crate::interaction_prompt::{demo_prompt_request, PromptFocus, PromptResolution};
+use crate::interaction_prompt::{PromptFocus, PromptResolution};
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
 use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
     validate_and_connect_api_key,
 };
+use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
 
 impl App {
@@ -311,6 +312,14 @@ impl App {
             return Ok(());
         }
 
+        let trimmed = user_input.trim();
+
+        if trimmed.eq_ignore_ascii_case("/new") {
+            self.gateway.reset_for_new_session(&mut self.state);
+            self.state.reset_for_new_session();
+            return Ok(());
+        }
+
         if self.state.chat_state.is_loading {
             self.state
                 .chat_state
@@ -322,31 +331,26 @@ impl App {
             return Ok(());
         }
 
-        if user_input.trim().eq_ignore_ascii_case("/connect") {
+        if trimmed.eq_ignore_ascii_case("/connect") {
             self.state.chat_state.input.reset();
             self.open_provider_selection_dialog();
             return Ok(());
         }
 
-        if user_input.trim().eq_ignore_ascii_case("/prompt-demo") {
+        if trimmed.eq_ignore_ascii_case("/skills") {
             self.state.chat_state.input.reset();
-            if let Err(error) = self
-                .state
-                .open_interaction_prompt(demo_prompt_request(), false)
-            {
-                self.state
-                    .chat_state
-                    .messages
-                    .push(crate::chat::Message::system(format!(
-                        "无法打开交互示例: {error}"
-                    )));
-                self.state.chat_state.stick_to_bottom = true;
-            }
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(render_skills_overview(
+                    &self.state.agent_config,
+                )));
+            self.state.chat_state.stick_to_bottom = true;
             return Ok(());
         }
 
-        if first_token_is_dir_command(user_input.trim()) {
-            match resolve_dir_command(user_input.trim(), &self.state.workspace) {
+        if first_token_is_dir_command(trimmed) {
+            match resolve_dir_command(trimmed, &self.state.workspace) {
                 Ok(path) => {
                     self.state.workspace = path;
                     self.state.status_panel.set_workspace(&self.state.workspace);
@@ -377,7 +381,6 @@ impl App {
 
         // External commands from ~/.xiaoo/command/
         {
-            let trimmed = user_input.trim();
             let cmd_name = trimmed.strip_prefix('/').unwrap_or("");
             if let Some(cmd) = self
                 .state

@@ -42,4 +42,21 @@ impl GatewayRuntime {
             interaction_reply_tx: None,
         }
     }
+
+    pub fn reset_for_new_session(&mut self, state: &mut crate::app_state::AppState) {
+        if state.chat_state.is_loading
+            || self.stream_rx.is_some()
+            || self.pending_stream_done.is_some()
+        {
+            self.cancel_streaming(state);
+        }
+        self.stream_rx = None;
+        self.stream_message_index = None;
+        self.stream_reveal_buffer.clear();
+        self.pending_stream_done = None;
+        self.cancel_flag = None;
+        self.request_start = None;
+        self.first_token_latency_recorded = false;
+        self.interaction_reply_tx = None;
+    }
 }

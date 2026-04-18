@@ -327,32 +327,3 @@ pub fn render_interaction_prompt(
         }
     }
 }
-
-/// 本地 `/prompt-demo` 使用的示例请求。
-pub fn demo_prompt_request() -> PromptRequest {
-    PromptRequest {
-        request_id: "demo-1".to_string(),
-        title: "示例交互".to_string(),
-        body: Some("请选择一个选项（可填写补充说明）。".to_string()),
-        choices: vec![
-            PromptChoice {
-                id: "a".to_string(),
-                label: "选项 A".to_string(),
-                description: Some("快速路径".to_string()),
-            },
-            PromptChoice {
-                id: "b".to_string(),
-                label: "选项 B".to_string(),
-                description: None,
-            },
-            PromptChoice {
-                id: "c".to_string(),
-                label: "选项 C".to_string(),
-                description: Some("详细模式".to_string()),
-            },
-        ],
-        allow_custom_input: true,
-        multi_select: false,
-        default_index: Some(0),
-    }
-}
