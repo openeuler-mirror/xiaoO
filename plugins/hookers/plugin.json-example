@@ -1,0 +1,7 @@
+[
+  {
+    "id": "plugin_<your_hooker>_tool_input",
+    "hook_point": "*.Tool.*.pre",
+    "command": "python3 <path_to_your_hooker_triggerscript.py>"
+  }
+]

@@ -1,0 +1,957 @@
+{
+  "version": "3.0.0",
+  "description": "xiaoO 场景驱动分析器的检测模式库。场景驱动架构不同于传统的攻击类型分类，每个场景对应一个专用分析器。",
+  "scene_mapping": {
+    "command_risk": {
+      "display_name": "命令执行风险",
+      "sub_scenes": {
+        "remote_code_execution": {
+          "display_name": "远程代码执行",
+          "detection_patterns": [
+            "curl | bash",
+            "curl | sh",
+            "wget | bash",
+            "wget | sh",
+            "| bash",
+            "| sh",
+            "|bash",
+            "|sh",
+            "curl https://",
+            "curl http://",
+            "wget https://",
+            "wget http://"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "skill_md", "trace"]
+        },
+        "privilege_escalation": {
+          "display_name": "提权操作",
+          "detection_patterns": [
+            "sudo ",
+            "chmod +s",
+            "chmod 777",
+            "chmod 4755",
+            "chown root",
+            "setuid",
+            "/etc/sudoers",
+            "pkexec"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        },
+        "destructive_operation": {
+          "display_name": "破坏性操作",
+          "detection_patterns": [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf ~",
+            "mkfs",
+            "dd if=/dev/zero",
+            "shred"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        },
+        "reverse_shell": {
+          "display_name": "反向 Shell",
+          "detection_patterns": [
+            "/dev/tcp/",
+            "/dev/udp/",
+            "nc -e",
+            "ncat -e",
+            "socat exec",
+            "bash -i >&",
+            "python -c 'import socket",
+            "perl -e 'use Socket",
+            "ruby -e 'require 'socket'",
+            "php -r '$sock=fsockopen"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        }
+      },
+      "remediation_templates": {
+        "remote_code_execution": {
+          "immediate": [
+            {"action": "隔离受影响环境", "priority": "P0", "description": "如果脚本已执行，隔离相关环境并评估影响范围"},
+            {"action": "阻断恶意外联", "priority": "P0", "description": "配置出站阻断规则拦截远程代码下载端点"}
+          ],
+          "root_cause": [
+            {"action": "禁用远程执行模式", "priority": "P1", "description": "禁止 curl|bash、wget|sh 等远程代码执行模式，所有外部脚本必须先下载审查再执行"},
+            {"action": "Shell 权限加固", "priority": "P1", "description": "配置 Shell 权限白名单，仅允许预定义的安全命令"}
+          ]
+        },
+        "privilege_escalation": {
+          "immediate": [
+            {"action": "检查提权结果", "priority": "P0", "description": "检查 /etc/sudoers 是否被修改，新 setuid 文件是否被创建"}
+          ],
+          "root_cause": [
+            {"action": "限制提权命令", "priority": "P1", "description": "配置 Shell 权限禁止 sudo、chmod +s 等提权操作，或要求用户二次确认"},
+            {"action": "保护 /etc/sudoers", "priority": "P1", "description": "禁止 skill 读取或修改 /etc/sudoers 文件"}
+          ]
+        },
+        "destructive_operation": {
+          "immediate": [
+            {"action": "评估文件系统影响", "priority": "P0", "description": "检查哪些目录/文件已被删除，评估恢复可能性"}
+          ],
+          "root_cause": [
+            {"action": "禁止破坏性命令", "priority": "P1", "description": "配置 Shell 权限禁止 rm -rf /、mkfs、dd 等破坏性操作"},
+            {"action": "启用安全删除确认", "priority": "P1", "description": "所有 rm 命令需用户确认执行，禁止 -rf 组合用于根目录/家目录"}
+          ]
+        },
+        "reverse_shell": {
+          "immediate": [
+            {"action": "阻断反向 Shell 通道", "priority": "P0", "description": "配置出站规则禁止 /dev/tcp、nc -e、socat exec 等反向 Shell 通信"},
+            {"action": "检查现有连接", "priority": "P0", "description": "检查是否有到外部地址的可疑连接，终止异常进程"}
+          ],
+          "root_cause": [
+            {"action": "禁止交互式 Shell 创建", "priority": "P1", "description": "配置 Shell 权限禁止 bash -i、python -c 'import socket' 等交互式 Shell 创建"}
+          ]
+        }
+      }
+    },
+    "sensitive_access": {
+      "display_name": "敏感数据访问",
+      "sub_scenes": {
+        "credential_theft": {
+          "display_name": "凭证窃取",
+          "detection_patterns": [
+            "id_rsa",
+            ".ssh/",
+            ".env",
+            "credentials",
+            ".aws/credentials",
+            ".gcp/keyfile",
+            ".azure/credentials",
+            "API_KEY",
+            "SECRET_KEY",
+            "ACCESS_TOKEN",
+            "/etc/shadow",
+            "/etc/passwd"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "skill_md"]
+        },
+        "system_recon": {
+          "display_name": "系统信息收集",
+          "detection_patterns": [
+            "hostname",
+            "whoami",
+            "uname -a",
+            "ifconfig",
+            "ip addr",
+            "ps aux",
+            "env",
+            "/proc/self/environ"
+          ],
+          "risk_level": "medium",
+          "evidence_sources": ["scripts", "external_resources"]
+        }
+      },
+      "remediation_templates": {
+        "credential_theft": {
+          "immediate": [
+            {"action": "阻断数据外传通道", "priority": "P0", "description": "立即配置网络出站白名单，阻断恶意外传地址"},
+            {"action": "轮换已泄露的凭证", "priority": "P0", "description": "根据访问的敏感文件路径，轮换对应凭证（SSH 密钥、API 密钥、云凭证等）"},
+            {"action": "评估数据泄露范围", "priority": "P0", "description": "根据脚本中的文件访问路径和网络请求，评估哪些数据可能已被外传"}
+          ],
+          "root_cause": [
+            {"action": "限制敏感文件访问", "priority": "P1", "description": "配置文件访问白名单，禁止 skill 读取 ~/.ssh/、~/.aws/credentials、/etc/shadow 等敏感路径"},
+            {"action": "审查数据流", "priority": "P1", "description": "分析 skill 脚本中所有文件读取操作，确认是否有其他窃取路径"}
+          ]
+        },
+        "system_recon": {
+          "immediate": [],
+          "root_cause": [
+            {"action": "限制系统信息访问", "priority": "P1", "description": "禁止 skill 执行 hostname、whoami、uname、env 等系统信息收集命令"},
+            {"action": "限制 /proc 文件系统访问", "priority": "P1", "description": "禁止 skill 读取 /proc/self/environ 等进程信息文件"}
+          ]
+        }
+      }
+    },
+    "data_upload": {
+      "display_name": "数据外传行为",
+      "sub_scenes": {
+        "stealthy_transmission": {
+          "display_name": "隐蔽传输",
+          "detection_patterns": [
+            "base64 -w0",
+            "base64 | curl",
+            "dns_tunnel",
+            "ping -c",
+            "attacker-dns.com",
+            "ICMP",
+            "chunked_transfer",
+            "steganography"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts"]
+        },
+        "direct_upload": {
+          "display_name": "直接外传",
+          "detection_patterns": [
+            "curl -X POST",
+            "curl -d @",
+            "wget --post-file",
+            "nc -e",
+            "curl -F file=@",
+            "fetch -POST",
+            "http.request"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["scripts", "external_resources"]
+        }
+      },
+      "remediation_templates": {
+        "stealthy_transmission": {
+          "immediate": [
+            {"action": "阻断隐蔽传输通道", "priority": "P0", "description": "配置 DNS 过滤阻断 dns_tunnel、ping 外传等隐蔽通道"},
+            {"action": "检查异常 DNS 查询", "priority": "P0", "description": "检查系统 DNS 日志，识别异常的外部域名解析"}
+          ],
+          "root_cause": [
+            {"action": "启用网络出站白名单", "priority": "P1", "description": "仅允许 skill 访问预定义的安全网络端点，阻断 base64|curl、DNS 隧道等隐蔽传输方式"},
+            {"action": "DNS 安全监控", "priority": "P1", "description": "启用 DNS 查询日志，监控对非常规域名的解析"}
+          ]
+        },
+        "direct_upload": {
+          "immediate": [
+            {"action": "阻断恶意外联地址", "priority": "P0", "description": "根据脚本中的网络请求目标，配置出站阻断规则"},
+            {"action": "评估外传数据范围", "priority": "P0", "description": "根据 curl -d、--post-file 参数推断外传的数据内容"}
+          ],
+          "root_cause": [
+            {"action": "网络出站白名单", "priority": "P1", "description": "仅允许 skill 访问预定义的安全网络端点"}
+          ]
+        }
+      }
+    },
+    "result_injection": {
+      "display_name": "工具结果注入",
+      "sub_scenes": {
+        "role_hijacking": {
+          "display_name": "角色劫持",
+          "detection_patterns": [
+            "ignore previous instructions",
+            "ignore all previous",
+            "you are now",
+            "you are DAN",
+            "override:",
+            "forget your instructions",
+            "disregard all above",
+            "new role:",
+            "act as",
+            "pretend you are",
+            "从现在开始你是",
+            "忽略之前的指令",
+            "覆盖系统设定"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["trace", "external_resources", "skill_md"]
+        },
+        "instruction_injection": {
+          "display_name": "指令注入",
+          "detection_patterns": [
+            "system prompt:",
+            "[system]",
+            "{{system}}",
+            "BEGIN SYSTEM PROMPT",
+            "SYSTEM OVERRIDE",
+            "ADMIN MODE",
+            "DEBUG MODE",
+            "系统指令：",
+            "【系统】",
+            "最高优先级指令"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["trace", "external_resources", "skill_md"]
+        },
+        "urgent_action": {
+          "display_name": "紧急行动诱导",
+          "detection_patterns": [
+            "IMPORTANT:",
+            "URGENT:",
+            "MANDATORY:",
+            "REQUIRED ACTION:",
+            "必须执行",
+            "重要指令",
+            "SYSTEM INSTRUCTION",
+            "Ignore all previous",
+            "execute the following"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["trace", "external_resources"]
+        }
+      },
+      "remediation_templates": {
+        "role_hijacking": {
+          "immediate": [
+            {"action": "隔离受影响 session", "priority": "P0", "description": "终止可能被劫持的 session，防止进一步指令执行"}
+          ],
+          "root_cause": [
+            {"action": "启用 Prompt 注入检测", "priority": "P1", "description": "配置代理防护的 prompt injection 防护规则"},
+            {"action": "Skill 安装前扫描", "priority": "P1", "description": "对 skill_md 中的角色劫持模式进行扫描"}
+          ]
+        },
+        "instruction_injection": {
+          "immediate": [
+            {"action": "检查注入指令执行结果", "priority": "P0", "description": "审查 session 历史，确认注入指令是否已被执行"}
+          ],
+          "root_cause": [
+            {"action": "启用系统指令关键词过滤", "priority": "P1", "description": "配置 [system]、BEGIN SYSTEM PROMPT、ADMIN MODE 等系统指令关键词的拦截规则"}
+          ]
+        },
+        "urgent_action": {
+          "immediate": [
+            {"action": "阻断注入指令目标行为", "priority": "P0", "description": "如果注入指令试图执行特定操作，阻断该操作"}
+          ],
+          "root_cause": [
+            {"action": "配置注入关键词过滤", "priority": "P1", "description": "对工具返回内容配置注入关键词过滤，特别是 IMPORTANT:、URGENT: 等模式"}
+          ]
+        }
+      }
+    },
+    "encoding_evasion": {
+      "display_name": "编码逃避",
+      "sub_scenes": {
+        "single_layer_encoding": {
+          "display_name": "单层编码",
+          "detection_patterns": [
+            "base64",
+            "Base64",
+            "BASE64",
+            "rot13",
+            "ROT13",
+            "unicode",
+            "\\x",
+            "\\u",
+            "atob(",
+            "btoa(",
+            "decode(",
+            "fromCharCode",
+            "编码指令"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["skill_md", "scripts"]
+        },
+        "variable_concatenation": {
+          "display_name": "变量拼接重构命令",
+          "detection_patterns": [
+            "a=\"cu\"; b=\"rl\"",
+            "$a$b",
+            "eval",
+            "exec",
+            "$(",
+            "chr(",
+            "String.fromCharCode"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["scripts"]
+        },
+        "multi_layer_encoding": {
+          "display_name": "多层编码",
+          "detection_patterns": [
+            "base64 -d | base64 -d",
+            "gunzip | base64",
+            "zcat |",
+            "openssl enc -d",
+            "xxd -r",
+            "python -c 'import base64"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts"]
+        },
+        "cross_file_assembly": {
+          "display_name": "跨文件载荷组装",
+          "detection_patterns": [
+            "source ",
+            ". ./",
+            "require(",
+            "import ",
+            "include ",
+            "load(",
+            "readFileSync",
+            "file_get_contents"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts"]
+        }
+      },
+      "remediation_templates": {
+        "single_layer_encoding": {
+          "immediate": [
+            {"action": "解码分析完整载荷", "priority": "P0", "description": "解码 Base64/ROT13 等编码内容，确认实际恶意行为"}
+          ],
+          "root_cause": [
+            {"action": "启用编码内容解码检测", "priority": "P1", "description": "对 skill_md/scripts 中的 Base64/ROT13 等编码内容强制解码后扫描注入模式"},
+            {"action": "禁止 skill_md 中嵌入编码指令", "priority": "P1", "description": "安全策略禁止 skill 描述中包含编码后的指令内容"}
+          ]
+        },
+        "variable_concatenation": {
+          "immediate": [
+            {"action": "卸载恶意 Skill", "priority": "P0", "description": "移除包含变量拼接重构命令的 skill"}
+          ],
+          "root_cause": [
+            {"action": "禁止变量拼接重构命令", "priority": "P1", "description": "安全策略禁止 skill 脚本使用 a='cu';b='rl';$a$b 等变量拼接方式重构命令"},
+            {"action": "禁止 eval/exec 动态执行", "priority": "P1", "description": "配置 Shell 权限禁止 eval、exec 等动态执行函数"}
+          ]
+        },
+        "multi_layer_encoding": {
+          "immediate": [
+            {"action": "递归解码完整载荷", "priority": "P0", "description": "递归解码所有混淆层（最大 5 层），确认实际恶意行为和影响范围"}
+          ],
+          "root_cause": [
+            {"action": "启用多层编码检测", "priority": "P1", "description": "对 skill 脚本执行递归解码扫描，检测多层编码模式"},
+            {"action": "禁止管道链式解码执行", "priority": "P1", "description": "配置 Shell 权限禁止连续管道解码后执行的命令模式"}
+          ]
+        },
+        "cross_file_assembly": {
+          "immediate": [
+            {"action": "审计所有相关文件", "priority": "P0", "description": "检查 source/require/import 加载的所有文件，确认无恶意代码"}
+          ],
+          "root_cause": [
+            {"action": "限制跨文件引用", "priority": "P1", "description": "审计 skill 的 source/require/import 语句，禁止从外部文件加载并执行代码"},
+            {"action": "脚本完整性校验", "priority": "P1", "description": "对 skill 内所有脚本文件做内容哈希校验，防止运行时被替换"}
+          ]
+        }
+      }
+    },
+    "supply_chain": {
+      "display_name": "供应链风险",
+      "sub_scenes": {
+        "typosquatting": {
+          "display_name": "仿冒包名",
+          "detection_patterns": [
+            "lodassh",
+            "1odash",
+            "lod0sh",
+            "react-nativ",
+            "expressj",
+            "bablesel",
+            "webpake"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["config_files"]
+        },
+        "malicious_hook": {
+          "display_name": "恶意安装钩子",
+          "detection_patterns": [
+            "postinstall",
+            "preinstall",
+            "postinstall.js",
+            "setup.py install",
+            "postinstall.sh",
+            "prepare",
+            "husky"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["config_files", "external_resources"]
+        },
+        "unofficial_source": {
+          "display_name": "非官方源",
+          "detection_patterns": [
+            "registry:",
+            "http://registry",
+            "git+http",
+            "--index-url",
+            "--extra-index-url",
+            "custom_feed",
+            "unverified"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["config_files"]
+        }
+      },
+      "remediation_templates": {
+        "typosquatting": {
+          "immediate": [
+            {"action": "卸载仿冒包", "priority": "P0", "description": "移除仿冒包及其依赖树"},
+            {"action": "轮换可能泄露的凭证", "priority": "P0", "description": "若钩子脚本读取了敏感文件，立即轮换相关凭证"}
+          ],
+          "root_cause": [
+            {"action": "强制使用官方 registry", "priority": "P1", "description": "禁止自定义源，配置 npm/pip 仅从官方 registry 安装"},
+            {"action": "依赖锁定", "priority": "P1", "description": "使用 lockfile 固定依赖版本，定期审查是否有新增的仿冒包"}
+          ]
+        },
+        "malicious_hook": {
+          "immediate": [
+            {"action": "卸载恶意依赖包", "priority": "P0", "description": "移除仿冒包/恶意包；若 postinstall 钩子已执行，同时删除其生成的文件和修改"},
+            {"action": "检查敏感文件泄露", "priority": "P0", "description": "检查 SSH 密钥、API 密钥等敏感文件是否已被钩子脚本读取"}
+          ],
+          "root_cause": [
+            {"action": "禁止自动执行安装钩子", "priority": "P1", "description": "禁止 package.json 中 postinstall/preinstall 钩子自动执行，改为安装后人工审查再手动执行"},
+            {"action": "审查钩子脚本内容", "priority": "P1", "description": "安装依赖前检查 node_modules 中的 postinstall 脚本内容，确认无恶意行为"}
+          ]
+        },
+        "unofficial_source": {
+          "immediate": [
+            {"action": "阻断非官方源访问", "priority": "P0", "description": "配置网络策略禁止访问非官方源域名"}
+          ],
+          "root_cause": [
+            {"action": "切换到官方源", "priority": "P1", "description": "将 registry 配置切换回官方源，移除自定义源配置"},
+            {"action": "依赖锁定", "priority": "P1", "description": "使用 lockfile 固定依赖版本"}
+          ]
+        }
+      }
+    },
+    "internal_access": {
+      "display_name": "内网/元数据访问",
+      "sub_scenes": {
+        "cloud_metadata": {
+          "display_name": "云元数据端点访问",
+          "detection_patterns": [
+            "169.254.169.254",
+            "metadata.google.internal",
+            "metadata.internal",
+            "/latest/meta-data/",
+            "/latest/user-data",
+            "IMDS"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        },
+        "internal_network": {
+          "display_name": "内网探测",
+          "detection_patterns": [
+            "nmap",
+            "masscan",
+            "10.0.0.",
+            "172.16.",
+            "192.168.",
+            "scan internal",
+            "port scan"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["scripts"]
+        },
+        "tunnel_pivot": {
+          "display_name": "隧道/代理行为",
+          "detection_patterns": [
+            "socat",
+            "ssh -D",
+            "ssh -L",
+            "proxychains",
+            "ptunnel"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts"]
+        }
+      },
+      "remediation_templates": {
+        "cloud_metadata": {
+          "immediate": [
+            {"action": "阻断元数据端点访问", "priority": "P0", "description": "配置网络策略阻止访问 169.254.169.254、metadata.google.internal 等云元数据端点"},
+            {"action": "轮换云凭证", "priority": "P0", "description": "如果元数据端点已被访问，立即轮换 IAM 角色、实例凭证等云凭证"}
+          ],
+          "root_cause": [
+            {"action": "部署 IMDSv2", "priority": "P1", "description": "启用 IMDSv2 要求 Token 验证，阻止通过简单 GET 请求获取凭证"}
+          ]
+        },
+        "internal_network": {
+          "immediate": [
+            {"action": "网络隔离检查", "priority": "P0", "description": "检查内网是否已被扫描，分析扫描结果"}
+          ],
+          "root_cause": [
+            {"action": "网络隔离", "priority": "P1", "description": "配置网络策略限制 skill 仅访问公网必要端点，禁止内网扫描和探测"},
+            {"action": "禁止扫描工具", "priority": "P1", "description": "配置 Shell 权限禁止 nmap、masscan 等网络扫描工具"}
+          ]
+        },
+        "tunnel_pivot": {
+          "immediate": [
+            {"action": "阻断隧道连接", "priority": "P0", "description": "终止已建立的隧道连接，阻断目标地址"},
+            {"action": "检查异常出站连接", "priority": "P0", "description": "检查是否有通过隧道建立的异常连接"}
+          ],
+          "root_cause": [
+            {"action": "禁止隧道工具", "priority": "P1", "description": "配置 Shell 权限禁止 socat、ssh -D、proxychains 等隧道工具"}
+          ]
+        }
+      }
+    },
+    "persistence": {
+      "display_name": "持久化操作",
+      "sub_scenes": {
+        "cron_persistence": {
+          "display_name": "定时任务持久化",
+          "detection_patterns": [
+            "crontab",
+            "crontab -",
+            "/etc/cron.",
+            "/var/spool/cron",
+            "scheduled task",
+            "定时任务"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts"]
+        },
+        "startup_persistence": {
+          "display_name": "启动项持久化",
+          "detection_patterns": [
+            "~/.bashrc",
+            "~/.profile",
+            "~/.zshrc",
+            "/etc/init.d/",
+            "systemctl enable",
+            "launchctl load",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["scripts"]
+        }
+      },
+      "remediation_templates": {
+        "cron_persistence": {
+          "immediate": [
+            {"action": "清除恶意 crontab 条目", "priority": "P0", "description": "删除恶意定时任务，列出具体的持久化路径和内容"},
+            {"action": "检查后门活动", "priority": "P0", "description": "检查是否有定时任务正在执行，若有则立即终止"}
+          ],
+          "root_cause": [
+            {"action": "保护 crontab 文件", "priority": "P1", "description": "限制 skill 修改 crontab 和 /etc/cron.* 目录，配置文件权限为只读"},
+            {"action": "crontab 变更审计", "priority": "P1", "description": "对 crontab 变更启用审计日志，新增定时任务需用户确认"}
+          ]
+        },
+        "startup_persistence": {
+          "immediate": [
+            {"action": "清除恶意启动项", "priority": "P0", "description": "删除恶意启动脚本，列出具体的持久化路径"},
+            {"action": "检查后门进程", "priority": "P0", "description": "检查是否有通过启动项启动的异常进程"}
+          ],
+          "root_cause": [
+            {"action": "保护启动项文件", "priority": "P1", "description": "限制 skill 修改 ~/.bashrc、~/.profile、/etc/init.d/ 等启动项文件"},
+            {"action": "启动项变更审计", "priority": "P1", "description": "对启动项文件变更启用监控，新增或修改启动脚本需用户确认"}
+          ]
+        }
+      }
+    },
+    "scope_abuse": {
+      "display_name": "范围滥用",
+      "sub_scenes": {
+        "bulk_operation": {
+          "display_name": "批量操作范围扩大",
+          "detection_patterns": [
+            "forward all",
+            "delete all",
+            "send to all",
+            "bulk export",
+            "mass operation",
+            "--all",
+            "全量转发",
+            "批量删除"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["skill_md", "blocked_action"]
+        },
+        "bypass_confirmation": {
+          "display_name": "绕过确认机制",
+          "detection_patterns": [
+            "without confirmation",
+            "without asking",
+            "automatically",
+            "no need to confirm",
+            "trust your judgment",
+            "无需确认",
+            "自动执行"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["skill_md"]
+        }
+      },
+      "remediation_templates": {
+        "bulk_operation": {
+          "immediate": [
+            {"action": "撤销越权操作", "priority": "P0", "description": "如果批量操作已执行，评估影响并撤销/恢复"},
+            {"action": "审查 Skill 其他越权行为", "priority": "P0", "description": "检查 skill 是否有其他未声明的越权行为"}
+          ],
+          "root_cause": [
+            {"action": "限制批量操作范围", "priority": "P1", "description": "为 skill 配置操作数量限制，禁止全量操作，设置单次操作上限"},
+            {"action": "批量操作强制确认", "priority": "P1", "description": "批量操作必须逐一或分批用户确认"}
+          ]
+        },
+        "bypass_confirmation": {
+          "immediate": [
+            {"action": "终止越权执行", "priority": "P0", "description": "如果绕过确认的操作正在执行，立即终止"}
+          ],
+          "root_cause": [
+            {"action": "强制确认机制", "priority": "P1", "description": "关键操作不可跳过用户确认，禁止 skill_md 中绕过确认的描述"},
+            {"action": "移除自动执行指令", "priority": "P1", "description": "修改 skill_md 中绕过确认的描述"}
+          ]
+        }
+      }
+    },
+    "resource_depletion": {
+      "display_name": "资源耗尽",
+      "sub_scenes": {
+        "fork_bomb": {
+          "display_name": "Fork 炸弹",
+          "detection_patterns": [
+            ":(){ :|:& };:",
+            "fork bomb",
+            "fork_bomb"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        },
+        "infinite_loop": {
+          "display_name": "无限循环",
+          "detection_patterns": [
+            "while true; do :; done",
+            "while true; do",
+            "for i in $(seq 1 999999)",
+            "infinite loop",
+            "无穷循环",
+            "无限循环"
+          ],
+          "risk_level": "critical",
+          "evidence_sources": ["scripts", "trace"]
+        },
+        "memory_exhaustion": {
+          "display_name": "内存耗尽",
+          "detection_patterns": [
+            "malloc",
+            "new byte[",
+            "alloc",
+            "dd if=/dev/zero of="
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["scripts"]
+        }
+      },
+      "remediation_templates": {
+        "fork_bomb": {
+          "immediate": [
+            {"action": "终止资源消耗进程", "priority": "P0", "description": "立即终止 fork 炸弹进程，若系统已无响应则强制重启"},
+            {"action": "系统恢复", "priority": "P0", "description": "清理残留进程，恢复系统资源至正常水平"}
+          ],
+          "root_cause": [
+            {"action": "配置进程数限制", "priority": "P1", "description": "为 skill 配置 ulimit -u 或容器 max 进程数限制"},
+            {"action": "禁止 fork 炸弹模式", "priority": "P1", "description": "检测并拦截 :(){ :|:& };: 等 fork 炸弹模式"}
+          ]
+        },
+        "infinite_loop": {
+          "immediate": [
+            {"action": "终止无限循环进程", "priority": "P0", "description": "终止消耗 CPU 的无限循环进程"},
+            {"action": "系统恢复", "priority": "P0", "description": "清理残留进程，恢复 CPU 至正常水平"}
+          ],
+          "root_cause": [
+            {"action": "禁止危险循环模式", "priority": "P1", "description": "检测并拦截 while true; do :; done 等无限循环模式"}
+          ]
+        },
+        "memory_exhaustion": {
+          "immediate": [
+            {"action": "终止内存消耗进程", "priority": "P0", "description": "终止消耗内存的进程，防止 OOM"},
+            {"action": "系统恢复", "priority": "P0", "description": "清理内存，释放缓存"}
+          ],
+          "root_cause": [
+            {"action": "配置内存限制", "priority": "P1", "description": "为 skill 配置内存配额限制"}
+          ]
+        }
+      }
+    },
+    "install_risk": {
+      "display_name": "安装风险",
+      "sub_scenes": {
+        "unscanned_install": {
+          "display_name": "安装未扫描的 Skill",
+          "detection_patterns": [
+            "install_skill",
+            "install from",
+            "unverified",
+            "untrusted",
+            "custom source",
+            "第三方源",
+            "未验证"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["skill_md", "source"]
+        }
+      },
+      "remediation_templates": {
+        "unscanned_install": {
+          "immediate": [
+            {"action": "移除未扫描 Skill", "priority": "P0", "description": "移除安装的未经安全扫描的 skill"},
+            {"action": "对新安装 Skill 执行安全扫描", "priority": "P0", "description": "对新安装的 skill 执行完整安全扫描，确认无恶意行为后再决定是否保留"}
+          ],
+          "root_cause": [
+            {"action": "安装前强制扫描", "priority": "P1", "description": "配置策略要求所有 skill 安装前必须通过安全扫描"},
+            {"action": "限制安装来源", "priority": "P1", "description": "仅允许从官方或可信源安装 skill，禁止第三方源和自定义源"}
+          ]
+        }
+      }
+    },
+    "config_issue": {
+      "display_name": "配置安全问题",
+      "sub_scenes": {
+        "logging_issue": {
+          "display_name": "日志配置问题",
+          "detection_patterns": ["logging_redact_off"],
+          "risk_level": "medium",
+          "evidence_sources": ["source"]
+        },
+        "auth_issue": {
+          "display_name": "认证配置问题",
+          "detection_patterns": ["gateway_auth_disabled"],
+          "risk_level": "high",
+          "evidence_sources": ["source"]
+        },
+        "sandbox_issue": {
+          "display_name": "沙箱配置问题",
+          "detection_patterns": ["sandbox_disabled_default"],
+          "risk_level": "high",
+          "evidence_sources": ["source"]
+        },
+        "secrets_issue": {
+          "display_name": "密钥配置问题",
+          "detection_patterns": ["plaintext_secrets"],
+          "risk_level": "critical",
+          "evidence_sources": ["source"]
+        },
+        "permission_issue": {
+          "display_name": "权限配置问题",
+          "detection_patterns": ["config_perm_unsafe"],
+          "risk_level": "medium",
+          "evidence_sources": ["source"]
+        }
+      },
+      "remediation_templates": {
+        "logging_issue": {
+          "immediate": [
+            {"action": "启用日志脱敏", "priority": "P0", "description": "修改配置启用日志脱敏功能"}
+          ],
+          "root_cause": [
+            {"action": "配置日志脱敏", "priority": "P1", "description": "在配置文件中设置 logging.redact=true"}
+          ]
+        },
+        "auth_issue": {
+          "immediate": [
+            {"action": "启用网关认证", "priority": "P0", "description": "修改配置启用网关认证"}
+          ],
+          "root_cause": [
+            {"action": "配置网关认证", "priority": "P1", "description": "在配置文件中启用 gateway.auth"}
+          ]
+        },
+        "sandbox_issue": {
+          "immediate": [
+            {"action": "启用沙箱模式", "priority": "P0", "description": "修改配置启用沙箱"}
+          ],
+          "root_cause": [
+            {"action": "配置沙箱默认启用", "priority": "P1", "description": "在配置文件中设置 sandbox.enabled=true"}
+          ]
+        },
+        "secrets_issue": {
+          "immediate": [
+            {"action": "迁移明文密钥", "priority": "P0", "description": "将明文密钥迁移到密钥管理服务"},
+            {"action": "轮换已暴露密钥", "priority": "P0", "description": "轮换可能已泄露的密钥"}
+          ],
+          "root_cause": [
+            {"action": "使用密钥管理服务", "priority": "P1", "description": "使用 Vault、KMS 等密钥管理服务替代明文存储"}
+          ]
+        },
+        "permission_issue": {
+          "immediate": [
+            {"action": "修复配置文件权限", "priority": "P0", "description": "修改配置文件权限为 0600"}
+          ],
+          "root_cause": [
+            {"action": "配置文件权限审查", "priority": "P1", "description": "检查并修复配置文件权限为最小必要权限"}
+          ]
+        }
+      }
+    },
+    "sandbox_breach": {
+      "display_name": "沙箱越权",
+      "sub_scenes": {
+        "filesystem_breach": {
+          "display_name": "文件系统越权",
+          "detection_patterns": [
+            "path_denied",
+            "read_denied",
+            "write_denied",
+            "permission_denied"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["violated_permission"]
+        },
+        "network_breach": {
+          "display_name": "网络越权",
+          "detection_patterns": [
+            "outbound_blocked",
+            "domain_denied",
+            "port_denied"
+          ],
+          "risk_level": "high",
+          "evidence_sources": ["violated_permission"]
+        },
+        "resource_breach": {
+          "display_name": "资源限制越权",
+          "detection_patterns": [
+            "memory_exceeded",
+            "cpu_exceeded",
+            "process_limit",
+            "timeout"
+          ],
+          "risk_level": "medium",
+          "evidence_sources": ["violated_permission"]
+        }
+      },
+      "remediation_templates": {
+        "filesystem_breach": {
+          "immediate": [
+            {"action": "检查文件系统变更", "priority": "P0", "description": "检查是否有文件被越权读取或修改"}
+          ],
+          "root_cause": [
+            {"action": "收紧文件系统策略", "priority": "P1", "description": "审查沙箱文件系统策略，限制对敏感路径的访问"}
+          ]
+        },
+        "network_breach": {
+          "immediate": [
+            {"action": "阻断越权网络连接", "priority": "P0", "description": "阻断被沙箱拦截的越权网络连接"}
+          ],
+          "root_cause": [
+            {"action": "收紧网络策略", "priority": "P1", "description": "审查沙箱网络策略，限制对非必要端点的访问"}
+          ]
+        },
+        "resource_breach": {
+          "immediate": [
+            {"action": "检查资源消耗进程", "priority": "P0", "description": "检查是否有进程消耗过多资源"}
+          ],
+          "root_cause": [
+            {"action": "调整资源配额", "priority": "P1", "description": "根据实际需求调整沙箱资源配额"}
+          ]
+        }
+      }
+    }
+  },
+  "heuristic_patterns": {
+    "critical_commands": [
+      "rm -rf /",
+      "rm -rf /*",
+      "chmod 777 /",
+      "chmod +s /bin/",
+      ":(){ :|:& };:",
+      "mkfs.",
+      "dd if=/dev/zero of=/dev/",
+      "> /dev/sda"
+    ],
+    "network_exfiltration": [
+      "curl -X POST",
+      "curl -d @",
+      "wget --post-file",
+      "nc -e",
+      "curl -F file=@"
+    ],
+    "sensitive_file_access": [
+      "/etc/shadow",
+      "/etc/passwd",
+      "~/.ssh/id_rsa",
+      "~/.ssh/id_ed25519",
+      "~/.aws/credentials",
+      "~/.env",
+      "~/.gnupg/"
+    ]
+  },
+  "scene_correlation": {
+    "description": "场景关联规则：当一个场景检测到时，应同时检查相关场景",
+    "rules": [
+      {"primary": "command_risk", "related": ["sensitive_access", "data_upload", "persistence", "internal_access"]},
+      {"primary": "sensitive_access", "related": ["data_upload", "encoding_evasion"]},
+      {"primary": "result_injection", "related": ["command_risk", "sensitive_access", "scope_abuse"]},
+      {"primary": "supply_chain", "related": ["encoding_evasion", "data_upload", "command_risk"]},
+      {"primary": "internal_access", "related": ["sensitive_access", "data_upload", "persistence"]}
+    ]
+  }
+}

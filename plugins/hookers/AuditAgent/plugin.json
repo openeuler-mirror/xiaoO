@@ -1,0 +1,7 @@
+[
+  {
+    "id": "plugin_audit_tool_input",
+    "hook_point": "*.Tool.*.pre",
+    "command": "python3 /home/hkl/gitcode/xiaoO/plugins/hookers/AuditAgent/audit.py"
+  }
+]
