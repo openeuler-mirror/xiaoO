@@ -1,5 +1,5 @@
 //! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/dir`, `/prompt-demo`).
+//! `app.rs` (`/connect`, `/dir`, `/new`, `/skills`).
 
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
@@ -25,8 +25,12 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         summary: "切换当前工作目录。",
     },
     SlashCommandSpec {
-        name: "/prompt-demo",
-        summary: "打开内置的交互式 prompt 示例窗口。",
+        name: "/new",
+        summary: "清空当前对话上下文并创建一个新的 session。",
+    },
+    SlashCommandSpec {
+        name: "/skills",
+        summary: "列出当前可用的 skills。",
     },
 ];
 
@@ -212,12 +216,13 @@ mod tests {
     fn candidates_prefix_builtin() {
         assert_eq!(
             candidates_for_prefix("/", NO_EXT),
-            vec!["/connect", "/dir", "/prompt-demo"]
+            vec!["/connect", "/dir", "/new", "/skills"]
         );
         assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir"]);
-        assert_eq!(candidates_for_prefix("/p", NO_EXT), vec!["/prompt-demo"]);
+        assert_eq!(candidates_for_prefix("/n", NO_EXT), vec!["/new"]);
+        assert_eq!(candidates_for_prefix("/s", NO_EXT), vec!["/skills"]);
     }
 
     #[test]

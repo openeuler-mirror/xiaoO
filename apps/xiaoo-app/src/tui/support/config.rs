@@ -2,6 +2,7 @@ use agent_types::hooker::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use skill::SkillsConfig as ResolvedSkillsConfig;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub trace: Option<Value>,
+    #[serde(default)]
+    pub skills: Option<SkillsSection>,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
@@ -76,6 +79,14 @@ pub struct AgentRoleConfig {
     pub prompt: Option<String>,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SkillsSection {
+    #[serde(default)]
+    pub dirs: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_scripts: Option<bool>,
 }
 
 impl Default for AgentsConfig {
@@ -152,6 +163,32 @@ impl Config {
 
     pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
         self.agent.get(role_id)
+    }
+
+    pub fn resolve_skills_config(&self) -> ResolvedSkillsConfig {
+        let mut skills_dirs = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            skills_dirs.push(home.join(".xiaoo").join("skills"));
+        }
+        if let Some(skills) = self.skills.as_ref() {
+            if let Some(extra_dirs) = skills.dirs.as_ref() {
+                for dir in extra_dirs {
+                    skills_dirs.push(PathBuf::from(dir));
+                }
+            }
+        }
+        skills_dirs.sort();
+        skills_dirs.dedup();
+
+        ResolvedSkillsConfig {
+            skills_dirs,
+            allow_scripts: self
+                .skills
+                .as_ref()
+                .and_then(|skills| skills.allow_scripts)
+                .unwrap_or(false),
+            ..ResolvedSkillsConfig::default()
+        }
     }
 }
 
