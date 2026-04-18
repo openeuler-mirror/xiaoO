@@ -44,6 +44,7 @@ pub struct ToolToggleRegion {
 #[derive(Default)]
 pub struct RenderState {
     pub messages_area: Option<Rect>,
+    pub theme_toggle_area: Option<Rect>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
@@ -171,6 +172,10 @@ impl AppState {
         self.copy_notice
             .map(|t| t.elapsed() < Duration::from_millis(1500))
             .unwrap_or(false)
+    }
+
+    pub fn toggle_theme(&mut self) {
+        self.theme = self.theme.toggled();
     }
 
     /// Extract the plain text covered by the current transcript selection.
@@ -439,6 +444,19 @@ mod tests {
             state.runtime_status_light(),
             RuntimeStatusLight::AwaitingInteraction
         );
+    }
+
+    #[test]
+    fn toggle_theme_switches_between_dark_and_light() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        let initial_is_light = state.theme.is_light();
+
+        state.toggle_theme();
+        assert_ne!(state.theme.is_light(), initial_is_light);
+
+        state.toggle_theme();
+        assert_eq!(state.theme.is_light(), initial_is_light);
     }
 
     fn sample_prompt_request() -> PromptRequest {
