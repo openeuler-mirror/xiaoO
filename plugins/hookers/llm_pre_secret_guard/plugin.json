@@ -1,0 +1,7 @@
+[
+  {
+    "id": "plugin_llm_pre_secret_guard",
+    "hook_point": "*.Llm.complete.pre",
+    "command": "python3 guard_secret_like_request.py"
+  }
+]
