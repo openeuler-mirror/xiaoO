@@ -28,6 +28,24 @@ cargo install --path apps/xiaoo-app
 
 Install to `~/.cargo/bin/xiaoo`, and ensure that `~/.cargo/bin` is in `PATH`.
 
+### Cerberus Plugin (Optional)
+
+Cerberus provides secure command execution with policy-based sandboxing. It is included in the workspace but requires the eBPF toolchain (Linux only).
+
+```bash
+# Install with eBPF support (default, requires nightly Rust + eBPF toolchain)
+cargo install --path crates/cerberus/cerberus-cli
+
+# Install without eBPF if toolchain is unavailable
+cargo install --path crates/cerberus/cerberus-cli --no-default-features -p cerberus-core
+```
+
+If `cargo build --release` fails due to Cerberus/eBPF, you can skip it:
+
+```bash
+cargo build --release --workspace --keep-going
+```
+
 ## Quick Start
 Create the configuration file `~/.config/xiaoo/config.toml`
 
@@ -46,6 +64,11 @@ prompt = "You are a code reviewer. Focus on security, performance, and maintaina
 [agent.code-reviewer.tools]
 file_write = false
 file_edit = false
+
+[trace]
+storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
+db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-sqlite 时生效；未配置时为 ~/.moirai
+
 ```
 
 Set environment variables
