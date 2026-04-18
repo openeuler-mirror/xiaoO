@@ -1,9 +1,10 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::chat::ToolExecutionUpdate;
-use crate::gateway::InMemorySessionStore;
+use crate::gateway::{InMemorySessionStore, SessionControlPlane};
 use crate::interaction_prompt::PromptRequest;
 
 use agent_types::common::ids::AgentId;
@@ -28,9 +29,25 @@ pub enum SessionTurnUpdate {
     Err(String),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct SessionGateway {
     pub(super) session_store: Arc<InMemorySessionStore>,
+    /// Persistent control plane used solely for session lifecycle hooks.
+    /// Initialized lazily on the first session open.
+    pub(super) lifecycle_control_plane:
+        Arc<tokio::sync::Mutex<Option<Arc<dyn SessionControlPlane>>>>,
+    /// Session IDs that have been opened and not yet closed.
+    pub(super) active_session_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
+}
+
+impl Default for SessionGateway {
+    fn default() -> Self {
+        Self {
+            session_store: Arc::new(InMemorySessionStore::default()),
+            lifecycle_control_plane: Arc::new(tokio::sync::Mutex::new(None)),
+            active_session_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        }
+    }
 }
 
 pub(super) struct ChannelLoopEventSink {

@@ -1,3 +1,6 @@
+use crate::session::hook_types::{
+    SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult,
+};
 use crate::llm::error::LlmError;
 use crate::llm::hook_types::{
     ErrorLlmHookInput, ErrorLlmHookResult, PostLlmHookInput, PostLlmHookResult, PreLlmHookInput,
@@ -52,6 +55,15 @@ pub enum HookInvokeInput {
         input: ErrorLlmHookInput,
         metadata: HookInvokeMetadata,
     },
+    // Session hook variants
+    SessionCreated {
+        input: SessionCreatedHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    SessionClosed {
+        input: SessionClosedHookInput,
+        metadata: HookInvokeMetadata,
+    },
 }
 
 impl HookInvokeInput {
@@ -62,7 +74,9 @@ impl HookInvokeInput {
             | Self::Error { metadata, .. }
             | Self::LlmPre { metadata, .. }
             | Self::LlmPost { metadata, .. }
-            | Self::LlmError { metadata, .. } => metadata,
+            | Self::LlmError { metadata, .. }
+            | Self::SessionCreated { metadata, .. }
+            | Self::SessionClosed { metadata, .. } => metadata,
         }
     }
 }
@@ -77,4 +91,7 @@ pub enum HookInvokeOutput {
     LlmPre(PreLlmHookResult),
     LlmPost(PostLlmHookResult),
     LlmError(ErrorLlmHookResult),
+    // Session hook variants
+    SessionCreated(SessionHookResult),
+    SessionClosed(SessionHookResult),
 }

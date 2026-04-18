@@ -80,6 +80,7 @@ impl App {
                 break;
             }
         }
+        self.gateway.close_sessions().await;
         reset_cursor_color();
         terminal.show_cursor()?;
         Ok(())
