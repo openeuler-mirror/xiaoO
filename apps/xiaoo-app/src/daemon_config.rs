@@ -9,8 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use xiaoo_app::channels::feishu::FeishuConfig;
 
-const DEFAULT_OUTPUT_TOKENS: usize = 4096;
-const DEFAULT_SYSTEM_PROMPT: &str = "You are XiaoO, an enterprise agent operating system assistant. Respond clearly, accurately, and in plain text suitable for enterprise chat channels.";
+const DEFAULT_OUTPUT_TOKENS: usize = 128000;
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -204,7 +204,11 @@ impl DaemonConfig {
         let system_prompt = explicit
             .as_ref()
             .and_then(|agent| agent.system_prompt.clone())
-            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+            .unwrap_or_else(|| {
+                DEFAULT_SYSTEM_PROMPT
+                    .trim_end_matches(['\r', '\n'])
+                    .to_string()
+            });
         let workspace_root = explicit
             .as_ref()
             .and_then(|agent| agent.workspace.clone())

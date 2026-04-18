@@ -11,7 +11,7 @@ pub enum HostAction {
         parent_agent_id: AgentId,
         description: String,
         prompt: String,
-        output_schema: serde_json::Value,
+        output_schema: Option<serde_json::Value>,
     },
     SuspendWaiter {
         join_id: String,

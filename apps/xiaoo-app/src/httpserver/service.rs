@@ -52,12 +52,7 @@ impl GatewayService {
             ..
         } = self
             .session_service
-            .run_turn_with_interaction(
-                request,
-                event_sink,
-                interaction_handle,
-                channel_file_sender,
-            )
+            .run_turn_with_interaction(request, event_sink, interaction_handle, channel_file_sender)
             .await?;
 
         Ok(GatewayTurnResponse {

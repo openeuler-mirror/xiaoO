@@ -125,6 +125,79 @@ pub(crate) fn response_format_to_wire(format: &ResponseFormat) -> Option<WireRes
     }
 }
 
+#[inline]
+pub(crate) fn parse_tool_arguments(arguments: &str) -> serde_json::Value {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return serde_json::Value::Null;
+    }
+
+    parse_tool_arguments_once(trimmed).unwrap_or(serde_json::Value::Null)
+}
+
+fn parse_tool_arguments_once(arguments: &str) -> Option<serde_json::Value> {
+    if let Ok(value) = serde_json::from_str(arguments) {
+        return Some(normalize_tool_arguments(value));
+    }
+
+    let repaired = repair_unclosed_json(arguments)?;
+    serde_json::from_str(&repaired)
+        .ok()
+        .map(normalize_tool_arguments)
+}
+
+fn normalize_tool_arguments(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(inner) => parse_tool_arguments(&inner),
+        other => other,
+    }
+}
+
+fn repair_unclosed_json(input: &str) -> Option<String> {
+    let mut closers = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for ch in input.chars() {
+        if in_string {
+            match ch {
+                '\\' if !escaped => {
+                    escaped = true;
+                }
+                '"' if !escaped => {
+                    in_string = false;
+                }
+                _ => {
+                    escaped = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => closers.push('}'),
+            '[' => closers.push(']'),
+            '}' | ']' => {
+                if closers.pop() != Some(ch) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string || closers.is_empty() {
+        return None;
+    }
+
+    let mut repaired = input.to_string();
+    while let Some(closer) = closers.pop() {
+        repaired.push(closer);
+    }
+    Some(repaired)
+}
+
 pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse {
     let choice = wire.choices.first();
     let message = match choice {
@@ -156,8 +229,7 @@ pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> Assistant
                 .map(|tc| ToolUseBlock {
                     call_id: tc.id.clone(),
                     tool_name: tc.function.name.clone(),
-                    input: serde_json::from_str(&tc.function.arguments)
-                        .unwrap_or(serde_json::Value::Null),
+                    input: parse_tool_arguments(&tc.function.arguments),
                 })
                 .collect()
         })
@@ -292,6 +364,41 @@ mod tests {
         );
         assert!(
             matches!(tool_choice_to_wire(&ToolChoice::None), WireToolChoice::String(s) if s == "none")
+        );
+    }
+
+    #[test]
+    fn test_parse_tool_arguments_repairs_missing_trailing_brace() {
+        let parsed = parse_tool_arguments(
+            r#"{"description":"count workspace","task_goal":"Count files","task_context":"Use find","output_schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}"#,
+        );
+
+        assert_eq!(parsed["description"], "count workspace");
+        assert_eq!(parsed["output_schema"]["type"], "object");
+        assert_eq!(parsed["output_schema"]["required"][0], "count");
+    }
+
+    #[test]
+    fn test_wire_choice_repairs_tool_arguments() {
+        let choice = WireChoice {
+            message: WireMessage::assistant(""),
+            finish_reason: Some("tool_calls".to_string()),
+            tool_calls: Some(vec![WireToolCall {
+                id: "call_123".to_string(),
+                call_type: "function".to_string(),
+                function: WireToolCallFunction {
+                    name: "spawn_subagent".to_string(),
+                    arguments: r#"{"description":"count workspace","task_goal":"Count files","task_context":"Use find","output_schema":{"type":"object","properties":{"count":{"type":"integer"}},"required":["count"]}"#.to_string(),
+                },
+            }]),
+        };
+
+        let message = wire_choice_to_assistant_message(&choice);
+        assert_eq!(message.tool_calls.len(), 1);
+        assert_eq!(message.tool_calls[0].tool_name, "spawn_subagent");
+        assert_eq!(
+            message.tool_calls[0].input["description"],
+            "count workspace"
         );
     }
 }

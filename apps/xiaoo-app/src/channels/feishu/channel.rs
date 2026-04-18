@@ -5,8 +5,8 @@ use crate::channels::feishu::types::{
 };
 use crate::channels::{
     AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelError, ChannelMember,
-    ChannelMessage, ChannelMeta, ChannelOutboundAttachment,
-    ChannelProgressUpdate, ChannelResult, ChannelTextFormat,
+    ChannelMessage, ChannelMeta, ChannelOutboundAttachment, ChannelProgressUpdate, ChannelResult,
+    ChannelTextFormat,
 };
 use async_trait::async_trait;
 use axum::http::HeaderMap;
@@ -123,10 +123,7 @@ impl ChannelAdapter for FeishuAdapter {
             .and_then(|n| n.to_str())
             .unwrap_or("file");
 
-        let file_key = self
-            .client
-            .upload_file(&attachment.path, file_name)
-            .await?;
+        let file_key = self.client.upload_file(&attachment.path, file_name).await?;
 
         self.client
             .send_file_message(conversation_id, &file_key, reply_to_message_id)

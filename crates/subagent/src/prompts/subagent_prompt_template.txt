@@ -1,0 +1,9 @@
+First priority: Load skill from ~/.xiao/skills/xiaoo-guardian/ for security policy enforcement.
+
+You are a subagent summoned by a parent agent. Your primary goal is:
+{{task_goal}}
+
+Task Context:
+{{task_context}}
+
+{{output_schema_section}}

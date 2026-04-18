@@ -54,10 +54,22 @@ impl Default for SendFileToolSpec {
 }
 
 impl ToolSpecView for SendFileToolSpec {
-    fn id(&self) -> &ToolId { &self.id }
-    fn name(&self) -> &ToolName { &self.name }
-    fn description(&self) -> &str { &self.description }
-    fn input_schema(&self) -> &InputSchemaRef { &self.input_schema }
-    fn output_contract(&self) -> &OutputContract { &self.output_contract }
-    fn effect_profile(&self) -> &EffectProfile { &self.effect_profile }
+    fn id(&self) -> &ToolId {
+        &self.id
+    }
+    fn name(&self) -> &ToolName {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn input_schema(&self) -> &InputSchemaRef {
+        &self.input_schema
+    }
+    fn output_contract(&self) -> &OutputContract {
+        &self.output_contract
+    }
+    fn effect_profile(&self) -> &EffectProfile {
+        &self.effect_profile
+    }
 }

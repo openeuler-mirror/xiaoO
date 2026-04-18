@@ -47,7 +47,7 @@ impl LoopEventSink for ChannelLoopEventSink {
                 call_id: event.call_id.clone(),
                 tool: event.tool_name.clone(),
                 summary: String::new(),
-                args_preview: String::new(),
+                args_preview: event.args_preview.clone(),
                 command_preview: None,
                 command: None,
                 detail: event.output_preview.clone(),
@@ -74,12 +74,20 @@ impl ChannelToolEventSink {
 impl ToolEventSink for ChannelToolEventSink {
     fn emit(&self, event: ToolLifecycleEvent) {
         let update = match event {
-            ToolLifecycleEvent::Pending { call_id, tool_name }
-            | ToolLifecycleEvent::Running { call_id, tool_name } => ToolExecutionUpdate {
+            ToolLifecycleEvent::Pending {
+                call_id,
+                tool_name,
+                args_preview,
+            }
+            | ToolLifecycleEvent::Running {
+                call_id,
+                tool_name,
+                args_preview,
+            } => ToolExecutionUpdate {
                 call_id,
                 tool: tool_name,
                 summary: String::new(),
-                args_preview: String::new(),
+                args_preview,
                 command_preview: None,
                 command: None,
                 detail: String::new(),
@@ -87,11 +95,15 @@ impl ToolEventSink for ChannelToolEventSink {
                 exit_code: None,
                 duration_ms: None,
             },
-            ToolLifecycleEvent::Completed { call_id, tool_name } => ToolExecutionUpdate {
+            ToolLifecycleEvent::Completed {
+                call_id,
+                tool_name,
+                args_preview,
+            } => ToolExecutionUpdate {
                 call_id,
                 tool: tool_name,
                 summary: String::new(),
-                args_preview: String::new(),
+                args_preview,
                 command_preview: None,
                 command: None,
                 detail: String::new(),
@@ -103,11 +115,12 @@ impl ToolEventSink for ChannelToolEventSink {
                 call_id,
                 tool_name,
                 reason,
+                args_preview,
             } => ToolExecutionUpdate {
                 call_id,
                 tool: tool_name,
                 summary: "denied by policy".to_string(),
-                args_preview: String::new(),
+                args_preview,
                 command_preview: None,
                 command: None,
                 detail: reason.clone(),
@@ -119,11 +132,12 @@ impl ToolEventSink for ChannelToolEventSink {
                 call_id,
                 tool_name,
                 error,
+                args_preview,
             } => ToolExecutionUpdate {
                 call_id,
                 tool: tool_name,
                 summary: "tool execution failed".to_string(),
-                args_preview: String::new(),
+                args_preview,
                 command_preview: None,
                 command: None,
                 detail: error.clone(),
@@ -138,5 +152,61 @@ impl ToolEventSink for ChannelToolEventSink {
             agent_id: agent_types::common::ids::AgentId(String::new()),
             update,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use agent_contracts::{LoopEventSink, ToolEventSink};
+    use agent_types::common::ids::AgentId;
+    use agent_types::events::{ToolLifecycleEvent, ToolResultEvent};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    use super::{ChannelLoopEventSink, ChannelToolEventSink, SessionTurnUpdate};
+
+    #[test]
+    fn loop_tool_result_forwards_args_preview() {
+        let (tx, mut rx) = unbounded_channel();
+        let sink = ChannelLoopEventSink::new(tx, Arc::new(Mutex::new(None)));
+
+        sink.on_tool_result(
+            &AgentId("root".to_string()),
+            &ToolResultEvent {
+                call_id: "call-1".to_string(),
+                tool_name: "spawn_subagent".to_string(),
+                output_preview: "{\"agent_id\":\"child\"}".to_string(),
+                is_error: false,
+                args_preview: "{\n  \"task_goal\": \"run\"\n}".to_string(),
+            },
+        );
+
+        let SessionTurnUpdate::Tool { update, .. } = rx.try_recv().expect("tool update expected")
+        else {
+            panic!("expected tool update");
+        };
+        assert_eq!(update.args_preview, "{\n  \"task_goal\": \"run\"\n}");
+    }
+
+    #[test]
+    fn lifecycle_tool_event_forwards_args_preview() {
+        let (tx, mut rx) = unbounded_channel();
+        let sink = ChannelToolEventSink::new(tx);
+
+        sink.emit(ToolLifecycleEvent::Running {
+            call_id: "call-2".to_string(),
+            tool_name: "join_subagent".to_string(),
+            args_preview: "{\n  \"target_agent_id\": \"child\"\n}".to_string(),
+        });
+
+        let SessionTurnUpdate::Tool { update, .. } = rx.try_recv().expect("tool update expected")
+        else {
+            panic!("expected tool update");
+        };
+        assert_eq!(
+            update.args_preview,
+            "{\n  \"target_agent_id\": \"child\"\n}"
+        );
     }
 }

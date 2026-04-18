@@ -1,3 +1,4 @@
+use chrono::TimeZone;
 use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
@@ -5,11 +6,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
     Frame,
 };
+use serde_json::Value;
 
 use crate::app::App;
 use crate::app_state::ToolToggleRegion;
-use crate::chat::{MessageRole, TodoDisplayStatus, ToolExecutionStatus};
+use crate::chat::{MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolMessageState};
 use crate::markdown::render_markdown;
+use crate::theme::Theme;
 
 use super::utils::{render_tool_detail_text, rendered_line_count, truncate_display_width};
 
@@ -32,7 +35,7 @@ impl App {
         frame.render_widget(block.clone(), area);
 
         let inner_height = inner_area.height as usize;
-        let mut message_entries: Vec<(usize, Vec<Line>, bool)> = Vec::new();
+        let mut message_entries: Vec<(usize, Vec<Line>, Option<usize>)> = Vec::new();
         for (message_index, message) in self.state.chat_state.messages.iter().enumerate() {
             if let Some(tool) = &message.tool_state {
                 let tool_color = match tool.status {
@@ -41,6 +44,19 @@ impl App {
                     ToolExecutionStatus::Failed => self.state.theme.error,
                 };
                 let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+                if is_subagent_tool(&tool.tool) {
+                    let mut lines = render_subagent_tool_lines(
+                        tool,
+                        &timestamp,
+                        tool_color,
+                        &self.state.theme,
+                        inner_area.width,
+                    );
+                    lines.push(Line::raw(""));
+                    message_entries.push((message_index, lines, Some(0)));
+                    continue;
+                }
+
                 let toggle = if tool.expanded { "▾" } else { "▸" };
                 let status = match tool.status {
                     ToolExecutionStatus::Running => "running",
@@ -135,7 +151,7 @@ impl App {
                     }
                 }
                 lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, true));
+                message_entries.push((message_index, lines, Some(1)));
                 continue;
             }
 
@@ -178,7 +194,7 @@ impl App {
                     ]));
                 }
                 lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, false));
+                message_entries.push((message_index, lines, None));
                 continue;
             }
 
@@ -228,7 +244,7 @@ impl App {
                     ));
                 }
                 lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, false));
+                message_entries.push((message_index, lines, None));
                 continue;
             }
 
@@ -328,7 +344,7 @@ impl App {
                 ));
             }
             lines.push(Line::raw(""));
-            message_entries.push((message_index, lines, false));
+            message_entries.push((message_index, lines, None));
         }
 
         let mut all_lines: Vec<Line> = Vec::new();
@@ -398,24 +414,25 @@ impl App {
 
         self.state.render_state.tool_toggle_regions.clear();
         let mut absolute_row = 0usize;
-        for (message_index, lines, toggleable) in &message_entries {
-            let toggle_row = absolute_row.saturating_add(1);
-            if *toggleable
-                && toggle_row >= scroll_offset
-                && toggle_row < scroll_offset.saturating_add(inner_height)
-            {
-                self.state
-                    .render_state
-                    .tool_toggle_regions
-                    .push(ToolToggleRegion {
-                        message_index: *message_index,
-                        rect: Rect {
-                            x: inner_area.x,
-                            y: inner_area.y + (toggle_row.saturating_sub(scroll_offset) as u16),
-                            width: inner_area.width,
-                            height: 1,
-                        },
-                    });
+        for (message_index, lines, toggle_row_offset) in &message_entries {
+            if let Some(toggle_row_offset) = *toggle_row_offset {
+                let toggle_row = absolute_row.saturating_add(toggle_row_offset);
+                if toggle_row >= scroll_offset
+                    && toggle_row < scroll_offset.saturating_add(inner_height)
+                {
+                    self.state
+                        .render_state
+                        .tool_toggle_regions
+                        .push(ToolToggleRegion {
+                            message_index: *message_index,
+                            rect: Rect {
+                                x: inner_area.x,
+                                y: inner_area.y + (toggle_row.saturating_sub(scroll_offset) as u16),
+                                width: inner_area.width,
+                                height: 1,
+                            },
+                        });
+                }
             }
             absolute_row += rendered_line_count(lines, inner_area.width);
         }
@@ -493,4 +510,254 @@ fn highlight_line_selection(
     }
 
     Line::from(new_spans)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JoinSubagentTerminalDetail {
+    status: String,
+    reply: Option<String>,
+    error: Option<String>,
+    completed_at_ms: Option<u64>,
+}
+
+fn is_subagent_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "spawn_subagent" | "join_subagent")
+}
+
+fn render_subagent_tool_lines(
+    tool: &ToolMessageState,
+    timestamp: &str,
+    tool_color: ratatui::style::Color,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let title = match tool.tool.as_str() {
+        "spawn_subagent" => "Spawn Subagent",
+        "join_subagent" => "Join Subagent",
+        _ => "Subagent",
+    };
+    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let status = match tool.status {
+        ToolExecutionStatus::Running => "running",
+        ToolExecutionStatus::Completed => "done",
+        ToolExecutionStatus::Failed => "failed",
+    };
+    let hint = if tool.expanded {
+        "click to collapse"
+    } else {
+        "click to expand details"
+    };
+    let mut header = format!("{toggle} {title}  {status}  {timestamp}  {hint}");
+    if let Some(duration_ms) = tool.duration_ms {
+        header.push_str(&format!("  {}ms", duration_ms));
+    }
+    let max_header_width = width.saturating_sub(2) as usize;
+    let header = truncate_display_width(&header, max_header_width);
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("▎ ", Style::default().fg(tool_color)),
+        Span::styled(
+            header,
+            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    if !tool.expanded {
+        return lines;
+    }
+
+    if !tool.args_preview.trim().is_empty() {
+        lines.push(Line::styled(
+            "  Input JSON",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for line in tool.args_preview.lines() {
+            lines.push(Line::styled(
+                format!("    {}", line),
+                Style::default().fg(theme.foreground),
+            ));
+        }
+    }
+
+    match tool.tool.as_str() {
+        "spawn_subagent" => render_spawn_subagent_detail_lines(tool, theme, &mut lines),
+        "join_subagent" => render_join_subagent_detail_lines(tool, theme, &mut lines),
+        _ => {}
+    }
+
+    lines
+}
+
+fn render_spawn_subagent_detail_lines(
+    tool: &ToolMessageState,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    if let Some(agent_id) = parse_spawn_subagent_agent_id(&tool.detail) {
+        lines.push(Line::styled(
+            "  Spawned",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!("    agent_id: {}", agent_id),
+            Style::default().fg(theme.foreground),
+        ));
+        return;
+    }
+
+    append_fallback_tool_output(tool, theme, lines);
+}
+
+fn render_join_subagent_detail_lines(
+    tool: &ToolMessageState,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    if let Some(terminal) = parse_join_subagent_terminal(&tool.detail) {
+        lines.push(Line::styled(
+            "  Terminal",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!("    status: {}", terminal.status),
+            Style::default().fg(theme.foreground),
+        ));
+        if let Some(completed_at_ms) = terminal.completed_at_ms {
+            lines.push(Line::styled(
+                format!(
+                    "    completed_at: {}",
+                    format_completed_at_ms(completed_at_ms)
+                ),
+                Style::default().fg(theme.foreground),
+            ));
+        }
+        if let Some(reply) = terminal.reply {
+            lines.push(Line::styled(
+                "  Reply",
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for line in reply.lines() {
+                lines.push(Line::styled(
+                    format!("    {}", line),
+                    Style::default().fg(theme.foreground),
+                ));
+            }
+        }
+        if let Some(error) = terminal.error {
+            lines.push(Line::styled(
+                "  Error",
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            for line in error.lines() {
+                lines.push(Line::styled(
+                    format!("    {}", line),
+                    Style::default().fg(theme.error),
+                ));
+            }
+        }
+        return;
+    }
+
+    append_fallback_tool_output(tool, theme, lines);
+}
+
+fn append_fallback_tool_output(
+    tool: &ToolMessageState,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+) {
+    let detail_text = render_tool_detail_text(&tool.detail);
+    let detail_text = detail_text.trim();
+    if detail_text.is_empty() {
+        lines.push(Line::styled(
+            "  No subagent detail available yet.",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        return;
+    }
+
+    lines.push(Line::styled(
+        "  Output",
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::BOLD),
+    ));
+    for line in detail_text.lines() {
+        lines.push(Line::styled(
+            format!("    {}", line),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+}
+
+fn parse_spawn_subagent_agent_id(detail: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(detail.trim()).ok()?;
+    value.get("agent_id")?.as_str().map(ToOwned::to_owned)
+}
+
+fn parse_join_subagent_terminal(detail: &str) -> Option<JoinSubagentTerminalDetail> {
+    let value: Value = serde_json::from_str(detail.trim()).ok()?;
+    let terminal = value.get("terminal")?;
+    Some(JoinSubagentTerminalDetail {
+        status: terminal.get("status")?.as_str()?.to_string(),
+        reply: terminal
+            .get("reply")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+            .filter(|value| !value.trim().is_empty()),
+        error: terminal
+            .get("error")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+            .filter(|value| !value.trim().is_empty()),
+        completed_at_ms: terminal
+            .get("completed_at_ms")
+            .and_then(|value| value.as_u64()),
+    })
+}
+
+fn format_completed_at_ms(value: u64) -> String {
+    i64::try_from(value)
+        .ok()
+        .and_then(|millis| chrono::Local.timestamp_millis_opt(millis).single())
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+        .unwrap_or_else(|| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_join_subagent_terminal, parse_spawn_subagent_agent_id};
+
+    #[test]
+    fn spawn_subagent_detail_parses_agent_id() {
+        assert_eq!(
+            parse_spawn_subagent_agent_id(r#"{"agent_id":"child-123"}"#),
+            Some("child-123".to_string())
+        );
+    }
+
+    #[test]
+    fn join_subagent_detail_parses_terminal_snapshot() {
+        let parsed = parse_join_subagent_terminal(
+            r#"{"terminal":{"status":"completed","reply":"done","error":null,"completed_at_ms":123}}"#,
+        )
+        .expect("join_subagent detail should parse");
+
+        assert_eq!(parsed.status, "completed");
+        assert_eq!(parsed.reply.as_deref(), Some("done"));
+        assert_eq!(parsed.error, None);
+        assert_eq!(parsed.completed_at_ms, Some(123));
+    }
 }

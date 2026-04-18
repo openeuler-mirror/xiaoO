@@ -838,13 +838,16 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             .partition(|tc| is_valid_tool_name(&tc.tool_name));
 
         if retry_valid.is_empty() && !retry_invalid.is_empty() {
-            // Retry also failed — push error results for conversation completeness, then bail.
+            // Retry also failed — push error results for conversation completeness,
+            // then degrade gracefully instead of killing the entire loop.
+            tracing::error!(
+                count = retry_invalid.len(),
+                "LLM returned tool call(s) with empty name after retry; degrading to failed tool results"
+            );
             for inv in &retry_invalid {
                 ctx.state.messages.push(build_invalid_tool_name_result(inv));
             }
-            return Err(AgentError::ToolExecution(
-                "LLM returned tool call(s) with empty name after retry".to_string(),
-            ));
+            return Ok(None);
         }
 
         (retry_valid, retry_invalid)
@@ -870,6 +873,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                     tool_name: inv.tool_name.clone(),
                     output_preview: "invalid empty tool name".to_string(),
                     is_error: true,
+                    args_preview: serde_json::to_string_pretty(&inv.input)
+                        .unwrap_or_else(|_| inv.input.to_string()),
                 },
             );
         }
@@ -885,57 +890,49 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             tool_name: tc.tool_name.clone(),
             input: tc.input.clone(),
         };
+        let fallback_final_call = agent_types::tool::FinalToolCall {
+            call_id: raw_tool_call.call_id.clone(),
+            tool_name: raw_tool_call.tool_name.clone(),
+            input: raw_tool_call.input.clone(),
+        };
 
         let per_call_filter = ctx.snapshot.tool_registry.filter_for(agent_id);
 
-        let tool_call = ToolCallBuilderImpl::new()
+        let tool_call = match ToolCallBuilderImpl::new()
             .with_raw_llm_tool_call(raw_tool_call)
             .with_tool_filter(per_call_filter)
             .build()
-            .map_err(|e| AgentError::ToolExecution(e.to_string()))?;
+        {
+            Ok(tool_call) => tool_call,
+            Err(error) => {
+                let result = build_framework_failed_tool_result(
+                    fallback_final_call,
+                    format!("tool call build failed: {error}"),
+                );
+                emit_tool_result_event(ctx, &result);
+                let tool_result_message = build_tool_result_message(&result);
+                ctx.state.messages.push(tool_result_message);
+                ctx.turn.tool_results.push(result);
+                continue;
+            }
+        };
 
-        let result = tool_call
+        let result = match tool_call
             .execute(&**runtime_view)
             .await
-            .map_err(|e| AgentError::ToolExecution(e.to_string()))?;
-
-        if let Some(ref sink) = ctx.input.event_sink {
-            let mut should_emit = true;
-            let (output_preview, is_error) = match &result {
-                ToolExecutionResult::Completed { raw_outcome, .. } => {
-                    let preview = match raw_outcome {
-                        RawToolOutcome::Success { output } => output.chars().take(200).collect(),
-                        RawToolOutcome::Error { message } => message.chars().take(200).collect(),
-                    };
-                    (preview, false)
-                }
-                ToolExecutionResult::Suspended { suspend_token, .. } => {
-                    should_emit = false;
-                    (format!("suspended:{suspend_token}"), false)
-                }
-                ToolExecutionResult::Failed {
-                    execution_error, ..
-                } => (execution_error.to_string(), true),
-                ToolExecutionResult::Denied { error, .. } => (
-                    error.as_ref().map(|e| e.to_string()).unwrap_or_default(),
-                    true,
-                ),
-            };
-
-            if should_emit {
-                let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-                let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
-                sink.on_tool_result(
-                    agent_id,
-                    &ToolResultEvent {
-                        call_id: result.call_id().to_string(),
-                        tool_name: result.tool_name().to_string(),
-                        output_preview,
-                        is_error,
-                    },
-                );
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let result =
+                    build_framework_failed_tool_result(fallback_final_call, error.to_string());
+                emit_tool_result_event(ctx, &result);
+                let tool_result_message = build_tool_result_message(&result);
+                ctx.state.messages.push(tool_result_message);
+                ctx.turn.tool_results.push(result);
+                continue;
             }
-        }
+        };
+        emit_tool_result_event(ctx, &result);
 
         if let Some(suspended_call) = SuspendedToolCall::from_tool_result(&result) {
             ctx.turn.tool_results.push(result);
@@ -965,6 +962,61 @@ fn build_invalid_tool_name_result(tc: &ToolUseBlock) -> ChatMessage {
         true,
         now_ms(),
     )
+}
+
+fn build_framework_failed_tool_result(
+    final_call: agent_types::tool::FinalToolCall,
+    message: String,
+) -> ToolExecutionResult {
+    ToolExecutionResult::Failed {
+        final_call,
+        pre_hook_results: Vec::new(),
+        error_hook_results: Vec::new(),
+        execution_error: agent_types::tool::ToolExecutionError::ExecutionFailed { message },
+    }
+}
+
+fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
+    let Some(ref sink) = ctx.input.event_sink else {
+        return;
+    };
+
+    let mut should_emit = true;
+    let (output_preview, is_error) = match result {
+        ToolExecutionResult::Completed { raw_outcome, .. } => {
+            let preview = match raw_outcome {
+                RawToolOutcome::Success { output } => output.chars().take(200).collect(),
+                RawToolOutcome::Error { message } => message.chars().take(200).collect(),
+            };
+            (preview, false)
+        }
+        ToolExecutionResult::Suspended { suspend_token, .. } => {
+            should_emit = false;
+            (format!("suspended:{suspend_token}"), false)
+        }
+        ToolExecutionResult::Failed {
+            execution_error, ..
+        } => (execution_error.to_string(), true),
+        ToolExecutionResult::Denied { error, .. } => (
+            error.as_ref().map(|e| e.to_string()).unwrap_or_default(),
+            true,
+        ),
+    };
+
+    if should_emit {
+        let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
+        let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+        sink.on_tool_result(
+            agent_id,
+            &ToolResultEvent {
+                call_id: result.call_id().to_string(),
+                tool_name: result.tool_name().to_string(),
+                output_preview,
+                is_error,
+                args_preview: serde_json::to_string_pretty(&result.final_call().input).unwrap_or_else(|_| result.final_call().input.to_string()) ,
+            },
+        );
+    }
 }
 
 fn decide(ctx: &mut LoopContext<'_>) {
@@ -1560,4 +1612,66 @@ mod tests {
             Some("Hello world")
         );
     }
+
+    /// LLM provider that returns a single empty-name tool call on every invocation.
+    /// Used to exercise the "retry still returns empty name → graceful degrade" path.
+    struct EmptyNameToolCallProvider {
+        capabilities: ProviderCapabilities,
+    }
+
+    impl EmptyNameToolCallProvider {
+        fn new() -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: true,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "empty-name-test".to_string(),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for EmptyNameToolCallProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            // Emit a text delta so the assistant message is non-empty.
+            on_chunk(StreamChunk {
+                delta_text: Some("trying to use a tool".to_string()),
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some("trying to use a tool".to_string()),
+                    tool_calls: vec![ToolUseBlock {
+                        call_id: "call_empty_1".to_string(),
+                        tool_name: String::new(), // ← empty name: the trigger
+                        input: serde_json::json!({}),
+                    }],
+                    usage: Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+   
 }
