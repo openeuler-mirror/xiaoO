@@ -61,7 +61,7 @@ pub struct RenderState {
 #[derive(Default)]
 pub struct SlashState {
     pub selected: usize,
-    pub dismissed: bool,
+    pub dismissed_prefix: Option<String>,
 }
 
 pub struct AppState {
@@ -255,14 +255,19 @@ impl AppState {
         if self.input_mode != InputMode::Editing || self.chat_state.is_loading {
             return false;
         }
-        if self.slash.dismissed {
-            return false;
-        }
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return false;
         };
+        if self
+            .slash
+            .dismissed_prefix
+            .as_deref()
+            .is_some_and(|dismissed| dismissed == prefix)
+        {
+            return false;
+        }
         !candidates_for_prefix(&prefix, &self.external_commands).is_empty()
     }
 
@@ -295,8 +300,14 @@ impl AppState {
     pub fn note_input_changed(&mut self) {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
-        if slash_typed_prefix(value, cursor).is_none() {
-            self.slash.dismissed = false;
+        let prefix = slash_typed_prefix(value, cursor);
+        if self
+            .slash
+            .dismissed_prefix
+            .as_deref()
+            .is_some_and(|dismissed| prefix.as_deref() != Some(dismissed))
+        {
+            self.slash.dismissed_prefix = None;
         }
         let candidate_count = self.slash_candidate_count();
         if candidate_count == 0 {
@@ -315,6 +326,12 @@ impl AppState {
                 self.note_input_changed();
             }
         }
+    }
+
+    pub fn dismiss_current_slash_menu(&mut self) {
+        let value = self.chat_state.input.value();
+        let cursor = self.chat_state.input.cursor();
+        self.slash.dismissed_prefix = slash_typed_prefix(value, cursor);
     }
 
     pub fn get_last_assistant_content(&self) -> Option<String> {
@@ -457,6 +474,38 @@ mod tests {
 
         state.toggle_theme();
         assert_eq!(state.theme.is_light(), initial_is_light);
+    }
+
+    #[test]
+    fn slash_menu_reopens_for_new_prefix_after_dismiss() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.input = "/skills".into();
+
+        assert!(state.slash_menu_visible());
+
+        state.dismiss_current_slash_menu();
+        assert!(!state.slash_menu_visible());
+
+        state.chat_state.input = "/".into();
+        state.note_input_changed();
+        assert!(state.slash_menu_visible());
+    }
+
+    #[test]
+    fn slash_menu_reopens_when_prefix_changes_after_escape() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.input = "/c".into();
+
+        assert!(state.slash_menu_visible());
+
+        state.dismiss_current_slash_menu();
+        assert!(!state.slash_menu_visible());
+
+        state.chat_state.input = "/co".into();
+        state.note_input_changed();
+        assert!(state.slash_menu_visible());
     }
 
     fn sample_prompt_request() -> PromptRequest {
