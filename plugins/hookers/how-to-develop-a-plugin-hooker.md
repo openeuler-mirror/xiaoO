@@ -4,7 +4,7 @@ This guide explains how to create a plugin hooker without touching Rust code in 
 
 ## 0. The simplest way
 
-Add your hooker under `xiaoO/plugins/hookers`. A subdirectory is recognized as a valid hooker only if it contains a `plugin.json` (refers to plugin.json-example). For file configuration details, see the sections below. If your hooker needs extra setup, add an `install.sh` in the hooker directory — it will be executed automatically. After adding a hooker, run `xiaoO/plugins/hookers/config.sh` manually and follow the prompts to configure.
+Add your hooker under `<your_xiaoO>/plugins/hookers`. A subdirectory is recognized as a valid hooker only if it contains a `plugin.json` (refers to plugin.json-example). For file configuration details, see the sections below. If your hooker needs extra setup, add an `install.sh` in the hooker directory — it will be executed automatically. After adding a hooker, run `<your_xiaoO>/plugins/hookers/config.sh` manually and follow the prompts to configure.
 
 ## 1. What is a plugin hooker?
 
@@ -40,6 +40,7 @@ plugins = [
 ]
 enabled = []
 disabled = []
+policies = {}
 ```
 
 Important:
