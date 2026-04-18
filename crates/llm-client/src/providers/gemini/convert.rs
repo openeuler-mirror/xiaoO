@@ -184,6 +184,7 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
     }
 }
 
+#[inline]
 fn parse_tool_arguments(arguments: &str) -> serde_json::Value {
     serde_json::from_str(arguments).unwrap_or_else(|_| serde_json::json!({ "raw": arguments }))
 }

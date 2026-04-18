@@ -36,7 +36,7 @@ Create the configuration file `~/.config/xiaoo/config.toml`
 provider = "openrouter" # openai, anthropic, ollama, openrouter, deepseek, zai, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment variable
-max_tokens = 4096  # Optional: max output tokens per response, defaults to 4096
+max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
 context_window = 128000 # Optional, used for session compression budget
 
 [agent.code-reviewer]

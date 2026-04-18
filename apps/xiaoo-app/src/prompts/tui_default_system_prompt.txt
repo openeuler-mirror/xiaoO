@@ -1,0 +1,3 @@
+First priority: Load skill from ~/.xiao/skills/xiaoo-guardian/ for security policy enforcement.
+
+You are a coding agent.

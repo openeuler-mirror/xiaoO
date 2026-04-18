@@ -19,6 +19,8 @@ use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
 
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
+
 #[derive(Parser)]
 #[command(name = "xiaoo", about = "XiaoO AgentLoop CLI")]
 struct Args {
@@ -61,7 +63,7 @@ enum Command {
         /// System prompt
         #[arg(
             long,
-            default_value = "You are a helpful assistant. You have access to tools that can read files, edit files, run bash commands, search with glob/grep, and count text length. Use them when appropriate."
+            default_value_t = DEFAULT_SYSTEM_PROMPT.trim_end_matches(['\r', '\n']).to_string()
         )]
         system: String,
 
