@@ -21,13 +21,6 @@ pub struct App {
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 impl App {
-    pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
-        Ok(Self {
-            state: AppState::new(config_path, workspace)?,
-            gateway: GatewayRuntime::new(),
-        })
-    }
-
     pub fn new_with_config(
         config: &Config,
         config_path: PathBuf,

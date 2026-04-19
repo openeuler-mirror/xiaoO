@@ -3,7 +3,7 @@ use ratatui::{layout::Rect, text::Line};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::chat::{default_provider_list, merge_config_provider, ChatState, MessageRole};
+use crate::chat::{default_provider_list, merge_config_provider, ChatState};
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
@@ -49,7 +49,6 @@ pub struct CachedMessageRender {
     pub width: u16,
     pub theme: Theme,
     pub lines: Vec<Line<'static>>,
-    pub visual_line_count: usize,
     pub tool_toggle_row_offset: Option<usize>,
 }
 
@@ -123,6 +122,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
         Ok(Self {
             theme: Theme::default(),
@@ -310,24 +310,6 @@ impl AppState {
         !candidates_for_prefix(&prefix, &self.external_commands).is_empty()
     }
 
-    pub fn slash_popup_height(&self) -> u16 {
-        if !self.slash_menu_visible() {
-            return 0;
-        }
-        let value = self.chat_state.input.value();
-        let cursor = self.chat_state.input.cursor();
-        let Some(prefix) = slash_typed_prefix(value, cursor) else {
-            return 0;
-        };
-        let candidate_count = candidates_for_prefix(&prefix, &self.external_commands)
-            .len()
-            .min(6);
-        if candidate_count == 0 {
-            return 0;
-        }
-        candidate_count as u16 + 2
-    }
-
     pub fn slash_candidate_count(&self) -> usize {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
@@ -371,19 +353,6 @@ impl AppState {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         self.slash.dismissed_prefix = slash_typed_prefix(value, cursor);
-    }
-
-    pub fn get_last_assistant_content(&self) -> Option<String> {
-        self.chat_state
-            .messages
-            .iter()
-            .rev()
-            .find(|message| {
-                message.role == MessageRole::Assistant
-                    && !message.is_streaming
-                    && !message.content.is_empty()
-            })
-            .map(|message| message.content.clone())
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
@@ -470,8 +439,6 @@ mod tests {
     use super::{ApiKeyDialogState, AppState, RuntimeStatusLight};
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
-    use crate::selection::TranscriptSelection;
-    use agent_types::{ChatMessage, ContentBlock, MessageRole};
     use std::path::PathBuf;
 
     #[test]

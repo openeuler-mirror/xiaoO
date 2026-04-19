@@ -42,7 +42,7 @@ impl LoopEventSink for ChannelLoopEventSink {
             ToolExecutionStatus::Completed
         };
         let _ = self.updates_tx.send(SessionTurnUpdate::Tool {
-            agent_id: agent_id.clone(),
+            _agent_id: agent_id.clone(),
             update: ToolExecutionUpdate {
                 call_id: event.call_id.clone(),
                 tool: event.tool_name.clone(),
@@ -149,7 +149,7 @@ impl ToolEventSink for ChannelToolEventSink {
         let _ = self.updates_tx.send(SessionTurnUpdate::Tool {
             // ToolEventSink has no agent context; tool lifecycle events are always
             // for the root agent and are never filtered by the TUI.
-            agent_id: agent_types::common::ids::AgentId(String::new()),
+            _agent_id: agent_types::common::ids::AgentId(String::new()),
             update,
         });
     }

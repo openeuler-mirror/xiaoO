@@ -22,6 +22,7 @@ pub struct ToolExecutionUpdate {
     pub duration_ms: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoDisplayStatus {
     Pending,
@@ -29,18 +30,21 @@ pub enum TodoDisplayStatus {
     Completed,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotItem {
     pub status: TodoDisplayStatus,
     pub content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotUpdate {
     pub title: String,
     pub items: Vec<TodoSnapshotItem>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CompletionCheckUpdate {
     pub reason: String,
@@ -112,20 +116,6 @@ impl Message {
         }
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: MessageRole::Assistant,
-            content: content.into(),
-            thinking_content: String::new(),
-            timestamp: chrono::Local::now(),
-            is_streaming: false,
-            tool_state: None,
-            todo_state: None,
-            completion_check_state: None,
-            render_revision: 0,
-        }
-    }
-
     pub fn assistant_streaming() -> Self {
         Self {
             role: MessageRole::Assistant,
@@ -180,6 +170,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn todo_snapshot(update: TodoSnapshotUpdate) -> Self {
         Self {
             role: MessageRole::System,
@@ -201,6 +192,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn completion_check(update: CompletionCheckUpdate) -> Self {
         Self {
             role: MessageRole::System,
@@ -503,30 +495,6 @@ impl ChatState {
         Self::default()
     }
 
-    pub fn messages_to_display(&self, height: usize) -> usize {
-        self.messages
-            .len()
-            .saturating_sub(self.scroll_offset)
-            .min(height.saturating_sub(4) / 3)
-    }
-
-    pub fn context_size(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|m| m.role != MessageRole::System)
-            .map(|m| m.content.chars().count())
-            .sum()
-    }
-
-    pub fn estimated_tokens(&self) -> usize {
-        const SAFETY_MARGIN: f64 = 1.2;
-        let total_chars = self.context_size();
-        let base_estimate = (total_chars + 3) / 4;
-        let message_overhead = self.messages.len() * 4;
-        let total = base_estimate + message_overhead;
-        ((total as f64) * SAFETY_MARGIN).ceil() as usize
-    }
-
     /// Max scroll offset (lines) so the last line is visible. Uses last_visible_height and total_lines.
     pub fn max_scroll_offset(&self) -> usize {
         self.total_lines
@@ -549,42 +517,6 @@ impl ChatState {
             self.stick_to_bottom = true;
         }
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll up by a page (half the visible height).
-    pub fn page_up(&mut self) {
-        let page_size = (self.last_visible_height / 2).max(1);
-        self.stick_to_bottom = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll down by a page (half the visible height).
-    pub fn page_down(&mut self) {
-        let page_size = (self.last_visible_height / 2).max(1);
-        let max = self.max_scroll_offset();
-        if self.scroll_offset < max {
-            self.scroll_offset = (self.scroll_offset + page_size).min(max);
-        }
-        if self.scroll_offset >= max {
-            self.stick_to_bottom = true;
-        }
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll to the bottom of the message list.
-    pub fn scroll_to_bottom(&mut self) {
-        let max = self.max_scroll_offset();
-        self.scroll_offset = max;
-        self.stick_to_bottom = true;
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll to the top of the message list.
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.stick_to_bottom = false;
-        self.scrollbar_state = self.scrollbar_state.position(0);
     }
 
     /// Set scroll position by line index (e.g. from scrollbar drag). Clamps to valid range.

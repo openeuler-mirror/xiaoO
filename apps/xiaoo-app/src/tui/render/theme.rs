@@ -57,14 +57,6 @@ impl Theme {
         Self::from_terminal_env(&env)
     }
 
-    pub fn dark() -> Self {
-        Self::from_scheme(ColorSupport::TrueColor, BackgroundMode::Dark)
-    }
-
-    pub fn light() -> Self {
-        Self::from_scheme(ColorSupport::TrueColor, BackgroundMode::Light)
-    }
-
     fn from_terminal_env(env: &TerminalThemeEnv) -> Self {
         Self::from_scheme(env.color_support(), env.background_mode())
     }
@@ -73,24 +65,8 @@ impl Theme {
         Style::default().fg(self.foreground).bg(self.background)
     }
 
-    pub fn muted_style(self) -> Style {
-        Style::default().fg(self.muted)
-    }
-
-    pub fn accent_style(self) -> Style {
-        Style::default().fg(self.accent)
-    }
-
-    pub fn primary_style(self) -> Style {
-        Style::default().fg(self.primary)
-    }
-
     pub fn error_style(self) -> Style {
         Style::default().fg(self.error)
-    }
-
-    pub fn success_style(self) -> Style {
-        Style::default().fg(self.success)
     }
 
     pub fn is_light(self) -> bool {
@@ -109,22 +85,12 @@ impl Theme {
         Self::from_scheme(self.color_support, self.background_mode.toggled())
     }
 
-    pub fn bold_style(self) -> Style {
-        Style::default()
-            .add_modifier(Modifier::BOLD)
-            .fg(self.foreground)
-    }
-
     pub fn border_style(self, active: bool) -> Style {
         if active {
             Style::default().fg(self.border_active)
         } else {
             Style::default().fg(self.border)
         }
-    }
-
-    pub fn code_style(self) -> Style {
-        Style::default().fg(self.code_fg).bg(self.code_bg)
     }
 
     pub fn status_bar_style(self) -> Style {

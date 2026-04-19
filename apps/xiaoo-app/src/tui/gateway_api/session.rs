@@ -16,7 +16,7 @@ pub enum SessionTurnUpdate {
         text: String,
     },
     Tool {
-        agent_id: AgentId,
+        _agent_id: AgentId,
         update: ToolExecutionUpdate,
     },
     InteractionPrompt(PromptRequest),

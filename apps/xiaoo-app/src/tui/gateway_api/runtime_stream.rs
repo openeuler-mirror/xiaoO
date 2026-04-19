@@ -38,7 +38,7 @@ impl GatewayRuntime {
                     }
                 }
                 SessionTurnUpdate::Tool {
-                    agent_id: _,
+                    _agent_id: _,
                     update,
                 } => {
                     self.apply_tool_update(state, update);

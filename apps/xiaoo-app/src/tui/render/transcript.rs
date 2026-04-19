@@ -294,7 +294,6 @@ fn render_message_entry(
         revision: message.render_revision,
         width,
         theme: *theme,
-        visual_line_count: rendered_line_count(&lines, width),
         tool_toggle_row_offset,
         lines,
     }
