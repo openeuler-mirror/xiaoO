@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,

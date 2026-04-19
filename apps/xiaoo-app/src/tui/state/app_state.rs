@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ratatui::layout::Rect;
+use ratatui::{layout::Rect, text::Line};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -43,11 +43,41 @@ pub struct ToolToggleRegion {
     pub rect: Rect,
 }
 
+#[derive(Clone)]
+pub struct CachedMessageRender {
+    pub revision: u64,
+    pub width: u16,
+    pub theme: Theme,
+    pub lines: Vec<Line<'static>>,
+    pub visual_line_count: usize,
+    pub tool_toggle_row_offset: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct CachedMessageLayout {
+    pub message_index: usize,
+    pub start_visual_row: usize,
+    pub tool_toggle_row_offset: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct TranscriptRenderCache {
+    pub all_lines: Vec<Line<'static>>,
+    pub visual_lines: Vec<Line<'static>>,
+    pub line_texts: Vec<String>,
+    pub line_is_header: Vec<bool>,
+    pub logical_line_visual_starts: Vec<usize>,
+    pub message_layouts: Vec<CachedMessageLayout>,
+    pub total_lines: usize,
+}
+
 #[derive(Default)]
 pub struct RenderState {
     pub messages_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
     pub api_key_toggle_area: Option<Rect>,
+    pub message_renders: Vec<Option<CachedMessageRender>>,
+    pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,

@@ -86,6 +86,7 @@ pub struct Message {
     pub tool_state: Option<ToolMessageState>,
     pub todo_state: Option<TodoMessageState>,
     pub completion_check_state: Option<CompletionCheckMessageState>,
+    pub render_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +108,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -120,6 +122,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -133,6 +136,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -146,6 +150,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -171,6 +176,7 @@ impl Message {
             }),
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -191,6 +197,7 @@ impl Message {
                     .collect(),
             }),
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -208,7 +215,29 @@ impl Message {
                 missing_information: update.missing_information,
                 next_step_hint: update.next_step_hint,
             }),
+            render_revision: 0,
         }
+    }
+
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.mark_render_dirty();
+    }
+
+    pub fn append_content(&mut self, chunk: &str) {
+        self.content.push_str(chunk);
+        self.mark_render_dirty();
+    }
+
+    pub fn set_streaming(&mut self, streaming: bool) {
+        if self.is_streaming != streaming {
+            self.is_streaming = streaming;
+            self.mark_render_dirty();
+        }
+    }
+
+    pub fn mark_render_dirty(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1);
     }
 }
 
@@ -564,5 +593,28 @@ impl ChatState {
         self.scroll_offset = line_offset.min(max);
         self.stick_to_bottom = self.scroll_offset >= max;
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Message;
+
+    #[test]
+    fn message_render_revision_updates_with_content_and_streaming_changes() {
+        let mut message = Message::assistant_streaming();
+        assert_eq!(message.render_revision, 0);
+
+        message.set_content("hello");
+        assert_eq!(message.render_revision, 1);
+
+        message.append_content(" world");
+        assert_eq!(message.render_revision, 2);
+
+        message.set_streaming(false);
+        assert_eq!(message.render_revision, 3);
+
+        message.set_streaming(false);
+        assert_eq!(message.render_revision, 3);
     }
 }

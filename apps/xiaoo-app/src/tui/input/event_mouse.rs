@@ -197,6 +197,7 @@ impl App {
                     {
                         if let Some(tool) = message.tool_state.as_mut() {
                             tool.expanded = !tool.expanded;
+                            message.mark_render_dirty();
                         }
                     }
                     return;
