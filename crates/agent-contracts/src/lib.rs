@@ -1,3 +1,4 @@
+
 pub mod compression;
 pub mod context;
 pub mod events;
@@ -8,6 +9,7 @@ pub mod runtime;
 pub mod skill;
 pub mod tool;
 pub mod trace;
+pub mod backend;
 
 pub use compression::{CompressionError, CompressionPipeline};
 pub use context::{PromptBuildInput, PromptBuilder, TokenBudgetPolicy, TokenEstimator};
