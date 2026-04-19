@@ -26,6 +26,7 @@ impl OperationBackendBuilder for OperationBackendBuilderImpl {
         config: &OperationBackendConfig,
     ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
         match config.kind.as_str() {
+            "conch" => backends::conch::build_backend(config).await,
             "local" => backends::local::build_backend(config).await,
             "docker" => backends::docker::build_backend(config).await,
             "remote" => backends::remote::build_backend(config).await,
