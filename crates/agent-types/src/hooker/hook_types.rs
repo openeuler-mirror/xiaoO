@@ -1,10 +1,10 @@
-use crate::session::hook_types::{
-    SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult,
-};
 use crate::llm::error::LlmError;
 use crate::llm::hook_types::{
     ErrorLlmHookInput, ErrorLlmHookResult, PostLlmHookInput, PostLlmHookResult, PreLlmHookInput,
     PreLlmHookResult,
+};
+use crate::session::hook_types::{
+    SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult,
 };
 use crate::tool::execution_types::ToolExecutionError;
 use crate::tool::hook_types::{
