@@ -59,4 +59,9 @@ impl GatewayRuntime {
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
     }
+    /// Closes all active sessions, firing the SessionClosed hook for each.
+    /// Should be called before the application exits.
+    pub async fn close_sessions(&self) {
+        self.session_gateway.close_all_sessions().await;
+    }
 }

@@ -4,7 +4,9 @@ use crate::gateway::{
     SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
     SessionStore, SessionStoreError,
 };
-use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
+use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookPointId};
+use agent_types::session::{SessionClosedHookInput, SessionCreatedHookInput};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use subagent::{
     SubagentControl, SubagentControlError,
 };
 use tokio::sync::Mutex;
+use xiaoo_core::NoopRuntimeView;
 
 use super::session_supervisor::SessionSupervisor;
 
@@ -20,17 +23,44 @@ pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     supervisors: Mutex<HashMap<String, Arc<SessionSupervisor>>>,
+    hooker_registry: Arc<dyn HookerRegistry>,
 }
 
 impl CoreBackedSessionService {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+        hooker_registry: Arc<dyn HookerRegistry>,
     ) -> Self {
         Self {
             session_store,
             runtime_resolver,
             supervisors: Mutex::new(HashMap::new()),
+            hooker_registry,
+        }
+    }
+
+    async fn fire_session_hooks(&self, input: HookInvokeInput, hook_point: HookPointId) {
+        let hookers: Vec<_> = self
+            .hooker_registry
+            .list_for_hook_point(&hook_point)
+            .into_iter()
+            .filter(|h| self.hooker_registry.is_enabled(h.id()))
+            .map(|h| h.id().clone())
+            .collect();
+
+        let noop_runtime = NoopRuntimeView::new();
+        for hooker_id in hookers {
+            if let Some(hooker) = self.hooker_registry.get(&hooker_id) {
+                if let Err(err) = hooker.invoke(input.clone(), &noop_runtime).await {
+                    tracing::warn!(
+                        hooker_id = %hooker_id,
+                        hook_point = %hook_point.0,
+                        error = %err,
+                        "session hook invocation failed"
+                    );
+                }
+            }
         }
     }
 
@@ -130,6 +160,7 @@ impl CoreBackedSessionService {
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let existing = self.session_store.load(&request.session_id).await;
+        let is_new_session = existing.is_none();
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
         let resolved = self
             .runtime_resolver
@@ -138,6 +169,25 @@ impl CoreBackedSessionService {
 
         let seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
+
+        if is_new_session {
+            let hook_point = HookPointId(format!(
+                "{}.Session.lifecycle.created",
+                resolved.descriptor.agent_id.0
+            ));
+            self.fire_session_hooks(
+                HookInvokeInput::SessionCreated {
+                    input: SessionCreatedHookInput {
+                        session_id: seed_session.session_id.clone(),
+                        sender_id: seed_session.sender_id.clone(),
+                    },
+                    metadata: HookInvokeMetadata::default(),
+                },
+                hook_point,
+            )
+            .await;
+        }
+
         let supervisor = self.get_or_create_supervisor(seed_session).await;
         supervisor.prepare_root_turn(&request, &resolved).await;
         supervisor
@@ -189,6 +239,23 @@ impl SessionControlPlane for CoreBackedSessionService {
         let resolved = self.runtime_resolver.resolve(&runtime_input, None).await?;
         let session = Self::build_session_for_open(&request, &resolved);
         self.session_store.save(session.clone()).await;
+
+        let hook_point = HookPointId(format!(
+            "{}.Session.lifecycle.created",
+            resolved.descriptor.agent_id.0
+        ));
+        self.fire_session_hooks(
+            HookInvokeInput::SessionCreated {
+                input: SessionCreatedHookInput {
+                    session_id: session.session_id.clone(),
+                    sender_id: session.sender_id.clone(),
+                },
+                metadata: HookInvokeMetadata::default(),
+            },
+            hook_point,
+        )
+        .await;
+
         Ok(self
             .get_or_create_supervisor(session)
             .await
@@ -210,17 +277,35 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         session_id: &str,
     ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        if let Some(supervisor) = self.supervisor_for_session(session_id).await {
-            return Ok(Some(supervisor.force_close().await));
-        }
-
-        let Some(mut existing) = self.session_store.load(session_id).await else {
-            return Ok(None);
+        let closed = if let Some(supervisor) = self.supervisor_for_session(session_id).await {
+            supervisor.force_close().await
+        } else {
+            let Some(mut existing) = self.session_store.load(session_id).await else {
+                return Ok(None);
+            };
+            existing.status = SessionLifecycleStatus::Closed;
+            existing.updated_at_ms = current_time_ms();
+            self.session_store.save(existing.clone()).await;
+            existing
         };
-        existing.status = SessionLifecycleStatus::Closed;
-        existing.updated_at_ms = current_time_ms();
-        self.session_store.save(existing.clone()).await;
-        Ok(Some(existing))
+
+        let hook_point = HookPointId(format!(
+            "{}.Session.lifecycle.closed",
+            closed.runtime.agent_id.0
+        ));
+        self.fire_session_hooks(
+            HookInvokeInput::SessionClosed {
+                input: SessionClosedHookInput {
+                    session_id: closed.session_id.clone(),
+                    sender_id: closed.sender_id.clone(),
+                },
+                metadata: HookInvokeMetadata::default(),
+            },
+            hook_point,
+        )
+        .await;
+
+        Ok(Some(closed))
     }
 }
 

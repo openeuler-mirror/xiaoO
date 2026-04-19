@@ -9,6 +9,8 @@ pub enum HookPointCategory {
     LlmPre,
     LlmPost,
     LlmError,
+    SessionCreated,
+    SessionClosed,
 }
 
 pub fn resolve_hook_point_category(
@@ -46,6 +48,8 @@ pub fn resolve_hook_point_category(
         ("llm", "pre") => Ok(HookPointCategory::LlmPre),
         ("llm", "post") => Ok(HookPointCategory::LlmPost),
         ("llm", "error") => Ok(HookPointCategory::LlmError),
+        ("session", "created") => Ok(HookPointCategory::SessionCreated),
+        ("session", "closed") => Ok(HookPointCategory::SessionClosed),
         (action, stage) => Err(BuildError::InvalidConfig {
             message: format!(
                 "unsupported hook_point category for action='{}' stage='{}': {}",

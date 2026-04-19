@@ -17,9 +17,10 @@ members = [
     "crates/trace",
     "crates/trace/src/moirai",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
-    "crates/cerberus/cerberus-core",
-    "crates/cerberus/cerberus-cli",
-    "crates/cerberus/cerberus-core/bpf",
+    # Disabled by default - uncomment to enable cerberus builds
+    # "crates/cerberus/cerberus-core",
+    # "crates/cerberus/cerberus-cli",
+    # "crates/cerberus/cerberus-core/bpf",
 ]
 resolver = "2"
 
@@ -56,9 +57,9 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["fs"] }
 rust-embed = "8.5"
 mime_guess = "2.0"
-# Cerberus dependencies
 dirs = "5"
-cerberus-core = { path = "crates/cerberus/cerberus-core" }
+# Cerberus dependencies (disabled by default)
+# cerberus-core = { path = "crates/cerberus/cerberus-core" }
 
 [profile.release]
 opt-level = 3
