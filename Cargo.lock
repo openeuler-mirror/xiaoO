@@ -2009,6 +2009,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "operation_backend"
+version = "0.1.0"
+dependencies = [
+ "agent-contracts",
+ "async-trait",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
