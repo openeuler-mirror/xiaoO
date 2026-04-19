@@ -28,11 +28,13 @@ pub enum RuntimeStatusLight {
     AwaitingInteraction,
 }
 
+#[derive(Clone)]
 pub struct ApiKeyDialogState {
     pub provider: String,
     pub model: String,
     pub input: Input,
     pub error: Option<String>,
+    pub show_plaintext: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +47,7 @@ pub struct ToolToggleRegion {
 pub struct RenderState {
     pub messages_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
+    pub api_key_toggle_area: Option<Rect>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
@@ -176,6 +179,12 @@ impl AppState {
 
     pub fn toggle_theme(&mut self) {
         self.theme = self.theme.toggled();
+    }
+
+    pub fn toggle_api_key_visibility(&mut self) {
+        if let Some(dialog) = self.api_key_dialog.as_mut() {
+            dialog.show_plaintext = !dialog.show_plaintext;
+        }
     }
 
     /// Extract the plain text covered by the current transcript selection.
@@ -428,7 +437,8 @@ fn build_status_panel(config: &Config) -> StatusPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, RuntimeStatusLight};
+    use super::{ApiKeyDialogState, AppState, RuntimeStatusLight};
+    use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
     use crate::selection::TranscriptSelection;
     use agent_types::{ChatMessage, ContentBlock, MessageRole};
@@ -474,6 +484,31 @@ mod tests {
 
         state.toggle_theme();
         assert_eq!(state.theme.is_light(), initial_is_light);
+    }
+
+    #[test]
+    fn toggle_api_key_visibility_switches_between_hidden_and_plaintext() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.api_key_dialog = Some(ApiKeyDialogState {
+            provider: "demo".to_string(),
+            model: "model".to_string(),
+            input: Input::default(),
+            error: None,
+            show_plaintext: false,
+        });
+
+        state.toggle_api_key_visibility();
+        assert!(state
+            .api_key_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.show_plaintext));
+
+        state.toggle_api_key_visibility();
+        assert!(state
+            .api_key_dialog
+            .as_ref()
+            .is_some_and(|dialog| !dialog.show_plaintext));
     }
 
     #[test]

@@ -11,7 +11,11 @@ use crate::selection::TranscriptSelection;
 
 impl App {
     pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> Result<()> {
-        if self.state.api_key_dialog.is_some() || self.state.provider_dialog.is_some() {
+        if self.state.api_key_dialog.is_some() {
+            return self.handle_api_key_dialog_mouse(mouse_event);
+        }
+
+        if self.state.provider_dialog.is_some() {
             return Ok(());
         }
 
@@ -34,6 +38,22 @@ impl App {
 
         self.handle_slash_popup_mouse(mouse_event)?;
         self.handle_transcript_mouse(mouse_event);
+        Ok(())
+    }
+
+    fn handle_api_key_dialog_mouse(&mut self, mouse_event: MouseEvent) -> Result<()> {
+        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(());
+        }
+
+        let Some(toggle_area) = self.state.render_state.api_key_toggle_area else {
+            return Ok(());
+        };
+
+        if mouse_in_rect(mouse_event.column, mouse_event.row, toggle_area) {
+            self.state.toggle_api_key_visibility();
+        }
+
         Ok(())
     }
 

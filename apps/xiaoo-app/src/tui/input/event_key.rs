@@ -441,6 +441,7 @@ impl App {
                                 model: model_id,
                                 input: crate::input::Input::default(),
                                 error: None,
+                                show_plaintext: false,
                             });
                         } else {
                             selection_to_apply =
