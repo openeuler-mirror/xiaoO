@@ -23,9 +23,24 @@ pub(crate) fn map_api_status_error(
     status: StatusCode,
     response_body: &str,
     request_body: &str,
+    headers: Option<&reqwest::header::HeaderMap>,
 ) -> LlmError {
     if status == StatusCode::TOO_MANY_REQUESTS {
-        return LlmError::RateLimited { retry_after_ms: 0 };
+        let retry_after_ms = headers
+            .and_then(|h| h.get("retry-after"))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|secs| secs * 1000)
+            .unwrap_or(0);
+        let message = if response_body.trim().is_empty() {
+            "no response body".to_string()
+        } else {
+            response_body.to_string()
+        };
+        return LlmError::RateLimited {
+            retry_after_ms,
+            message,
+        };
     }
 
     let message = format!(
@@ -161,6 +176,7 @@ mod tests {
             StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"This model's maximum context length is 128000 tokens, however you requested 128500 tokens."}}"#,
             "{}",
+            None,
         );
 
         assert!(matches!(error, LlmError::ContextLengthExceeded { .. }));
@@ -168,7 +184,7 @@ mod tests {
 
     #[test]
     fn map_api_status_error_classifies_413_without_body_as_context_limit() {
-        let error = map_api_status_error(StatusCode::PAYLOAD_TOO_LARGE, "", "{}");
+        let error = map_api_status_error(StatusCode::PAYLOAD_TOO_LARGE, "", "{}", None);
 
         assert!(matches!(error, LlmError::ContextLengthExceeded { .. }));
     }
@@ -179,6 +195,7 @@ mod tests {
             StatusCode::BAD_REQUEST,
             r#"{"error":{"code":"context_length_exceeded","message":"overflow"}}"#,
             "{}",
+            None,
         );
 
         assert!(matches!(error, LlmError::ContextLengthExceeded { .. }));
@@ -190,6 +207,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":{"message":"provider unavailable"}}"#,
             "{}",
+            None,
         );
 
         assert!(matches!(error, LlmError::ApiError(_)));

@@ -276,10 +276,10 @@ impl PluginLlmHookerAdaptor {
                 "type": "parse_error",
                 "message": msg,
             }),
-            LlmError::RateLimited { retry_after_ms } => json!({
+            LlmError::RateLimited { retry_after_ms, .. } => json!({
                 "type": "rate_limited",
                 "retry_after_ms": retry_after_ms,
-                "message": error.to_string(),
+                "message": "rate limited",
             }),
             LlmError::AuthError { message } => json!({
                 "type": "auth_error",

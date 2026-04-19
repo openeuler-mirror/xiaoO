@@ -106,10 +106,16 @@ impl LlmProvider for OpenAiFamilyProvider {
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         let resp_body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            return Err(map_api_status_error(status, &resp_body, &body_str));
+            return Err(map_api_status_error(
+                status,
+                &resp_body,
+                &body_str,
+                Some(&headers),
+            ));
         }
 
         let wire_response: crate::wire_types::WireResponse =
@@ -137,8 +143,14 @@ impl LlmProvider for OpenAiFamilyProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(status, &error_body, &body_str));
+            return Err(map_api_status_error(
+                status,
+                &error_body,
+                &body_str,
+                Some(&headers),
+            ));
         }
 
         let mut full_text = String::new();
