@@ -288,107 +288,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
                 },
             ],
         },
+        // 智谱 AI (Zhipu / BigModel) — open.bigmodel.cn
+        // Aliases resolved by core: zai, zai-cn, zai-china, zai-global, z-ai, z.ai, bigmodel, glm-cn
         ProviderInfo {
-            name: "zai".to_string(),
-            models: vec![
-                ModelInfo {
-                    id: "glm-5".to_string(),
-                    name: "GLM-5 (Flagship)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.7".to_string(),
-                    name: "GLM-4.7".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.7-flash".to_string(),
-                    name: "GLM-4.7 Flash (Fast)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.6".to_string(),
-                    name: "GLM-4.6".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.6v".to_string(),
-                    name: "GLM-4.6V (Vision)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5".to_string(),
-                    name: "GLM-4.5".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5-air".to_string(),
-                    name: "GLM-4.5 Air".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5v".to_string(),
-                    name: "GLM-4.5V (Vision)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-plus".to_string(),
-                    name: "GLM-4-Plus".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-flash".to_string(),
-                    name: "GLM-4-Flash".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-long".to_string(),
-                    name: "GLM-4-Long (1M ctx)".to_string(),
-                },
-            ],
-        },
-        ProviderInfo {
-            name: "zai-cn".to_string(),
-            models: vec![
-                ModelInfo {
-                    id: "glm-5".to_string(),
-                    name: "GLM-5 (Flagship)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.7".to_string(),
-                    name: "GLM-4.7".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.7-flash".to_string(),
-                    name: "GLM-4.7 Flash (Fast)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.6".to_string(),
-                    name: "GLM-4.6".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.6v".to_string(),
-                    name: "GLM-4.6V (Vision)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5".to_string(),
-                    name: "GLM-4.5".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5-air".to_string(),
-                    name: "GLM-4.5 Air".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4.5v".to_string(),
-                    name: "GLM-4.5V (Vision)".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-plus".to_string(),
-                    name: "GLM-4-Plus".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-flash".to_string(),
-                    name: "GLM-4-Flash".to_string(),
-                },
-                ModelInfo {
-                    id: "glm-4-long".to_string(),
-                    name: "GLM-4-Long (1M ctx)".to_string(),
-                },
-            ],
-        },
-        // open.bigmodel.cn (智谱) — same endpoint as: POST https://open.bigmodel.cn/api/paas/v4/chat/completions
-        ProviderInfo {
-            name: "bigmodel".to_string(),
+            name: "zhipu".to_string(),
             models: vec![
                 ModelInfo {
                     id: "glm-5".to_string(),
@@ -484,6 +387,41 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
                 id: "Qwen/Qwen3.5-397B-A17B".to_string(),
                 name: "Qwen 3.5 (GitCode)".to_string(),
             }],
+        },
+        // Z.AI Coding Plan (Zhipu Coding Plan) — api.z.ai OpenAI-compatible
+        // Models: glm-4.5, glm-4.5-air, glm-4.5-flash, glm-4.5v, glm-4.6, glm-4.6v, glm-4.7
+        ProviderInfo {
+            name: "zai-coding-plan".to_string(),
+            models: vec![
+                ModelInfo {
+                    id: "glm-4.7".to_string(),
+                    name: "GLM-4.7 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.6".to_string(),
+                    name: "GLM-4.6 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.6v".to_string(),
+                    name: "GLM-4.6V (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5".to_string(),
+                    name: "GLM-4.5 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5-air".to_string(),
+                    name: "GLM-4.5 Air (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5-flash".to_string(),
+                    name: "GLM-4.5 Flash (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5v".to_string(),
+                    name: "GLM-4.5V (Coding Plan)".to_string(),
+                },
+            ],
         },
     ]
 }

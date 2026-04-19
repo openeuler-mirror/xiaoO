@@ -238,6 +238,18 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: false,
         }),
+        // Z.AI Coding Plan (zhipu coding plan) — OpenAI-compatible endpoint at api.z.ai
+        // Aliases: zai-coding-plan, zhipu-coding-plan, zhipuai-coding-plan
+        "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => Some(ProviderProfile {
+            provider_name: "zai-coding-plan",
+            display_name: "Z.AI Coding Plan",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.z.ai/api/coding/paas/v4"),
+            default_api_key_env: Some("ZHIPU_API_KEY"),
+            api_key_required: true,
+            api_base_style: ApiBaseStyle::Preserve,
+            supports_model_catalog: true,
+        }),
         _ => None,
     }
 }
@@ -277,6 +289,9 @@ pub fn supported_providers() -> &'static [&'static str] {
         "minimax-openai",
         "minimax-anthropic",
         "gitcode",
+        "zai-coding-plan",
+        "zhipu-coding-plan",
+        "zhipuai-coding-plan",
     ]
 }
 

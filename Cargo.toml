@@ -17,7 +17,6 @@ members = [
     "crates/trace",
     "crates/trace/src/moirai",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
-    # Disabled by default - uncomment to enable cerberus builds
     # "crates/cerberus/cerberus-core",
     # "crates/cerberus/cerberus-cli",
     # "crates/cerberus/cerberus-core/bpf",
