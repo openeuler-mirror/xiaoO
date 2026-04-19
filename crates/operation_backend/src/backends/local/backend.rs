@@ -6,8 +6,9 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    OperationBackend, OperationBackendCapabilities,
+    OperationBackend, OperationBackendCapabilities, OperationError,
 };
+use async_trait::async_trait;
 
 pub(crate) struct LocalBackendState {
     pub(crate) backend_id: String,
@@ -41,6 +42,7 @@ impl LocalOperationBackend {
     }
 }
 
+#[async_trait]
 impl OperationBackend for LocalOperationBackend {
     fn backend_id(&self) -> &str {
         self.backend_id.as_str()
@@ -68,5 +70,9 @@ impl OperationBackend for LocalOperationBackend {
 
     fn export(&self) -> &dyn OperationExport {
         &self.export as &dyn OperationExport
+    }
+
+    async fn shutdown(&self) -> Result<(), OperationError> {
+        Ok(())
     }
 }
