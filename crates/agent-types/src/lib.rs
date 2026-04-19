@@ -6,6 +6,7 @@ pub mod hooker;
 pub mod interaction;
 pub mod llm;
 pub mod outcome;
+pub mod session;
 pub mod tool;
 
 pub use common::{AgentId, AgentMetadata, BuildError, HookerId, ToolId, ToolName, WorkspaceRef};
@@ -20,4 +21,5 @@ pub use llm::{
     ToolUseBlock, Usage,
 };
 pub use outcome::{AgentError, AgentOutcome, TokenUsage};
+pub use session::{SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult};
 pub use tool::{ToolRegistryConfig, ToolStateStoreConfig, ToolVisibilityConfig};

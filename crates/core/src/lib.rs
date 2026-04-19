@@ -16,7 +16,7 @@ pub use outcome::{AgentError, AgentOutcome};
 pub use runtime::{AgentRuntime, AgentRuntimeBuilder, RuntimePatch};
 pub use runtime_support::{
     BasicAgentContext, BasicRuntimeView, EmptySkillRegistry, NoopInteractionHandle,
-    NoopToolEventSink, OwnedConversationView,
+    NoopRuntimeView, NoopToolEventSink, OwnedConversationView,
 };
 pub use snapshot::RuntimeSnapshot;
 pub use suspend::{LoopRunResult, LoopSuspendReason, SuspendedToolCall};
