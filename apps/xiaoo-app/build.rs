@@ -9,7 +9,7 @@ fn main() {
         .unwrap()
         .parent()
         .unwrap()
-        .join("plugin/security/xiaoo-guardian");
+        .join("plugins/skills/xiaoo-guardian");
 
     let home = env::var("HOME").expect("HOME not set");
     let dst = Path::new(&home).join(".xiaoo/skills/xiaoo-guardian");

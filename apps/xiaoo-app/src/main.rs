@@ -24,9 +24,11 @@ async fn main() -> Result<()> {
 async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     let config = DaemonConfig::load_from(&config_path)?;
+    let hooker_config = config.app.hooker.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config)?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let app = AppBootstrap::from_session_components(session_store, resolver)?;
+    let app =
+        AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
     let router = match config.feishu_config()? {
         Some(feishu) => create_router_with_feishu_and_timeout(
             app.session_service,

@@ -1,0 +1,50 @@
+[package]
+name = "cerberus-core"
+version.workspace = true
+edition.workspace = true
+description = "Cerberus core library - secure command execution with policy enforcement"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+uuid.workspace = true
+regex = "1"
+
+# Platform-specific sandbox dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+seccompiler = "0.4"
+nix = { version = "0.29", features = ["mount", "sched", "fs"] }
+
+# eBPF dependencies (optional, enabled by 'ebpf' feature)
+aya = { version = "0.13", optional = true }
+aya-log = { version = "0.2", optional = true }
+bytes = { version = "1", optional = true }
+log = { version = "0.4", optional = true }
+
+# Network policy enforcement dependencies (feature-gated)
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
+
+[build-dependencies]
+# eBPF build dependencies
+aya-build = { version = "0.1", optional = true }
+anyhow = { version = "1", optional = true }
+
+[features]
+default = ["ebpf"]
+# eBPF network policy enforcement (requires additional dependencies)
+ebpf = [
+    "dep:tokio",
+    "dep:aya",
+    "dep:aya-log",
+    "dep:bytes",
+    "dep:log",
+    "dep:aya-build",
+    "dep:anyhow",
+]
