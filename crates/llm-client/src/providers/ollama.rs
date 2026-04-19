@@ -90,8 +90,14 @@ impl LlmProvider for OllamaProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let resp_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(status, &resp_body, &body_str));
+            return Err(map_api_status_error(
+                status,
+                &resp_body,
+                &body_str,
+                Some(&headers),
+            ));
         }
 
         let ollama_response: serde_json::Value =
@@ -131,8 +137,14 @@ impl LlmProvider for OllamaProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
-            return Err(map_api_status_error(status, &error_body, &body_str));
+            return Err(map_api_status_error(
+                status,
+                &error_body,
+                &body_str,
+                Some(&headers),
+            ));
         }
 
         let mut full_text = String::new();
