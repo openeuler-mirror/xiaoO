@@ -388,6 +388,41 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
                 name: "Qwen 3.5 (GitCode)".to_string(),
             }],
         },
+        // Z.AI Coding Plan (Zhipu Coding Plan) — api.z.ai OpenAI-compatible
+        // Models: glm-4.5, glm-4.5-air, glm-4.5-flash, glm-4.5v, glm-4.6, glm-4.6v, glm-4.7
+        ProviderInfo {
+            name: "zai-coding-plan".to_string(),
+            models: vec![
+                ModelInfo {
+                    id: "glm-4.7".to_string(),
+                    name: "GLM-4.7 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.6".to_string(),
+                    name: "GLM-4.6 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.6v".to_string(),
+                    name: "GLM-4.6V (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5".to_string(),
+                    name: "GLM-4.5 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5-air".to_string(),
+                    name: "GLM-4.5 Air (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5-flash".to_string(),
+                    name: "GLM-4.5 Flash (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-4.5v".to_string(),
+                    name: "GLM-4.5V (Coding Plan)".to_string(),
+                },
+            ],
+        },
     ]
 }
 
