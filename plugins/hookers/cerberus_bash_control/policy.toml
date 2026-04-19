@@ -1,0 +1,94 @@
+# Allow execution to continue when Landlock is unavailable.
+# In this mode, Cerberus keeps other protections that still apply,
+# but filesystem isolation itself is not enforced unless mount fallback is enabled.
+landlock_optional = true
+
+# Keep mount fallback disabled here.
+# Mount fallback reduces path visibility, but it does not preserve exact execute semantics.
+mount_isolation_fallback = false
+
+[path_groups]
+system_binaries = true
+system_libraries = true
+temp_directories = true
+device_files = true
+proc_filesystem = true
+wsl_paths = true
+
+[[custom_paths]]
+path = "."
+permission = "readwriteexecute"
+
+
+[[custom_paths]]
+path = "/etc/passwd"
+permission = "readonly"
+
+[[custom_paths]]
+path = "/root/"
+permission = "readexecute"
+
+[[custom_paths]]
+path = "/root/.xiaoo/"
+permission = "readexecute"
+
+[[custom_paths]]
+path = "/root/.profile"
+permission = "readonly"
+
+[[custom_paths]]
+path = "/root/.bashrc"
+permission = "readonly"
+
+[[custom_paths]]
+path = "/root/.cargo/"
+permission = "readexecute"
+
+[[custom_paths]]
+path = "/etc/profile"
+permission = "readonly"
+
+[namespaces]
+mount = true
+pid = true
+network = true
+user = true
+
+# Optional fine-grained network policy entry for users.
+# This block stays inactive by default.
+#
+# It only becomes effective when all of the following are true:
+# 1. namespaces.network = true
+# 2. Cerberus is built with: --features cerberus-core/ebpf
+# 3. The eBPF backend initializes successfully at runtime
+#
+# If enabled while namespaces.network = false, Cerberus will fail closed.
+# If enabled without an available eBPF backend, Cerberus will fail closed.
+[network_policy]
+enabled = true
+# mode = "monitor"   # or "enforce"
+# default_action = "deny"
+#
+# [[network_policy.rules]]
+# action = "allow"
+# direction = "outbound"
+# protocol = "tcp"
+# hosts = ["example.com"]
+# ports = [[443, 443]]
+mode = "enforce"
+default_action = "deny"
+[[network_policy.rules]]
+action = "allow"
+direction = "outbound"
+protocol = "tcp"
+hosts = ["github.com", "pypi.org", "gitcode.com"]
+ports = [[443, 443]]
+
+
+[resources]
+timeout_secs = 300
+max_memory_bytes = 2147483648
+max_processes = 80
+
+[environment]
+whitelist = ["PATH", "LANG", "HOME", "USER", "TERM", "SHELL", "PWD", "GIT_PAGER", "PAGER"]

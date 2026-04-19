@@ -1,0 +1,30 @@
+[
+  {
+    "id": "plugin_cerberus_wrap_pre",
+    "hook_point": "*.Tool.bash.pre",
+    "command": "python3 <wrap_bash_with_cerberus_script.py>",
+    "config": {
+      "cerberus_path": "~/.cargo/bin/cerberus",
+      "policy_file": "<policy_file_path>"
+    }
+  },
+  {
+    "id": "plugin_cerberus_alert_post",
+    "hook_point": "*.Tool.bash.post",
+    "command": "python3 <alert_on_cerberus_permission_script.py>",
+    "config": {
+      "alert_log_path": "<alert_log_path>",
+      "denial_markers": [
+        "Error: Execution error: Filter error:",
+        "Sandbox capability error:",
+        "Violation triggered",
+        "Seccomp setup failed:",
+        "Mount isolation failed:",
+        "Namespace setup failed:",
+        "Permission denied",
+        "/etc/shadow",
+        "Could not resolve host"
+      ]
+    }
+  }
+]
