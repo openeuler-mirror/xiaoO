@@ -1,5 +1,6 @@
 mod builder;
 mod definition;
+mod llm;
 mod parsed_hook_point;
 mod tool;
 
