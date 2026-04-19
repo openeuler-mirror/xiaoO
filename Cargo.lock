@@ -2014,6 +2014,8 @@ version = "0.1.0"
 dependencies = [
  "agent-contracts",
  "async-trait",
+ "glob",
+ "serde",
  "serde_json",
  "tokio",
 ]

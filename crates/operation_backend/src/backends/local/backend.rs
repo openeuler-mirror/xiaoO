@@ -6,12 +6,22 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    OperationBackend, OperationBackendCapabilities, OperationError,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError, PathKind,
+    PathStat,
 };
 use async_trait::async_trait;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
 
 pub(crate) struct LocalBackendState {
     pub(crate) backend_id: String,
+    pub(crate) workspace_root: BackendPath,
+    pub(crate) workspace_root_host: PathBuf,
+    pub(crate) home_dir: Option<BackendPath>,
+    pub(crate) home_dir_host: Option<PathBuf>,
+    pub(crate) temp_root_host: PathBuf,
+    pub(crate) default_shell: Option<String>,
 }
 
 pub struct LocalOperationBackend {
@@ -25,7 +35,7 @@ pub struct LocalOperationBackend {
 }
 
 impl LocalOperationBackend {
-    pub(crate) fn new(state: std::sync::Arc<LocalBackendState>) -> Self {
+    pub(crate) fn new(state: Arc<LocalBackendState>) -> Self {
         Self {
             backend_id: state.backend_id.clone(),
             capabilities: OperationBackendCapabilities {
@@ -33,12 +43,165 @@ impl LocalOperationBackend {
                 supports_grep: true,
                 supports_export_file: true,
             },
-            paths: LocalPathResolver::new(std::sync::Arc::clone(&state)),
-            files: LocalFileSystem::new(std::sync::Arc::clone(&state)),
-            search: LocalSearch::new(std::sync::Arc::clone(&state)),
-            exec: LocalExec::new(std::sync::Arc::clone(&state)),
+            paths: LocalPathResolver::new(Arc::clone(&state)),
+            files: LocalFileSystem::new(Arc::clone(&state)),
+            search: LocalSearch::new(Arc::clone(&state)),
+            exec: LocalExec::new(Arc::clone(&state)),
             export: LocalExport::new(state),
         }
+    }
+}
+
+impl LocalBackendState {
+    pub(crate) fn backend_path_to_host(
+        &self,
+        path: &BackendPath,
+    ) -> Result<PathBuf, OperationError> {
+        normalize_absolute_host_path(Path::new(path.0.as_str()))
+    }
+
+    pub(crate) fn host_path_to_backend(&self, path: &Path) -> Result<BackendPath, OperationError> {
+        let normalized = normalize_absolute_host_path(path)?;
+        let text = normalized
+            .to_str()
+            .ok_or_else(|| OperationError::InvalidPath {
+                message: format!("path is not valid utf-8: {}", normalized.display()),
+            })?;
+        Ok(BackendPath(text.to_string()))
+    }
+
+    pub(crate) fn resolve_host_path(
+        &self,
+        raw_path: &str,
+        base: &Path,
+    ) -> Result<PathBuf, OperationError> {
+        let candidate = Path::new(raw_path);
+        let joined = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            base.join(candidate)
+        };
+        normalize_absolute_host_path(joined.as_path())
+    }
+
+    pub(crate) fn stat_for_path(&self, path: &Path) -> Result<PathStat, OperationError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(PathStat {
+                exists: true,
+                kind: Some(path_kind_from_metadata(&metadata)),
+                size_bytes: Some(metadata.len()),
+                modified_at: metadata.modified().ok(),
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PathStat {
+                exists: false,
+                kind: None,
+                size_bytes: None,
+                modified_at: None,
+            }),
+            Err(error) => Err(io_error_for_path(path, error)),
+        }
+    }
+
+    pub(crate) fn ensure_directory(&self, path: &Path) -> Result<(), OperationError> {
+        let metadata = std::fs::metadata(path).map_err(|error| io_error_for_path(path, error))?;
+        if metadata.is_dir() {
+            return Ok(());
+        }
+        Err(OperationError::NotDirectory {
+            path: path.display().to_string(),
+        })
+    }
+
+    pub(crate) fn ensure_file(&self, path: &Path) -> Result<(), OperationError> {
+        let metadata = std::fs::metadata(path).map_err(|error| io_error_for_path(path, error))?;
+        if metadata.is_file() {
+            return Ok(());
+        }
+        Err(OperationError::NotFile {
+            path: path.display().to_string(),
+        })
+    }
+}
+
+pub(crate) fn normalize_absolute_host_path(path: &Path) -> Result<PathBuf, OperationError> {
+    if !path.is_absolute() {
+        return Err(OperationError::InvalidPath {
+            message: format!("path must be absolute: {}", path.display()),
+        });
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(OperationError::InvalidPath {
+                        message: format!("path escapes root: {}", path.display()),
+                    });
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+        }
+    }
+
+    if !normalized.is_absolute() {
+        return Err(OperationError::InvalidPath {
+            message: format!("path must remain absolute: {}", path.display()),
+        });
+    }
+
+    Ok(normalized)
+}
+
+pub(crate) fn io_error_for_path(path: &Path, error: std::io::Error) -> OperationError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => OperationError::NotFound {
+            path: path.display().to_string(),
+        },
+        std::io::ErrorKind::AlreadyExists => OperationError::AlreadyExists {
+            path: path.display().to_string(),
+        },
+        std::io::ErrorKind::PermissionDenied => OperationError::PermissionDenied {
+            path: path.display().to_string(),
+        },
+        _ => OperationError::Transport {
+            message: format!("{}: {error}", path.display()),
+        },
+    }
+}
+
+pub(crate) fn file_name_string(path: &Path) -> Result<String, OperationError> {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| OperationError::InvalidPath {
+            message: format!(
+                "path does not contain a valid file name: {}",
+                path.display()
+            ),
+        })
+}
+
+pub(crate) fn system_time_millis(value: SystemTime) -> u128 {
+    value
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn path_kind_from_metadata(metadata: &std::fs::Metadata) -> PathKind {
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        PathKind::Directory
+    } else if file_type.is_file() {
+        PathKind::File
+    } else if file_type.is_symlink() {
+        PathKind::Symlink
+    } else {
+        PathKind::Other
     }
 }
 
