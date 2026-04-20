@@ -1,0 +1,85 @@
+{
+  "sensitive_actions": [
+    {
+      "pattern": "写入系统文件",
+      "description": "写入 /etc, /usr, /boot 等系统目录下的文件"
+    },
+    {
+      "pattern": "发送外部邮件",
+      "description": "通过 email 工具发送邮件到外部地址"
+    },
+    {
+      "pattern": "危险 shell 命令",
+      "description": "执行 rm -rf, chmod 777, sudo 等危险命令"
+    },
+    {
+      "pattern": "修改全局配置",
+      "description": "修改系统级配置文件或环境变量"
+    },
+    {
+      "pattern": "支付操作",
+      "description": "涉及支付、转账等金融操作"
+    },
+    {
+      "pattern": "访问密钥文件",
+      "description": "访问 .ssh/id_rsa, .env, credentials 等密钥/凭证文件"
+    },
+    {
+      "pattern": "网络数据外传",
+      "description": "通过 HTTP/wget/curl 等方式将数据发送到外部服务器"
+    },
+    {
+      "pattern": "curl * -d *",
+      "description": "使用 curl 发送数据到外部服务器（可能为数据外传）"
+    },
+    {
+      "pattern": "curl * POST *",
+      "description": "使用 curl POST 请求发送数据到外部服务器"
+    },
+    {
+      "pattern": "wget * --post-data *",
+      "description": "使用 wget 发送 POST 数据到外部服务器"
+    },
+    {
+      "pattern": "crontab -e",
+      "description": "编辑定时任务（可能用于持久化后门）"
+    },
+    {
+      "pattern": "crontab -r",
+      "description": "删除定时任务（可能用于清除审计痕迹）"
+    },
+    {
+      "pattern": "crontab * | crontab",
+      "description": "管道方式修改定时任务（可能用于持久化后门）"
+    },
+    {
+      "pattern": "iptables -",
+      "description": "修改防火墙规则（可能用于关闭安全防护）"
+    },
+    {
+      "pattern": "ssh * -o StrictHostKeyChecking=no",
+      "description": "SSH 跳过主机密钥验证（可能用于横向移动）"
+    },
+    {
+      "pattern": "base64 -d * bash",
+      "description": "Base64 解码后执行（可能用于编码绕过）"
+    },
+    {
+      "pattern": "curl * | bash",
+      "description": "下载远程脚本并执行（远程代码执行风险）"
+    }
+  ],
+  "sensitive_tools": [
+    "execute_command",
+    "run_shell",
+    "file_delete",
+    "eval",
+    "exec",
+    "system",
+    "send_email",
+    "http_request",
+    "fetch_url",
+    "database_query",
+    "subprocess"
+  ]
+}

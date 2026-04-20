@@ -46,6 +46,21 @@ If `cargo build --release` fails due to Cerberus/eBPF, you can skip it:
 cargo build --release --workspace --keep-going
 ```
 
+### Plugins
+
+Pre-built hookers and skills are placed in `<your_xiaoO>/plugins`. They are **not installed by default**.
+
+To install hookers, run:
+
+```bash
+cd <your_xiaoO>/plugins/hookers
+./config.sh
+```
+
+You can also develop your own hookers and place them in `<your_xiaoO>/plugins/hookers`. See `how-to-develop-a-plugin-hooker.md` for details.
+
+Custom skills can be installed directly into `~/.xiaoo/skills`.
+
 ## Quick Start
 Create the configuration file `~/.config/xiaoo/config.toml`
 
