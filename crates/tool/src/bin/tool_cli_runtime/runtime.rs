@@ -4,9 +4,9 @@ use agent_contracts::{
     ToolStateStoreBuilder, TraceRecorder,
 };
 use agent_types::common::BuildError;
-use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 use agent_types::tool::ToolStateStoreConfig;
-use hooker::framework::HookerRegistryBuilderImpl;
+use hook::framework::HookerRegistryBuilderImpl;
 use tool::ToolStateStoreBuilderImpl;
 use trace::TraceRecorderBuilderImpl;
 

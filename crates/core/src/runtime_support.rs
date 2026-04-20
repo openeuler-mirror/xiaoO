@@ -9,7 +9,7 @@ use agent_contracts::{
 use agent_types::common::{AgentMetadata, HookerId, WorkspaceRef};
 use agent_types::context::prompt::SkillSummary;
 use agent_types::events::ToolLifecycleEvent;
-use agent_types::hooker::HookPointId;
+use agent_types::hook::HookPointId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::{
     FinalToolCall, ToolExecutionError, ToolExecutionResult, ToolLifecycleRecord,

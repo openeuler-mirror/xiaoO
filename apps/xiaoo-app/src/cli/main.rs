@@ -17,7 +17,7 @@ use xiaoo_app::gateway::{
 
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
 

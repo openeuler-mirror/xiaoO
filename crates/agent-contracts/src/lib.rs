@@ -1,7 +1,8 @@
+pub mod backend;
 pub mod compression;
 pub mod context;
 pub mod events;
-pub mod hooker;
+pub mod hook;
 pub mod interaction;
 pub mod llm;
 pub mod runtime;
@@ -12,7 +13,7 @@ pub mod trace;
 pub use compression::{CompressionError, CompressionPipeline};
 pub use context::{PromptBuildInput, PromptBuilder, TokenBudgetPolicy, TokenEstimator};
 pub use events::{LoopEventSink, ToolEventSink};
-pub use hooker::{HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder};
+pub use hook::{HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder};
 pub use interaction::InteractionHandle;
 pub use llm::{LlmProvider, ProviderCapabilities};
 pub use runtime::{AgentContext, ChannelFileSender, ConversationView, RuntimeView};

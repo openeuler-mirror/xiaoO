@@ -2,10 +2,10 @@ use crate::gateway::{
     CoreBackedSessionService, SessionControlPlane, SessionRuntimeResolver, SessionService,
     SessionStore,
 };
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use async_trait::async_trait;
-use hooker::framework::HookerRegistryBuilderImpl;
-use hooker::HookerRegistryBuilder;
+use hook::framework::HookerRegistryBuilderImpl;
+use hook::HookerRegistryBuilder;
 use std::sync::Arc;
 use thiserror::Error;
 

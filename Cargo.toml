@@ -6,7 +6,7 @@ members = [
     "crates/agent-types",
     "crates/agent-contracts",
     "crates/agent-llm",
-    "crates/hooker",
+    "crates/hook",
     "crates/core",
     "crates/memory",
     "crates/compact",
@@ -16,6 +16,7 @@ members = [
     "crates/skill",
     "crates/trace",
     "crates/trace/src/moirai",
+    #"crates/operation_backend",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
     # "crates/cerberus/cerberus-core",
     # "crates/cerberus/cerberus-cli",

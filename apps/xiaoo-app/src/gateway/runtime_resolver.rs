@@ -5,7 +5,7 @@ use crate::gateway::{
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
 use serde::{Deserialize, Serialize};

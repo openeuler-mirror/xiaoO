@@ -5,7 +5,7 @@ use crate::gateway::{
     SessionStore, SessionStoreError,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
-use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookPointId};
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
 use agent_types::session::{SessionClosedHookInput, SessionCreatedHookInput};
 use async_trait::async_trait;
 use std::collections::{BTreeMap, HashMap};

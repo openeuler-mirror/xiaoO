@@ -49,11 +49,11 @@ mod wrapper_tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use agent_contracts::hooker::{Hooker, HookerRegistry};
+    use agent_contracts::hook::{Hooker, HookerRegistry};
     use agent_contracts::runtime::runtime_view::RuntimeView;
     use agent_contracts::{LlmProvider, ProviderCapabilities};
     use agent_types::common::HookerId;
-    use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeOutput, HookPointId};
+    use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeOutput, HookPointId};
     use agent_types::llm::{
         AssistantMessage, ChatMessage, ContentBlock, ErrorLlmHookResult, LlmError, LlmRequest,
         LlmResponse, MessageRole, PostLlmHookResult, PreLlmHookResult, StopReason, StreamChunk,
