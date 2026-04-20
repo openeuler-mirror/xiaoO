@@ -150,17 +150,7 @@ impl App {
         } else {
             self.state.status_panel.workspace_display.clone()
         };
-        let status_dot_style = if self.state.status_panel.is_connected {
-            Style::default()
-                .fg(self.state.theme.success)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(self.state.theme.error)
-                .add_modifier(Modifier::BOLD)
-        };
         let summary = Line::from(vec![
-            Span::styled("● ", status_dot_style),
             Span::styled(
                 provider_name,
                 Style::default().fg(self.state.theme.foreground),
