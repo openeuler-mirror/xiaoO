@@ -6,12 +6,25 @@
 ## What is xiaoO?
 It is the intelligence hub of AgentOS, delivering self-governing system management, seamless agent orchestration, and ready-to-use smart capabilities across all user channels. xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof.
 
-> The butler that is the house.
+At the runtime core, xiaoO ships a layered memory system and an adaptive context compression engine, so agents can stay stable across long conversations, tool-heavy execution, and multi-agent collaboration instead of collapsing under raw history growth.
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 <a href="https://gitcode.com/openeuler/xiaoO"><img src="https://img.shields.io/badge/version-v0.0.1-red" alt="Version v0.0.1" /></a>
 ---
+
+## Memory & Context
+
+The highlights below focus specifically on xiaoO's memory system and context compression architecture:
+
+- **Layered Memory System**: xiaoO separates live working memory, structured session memory, durable memory, and semantic recall instead of treating context as one flat transcript.
+- **Adaptive Context Compression**: the runtime analyzes token pressure before each turn and can microcompact tool noise, trim stale history, collapse old context into summaries, and auto-recover from context-window overflow.
+- **Memory Self-Evolution**: memory is continuously refreshed, deduplicated, summary-merged, correction-aware, and able to rebuild semantic indexes when the embedding stack changes.
+- **Hybrid Semantic Memory**: the architecture supports lightweight JSON persistence as well as SQLite + FTS5 + embedding-based hybrid retrieval.
+- **Multi-Agent Memory Isolation**: each execution lane keeps its own loop state and memory snapshot, preventing context pollution across collaborating agents.
+- **Traceable Runtime**: compression, prompt building, and execution can be traced end-to-end with Moirai-backed observability.
+
+Read the full architecture, configuration, and integration guide in [Memory & Context Compression](./docs/memory_context_system.md).
 
 
 ## Prerequisites
