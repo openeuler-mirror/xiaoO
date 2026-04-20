@@ -24,6 +24,10 @@ app_secret_env = "FEISHU_APP_SECRET"
 verification_token = "your-token"
 base_url = "https://open.feishu.cn"  # Optional, default value
 
+[http]                               # Optional, enable Bearer auth for chat APIs
+bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
+# bearer_token = "local-dev-token"   # Optional, use env var in production; do not set both
+
 [trace]                              # Optional, tracing/observability config
 storage_backend = "moirai-sqlite"    # moirai-sqlite (default) | stdout | noop
 db_path = "~/.xiaoo/traces.db"      # Database path for moirai-sqlite; uses trace crate built-in default if not configured
@@ -95,6 +99,7 @@ Chat endpoint. Send messages to the Gateway and receive responses.
 
 ```bash
 curl -X POST http://localhost:18080/api/v1/chat \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
@@ -133,6 +138,7 @@ curl -X POST http://localhost:18080/api/v1/chat \
   { "error": "text must not be empty" }
   ```
 - `500 Internal Server Error` — Session service internal error
+- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
 
 ---
 
@@ -158,6 +164,7 @@ Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **
 
 ```bash
 curl -N -X POST http://localhost:18080/api/v1/chat/stream \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
@@ -186,6 +193,7 @@ data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! Ho
 **Error Responses:**
 
 - `400 Bad Request` — Same validation errors as `/api/v1/chat`
+- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
 
 ---
 
@@ -210,6 +218,7 @@ Called by Feishu platform via POST, Body is raw JSON event payload, Headers cont
 - **Feishu not configured**: `503 Service Unavailable` → `{ "error": "feishu webhook is not configured" }`
 
 > ⚠️ This endpoint requires Feishu Open Platform Event Subscription configuration, pointing the callback URL to `http://<your-host>:<port>/api/v1/channels/feishu/events`.
+> It is intentionally **not** wrapped by the HTTP Bearer middleware; Feishu requests continue to use Feishu's own verification flow.
 
 ### Session Isolation Mechanism
 
