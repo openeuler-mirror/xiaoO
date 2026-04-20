@@ -18,7 +18,11 @@ use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        HeaderMap, Request, StatusCode,
+    },
+    middleware::{self, Next},
     response::{
         sse::{KeepAlive, Sse},
         IntoResponse, Response,
@@ -97,9 +101,26 @@ pub struct GatewayHealthResponse {
     pub version: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct GatewayErrorResponse {
     pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpBearerAuthConfig {
+    token: Arc<str>,
+}
+
+impl HttpBearerAuthConfig {
+    pub fn new(token: impl Into<String>) -> Self {
+        Self {
+            token: Arc::<str>::from(token.into()),
+        }
+    }
+
+    fn matches(&self, token: &str) -> bool {
+        self.token.as_ref() == token
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,7 +182,14 @@ pub struct TestChatResponse {
 }
 
 pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
-    create_router_from_state(GatewayAppState::new(session_service))
+    create_router_with_auth(session_service, None)
+}
+
+pub fn create_router_with_auth(
+    session_service: Arc<dyn SessionService>,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+) -> Router {
+    create_router_from_state(GatewayAppState::new(session_service), bearer_auth)
 }
 
 pub fn create_router_with_feishu_and_timeout(
@@ -169,18 +197,106 @@ pub fn create_router_with_feishu_and_timeout(
     feishu_config: FeishuConfig,
     interaction_timeout_secs: u64,
 ) -> ChannelResult<Router> {
-    let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
-    state.interaction_timeout_secs = interaction_timeout_secs;
-    Ok(create_router_from_state(state))
+    create_router_with_feishu_and_timeout_and_auth(
+        session_service,
+        feishu_config,
+        interaction_timeout_secs,
+        None,
+    )
 }
 
-fn create_router_from_state(state: GatewayAppState) -> Router {
+pub fn create_router_with_feishu_and_timeout_and_auth(
+    session_service: Arc<dyn SessionService>,
+    feishu_config: FeishuConfig,
+    interaction_timeout_secs: u64,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
+    state.interaction_timeout_secs = interaction_timeout_secs;
+    Ok(create_router_from_state(state, bearer_auth))
+}
+
+fn create_router_from_state(
+    state: GatewayAppState,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+) -> Router {
+    let protected_routes = apply_http_bearer_auth(
+        Router::new()
+            .route("/api/v1/chat", post(handle_chat))
+            .route("/api/v1/chat/stream", post(handle_chat_stream)),
+        bearer_auth,
+    );
+
     Router::new()
         .route("/api/v1/health", get(health_check))
-        .route("/api/v1/chat", post(handle_chat))
-        .route("/api/v1/chat/stream", post(handle_chat_stream))
         .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
+        .merge(protected_routes)
         .with_state(Arc::new(state))
+}
+
+fn apply_http_bearer_auth<S>(
+    router: Router<S>,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    match bearer_auth {
+        Some(bearer_auth) => router.route_layer(middleware::from_fn_with_state(
+            bearer_auth,
+            require_bearer_auth,
+        )),
+        None => router,
+    }
+}
+
+async fn require_bearer_auth(
+    State(auth): State<HttpBearerAuthConfig>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let token = match parse_bearer_token(request.headers()) {
+        Ok(token) => token,
+        Err(error) => return unauthorized_response(error),
+    };
+
+    if !auth.matches(token) {
+        return unauthorized_response("invalid bearer token");
+    }
+
+    next.run(request).await
+}
+
+fn parse_bearer_token(headers: &HeaderMap) -> Result<&str, &'static str> {
+    let value = headers
+        .get(AUTHORIZATION)
+        .ok_or("missing bearer token")?
+        .to_str()
+        .map_err(|_| "invalid authorization header")?;
+    let mut parts = value.split_whitespace();
+    let scheme = parts.next().ok_or("missing bearer token")?;
+    let token = parts.next().ok_or("missing bearer token")?;
+    if parts.next().is_some() {
+        return Err("invalid authorization header");
+    }
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err("invalid authorization scheme");
+    }
+    if token.is_empty() {
+        return Err("missing bearer token");
+    }
+    Ok(token)
+}
+
+fn unauthorized_response(message: impl Into<String>) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(WWW_AUTHENTICATE, "Bearer")],
+        Json(GatewayErrorResponse {
+            error: message.into(),
+        }),
+    )
+        .into_response()
 }
 
 async fn health_check() -> Json<GatewayHealthResponse> {
@@ -735,8 +851,8 @@ impl ChannelFileSender for AdapterFileSender {
 #[cfg(test)]
 mod tests {
     use super::{
-        handle_feishu_events, validate_test_chat_request, GatewayAppState, TestChatMention,
-        TestChatRequest,
+        create_router_with_auth, handle_feishu_events, validate_test_chat_request, GatewayAppState,
+        GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention, TestChatRequest,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -746,12 +862,13 @@ mod tests {
     use agent_contracts::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
-        body::Bytes,
+        body::{to_bytes, Body, Bytes},
         extract::State,
-        http::{HeaderMap, StatusCode},
+        http::{HeaderMap, Request, StatusCode},
     };
     use std::sync::{Arc, Mutex};
     use tokio::time::{sleep, timeout, Duration};
+    use tower::util::ServiceExt;
 
     #[test]
     fn rejects_missing_identity_fields() {
@@ -795,6 +912,111 @@ mod tests {
         assert_eq!(request.channel, "feishu");
         assert_eq!(request.channel_instance_id.as_deref(), Some("ops-feishu"));
         assert_eq!(request.mentions.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bearer_auth_rejects_missing_token_for_chat_routes() {
+        let router = create_router_with_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/chat")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","channel":"test","sender_id":"user-1","conversation_id":"conv-1"}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("www-authenticate")
+                .and_then(|h| h.to_str().ok()),
+            Some("Bearer")
+        );
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: GatewayErrorResponse =
+            serde_json::from_slice(&body).expect("error response should parse");
+        assert_eq!(payload.error, "missing bearer token");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bearer_auth_allows_valid_token_for_chat_routes() {
+        let session_service = Arc::new(FakeSessionService::new("处理完成"));
+        let router = create_router_with_auth(
+            session_service.clone(),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/chat")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"text":"hello","channel":"test","sender_id":"user-1","conversation_id":"conv-1"}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            session_service
+                .requests
+                .lock()
+                .expect("session service mutex poisoned")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bearer_auth_does_not_apply_to_health_or_feishu_webhook() {
+        let router = create_router_with_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+        );
+
+        let health_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("health route should respond");
+        assert_eq!(health_response.status(), StatusCode::OK);
+
+        let feishu_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/channels/feishu/events")
+                    .body(Body::from("{}"))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("feishu route should respond");
+        assert_eq!(feishu_response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     struct FakeSessionService {

@@ -6,7 +6,7 @@ members = [
     "crates/agent-types",
     "crates/agent-contracts",
     "crates/agent-llm",
-    "crates/hooker",
+    "crates/hook",
     "crates/core",
     "crates/memory",
     "crates/compact",
@@ -16,13 +16,18 @@ members = [
     "crates/skill",
     "crates/trace",
     "crates/trace/src/moirai",
+    #"crates/operation_backend",
+    # Cerberus - secure execution (optional, requires eBPF toolchain)
+    # "crates/cerberus/cerberus-core",
+    # "crates/cerberus/cerberus-cli",
+    # "crates/cerberus/cerberus-core/bpf",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MulanPSL-2.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -52,6 +57,9 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["fs"] }
 rust-embed = "8.5"
 mime_guess = "2.0"
+dirs = "5"
+# Cerberus dependencies (disabled by default)
+# cerberus-core = { path = "crates/cerberus/cerberus-core" }
 
 [profile.release]
 opt-level = 3

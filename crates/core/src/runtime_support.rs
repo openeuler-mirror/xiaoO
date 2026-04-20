@@ -1,15 +1,23 @@
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use agent_contracts::{
-    AgentContext, ConversationView, HookerRegistry, InteractionHandle, RuntimeView, SkillRegistry,
-    ToolEventSink, ToolStateStore, TraceRecorder,
+    AgentContext, ConversationView, Hooker, HookerRegistry, InteractionHandle, RuntimeView,
+    SkillRegistry, ToolEventSink, ToolSpecView, ToolStateStore, TraceOutcome, TraceRecorder,
+    TraceSpanHandle, TraceSpanKind,
 };
-use agent_types::common::{AgentMetadata, WorkspaceRef};
+use agent_types::common::{AgentMetadata, HookerId, WorkspaceRef};
 use agent_types::context::prompt::SkillSummary;
 use agent_types::events::ToolLifecycleEvent;
+use agent_types::hook::HookPointId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use agent_types::tool::{
+    FinalToolCall, ToolExecutionError, ToolExecutionResult, ToolLifecycleRecord,
+    ToolLifecycleStatus,
+};
 use agent_types::ChatMessage;
 use async_trait::async_trait;
+use serde_json::Value;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopToolEventSink;
@@ -173,5 +181,135 @@ impl RuntimeView for BasicRuntimeView {
 
     fn hookers(&self) -> &dyn HookerRegistry {
         self.hookers.as_ref()
+    }
+}
+
+struct NoopToolStateStore;
+
+impl ToolStateStore for NoopToolStateStore {
+    fn begin(&self, call: &FinalToolCall, _spec: &dyn ToolSpecView) -> ToolLifecycleRecord {
+        ToolLifecycleRecord {
+            call_id: call.call_id.clone(),
+            tool_name: call.tool_name.clone(),
+            status: ToolLifecycleStatus::Pending,
+            started_at_ms: 0,
+            finished_at_ms: None,
+        }
+    }
+
+    fn update(&self, _record: &ToolLifecycleRecord) {}
+
+    fn finish(&self, _record: &ToolLifecycleRecord, _result: &ToolExecutionResult) {}
+
+    fn fail(&self, _record: &ToolLifecycleRecord, _error: &ToolExecutionError) {}
+}
+
+struct NoopTraceRecorder;
+
+#[async_trait]
+impl TraceRecorder for NoopTraceRecorder {
+    async fn begin_span(
+        &self,
+        _kind: TraceSpanKind,
+        _name: Cow<'static, str>,
+        _fields: Value,
+    ) -> TraceSpanHandle {
+        TraceSpanHandle::new("", "", None)
+    }
+
+    async fn update_span(&self, _span: &TraceSpanHandle, _fields: Value) {}
+
+    async fn end_span(&self, _span: TraceSpanHandle, _outcome: TraceOutcome, _fields: Value) {}
+
+    async fn finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {}
+
+    async fn force_finalize_trace(&self, _outcome: TraceOutcome, _fields: Value) {}
+}
+
+struct NoopHookerRegistry;
+
+impl HookerRegistry for NoopHookerRegistry {
+    fn get(&self, _id: &HookerId) -> Option<&dyn Hooker> {
+        None
+    }
+
+    fn list(&self) -> Vec<&dyn Hooker> {
+        Vec::new()
+    }
+
+    fn list_for_hook_point(&self, _hook_point: &HookPointId) -> Vec<&dyn Hooker> {
+        Vec::new()
+    }
+
+    fn is_enabled(&self, _id: &HookerId) -> bool {
+        false
+    }
+
+    fn policy_for(&self, _id: &HookerId) -> Option<&serde_json::Value> {
+        None
+    }
+}
+
+/// A minimal no-op RuntimeView for use in contexts that require a RuntimeView
+/// but do not need any of its capabilities (e.g. session lifecycle hooks).
+pub struct NoopRuntimeView {
+    state_store: NoopToolStateStore,
+    tool_events: NoopToolEventSink,
+    trace_recorder: NoopTraceRecorder,
+    agent_context: BasicAgentContext,
+    interaction: NoopInteractionHandle,
+    hookers: NoopHookerRegistry,
+}
+
+impl NoopRuntimeView {
+    pub fn new() -> Self {
+        Self {
+            state_store: NoopToolStateStore,
+            tool_events: NoopToolEventSink,
+            trace_recorder: NoopTraceRecorder,
+            agent_context: BasicAgentContext::new(
+                Vec::new(),
+                PathBuf::from("."),
+                AgentMetadata {
+                    agent_id: String::new(),
+                    model: String::new(),
+                    session_id: None,
+                },
+            ),
+            interaction: NoopInteractionHandle,
+            hookers: NoopHookerRegistry,
+        }
+    }
+}
+
+impl Default for NoopRuntimeView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuntimeView for NoopRuntimeView {
+    fn state_store(&self) -> &dyn ToolStateStore {
+        &self.state_store
+    }
+
+    fn tool_events(&self) -> &dyn ToolEventSink {
+        &self.tool_events
+    }
+
+    fn trace_recorder(&self) -> &dyn TraceRecorder {
+        &self.trace_recorder
+    }
+
+    fn agent_context(&self) -> &dyn AgentContext {
+        &self.agent_context
+    }
+
+    fn interaction(&self) -> &dyn InteractionHandle {
+        &self.interaction
+    }
+
+    fn hookers(&self) -> &dyn HookerRegistry {
+        &self.hookers
     }
 }

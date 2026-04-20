@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
-use xiaoo_app::httpserver::{create_router, create_router_with_feishu_and_timeout};
+use xiaoo_app::httpserver::{
+    create_router_with_auth, create_router_with_feishu_and_timeout_and_auth, HttpBearerAuthConfig,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,18 +26,22 @@ async fn main() -> Result<()> {
 async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     let config = DaemonConfig::load_from(&config_path)?;
+    let hooker_config = config.app.hooker.clone();
+    let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config)?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let app = AppBootstrap::from_session_components(session_store, resolver)?;
+    let app =
+        AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
     let router = match config.feishu_config()? {
-        Some(feishu) => create_router_with_feishu_and_timeout(
+        Some(feishu) => create_router_with_feishu_and_timeout_and_auth(
             app.session_service,
             feishu,
             config.interaction_timeout_secs(),
+            bearer_auth,
         )
         .map_err(anyhow::Error::new)
         .context("failed to create router with feishu")?,
-        None => create_router(app.session_service),
+        None => create_router_with_auth(app.session_service, bearer_auth),
     };
 
     let addr: SocketAddr = format!("{host}:{port}")
@@ -84,7 +90,7 @@ impl Cli {
             "daemon" => {
                 let mut config = None;
                 let mut host = "0.0.0.0".to_string();
-                let mut port = 8080_u16;
+                let mut port = 18080_u16;
                 let remaining = args.collect::<Vec<_>>();
                 let mut index = 0;
                 while index < remaining.len() {
@@ -142,5 +148,18 @@ mod tests {
         .expect("cli should parse");
 
         assert!(matches!(cli.command, super::Command::Daemon { .. }));
+    }
+
+    #[test]
+    fn daemon_defaults_to_port_18080() {
+        let cli = Cli::parse(["daemon"].into_iter().map(str::to_string))
+            .expect("cli should parse with defaults");
+
+        match cli.command {
+            super::Command::Daemon { host, port, .. } => {
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, 18080);
+            }
+        }
     }
 }

@@ -53,12 +53,6 @@ impl Input {
         self.selection_anchor = Some(self.cursor);
     }
 
-    /// Extend the selection by moving the cursor to `pos` (anchor stays fixed).
-    pub fn extend_to(&mut self, pos: usize) {
-        let len = self.value.chars().count();
-        self.cursor = pos.min(len);
-    }
-
     /// Returns the selected character range as `start..end` (inclusive start,
     /// exclusive end), where `start <= end`.  Returns `None` when there is no
     /// anchor or the anchor equals the cursor (empty selection).
@@ -175,6 +169,19 @@ impl Input {
         self.value = chars.into_iter().collect();
         self.cursor = cursor;
     }
+
+    fn is_backspace_compat(key: &crossterm::event::KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Backspace => true,
+            // Some terminals send Ctrl+H for Backspace.
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                key.modifiers.contains(KeyModifiers::CONTROL)
+            }
+            // Others surface raw ASCII control characters for BS/DEL.
+            KeyCode::Char('\u{8}') | KeyCode::Char('\u{7f}') => true,
+            _ => false,
+        }
+    }
 }
 
 impl EventHandler for Input {
@@ -185,6 +192,11 @@ impl EventHandler for Input {
 
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if Self::is_backspace_compat(key) {
+            self.backspace();
+            return;
+        }
 
         match key.code {
             // Ctrl+A – select all
@@ -202,7 +214,6 @@ impl EventHandler for Input {
             // Ignore all other Ctrl+letter combos (handled elsewhere).
             KeyCode::Char(_ch) if ctrl => {}
             KeyCode::Char(ch) => self.insert_char(ch),
-            KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete(),
             // Shift+Left – extend selection leftward
             KeyCode::Left if shift => {
@@ -303,5 +314,47 @@ impl From<&str> for Input {
 impl From<String> for Input {
     fn from(value: String) -> Self {
         Self::default().with_value(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventHandler, Input};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn backspace_key_deletes_previous_character() {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "hell");
+        assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn ctrl_h_is_treated_as_backspace() {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(input.value(), "hell");
+        assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn del_control_character_is_treated_as_backspace() {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('\u{7f}'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "hell");
+        assert_eq!(input.cursor(), 4);
     }
 }

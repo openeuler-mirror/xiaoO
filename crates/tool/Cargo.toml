@@ -8,7 +8,7 @@ license.workspace = true
 tool-cli = []
 
 [dependencies]
-hooker = { path = "../hooker" }
+hook = { path = "../hook" }
 agent-contracts = { path = "../agent-contracts" }
 agent-types = { path = "../agent-types" }
 subagent = { path = "../subagent" }

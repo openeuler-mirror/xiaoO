@@ -47,7 +47,7 @@ impl BashToolSpec {
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
                 description:
-                    "Output from bash including stdout, stderr, exit_code, and interruption state"
+                    "Output from bash including stdout/stderr, truncation flags, exit_code, and interruption state"
                         .to_string(),
             },
             effect_profile: EffectProfile {

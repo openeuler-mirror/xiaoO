@@ -2,7 +2,12 @@ use agent_types::common::BuildError;
 use serde_json::Value;
 
 use super::backend::BACKEND_TYPE_MOIRAI_SQLITE;
-pub(crate) const DEFAULT_DB_PATH: &str = "./.clawtrace/traces.db";
+pub(crate) fn default_db_path() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| ".".into());
+    home.join(".xiaoo/data/trace.db")
+        .to_string_lossy()
+        .into_owned()
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraceRecorderConfig {
@@ -15,7 +20,7 @@ impl Default for TraceRecorderConfig {
     fn default() -> Self {
         Self {
             storage_backend: BACKEND_TYPE_MOIRAI_SQLITE.to_string(),
-            db_path: Some(DEFAULT_DB_PATH.to_string()),
+            db_path: Some(default_db_path()),
             agent_id: None,
         }
     }
@@ -36,8 +41,8 @@ impl TraceRecorderConfig {
                     }
                 };
 
-                let db_path = parse_optional_string(&map, "db_path")?
-                    .or_else(|| Some(DEFAULT_DB_PATH.to_string()));
+                let db_path =
+                    parse_optional_string(&map, "db_path")?.or_else(|| Some(default_db_path()));
                 let agent_id = parse_optional_string(&map, "agent_id")?;
 
                 Ok(Self {

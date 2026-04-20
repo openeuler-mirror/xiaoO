@@ -23,13 +23,14 @@ impl MoiraiSqliteBackend {
         config: &TraceRecorderConfig,
         trace_id: String,
     ) -> Result<Self, BuildError> {
-        let db_path = config
+        let db_path_raw = config
             .db_path
             .as_deref()
             .filter(|value| !value.is_empty())
             .ok_or_else(|| BuildError::MissingRequiredField {
                 field: "db_path".to_string(),
             })?;
+        let db_path = expand_tilde(db_path_raw);
         let agent_id = config
             .agent_id
             .as_deref()
@@ -39,12 +40,12 @@ impl MoiraiSqliteBackend {
             })?;
 
         let storage = Arc::new({
-            if let Some(parent) = Path::new(db_path).parent() {
+            if let Some(parent) = Path::new(&db_path).parent() {
                 std::fs::create_dir_all(parent).map_err(|error| BuildError::DependencyError {
                     message: format!("failed to create trace db parent directory: {error}"),
                 })?;
             }
-            SqliteStorage::new(db_path).map_err(|error| BuildError::DependencyError {
+            SqliteStorage::new(&db_path).map_err(|error| BuildError::DependencyError {
                 message: format!("failed to create moirai sqlite storage: {error}"),
             })?
         });
@@ -271,6 +272,16 @@ fn span_kind_to_moirai_type(kind: TraceSpanKind) -> &'static str {
         TraceSpanKind::Hook => "HOOK",
         TraceSpanKind::Custom => "CUSTOM",
     }
+}
+
+/// Expand `~` to home directory in path string.
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(&path[2..]).to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
 }
 
 fn merge_json_fields(base: Value, extra: Value) -> Value {

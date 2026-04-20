@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use agent_contracts::CompressionPipeline;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use agent_types::CompletionConfig;
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,

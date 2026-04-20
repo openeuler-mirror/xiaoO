@@ -28,6 +28,8 @@ cargo install --path apps/xiaoo-app
 
 Install to `~/.cargo/bin/xiaoo`, and ensure that `~/.cargo/bin` is in `PATH`.
 
+For plugin installation and usage, please refer to [plugins.md](./docs/plugins.md).
+
 ## Quick Start
 Create the configuration file `~/.config/xiaoo/config.toml`
 
@@ -39,13 +41,10 @@ api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment vari
 max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
 context_window = 128000 # Optional, used for session compression budget
 
-[agent.code-reviewer]
-description = "Reviews code for best practices and potential issues"
-prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
+[trace]
+storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
+db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-sqlite 时生效；未配置时为 ~/.moirai
 
-[agent.code-reviewer.tools]
-file_write = false
-file_edit = false
 ```
 
 Set environment variables
@@ -86,7 +85,7 @@ $ xiaoo run -p 'Count "hello world" char numbers'
 The Gateway operates in **daemon mode**, providing a RESTful API for external systems (such as Lark Webhook) to access.
 
 ```bash
-# default port（0.0.0.0:8080）
+# default port（0.0.0.0:18080）
 xiaoo-app daemon
 
 # Specify configuration file, address and port

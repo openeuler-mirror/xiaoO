@@ -1,13 +1,13 @@
 use anyhow::Result;
 use crossterm::cursor::SetCursorStyle;
-use crossterm::event::EventStream;
+use crossterm::event::{Event, EventStream, MouseEventKind};
 use crossterm::execute;
 use futures_util::{FutureExt, StreamExt};
 use ratatui::Terminal;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::time::interval;
+use tokio::time::sleep;
 
 use crate::app_state::AppState;
 use crate::config::Config;
@@ -21,13 +21,6 @@ pub struct App {
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 impl App {
-    pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
-        Ok(Self {
-            state: AppState::new(config_path, workspace)?,
-            gateway: GatewayRuntime::new(),
-        })
-    }
-
     pub fn new_with_config(
         config: &Config,
         config_path: PathBuf,
@@ -43,46 +36,136 @@ impl App {
         &mut self,
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> Result<()> {
-        let mut render_interval = interval(Duration::from_millis(16));
         let mut event_stream = EventStream::new();
+        let mut pending_event: Option<Event> = None;
         let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
         set_cursor_color(self.state.theme.border_active);
         let mut cursor_visible = true;
         let mut last_cursor_blink_toggle = Instant::now();
+        let mut needs_redraw = true;
 
         loop {
-            if self.state.chat_state.is_loading {
-                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+            if needs_redraw {
+                terminal.draw(|frame| self.ui(frame))?;
+                needs_redraw = false;
             }
             if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
                 last_cursor_blink_toggle = Instant::now();
-            }
-            terminal.draw(|frame| self.ui(frame))?;
-            if cursor_visible {
-                terminal.show_cursor()?;
-            } else {
-                terminal.hide_cursor()?;
+                if cursor_visible {
+                    terminal.show_cursor()?;
+                } else {
+                    terminal.hide_cursor()?;
+                }
             }
 
-            tokio::select! {
-                _ = render_interval.tick() => {}
-                maybe_event = event_stream.next().fuse() => {
-                    if let Some(Ok(event)) = maybe_event {
-                        self.handle_event(event).await?;
+            let active_refresh =
+                self.state.chat_state.is_loading || self.gateway.needs_active_refresh();
+            let tick_duration = if active_refresh {
+                Duration::from_millis(16)
+            } else {
+                Duration::from_millis(250)
+            };
+
+            let mut handled_event = None;
+            if let Some(event) = pending_event.take() {
+                self.handle_event(event.clone()).await?;
+                needs_redraw = true;
+                handled_event = Some(event);
+            } else {
+                tokio::select! {
+                    _ = sleep(tick_duration) => {
+                        if self.state.chat_state.is_loading {
+                            self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+                            needs_redraw = true;
+                        }
+                    }
+                    maybe_event = event_stream.next().fuse() => {
+                        if let Some(Ok(event)) = maybe_event {
+                            self.handle_event(event.clone()).await?;
+                            needs_redraw = true;
+                            handled_event = Some(event);
+                        }
                     }
                 }
             }
 
-            self.gateway.poll_stream_updates(&mut self.state);
+            if let Some(event) = handled_event.as_ref() {
+                discard_redundant_boundary_scrolls(
+                    event,
+                    &self.state,
+                    &mut event_stream,
+                    &mut pending_event,
+                );
+            }
+
+            needs_redraw |= self.gateway.poll_stream_updates(&mut self.state);
 
             if self.state.should_quit {
                 break;
             }
         }
+        self.gateway.close_sessions().await;
         reset_cursor_color();
         terminal.show_cursor()?;
         Ok(())
+    }
+}
+
+fn discard_redundant_boundary_scrolls(
+    handled_event: &Event,
+    state: &AppState,
+    event_stream: &mut EventStream,
+    pending_event: &mut Option<Event>,
+) {
+    let boundary_kind = match handled_event {
+        Event::Mouse(mouse)
+            if mouse.kind == MouseEventKind::ScrollDown
+                && state.chat_state.scroll_offset >= state.chat_state.max_scroll_offset() =>
+        {
+            Some(MouseEventKind::ScrollDown)
+        }
+        Event::Mouse(mouse)
+            if mouse.kind == MouseEventKind::ScrollUp && state.chat_state.scroll_offset == 0 =>
+        {
+            Some(MouseEventKind::ScrollUp)
+        }
+        _ => None,
+    };
+
+    let Some(boundary_kind) = boundary_kind else {
+        return;
+    };
+    let opposite_kind = match boundary_kind {
+        MouseEventKind::ScrollDown => MouseEventKind::ScrollUp,
+        MouseEventKind::ScrollUp => MouseEventKind::ScrollDown,
+        _ => return,
+    };
+
+    for _ in 0..128 {
+        let Some(ready) = event_stream.next().now_or_never() else {
+            break;
+        };
+        let Some(Ok(event)) = ready else {
+            break;
+        };
+
+        match &event {
+            Event::Mouse(mouse) if mouse.kind == boundary_kind => {
+                continue;
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
+                continue;
+            }
+            Event::Mouse(mouse) if mouse.kind == opposite_kind => {
+                *pending_event = Some(event);
+                return;
+            }
+            _ => {
+                *pending_event = Some(event);
+                return;
+            }
+        }
     }
 }
 

@@ -93,6 +93,17 @@ pub async fn read_pdf<P: AsRef<Path>>(file_path: P) -> Result<PdfOutput, PdfErro
     })
 }
 
+pub fn read_pdf_from_bytes(file_path: &str, bytes: &[u8]) -> PdfOutput {
+    let original_size = bytes.len() as u64;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    PdfOutput {
+        file_path: file_path.to_string(),
+        base64,
+        original_size,
+    }
+}
+
 pub async fn extract_pdf_pages<P: AsRef<Path>>(
     file_path: P,
     pages: &str,
@@ -156,6 +167,71 @@ pub async fn extract_pdf_pages<P: AsRef<Path>>(
             original_size,
             count: page_numbers.len() as u32,
             output_dir: output_dir.to_string_lossy().to_string(),
+        },
+    })
+}
+
+pub fn extract_pdf_pages_from_bytes(
+    file_path: &str,
+    bytes: &[u8],
+    pages: &str,
+    output_dir: &str,
+) -> Result<PartsOutput, PdfError> {
+    let output_dir_path = Path::new(output_dir);
+
+    let page_numbers = parse_page_range(pages, PDF_MAX_PAGES_PER_READ)?;
+
+    if page_numbers.is_empty() {
+        return Err(PdfError::InvalidPageRange("No pages specified".into()));
+    }
+
+    let original_size = bytes.len() as u64;
+
+    let doc = lopdf::Document::load_mem(bytes)
+        .map_err(|e| PdfError::Parse(format!("PDF parse error: {}", e)))?;
+
+    let page_count = doc.get_pages().len() as u32;
+
+    for &page in &page_numbers {
+        if page > page_count {
+            return Err(PdfError::PageNotFound(page_count, page));
+        }
+    }
+
+    std::fs::create_dir_all(output_dir_path).map_err(PdfError::Io)?;
+
+    for page_num in &page_numbers {
+        let output_path = output_dir_path.join(format!("page_{}.pdf", page_num));
+        let mut page_doc = doc.clone();
+        let all_pages = page_doc.get_pages();
+
+        let pages_to_delete: Vec<u32> = all_pages
+            .keys()
+            .filter(|&&p| p != *page_num)
+            .cloned()
+            .collect();
+
+        if !pages_to_delete.is_empty() {
+            page_doc.delete_pages(&pages_to_delete);
+        }
+
+        page_doc.prune_objects();
+        page_doc.renumber_objects();
+
+        let mut buffer = Vec::new();
+        page_doc
+            .save_to(&mut buffer)
+            .map_err(|e| PdfError::Parse(format!("PDF save error: {}", e)))?;
+
+        std::fs::write(&output_path, &buffer).map_err(PdfError::Io)?;
+    }
+
+    Ok(PartsOutput {
+        file: PartsOutputFile {
+            file_path: file_path.to_string(),
+            original_size,
+            count: page_numbers.len() as u32,
+            output_dir: output_dir.to_string(),
         },
     })
 }

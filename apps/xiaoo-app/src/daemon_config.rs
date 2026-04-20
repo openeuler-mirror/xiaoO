@@ -1,4 +1,4 @@
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json;
@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
     pub channels: ChannelsConfig,
+    #[serde(default)]
+    pub http: HttpConfig,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
@@ -72,6 +74,14 @@ pub struct FeishuChannelConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub struct HttpConfig {
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SkillsSection {
     #[serde(default)]
     pub dirs: Option<Vec<String>>,
@@ -103,6 +113,7 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentRoleConfig {
     #[serde(default)]
+    #[allow(dead_code)]
     pub description: String,
     #[serde(default)]
     pub prompt: Option<String>,
@@ -159,6 +170,7 @@ pub struct ResolvedAgentConfig {
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub app: AppConfig,
+    #[allow(dead_code)]
     pub config_path: PathBuf,
 }
 
@@ -231,6 +243,44 @@ impl DaemonConfig {
 
     pub fn interaction_timeout_secs(&self) -> u64 {
         self.app.channels.interaction_timeout_secs.unwrap_or(600)
+    }
+
+    pub fn http_bearer_token(&self) -> Result<Option<String>> {
+        let direct = self
+            .app
+            .http
+            .bearer_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let env_name = self
+            .app
+            .http
+            .bearer_token_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if direct.is_some() && env_name.is_some() {
+            bail!("http.bearer_token and http.bearer_token_env are mutually exclusive");
+        }
+
+        if let Some(token) = direct {
+            return Ok(Some(token.to_string()));
+        }
+
+        let Some(env_name) = env_name else {
+            return Ok(None);
+        };
+
+        let token = env::var(env_name)
+            .with_context(|| format!("failed to read HTTP bearer token from env `{env_name}`"))?;
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            bail!("environment variable `{env_name}` for http.bearer_token_env is empty");
+        }
+
+        Ok(Some(trimmed.to_string()))
     }
 
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {
@@ -316,6 +366,11 @@ impl DaemonConfig {
             );
         }
         serde_json::Value::Object(map)
+    }
+
+    #[allow(dead_code)]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     pub fn resolve_compact_config(&self) -> Option<&CompactConfig> {
@@ -444,5 +499,62 @@ mod tests {
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
+    }
+
+    #[test]
+    fn resolves_http_bearer_token_from_env() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [http]
+            bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN_TEST"
+        "#;
+
+        let previous = std::env::var_os("XIAOO_HTTP_BEARER_TOKEN_TEST");
+        std::env::set_var("XIAOO_HTTP_BEARER_TOKEN_TEST", "test-token");
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let token = daemon
+            .http_bearer_token()
+            .expect("http auth should resolve")
+            .expect("token should be present");
+
+        if let Some(value) = previous {
+            std::env::set_var("XIAOO_HTTP_BEARER_TOKEN_TEST", value);
+        } else {
+            std::env::remove_var("XIAOO_HTTP_BEARER_TOKEN_TEST");
+        }
+
+        assert_eq!(token, "test-token");
+    }
+
+    #[test]
+    fn rejects_conflicting_http_bearer_token_sources() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [http]
+            bearer_token = "inline-token"
+            bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN_TEST"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+
+        let error = daemon.http_bearer_token().expect_err("config should fail");
+        assert!(error
+            .to_string()
+            .contains("http.bearer_token and http.bearer_token_env are mutually exclusive"));
     }
 }

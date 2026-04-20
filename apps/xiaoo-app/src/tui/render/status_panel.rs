@@ -40,12 +40,6 @@ impl StatusPanel {
         self.is_connected = true;
     }
 
-    pub fn clear_provider(&mut self) {
-        self.provider_name.clear();
-        self.model_name.clear();
-        self.is_connected = false;
-    }
-
     /// Update the workspace line from an absolute path (caller should pass canonical path when possible).
     pub fn set_workspace(&mut self, path: &Path) {
         self.workspace_display = shorten_path_display(path, 26);

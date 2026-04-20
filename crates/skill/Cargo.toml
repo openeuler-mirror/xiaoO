@@ -18,7 +18,7 @@ regex-lite = "0.1"
 tempfile.workspace = true
 dirs = "6"
 xiaoo-core = { path = "../core" }
-hooker = { path = "../hooker" }
+hook = { path = "../hook" }
 tool = { path = "../tool" }
 trace = { path = "../trace" }
 tokio = { workspace = true, features = ["rt", "macros"] }

@@ -8,16 +8,19 @@ use crate::session_gateway::SessionTurnUpdate;
 use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_TICK};
 
 impl GatewayRuntime {
-    pub fn poll_stream_updates(&mut self, state: &mut AppState) {
+    pub fn poll_stream_updates(&mut self, state: &mut AppState) -> bool {
+        let mut changed = false;
         while let Some(receiver) = &mut self.stream_rx {
             let update = match receiver.try_recv() {
                 Ok(update) => update,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.handle_stream_disconnect(state);
+                    changed = true;
                     break;
                 }
             };
+            changed = true;
             match update {
                 SessionTurnUpdate::SetAssistantContent {
                     agent_id,
@@ -35,7 +38,7 @@ impl GatewayRuntime {
                     }
                 }
                 SessionTurnUpdate::Tool {
-                    agent_id: _,
+                    _agent_id: _,
                     update,
                 } => {
                     self.apply_tool_update(state, update);
@@ -72,13 +75,18 @@ impl GatewayRuntime {
             }
         }
 
+        let had_reveal_buffer = !self.stream_reveal_buffer.is_empty();
         self.reveal_stream_chars(state);
+        changed |= had_reveal_buffer;
 
         if self.stream_reveal_buffer.is_empty() {
             if let Some(done) = self.pending_stream_done.take() {
                 self.finish_stream_done(state, done);
+                changed = true;
             }
         }
+
+        changed
     }
 
     pub fn cancel_streaming(&mut self, state: &mut AppState) {
@@ -98,18 +106,18 @@ impl GatewayRuntime {
         if let Some(index) = stream_message_index {
             if let Some(message) = state.chat_state.messages.get_mut(index) {
                 if message.is_streaming {
-                    message.is_streaming = false;
+                    message.set_streaming(false);
                     if message.content.is_empty() {
-                        message.content = "[Cancelled]".to_string();
+                        message.set_content("[Cancelled]");
                     }
                 }
             }
         } else if let Some(message) = state.chat_state.messages.iter_mut().rev().find(|message| {
             message.role == crate::chat::MessageRole::Assistant && message.is_streaming
         }) {
-            message.is_streaming = false;
+            message.set_streaming(false);
             if message.content.is_empty() {
-                message.content = "[Cancelled]".to_string();
+                message.set_content("[Cancelled]");
             }
         }
         state.status_panel.update_metrics(0, 0, 0, 0);
@@ -148,8 +156,8 @@ impl GatewayRuntime {
     ) {
         self.ensure_stream_message(state);
         if let Some(message) = self.stream_message_mut(state) {
-            message.content = content.into();
-            message.is_streaming = streaming;
+            message.set_content(content);
+            message.set_streaming(streaming);
         }
     }
 
@@ -240,7 +248,7 @@ impl GatewayRuntime {
 
         if let Some(message) = state.chat_state.messages.get_mut(index) {
             if message.role == crate::chat::MessageRole::Assistant && message.is_streaming {
-                message.is_streaming = false;
+                message.set_streaming(false);
             }
         }
     }
@@ -267,6 +275,7 @@ impl GatewayRuntime {
                 tool.duration_ms = update.duration_ms;
             }
             existing.timestamp = chrono::Local::now();
+            existing.mark_render_dirty();
             return;
         }
 
@@ -287,7 +296,7 @@ impl GatewayRuntime {
         let chunk: String = self.stream_reveal_buffer.drain(..split_index).collect();
 
         if let Some(message) = self.stream_message_mut(state) {
-            message.content.push_str(&chunk);
+            message.append_content(&chunk);
         } else {
             self.stream_reveal_buffer.clear();
         }
@@ -296,7 +305,7 @@ impl GatewayRuntime {
     fn finish_stream_done(&mut self, state: &mut AppState, done: PendingStreamDone) {
         if let Some(message) = self.stream_message_mut(state) {
             let response_content = message.content.clone();
-            message.is_streaming = false;
+            message.set_streaming(false);
             let response_preview = response_content.chars().take(120).collect::<String>();
             if response_content.len() > 120 {
                 tracing::info!(

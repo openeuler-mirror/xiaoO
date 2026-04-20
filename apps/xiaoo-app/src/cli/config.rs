@@ -1,4 +1,4 @@
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;

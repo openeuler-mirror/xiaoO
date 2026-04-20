@@ -1,3 +1,4 @@
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,38 @@ impl WebFetchExecutor {
             .timeout
             .unwrap_or_else(default_timeout_ms)
             .min(max_timeout_ms());
+
+        // Layer 2 SSRF protection: resolve hostname → validate all resulting IPs
+        // This prevents DNS rebinding attacks where a hostname resolves to safe IP
+        // during validation but to a blocked IP during actual request.
+        let host = extract_host_for_dns(&input.url);
+        // Infer default port from URL scheme so that to_socket_addrs() receives a
+        // valid "host:port" string (Rust's ToSocketAddrs requires a port number).
+        let port = if input.url.starts_with("https://") {
+            443
+        } else {
+            80
+        };
+        let host_port = format!("{}:{}", host, port);
+        match host_port.to_socket_addrs() {
+            Ok(addrs) => {
+                let addr_vec: Vec<_> = addrs.collect();
+                let dns_check = validation::validate_resolved_addrs(&addr_vec);
+                if !dns_check.result {
+                    return Err(
+                        dns_check
+                            .message
+                            .unwrap_or_else(|| "URL resolves to blocked IP".to_string()),
+                    );
+                }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "DNS resolution failed for '{}': {}",
+                    host, e
+                ));
+            }
+        }
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
@@ -124,9 +157,35 @@ fn extract_text_from_html(html: &str) -> String {
 
 fn convert_html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| {
-        // Fallback to plain text extraction if markdown conversion fails
         extract_text_from_html(html)
     })
+}
+
+/// Extract host from URL for DNS resolution.
+/// Returns just the hostname (no scheme, port, path) suitable for `ToSocketAddrs`.
+fn extract_host_for_dns(url_str: &str) -> &str {
+    let after_scheme = url_str
+        .strip_prefix("http://")
+        .or_else(|| url_str.strip_prefix("https://"))
+        .unwrap_or(url_str);
+
+    let authority = after_scheme
+        .find(&['/', '?', '#'][..])
+        .map(|i| &after_scheme[..i])
+        .unwrap_or(after_scheme);
+
+    // Strip userinfo (@ separates credentials from host)
+    let host_port = authority.rfind('@').map(|i| &authority[i + 1..]).unwrap_or(authority);
+
+    if host_port.starts_with('[') {
+        if let Some(bracket_end) = host_port.find(']') {
+            return &host_port[1..bracket_end];
+        }
+    } else if let Some(colon_pos) = host_port.rfind(':') {
+        return &host_port[..colon_pos];
+    }
+
+    host_port
 }
 
 impl Default for WebFetchExecutor {

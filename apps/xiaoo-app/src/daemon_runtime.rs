@@ -2,7 +2,7 @@ use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;

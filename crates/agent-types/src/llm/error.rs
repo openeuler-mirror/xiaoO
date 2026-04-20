@@ -12,8 +12,11 @@ pub enum LlmError {
     #[error("parse error: {0}")]
     ParseError(String),
 
-    #[error("rate limited: retry after {retry_after_ms}ms")]
-    RateLimited { retry_after_ms: u64 },
+    #[error("rate limited (retry after {retry_after_ms}ms): {message}")]
+    RateLimited {
+        retry_after_ms: u64,
+        message: String,
+    },
 
     #[error("authentication error: {message}")]
     AuthError { message: String },

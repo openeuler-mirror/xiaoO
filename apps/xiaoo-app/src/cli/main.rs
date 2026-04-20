@@ -17,7 +17,7 @@ use xiaoo_app::gateway::{
 
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
 
@@ -443,7 +443,11 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let resolver: Arc<dyn SessionRuntimeResolver> =
         Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-    let deps = match AppBootstrap::from_session_components(store, resolver) {
+    let deps = match AppBootstrap::from_session_components_with_hooks(
+        store,
+        resolver,
+        config.hooker.clone(),
+    ) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("Failed to bootstrap session: {}", e);
@@ -458,7 +462,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         entry: GatewayEntryContext::cli(),
         channel: None,
         message_id: None,
-        conversation_id: session_id,
+        conversation_id: session_id.clone(),
         sender_id: "cli-user".into(),
         text: prompt,
         channel_instance_id: None,
@@ -468,8 +472,18 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         mentions: Vec::new(),
     };
 
-    // 7. Run turn via gateway session service
-    match deps.session_service.run_turn(request).await {
+    // 7. Run turn via gateway session service, then explicitly close the
+    // session so SessionClosed lifecycle hookers fire in CLI mode as well.
+    let turn_result = deps.session_service.run_turn(request).await;
+    if let Err(err) = deps
+        .session_control_plane
+        .force_close_session(&session_id)
+        .await
+    {
+        eprintln!("[warn] failed to close session: {}", err);
+    }
+
+    match turn_result {
         Ok(result) => {
             if !result.raw_reply.is_empty() {
                 println!("{}", result.raw_reply);

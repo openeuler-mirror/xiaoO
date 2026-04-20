@@ -917,10 +917,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             }
         };
 
-        let result = match tool_call
-            .execute(&**runtime_view)
-            .await
-        {
+        let result = match tool_call.execute(&**runtime_view).await {
             Ok(result) => result,
             Err(error) => {
                 let result =
@@ -1013,7 +1010,8 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
                 tool_name: result.tool_name().to_string(),
                 output_preview,
                 is_error,
-                args_preview: serde_json::to_string_pretty(&result.final_call().input).unwrap_or_else(|_| result.final_call().input.to_string()) ,
+                args_preview: serde_json::to_string_pretty(&result.final_call().input)
+                    .unwrap_or_else(|_| result.final_call().input.to_string()),
             },
         );
     }
@@ -1672,6 +1670,4 @@ mod tests {
             &self.capabilities
         }
     }
-
-   
 }

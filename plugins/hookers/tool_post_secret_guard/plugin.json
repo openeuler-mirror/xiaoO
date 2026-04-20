@@ -1,0 +1,7 @@
+[
+  {
+    "id": "pluginguard_secret_like_output",
+    "hook_point": "*.Tool.*.post",
+    "command": "python3 guard_secret_like_output.py"
+  }
+]
