@@ -1,13 +1,14 @@
 use crate::backends::local::backend::{io_error_for_path, LocalBackendState};
 use agent_contracts::backend::{
     capability::{
-        search::{GlobRequest, GrepMode, GrepRequest, GrepResult},
+        search::{GlobRequest, GrepEntry, GrepMode, GrepPatternKind, GrepRequest, GrepResult},
         OperationSearch,
     },
     BackendPath, OperationError,
 };
 use async_trait::async_trait;
 use glob::Pattern;
+use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -18,6 +19,54 @@ pub(crate) struct LocalSearch {
 impl LocalSearch {
     pub(crate) fn new(state: Arc<LocalBackendState>) -> Self {
         Self { _state: state }
+    }
+}
+
+/// Pattern matcher abstraction that supports both literal and regex matching.
+enum PatternMatcher {
+    Literal {
+        pattern: String,
+        case_insensitive: bool,
+    },
+    Regex(Regex),
+}
+
+impl PatternMatcher {
+    fn is_match(&self, line: &str) -> bool {
+        match self {
+            Self::Literal {
+                pattern,
+                case_insensitive,
+            } => {
+                if *case_insensitive {
+                    line.to_lowercase().contains(&pattern.to_lowercase())
+                } else {
+                    line.contains(pattern.as_str())
+                }
+            }
+            Self::Regex(re) => re.is_match(line),
+        }
+    }
+}
+
+/// Build a `PatternMatcher` from the grep request fields.
+fn build_matcher(request: &GrepRequest) -> Result<PatternMatcher, OperationError> {
+    match request.pattern_kind {
+        GrepPatternKind::Regex => {
+            let pattern = if request.case_insensitive {
+                format!("(?i){}", request.pattern)
+            } else {
+                request.pattern.clone()
+            };
+            let re = Regex::new(&pattern).map_err(|e| OperationError::Unsupported {
+                message: format!("regex compilation failed: {e}"),
+            })?;
+            Ok(PatternMatcher::Regex(re))
+        }
+        GrepPatternKind::Literal => Ok(PatternMatcher::Literal {
+            pattern: request.pattern.clone(),
+            case_insensitive: request.case_insensitive,
+        }),
     }
 }
 
@@ -55,8 +104,10 @@ impl OperationSearch for LocalSearch {
     }
 
     async fn grep(&self, request: GrepRequest) -> Result<GrepResult, OperationError> {
-        let base_dir = self._state.backend_path_to_host(&request.base_dir)?;
-        self._state.ensure_directory(base_dir.as_path())?;
+        let matcher = build_matcher(&request)?;
+
+        let target_dir = self._state.backend_path_to_host(&request.target)?;
+        self._state.ensure_directory(target_dir.as_path())?;
         let include_pattern = match request.include.as_deref() {
             Some(pattern) => {
                 Some(
@@ -69,13 +120,18 @@ impl OperationSearch for LocalSearch {
         };
 
         let mut files = Vec::new();
-        collect_files(base_dir.as_path(), &mut files)?;
+        collect_files(target_dir.as_path(), &mut files, request.exclude_vcs)?;
         files.sort();
 
+        let files_searched = files.len();
+        let skip = request.offset.unwrap_or(0);
         let mut entries = Vec::new();
+        let mut truncated = false;
+        let mut seen = 0usize;
+
         for path in files {
             let relative = path
-                .strip_prefix(base_dir.as_path())
+                .strip_prefix(target_dir.as_path())
                 .ok()
                 .and_then(|value| value.to_str())
                 .unwrap_or("");
@@ -88,45 +144,140 @@ impl OperationSearch for LocalSearch {
             let content = std::fs::read(path.as_path())
                 .map_err(|error| io_error_for_path(path.as_path(), error))?;
             let text = String::from_utf8_lossy(content.as_slice());
-            let mut matched_lines = Vec::new();
-            for (index, line) in text.lines().enumerate() {
-                if line.contains(request.query.as_str()) {
-                    matched_lines.push((index + 1, line.to_string()));
-                }
-            }
+            let all_lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
 
-            if matched_lines.is_empty() {
+            // Find matching line indices (0-based)
+            let matched_indices: Vec<usize> = all_lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| matcher.is_match(line.as_str()))
+                .map(|(i, _)| i)
+                .collect();
+
+            if matched_indices.is_empty() {
                 continue;
             }
 
-            let display_path = path.to_string_lossy().to_string();
-            match request.mode {
-                GrepMode::FilesWithMatches => entries.push(display_path),
-                GrepMode::Content => {
-                    for (line_number, line) in matched_lines {
-                        entries.push(format!("{}:{line_number}:{line}", path.display()));
+            let backend_path = self._state.host_path_to_backend(path.as_path())?;
+
+            match &request.mode {
+                GrepMode::FilesWithMatches => {
+                    seen += 1;
+                    if seen <= skip {
+                        continue;
+                    }
+                    entries.push(GrepEntry {
+                        path: backend_path,
+                        line_number: None,
+                        line: None,
+                        match_count: None,
+                    });
+                    if request
+                        .head_limit
+                        .is_some_and(|limit| entries.len() >= limit)
+                    {
+                        truncated = true;
+                        break;
+                    }
+                }
+                GrepMode::Content {
+                    show_line_numbers,
+                    context_before,
+                    context_after,
+                } => {
+                    let ctx_before = context_before.unwrap_or(0);
+                    let ctx_after = context_after.unwrap_or(0);
+                    let total_lines = all_lines.len();
+                    let mut visible_matches = 0usize;
+
+                    for &match_idx in &matched_indices {
+                        seen += 1;
+                        if seen <= skip {
+                            continue;
+                        }
+                        visible_matches += 1;
+
+                        // Context lines before the match
+                        let ctx_start = match_idx.saturating_sub(ctx_before);
+                        for line_idx in ctx_start..match_idx {
+                            entries.push(GrepEntry {
+                                path: backend_path.clone(),
+                                line_number: if *show_line_numbers {
+                                    Some(line_idx + 1)
+                                } else {
+                                    None
+                                },
+                                line: Some(all_lines[line_idx].clone()),
+                                match_count: None,
+                            });
+                        }
+
+                        // The matching line itself
+                        entries.push(GrepEntry {
+                            path: backend_path.clone(),
+                            line_number: if *show_line_numbers {
+                                Some(match_idx + 1)
+                            } else {
+                                None
+                            },
+                            line: Some(all_lines[match_idx].clone()),
+                            match_count: None,
+                        });
+
+                        // Context lines after the match
+                        let ctx_end = (match_idx + ctx_after + 1).min(total_lines);
+                        for line_idx in (match_idx + 1)..ctx_end {
+                            entries.push(GrepEntry {
+                                path: backend_path.clone(),
+                                line_number: if *show_line_numbers {
+                                    Some(line_idx + 1)
+                                } else {
+                                    None
+                                },
+                                line: Some(all_lines[line_idx].clone()),
+                                match_count: None,
+                            });
+                        }
+
                         if request
                             .head_limit
-                            .is_some_and(|limit| entries.len() >= limit)
+                            .is_some_and(|limit| visible_matches >= limit)
                         {
-                            return Ok(GrepResult { entries });
+                            truncated = true;
+                            break;
                         }
+                    }
+                    if truncated {
+                        break;
                     }
                 }
                 GrepMode::Count => {
-                    entries.push(format!("{}:{}", path.display(), matched_lines.len()))
+                    seen += 1;
+                    if seen <= skip {
+                        continue;
+                    }
+                    entries.push(GrepEntry {
+                        path: backend_path,
+                        line_number: None,
+                        line: None,
+                        match_count: Some(matched_indices.len()),
+                    });
+                    if request
+                        .head_limit
+                        .is_some_and(|limit| entries.len() >= limit)
+                    {
+                        truncated = true;
+                        break;
+                    }
                 }
-            }
-
-            if request
-                .head_limit
-                .is_some_and(|limit| entries.len() >= limit)
-            {
-                break;
             }
         }
 
-        Ok(GrepResult { entries })
+        Ok(GrepResult {
+            entries,
+            truncated,
+            files_searched,
+        })
     }
 }
 
@@ -154,12 +305,23 @@ fn collect_paths(
     Ok(())
 }
 
-fn collect_files(current: &Path, entries: &mut Vec<PathBuf>) -> Result<(), OperationError> {
+fn collect_files(
+    current: &Path,
+    entries: &mut Vec<PathBuf>,
+    exclude_vcs: bool,
+) -> Result<(), OperationError> {
     for entry in std::fs::read_dir(current).map_err(|error| io_error_for_path(current, error))? {
         let entry = entry.map_err(|error| io_error_for_path(current, error))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(path.as_path(), entries)?;
+            if exclude_vcs {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name == ".git" || name == ".hg" || name == ".svn" {
+                        continue;
+                    }
+                }
+            }
+            collect_files(path.as_path(), entries, exclude_vcs)?;
         } else if path.is_file() {
             entries.push(path);
         }

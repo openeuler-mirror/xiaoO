@@ -7,8 +7,8 @@ use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 use async_trait::async_trait;
 
-use super::input::SendFileInput;
-use super::spec::SendFileToolSpec;
+use super::super::input::SendFileInput;
+use super::super::spec::SendFileToolSpec;
 
 pub struct SendFileToolExecutor {
     spec: Arc<SendFileToolSpec>,

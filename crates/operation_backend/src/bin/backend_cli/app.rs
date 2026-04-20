@@ -6,7 +6,7 @@ use agent_contracts::backend::{
             ReadBytesRequest, TempPathKind, TempPathRequest, WriteBytesRequest, WriteMode,
         },
         path::{ResolveBase, ResolvePathRequest},
-        search::{GlobRequest, GrepMode, GrepRequest},
+        search::{GlobRequest, GrepMode, GrepPatternKind, GrepRequest},
     },
     BackendPath, ExportedFile, ExportedFileSource, OperationBackendBuilder, OperationBackendConfig,
     OperationError, PathKind, PathStat,
@@ -158,23 +158,40 @@ async fn handle_request(
             }))
         }
         BackendCliRequest::Grep {
-            query,
-            base_dir,
+            pattern,
+            pattern_kind,
+            target,
             include,
             mode,
             head_limit,
+            offset,
+            case_insensitive,
+            exclude_vcs,
         } => {
             let result = backend
                 .search()
                 .grep(GrepRequest {
-                    query,
-                    base_dir: BackendPath(base_dir),
+                    pattern,
+                    pattern_kind: pattern_kind.into_contract(),
+                    target: BackendPath(target),
                     include,
                     mode: mode.into_contract(),
                     head_limit,
+                    offset,
+                    case_insensitive,
+                    exclude_vcs,
                 })
                 .await?;
-            Ok(json!({ "entries": result.entries }))
+            Ok(json!({
+                "entries": result.entries.iter().map(|e| json!({
+                    "path": e.path.0,
+                    "line_number": e.line_number,
+                    "line": e.line,
+                    "match_count": e.match_count,
+                })).collect::<Vec<_>>(),
+                "truncated": result.truncated,
+                "files_searched": result.files_searched,
+            }))
         }
         BackendCliRequest::TempPath {
             kind,
@@ -337,6 +354,10 @@ fn strip_jsonc_comments(input: &str) -> String {
     output
 }
 
+fn default_exclude_vcs() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 struct BackendConfigFile {
     backend: BackendConfigEntry,
@@ -376,11 +397,19 @@ enum BackendCliRequest {
     },
     #[serde(rename = "grep")]
     Grep {
-        query: String,
-        base_dir: String,
+        #[serde(alias = "query")]
+        pattern: String,
+        pattern_kind: GrepPatternKindInput,
+        #[serde(alias = "base_dir")]
+        target: String,
         include: Option<String>,
         mode: GrepModeInput,
         head_limit: Option<usize>,
+        offset: Option<usize>,
+        #[serde(default)]
+        case_insensitive: bool,
+        #[serde(default = "default_exclude_vcs")]
+        exclude_vcs: bool,
     },
     #[serde(rename = "temp_path")]
     TempPath {
@@ -458,6 +487,22 @@ impl TempPathKindInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
+enum GrepPatternKindInput {
+    Regex,
+    Literal,
+}
+
+impl GrepPatternKindInput {
+    fn into_contract(self) -> GrepPatternKind {
+        match self {
+            GrepPatternKindInput::Regex => GrepPatternKind::Regex,
+            GrepPatternKindInput::Literal => GrepPatternKind::Literal,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum GrepModeInput {
     FilesWithMatches,
     Content,
@@ -468,7 +513,11 @@ impl GrepModeInput {
     fn into_contract(self) -> GrepMode {
         match self {
             GrepModeInput::FilesWithMatches => GrepMode::FilesWithMatches,
-            GrepModeInput::Content => GrepMode::Content,
+            GrepModeInput::Content => GrepMode::Content {
+                show_line_numbers: true,
+                context_before: None,
+                context_after: None,
+            },
             GrepModeInput::Count => GrepMode::Count,
         }
     }

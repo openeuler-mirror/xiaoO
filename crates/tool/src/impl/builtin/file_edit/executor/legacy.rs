@@ -13,7 +13,7 @@ use agent_contracts::tool::spec::ToolSpecView;
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use super::super::file_read::dedup::DedupStateStore;
+use crate::r#impl::builtin::file_read::dedup::DedupStateStore;
 use super::input::FileEditInput;
 use super::output::FileEditOutput;
 use super::spec::FileEditToolSpec;

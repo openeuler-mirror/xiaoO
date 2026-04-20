@@ -8,6 +8,7 @@ license.workspace = true
 agent-contracts = { path = "../agent-contracts" }
 async-trait.workspace = true
 glob = "0.3"
+regex = "1"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

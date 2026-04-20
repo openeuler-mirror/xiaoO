@@ -14,10 +14,10 @@ use std::path::Path;
 
 use crate::r#impl::path_resolver::expand_path_from_base;
 
-use super::super::file_read::dedup::{get_file_mtime, DedupStateStore};
 use super::constants::MAX_EDIT_FILE_SIZE;
 use super::input::FileEditInput;
 use super::utils::find_actual_string;
+use crate::r#impl::builtin::file_read::dedup::{get_file_mtime, DedupStateStore};
 
 /// Error codes for validation failures.
 ///
