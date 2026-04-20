@@ -1,6 +1,5 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::Color,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
@@ -12,20 +11,29 @@ use crate::app_state::RuntimeStatusLight;
 use crate::status_panel::StatusPanel;
 
 impl App {
-    pub(crate) fn render_header(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(self.state.theme.border))
             .style(Style::default().bg(self.state.theme.background));
         let inner = block.inner(area);
+        self.state.render_state.theme_toggle_area = None;
         frame.render_widget(block, area);
+
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let theme_button_text = format!(" {} ", self.state.theme.toggle_button_label());
+        let theme_button_width = theme_button_text.chars().count() as u16;
 
         let inner_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(14),
                 Constraint::Min(1),
+                Constraint::Length(theme_button_width),
                 Constraint::Length(20),
             ])
             .split(inner);
@@ -61,6 +69,21 @@ impl App {
         }
         frame.render_widget(Paragraph::new(Line::from(tabs)), inner_chunks[1]);
 
+        let theme_button_style = Style::default()
+            .fg(self.state.theme.primary)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let theme_button = Paragraph::new(Line::from(vec![Span::styled(
+            theme_button_text.clone(),
+            theme_button_style,
+        )]));
+        frame.render_widget(theme_button, inner_chunks[2]);
+        self.state.render_state.theme_toggle_area = Some(Rect {
+            x: inner_chunks[2].x,
+            y: inner_chunks[2].y,
+            width: theme_button_width.min(inner_chunks[2].width),
+            height: 1,
+        });
+
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         let (status_light_color, status_label, status_label_style) =
             match self.state.runtime_status_light() {
@@ -79,10 +102,10 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 RuntimeStatusLight::Idle => (
-                    Color::White,
+                    self.state.theme.foreground,
                     "IDLE",
                     Style::default()
-                        .fg(Color::White)
+                        .fg(self.state.theme.foreground)
                         .add_modifier(Modifier::BOLD),
                 ),
             };
@@ -92,7 +115,7 @@ impl App {
             Span::styled(now, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);
-        frame.render_widget(status, inner_chunks[2]);
+        frame.render_widget(status, inner_chunks[3]);
     }
 
     pub(crate) fn render_status_bar(&self, frame: &mut Frame, area: Rect) {

@@ -59,6 +59,13 @@ impl GatewayRuntime {
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
     }
+
+    pub fn needs_active_refresh(&self) -> bool {
+        self.stream_rx.is_some()
+            || !self.stream_reveal_buffer.is_empty()
+            || self.pending_stream_done.is_some()
+    }
+
     /// Closes all active sessions, firing the SessionClosed hook for each.
     /// Should be called before the application exits.
     pub async fn close_sessions(&self) {

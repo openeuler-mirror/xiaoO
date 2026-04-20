@@ -13,8 +13,8 @@ pub fn api_key_env_for_provider(provider: &str) -> &'static str {
         "mistral" => "MISTRAL_API_KEY",
         "xai" | "xai-grok" => "XAI_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
-        "zai" | "zai-global" | "z.ai" | "zai-cn" | "zai-china"
-        | "bigmodel" | "zhipu" | "glm-cn" => "ZHIPU_API_KEY",
+        "zai" | "zai-global" | "z.ai" | "zai-cn" | "zai-china" | "bigmodel" | "zhipu"
+        | "glm-cn" => "ZHIPU_API_KEY",
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => "ZHIPU_API_KEY",
         "glm" | "glm-global" => "GLM_API_KEY",
         "gitcode" => "GITCODE_API_KEY",

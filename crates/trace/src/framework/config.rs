@@ -4,7 +4,9 @@ use serde_json::Value;
 use super::backend::BACKEND_TYPE_MOIRAI_SQLITE;
 pub(crate) fn default_db_path() -> String {
     let home = dirs::home_dir().unwrap_or_else(|| ".".into());
-    home.join(".xiaoo/data/trace.db").to_string_lossy().into_owned()
+    home.join(".xiaoo/data/trace.db")
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -39,8 +41,8 @@ impl TraceRecorderConfig {
                     }
                 };
 
-                let db_path = parse_optional_string(&map, "db_path")?
-                    .or_else(|| Some(default_db_path()));
+                let db_path =
+                    parse_optional_string(&map, "db_path")?.or_else(|| Some(default_db_path()));
                 let agent_id = parse_optional_string(&map, "agent_id")?;
 
                 Ok(Self {
