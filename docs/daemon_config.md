@@ -4,7 +4,7 @@
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
 | `--host <HOST>` | Bind address | `0.0.0.0` |
-| `--port <PORT>` | Listen port | `8080` |
+| `--port <PORT>` | Listen port | `18080` |
 
 ### Daemon Configuration File (TOML)
 
@@ -23,6 +23,10 @@ app_id = "cli_..."
 app_secret_env = "FEISHU_APP_SECRET"
 verification_token = "your-token"
 base_url = "https://open.feishu.cn"  # Optional, default value
+
+[http]                               # Optional, enable Bearer auth for chat APIs
+bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
+# bearer_token = "local-dev-token"   # Optional, use env var in production; do not set both
 
 [trace]                              # Optional, tracing/observability config
 storage_backend = "moirai-sqlite"    # moirai-sqlite (default) | stdout | noop
@@ -94,7 +98,8 @@ Chat endpoint. Send messages to the Gateway and receive responses.
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/chat \
+curl -X POST http://localhost:18080/api/v1/chat \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
@@ -133,6 +138,7 @@ curl -X POST http://localhost:8080/api/v1/chat \
   { "error": "text must not be empty" }
   ```
 - `500 Internal Server Error` — Session service internal error
+- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
 
 ---
 
@@ -157,7 +163,8 @@ Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **
 **Example Request:**
 
 ```bash
-curl -N -X POST http://localhost:8080/api/v1/chat/stream \
+curl -N -X POST http://localhost:18080/api/v1/chat/stream \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
@@ -186,6 +193,7 @@ data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! Ho
 **Error Responses:**
 
 - `400 Bad Request` — Same validation errors as `/api/v1/chat`
+- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
 
 ---
 
@@ -210,6 +218,7 @@ Called by Feishu platform via POST, Body is raw JSON event payload, Headers cont
 - **Feishu not configured**: `503 Service Unavailable` → `{ "error": "feishu webhook is not configured" }`
 
 > ⚠️ This endpoint requires Feishu Open Platform Event Subscription configuration, pointing the callback URL to `http://<your-host>:<port>/api/v1/channels/feishu/events`.
+> It is intentionally **not** wrapped by the HTTP Bearer middleware; Feishu requests continue to use Feishu's own verification flow.
 
 ### Session Isolation Mechanism
 

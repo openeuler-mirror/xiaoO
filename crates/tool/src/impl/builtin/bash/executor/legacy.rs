@@ -18,8 +18,16 @@ use super::output::BashOutput;
 use super::spec::BashToolSpec;
 use super::validation;
 
+const SHELL_COMMAND_FLAG: &str = "-c";
+const MAX_OUTPUT_BYTES_PER_STREAM: usize = 1024 * 1024;
+
 pub struct BashExecutor {
     spec: Arc<BashToolSpec>,
+}
+
+struct CollectedPipeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
 impl BashExecutor {
@@ -27,20 +35,48 @@ impl BashExecutor {
         Self { spec }
     }
 
-    async fn read_pipe<R>(reader: Option<R>) -> Result<Vec<u8>, String>
+    async fn read_pipe<R>(reader: Option<R>) -> Result<CollectedPipeOutput, String>
     where
         R: tokio::io::AsyncRead + Unpin,
     {
         let Some(mut reader) = reader else {
-            return Ok(Vec::new());
+            return Ok(CollectedPipeOutput {
+                bytes: Vec::new(),
+                truncated: false,
+            });
         };
 
         let mut buffer = Vec::new();
-        reader
-            .read_to_end(&mut buffer)
-            .await
-            .map_err(|e| format!("Failed to read process output: {}", e))?;
-        Ok(buffer)
+        let mut chunk = [0_u8; 8192];
+        let mut truncated = false;
+
+        loop {
+            let read = reader
+                .read(&mut chunk)
+                .await
+                .map_err(|e| format!("Failed to read process output: {}", e))?;
+            if read == 0 {
+                break;
+            }
+
+            let available = MAX_OUTPUT_BYTES_PER_STREAM.saturating_sub(buffer.len());
+            let copy_len = available.min(read);
+            if copy_len > 0 {
+                buffer.extend_from_slice(&chunk[..copy_len]);
+            }
+            if copy_len < read {
+                truncated = true;
+            }
+        }
+
+        Ok(CollectedPipeOutput {
+            bytes: buffer,
+            truncated,
+        })
+    }
+
+    fn append_shell_command(command: &mut Command, shell_command: &str) {
+        command.arg(SHELL_COMMAND_FLAG).arg(shell_command);
     }
 
     async fn execute_with_shell(
@@ -51,9 +87,8 @@ impl BashExecutor {
         let timeout_ms = input.timeout.unwrap_or_else(default_timeout_ms);
 
         let mut command = Command::new(shell);
+        Self::append_shell_command(&mut command, &input.command);
         command
-            .arg("-lc")
-            .arg(&input.command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -94,16 +129,18 @@ impl BashExecutor {
                 }
             };
 
-        let stdout_bytes = stdout_task
+        let stdout = stdout_task
             .await
             .map_err(|e| format!("Failed to join stdout reader task: {}", e))??;
-        let stderr_bytes = stderr_task
+        let stderr = stderr_task
             .await
             .map_err(|e| format!("Failed to join stderr reader task: {}", e))??;
 
         let output = BashOutput {
-            stdout: String::from_utf8_lossy(&stdout_bytes).replace("\r\n", "\n"),
-            stderr: String::from_utf8_lossy(&stderr_bytes).replace("\r\n", "\n"),
+            stdout: String::from_utf8_lossy(&stdout.bytes).replace("\r\n", "\n"),
+            stdout_truncated: stdout.truncated,
+            stderr: String::from_utf8_lossy(&stderr.bytes).replace("\r\n", "\n"),
+            stderr_truncated: stderr.truncated,
             exit_code,
             interrupted,
         };
@@ -162,5 +199,72 @@ impl ToolExecutor for BashExecutor {
         Ok(ToolExecutorOutput::Completed {
             raw_outcome: RawToolOutcome::Success { output: serialized },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BashExecutor, BashInput, MAX_OUTPUT_BYTES_PER_STREAM};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use tokio::io::AsyncReadExt;
+    use uuid::Uuid;
+
+    fn make_temp_test_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("xiaoo-bash-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("temp test dir should be created");
+        path
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_pipe_truncates_without_growing_unbounded() {
+        let reader = tokio::io::repeat(b'a').take((MAX_OUTPUT_BYTES_PER_STREAM + 512) as u64);
+
+        let output = BashExecutor::read_pipe(Some(reader))
+            .await
+            .expect("pipe should read");
+
+        assert_eq!(output.bytes.len(), MAX_OUTPUT_BYTES_PER_STREAM);
+        assert!(output.truncated);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn execute_with_shell_uses_non_login_flag() {
+        let temp_dir = make_temp_test_dir();
+        let shell_path = temp_dir.join("fake-shell.sh");
+        let flag_path = temp_dir.join("flag.txt");
+        fs::write(
+            &shell_path,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > '{}'\nexit 0\n",
+                flag_path.display()
+            ),
+        )
+        .expect("shell script should write");
+
+        let mut permissions = fs::metadata(&shell_path)
+            .expect("shell script should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shell_path, permissions).expect("shell script should be executable");
+
+        let output = BashExecutor::execute_with_shell(
+            shell_path.to_str().expect("path should be utf-8"),
+            &BashInput {
+                command: "echo ignored".to_string(),
+                cwd: None,
+                timeout: Some(1_000),
+            },
+            &temp_dir,
+        )
+        .await
+        .expect("executor should run fake shell");
+
+        assert_eq!(output.exit_code, Some(0));
+        let flag = fs::read_to_string(flag_path).expect("flag should be captured");
+        assert_eq!(flag, "-c");
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 }
