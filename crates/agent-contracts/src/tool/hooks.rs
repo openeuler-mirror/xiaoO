@@ -1,4 +1,4 @@
-use crate::hooker::registry::Hooker;
+use crate::hook::registry::Hooker;
 use crate::runtime::runtime_view::RuntimeView;
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,

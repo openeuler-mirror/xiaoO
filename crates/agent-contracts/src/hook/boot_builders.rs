@@ -1,6 +1,6 @@
-use crate::hooker::registry::HookerRegistry;
+use crate::hook::registry::HookerRegistry;
 use agent_types::common::BuildError;
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 
 pub trait HookerRegistryBuilder: Send {
     fn with_config(self, config: HookerRegistryConfig) -> Self

@@ -23,7 +23,7 @@ impl SessionGateway {
     /// `open_session` / `force_close_session`.
     async fn get_or_init_lifecycle_control_plane(
         &self,
-        hooker_config: agent_types::hooker::HookerRegistryConfig,
+        hooker_config: agent_types::hook::HookerRegistryConfig,
     ) -> Result<Arc<dyn SessionControlPlane>, String> {
         let mut lock = self.lifecycle_control_plane.lock().await;
         if let Some(cp) = lock.as_ref() {

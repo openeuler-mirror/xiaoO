@@ -4,14 +4,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
-use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
+use agent_types::hook::HookPointId;
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::llm::{
     ErrorLlmHookInput, ErrorLlmHookResult, LlmError, LlmRequest, LlmResponse, PostLlmHookInput,
     PostLlmHookResult, PreLlmHookInput, PreLlmHookResult, StreamChunk,
 };
 use async_trait::async_trait;
-use hooker::{resolve_hook_point_category, HookPointCategory};
+use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
 
 use super::trace::{

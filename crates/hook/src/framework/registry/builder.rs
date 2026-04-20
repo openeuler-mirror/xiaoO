@@ -3,9 +3,9 @@ use std::fs;
 
 use crate::framework::HookerRegistryImpl;
 use crate::hookers::build_hookers;
-use agent_contracts::hooker::{HookerRegistry, HookerRegistryBuilder};
+use agent_contracts::hook::{HookerRegistry, HookerRegistryBuilder};
 use agent_types::common::BuildError;
-use agent_types::hooker::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 
 pub struct HookerRegistryBuilderImpl {
     // Stores the hooker registry config for later use in build().

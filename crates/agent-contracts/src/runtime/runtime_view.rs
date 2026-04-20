@@ -1,5 +1,5 @@
 use crate::events::tool_events::ToolEventSink;
-use crate::hooker::registry::HookerRegistry;
+use crate::hook::registry::HookerRegistry;
 use crate::interaction::InteractionHandle;
 use crate::runtime::agent_context::AgentContext;
 use crate::runtime::channel_file_sender::ChannelFileSender;

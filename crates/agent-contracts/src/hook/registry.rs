@@ -1,10 +1,10 @@
 use crate::runtime::runtime_view::RuntimeView;
-use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeOutput};
+use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeOutput};
 use async_trait::async_trait;
 use std::any::Any;
 
 use agent_types::common::HookerId;
-use agent_types::hooker::{HookPointId, HookerDescriptor};
+use agent_types::hook::{HookPointId, HookerDescriptor};
 
 #[async_trait]
 pub trait Hooker: Send + Sync + 'static {

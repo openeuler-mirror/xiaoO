@@ -8,7 +8,7 @@ license.workspace = true
 agent-contracts = { path = "../agent-contracts" }
 agent-llm = { path = "../agent-llm" }
 agent-types = { path = "../agent-types" }
-hooker = { path = "../hooker" }
+hook = { path = "../hook" }
 serde.workspace = true
 serde_json.workspace = true
 async-trait.workspace = true

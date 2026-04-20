@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
 use agent_types::common::HookerId;
-use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
+use agent_types::hook::HookPointId;
+use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::interaction::types::InteractionSource;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::{
@@ -575,7 +575,7 @@ mod tests {
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
     use agent_contracts::events::tool_events::ToolEventSink;
-    use agent_contracts::hooker::registry::HookerRegistry;
+    use agent_contracts::hook::registry::HookerRegistry;
     use agent_contracts::interaction::handle::InteractionHandle;
     use agent_contracts::runtime::agent_context::{AgentContext, ConversationView};
     use agent_contracts::runtime::runtime_view::RuntimeView;

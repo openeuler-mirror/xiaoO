@@ -6,7 +6,7 @@ members = [
     "crates/agent-types",
     "crates/agent-contracts",
     "crates/agent-llm",
-    "crates/hooker",
+    "crates/hook",
     "crates/core",
     "crates/memory",
     "crates/compact",

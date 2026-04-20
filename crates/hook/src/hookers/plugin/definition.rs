@@ -1,5 +1,5 @@
 use agent_types::common::{BuildError, HookerId};
-use agent_types::hooker::HookPointId;
+use agent_types::hook::HookPointId;
 
 pub(crate) struct PluginHookerDefinition {
     pub(crate) id: HookerId,

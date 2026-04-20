@@ -5,8 +5,8 @@ use std::process::{Command, Stdio};
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
 use agent_types::common::HookerId;
-use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
+use agent_types::hook::HookPointId;
+use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::interaction::types::InteractionSource;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::llm::{

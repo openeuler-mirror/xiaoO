@@ -1,5 +1,5 @@
 use agent_types::common::BuildError;
-use agent_types::hooker::HookPointId;
+use agent_types::hook::HookPointId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HookPointCategory {

@@ -1,23 +1,23 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
-/// The source of an exported file.
-#[derive(Debug, Clone)]
-pub enum ExportedFileSource {
-    /// The file is accessible at a host path.
-    HostPath(PathBuf),
-    /// The file contents are provided as bytes.
-    Bytes(Vec<u8>),
-}
+use crate::backend::OperationError;
+use async_trait::async_trait;
+use tokio::io::AsyncRead;
 
-/// A file that has been exported from the backend.
+pub type ExportedFileReader = Box<dyn AsyncRead + Send + Unpin>;
+
 #[derive(Debug, Clone)]
-pub struct ExportedFile {
-    /// Human-readable name for display purposes.
+pub struct ExportedFileMeta {
     pub file_name: String,
-    /// Size in bytes.
-    pub size_bytes: u64,
-    /// MIME type if known.
+    pub size_bytes: Option<u64>,
     pub media_type: Option<String>,
-    /// The source of the file data.
-    pub source: ExportedFileSource,
 }
+
+#[async_trait]
+pub trait ExportedFileHandle: Send + Sync {
+    fn metadata(&self) -> &ExportedFileMeta;
+
+    async fn open_read(&self) -> Result<ExportedFileReader, OperationError>;
+}
+
+pub type SharedExportedFileHandle = Arc<dyn ExportedFileHandle>;

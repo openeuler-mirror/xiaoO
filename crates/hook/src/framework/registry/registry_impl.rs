@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use agent_contracts::hooker::{Hooker, HookerRegistry};
+use agent_contracts::hook::{Hooker, HookerRegistry};
 use agent_types::common::HookerId;
-use agent_types::hooker::HookPointId;
+use agent_types::hook::HookPointId;
 
 pub struct HookerRegistryImpl {
     // Stores all registered hookers (tool and LLM) by HookerId.

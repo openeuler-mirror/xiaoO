@@ -1,11 +1,11 @@
 use std::any::Any;
 
-use agent_contracts::hooker::hookers::tool_hookers::PreToolHook;
+use agent_contracts::hook::hookers::tool_hookers::PreToolHook;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
 use agent_types::common::HookerId;
-use agent_types::hooker::HookPointId;
-use agent_types::hooker::{HookInvokeError, HookInvokeInput, HookInvokeOutput};
+use agent_types::hook::HookPointId;
+use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeOutput};
 use agent_types::tool::ToolExecutionError;
 use agent_types::tool::{PreHookResult, PreToolHookInput};
 use async_trait::async_trait;

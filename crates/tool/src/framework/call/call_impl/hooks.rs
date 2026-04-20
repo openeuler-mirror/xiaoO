@@ -1,11 +1,11 @@
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
-use agent_types::hooker::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
 };
-use hooker::{resolve_hook_point_category, HookPointCategory};
+use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
 use std::borrow::Cow;
 
