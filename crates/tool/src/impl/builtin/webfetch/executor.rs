@@ -34,7 +34,15 @@ impl WebFetchExecutor {
         // This prevents DNS rebinding attacks where a hostname resolves to safe IP
         // during validation but to a blocked IP during actual request.
         let host = extract_host_for_dns(&input.url);
-        match host.to_socket_addrs() {
+        // Infer default port from URL scheme so that to_socket_addrs() receives a
+        // valid "host:port" string (Rust's ToSocketAddrs requires a port number).
+        let port = if input.url.starts_with("https://") {
+            443
+        } else {
+            80
+        };
+        let host_port = format!("{}:{}", host, port);
+        match host_port.to_socket_addrs() {
             Ok(addrs) => {
                 let addr_vec: Vec<_> = addrs.collect();
                 let dns_check = validation::validate_resolved_addrs(&addr_vec);
