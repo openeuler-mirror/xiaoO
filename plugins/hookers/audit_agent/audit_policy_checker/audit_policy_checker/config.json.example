@@ -1,0 +1,31 @@
+{
+    "llm": {
+        "api_key": "your-openrouter-api-key-here",
+        "model": "anthropic/claude-3.5-sonnet",
+        "temperature": 0.1,
+        "base_url": "https://openrouter.ai/api/v1"
+    },
+    "timeout": {
+        "total_timeout": 60.0,
+        "prompt1_timeout": 30.0,
+        "prompt2_timeout": 20.0,
+        "step_interval": 5.0
+    },
+    "cache": {
+        "enabled": true,
+        "max_size": 1000
+    },
+    "retry": {
+        "max_retries": 3,
+        "retry_interval": 2.0
+    },
+    "security": {
+        "enabled": true,
+        "heuristic_enabled": true,
+        "logic_rules_enabled": true,
+        "llm_analysis_enabled": true,
+        "rules_path": "",
+        "skills_dir": ""
+    },
+    "log_level": "INFO"
+}

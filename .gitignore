@@ -22,13 +22,3 @@ __pycache__/
 .idea/
 .opencode/
 CLAUDE.md
-
-
-**/plugin.json
-
-tmp/
-findings.md
-progress.md
-task_plan.md
-
-.sisyphus/

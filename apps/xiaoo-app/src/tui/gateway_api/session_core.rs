@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
-    AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult,
-    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SessionControlPlane,
-    SessionOpenRequest, SessionRuntimeBindings, SessionStore,
+    AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
+    HostedSessionRuntimeResolver, SessionControlPlane, SessionOpenRequest, SessionRuntimeBindings,
+    SessionStore,
 };
 use crate::interaction_prompt::UserPromptResult;
 

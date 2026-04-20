@@ -38,6 +38,7 @@ impl App {
         self.state.render_state.interaction_prompt_list_area = None;
         self.state.render_state.interaction_prompt_supplement_area = None;
         self.state.render_state.slash_popup_inner = None;
+        self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
         self.render_status_bar(frame, chunks[3]);
 
@@ -48,8 +49,8 @@ impl App {
         if let Some(dialog) = self.state.provider_dialog.as_ref() {
             self.render_provider_dialog(frame, frame.area(), dialog);
         }
-        if let Some(dialog) = self.state.api_key_dialog.as_ref() {
-            self.render_api_key_dialog(frame, frame.area(), dialog);
+        if let Some(dialog) = self.state.api_key_dialog.clone() {
+            self.render_api_key_dialog(frame, frame.area(), &dialog);
         }
 
         // Copy-to-clipboard toast (mirrors opencode's toast.show after copy).

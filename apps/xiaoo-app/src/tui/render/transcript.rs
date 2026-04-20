@@ -7,10 +7,13 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
-use crate::app_state::ToolToggleRegion;
-use crate::chat::{MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolMessageState};
+use crate::app_state::{
+    CachedMessageLayout, CachedMessageRender, ToolToggleRegion, TranscriptRenderCache,
+};
+use crate::chat::{Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolMessageState};
 use crate::markdown::render_markdown;
 use crate::theme::Theme;
 
@@ -35,357 +38,151 @@ impl App {
         frame.render_widget(block.clone(), area);
 
         let inner_height = inner_area.height as usize;
-        let mut message_entries: Vec<(usize, Vec<Line>, Option<usize>)> = Vec::new();
-        for (message_index, message) in self.state.chat_state.messages.iter().enumerate() {
-            if let Some(tool) = &message.tool_state {
-                let tool_color = match tool.status {
-                    ToolExecutionStatus::Running => self.state.theme.accent,
-                    ToolExecutionStatus::Completed => self.state.theme.success,
-                    ToolExecutionStatus::Failed => self.state.theme.error,
-                };
-                let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-                if is_subagent_tool(&tool.tool) {
-                    let mut lines = render_subagent_tool_lines(
-                        tool,
-                        &timestamp,
-                        tool_color,
+        let loading_animation = self.loading_animation();
+        let message_count = self.state.chat_state.messages.len();
+        if self.state.render_state.message_renders.len() != message_count {
+            self.state
+                .render_state
+                .message_renders
+                .resize(message_count, None);
+            self.state.render_state.transcript_cache = None;
+        }
+
+        let mut transcript_dirty = self.state.render_state.transcript_cache.is_none();
+        for message_index in 0..message_count {
+            let message = &self.state.chat_state.messages[message_index];
+            let is_active_stream_message = self.gateway.stream_message_index == Some(message_index);
+            let should_bypass_cache = is_active_stream_message && self.state.chat_state.is_loading;
+            if should_bypass_cache {
+                transcript_dirty = true;
+                continue;
+            }
+
+            let cache_slot = &mut self.state.render_state.message_renders[message_index];
+            let needs_rebuild = cache_slot.as_ref().is_none_or(|cached| {
+                cached.revision != message.render_revision
+                    || cached.width != inner_area.width
+                    || cached.theme != self.state.theme
+            });
+            if needs_rebuild {
+                *cache_slot = Some(render_message_entry(
+                    message,
+                    &self.state.theme,
+                    inner_area.width,
+                    is_active_stream_message,
+                    self.state.chat_state.is_loading,
+                    &loading_animation,
+                ));
+                transcript_dirty = true;
+            }
+        }
+
+        if transcript_dirty {
+            let mut current_renders = Vec::with_capacity(message_count);
+            for message_index in 0..message_count {
+                let message = &self.state.chat_state.messages[message_index];
+                let is_active_stream_message =
+                    self.gateway.stream_message_index == Some(message_index);
+                let should_bypass_cache =
+                    is_active_stream_message && self.state.chat_state.is_loading;
+                if should_bypass_cache {
+                    current_renders.push(render_message_entry(
+                        message,
                         &self.state.theme,
                         inner_area.width,
+                        is_active_stream_message,
+                        self.state.chat_state.is_loading,
+                        &loading_animation,
+                    ));
+                } else {
+                    current_renders.push(
+                        self.state.render_state.message_renders[message_index]
+                            .as_ref()
+                            .expect("message render cache must be populated")
+                            .clone(),
                     );
-                    lines.push(Line::raw(""));
-                    message_entries.push((message_index, lines, Some(0)));
-                    continue;
-                }
-
-                let toggle = if tool.expanded { "▾" } else { "▸" };
-                let status = match tool.status {
-                    ToolExecutionStatus::Running => "running",
-                    ToolExecutionStatus::Completed => "done",
-                    ToolExecutionStatus::Failed => "failed",
-                };
-                let mut header = format!("{} {}  {}", toggle, tool.tool, status);
-                if let Some(exit_code) = tool.exit_code {
-                    header.push_str(&format!("  exit={}", exit_code));
-                }
-                if let Some(duration_ms) = tool.duration_ms {
-                    header.push_str(&format!("  {}ms", duration_ms));
-                }
-                if !tool.summary.trim().is_empty() {
-                    header.push_str(&format!("  {}", tool.summary.trim()));
-                }
-                let max_header_width = inner_area.width.saturating_sub(2) as usize;
-                let header = truncate_display_width(&header, max_header_width);
-
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled("▎ ", Style::default().fg(tool_color)),
-                        Span::styled(
-                            "Tool",
-                            Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  {}", timestamp),
-                            Style::default().fg(self.state.theme.muted),
-                        ),
-                    ]),
-                    Line::styled(header, Style::default().fg(tool_color)),
-                ];
-
-                let command_text = if tool.expanded {
-                    tool.command.as_deref()
-                } else {
-                    tool.command_preview.as_deref()
-                };
-                if let Some(command_text) = command_text.filter(|text| !text.trim().is_empty()) {
-                    lines.push(Line::styled(
-                        "  Command",
-                        Style::default()
-                            .fg(self.state.theme.muted)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    for line in command_text.lines() {
-                        lines.push(Line::styled(
-                            format!("    {}", line),
-                            Style::default().fg(self.state.theme.foreground),
-                        ));
-                    }
-                    if !tool.expanded && tool.command_preview != tool.command {
-                        lines.push(Line::styled(
-                            "    ... click to expand full command",
-                            Style::default()
-                                .fg(self.state.theme.muted)
-                                .add_modifier(Modifier::ITALIC),
-                        ));
-                    }
-                }
-
-                if tool.expanded && tool.command.is_none() && !tool.args_preview.trim().is_empty() {
-                    lines.push(Line::styled(
-                        "  Arguments",
-                        Style::default()
-                            .fg(self.state.theme.muted)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    for line in tool.args_preview.lines() {
-                        lines.push(Line::styled(
-                            format!("    {}", line),
-                            Style::default().fg(self.state.theme.foreground),
-                        ));
-                    }
-                }
-
-                let detail_text = render_tool_detail_text(&tool.detail);
-                let detail_text = detail_text.trim();
-                if tool.expanded && !detail_text.is_empty() {
-                    lines.push(Line::styled(
-                        "  Output",
-                        Style::default()
-                            .fg(self.state.theme.muted)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    for line in detail_text.lines() {
-                        lines.push(Line::styled(
-                            format!("    {}", line),
-                            Style::default().fg(self.state.theme.foreground),
-                        ));
-                    }
-                }
-                lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, Some(1)));
-                continue;
-            }
-
-            if let Some(todo) = &message.todo_state {
-                let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled("▎ ", Style::default().fg(self.state.theme.secondary)),
-                        Span::styled(
-                            "Planner",
-                            Style::default()
-                                .fg(self.state.theme.secondary)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  {}", timestamp),
-                            Style::default().fg(self.state.theme.muted),
-                        ),
-                    ]),
-                    Line::styled(
-                        format!("  {}", todo.title),
-                        Style::default()
-                            .fg(self.state.theme.secondary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-
-                for (status, content) in &todo.items {
-                    let (icon, color) = match status {
-                        TodoDisplayStatus::Completed => ("✅", self.state.theme.success),
-                        TodoDisplayStatus::InProgress => ("◔", self.state.theme.accent),
-                        TodoDisplayStatus::Pending => ("☐", self.state.theme.muted),
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                        Span::styled(
-                            content.as_str(),
-                            Style::default().fg(self.state.theme.foreground),
-                        ),
-                    ]));
-                }
-                lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, None));
-                continue;
-            }
-
-            if let Some(checker) = &message.completion_check_state {
-                let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-                let mut lines = vec![
-                    Line::from(vec![
-                        Span::styled("▎ ", Style::default().fg(self.state.theme.gradient_yellow)),
-                        Span::styled(
-                            "Checker",
-                            Style::default()
-                                .fg(self.state.theme.gradient_yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("  {}", timestamp),
-                            Style::default().fg(self.state.theme.muted),
-                        ),
-                    ]),
-                    Line::styled(
-                        "  next_step_hint",
-                        Style::default()
-                            .fg(self.state.theme.gradient_yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-
-                if !checker.next_step_hint.trim().is_empty() {
-                    lines.push(Line::styled(
-                        format!("  → {}", checker.next_step_hint.trim()),
-                        Style::default().fg(self.state.theme.foreground),
-                    ));
-                }
-                if !checker.missing_information.trim().is_empty() {
-                    lines.push(Line::styled(
-                        format!(
-                            "  missing_information: {}",
-                            checker.missing_information.trim()
-                        ),
-                        Style::default().fg(self.state.theme.muted),
-                    ));
-                }
-                if !checker.reason.trim().is_empty() {
-                    lines.push(Line::styled(
-                        format!("  reason: {}", checker.reason.trim()),
-                        Style::default().fg(self.state.theme.muted),
-                    ));
-                }
-                lines.push(Line::raw(""));
-                message_entries.push((message_index, lines, None));
-                continue;
-            }
-
-            let (indicator_color, role_label, role_style) = match message.role {
-                MessageRole::User => (
-                    self.state.theme.primary,
-                    "You",
-                    Style::default()
-                        .fg(self.state.theme.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                MessageRole::Assistant => (
-                    self.state.theme.accent,
-                    "Assistant",
-                    Style::default()
-                        .fg(self.state.theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                MessageRole::System => (
-                    self.state.theme.success,
-                    "System",
-                    Style::default().fg(self.state.theme.success),
-                ),
-                MessageRole::Tool => (
-                    self.state.theme.muted,
-                    "Tool",
-                    Style::default().fg(self.state.theme.muted),
-                ),
-            };
-
-            let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-            let is_active_stream_message = self.gateway.stream_message_index == Some(message_index);
-            let show_stream_thinking = message.role == MessageRole::Assistant
-                && message.is_streaming
-                && is_active_stream_message
-                && message.content.is_empty();
-            let mut lines = vec![Line::from(vec![
-                Span::styled("▎ ", Style::default().fg(indicator_color)),
-                Span::styled(role_label.to_string(), role_style),
-                Span::styled(
-                    format!("  {}", timestamp),
-                    Style::default().fg(self.state.theme.muted),
-                ),
-            ])];
-
-            if !message.thinking_content.is_empty() {
-                let is_thinking = self.state.chat_state.is_loading
-                    && is_active_stream_message
-                    && message.content.is_empty();
-                let thinking_header = if is_thinking {
-                    format!("  ⟡ {}", self.loading_animation())
-                } else {
-                    "  ⟡ Thought".to_string()
-                };
-                lines.push(Line::styled(
-                    thinking_header,
-                    Style::default()
-                        .fg(self.state.theme.muted)
-                        .add_modifier(Modifier::ITALIC),
-                ));
-                let thinking_style = Style::default()
-                    .fg(self.state.theme.muted)
-                    .add_modifier(Modifier::DIM);
-                for line in message.thinking_content.lines() {
-                    lines.push(Line::styled(format!("  │ {}", line), thinking_style));
-                }
-                lines.push(Line::raw(""));
-            }
-
-            if show_stream_thinking {
-                lines.push(Line::styled(
-                    format!("  {}", self.loading_animation()),
-                    Style::default().fg(self.state.theme.accent),
-                ));
-            }
-
-            match message.role {
-                MessageRole::Assistant if !message.content.is_empty() => {
-                    let markdown_lines =
-                        render_markdown(&message.content, &self.state.theme, inner_area.width);
-                    lines.extend(markdown_lines);
-                }
-                _ => {
-                    for line in message.content.lines() {
-                        lines.push(Line::styled(
-                            format!("  {}", line),
-                            Style::default().fg(self.state.theme.foreground),
-                        ));
-                    }
                 }
             }
-
-            if message.is_streaming && !show_stream_thinking {
-                lines.push(Line::styled(
-                    "  ▌",
-                    Style::default().fg(self.state.theme.accent),
-                ));
-            }
-            lines.push(Line::raw(""));
-            message_entries.push((message_index, lines, None));
+            let transcript_cache = build_transcript_cache(&current_renders);
+            self.state.render_state.line_texts = transcript_cache.line_texts.clone();
+            self.state.render_state.line_is_header = transcript_cache.line_is_header.clone();
+            self.state.render_state.transcript_cache = Some(transcript_cache);
         }
 
-        let mut all_lines: Vec<Line> = Vec::new();
-        let mut line_is_header: Vec<bool> = Vec::new();
-        for (_, lines, _) in &message_entries {
-            for (i, line) in lines.iter().enumerate() {
-                all_lines.push(line.clone());
-                // The first line of every entry is the "▎ Role  HH:MM:SS" header.
-                // Mark it so that selection extraction can skip it.
-                line_is_header.push(i == 0);
-            }
+        let transcript_cache = self
+            .state
+            .render_state
+            .transcript_cache
+            .as_ref()
+            .expect("transcript cache must be populated");
+
+        self.state.chat_state.total_lines = transcript_cache.total_lines;
+        self.state.chat_state.last_visible_height = inner_height;
+
+        let max_scroll = transcript_cache
+            .total_lines
+            .saturating_sub(inner_height)
+            .min(transcript_cache.total_lines);
+        if self.state.chat_state.stick_to_bottom {
+            self.state.chat_state.scroll_offset = max_scroll;
+        } else {
+            self.state.chat_state.scroll_offset =
+                self.state.chat_state.scroll_offset.min(max_scroll);
         }
-
-        // Cache the plain-text content of every rendered line so that
-        // transcript selection can extract text without re-rendering.
-        self.state.render_state.line_texts = all_lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        self.state.render_state.line_is_header = line_is_header;
-
-        // Apply selection highlighting to the line copies used for rendering.
+        let scroll_offset = self.state.chat_state.scroll_offset;
+        let scroll_end = scroll_offset.saturating_add(inner_height);
         if let Some(sel) = &self.state.transcript_selection {
+            let start_line_index = transcript_cache
+                .logical_line_visual_starts
+                .partition_point(|start| *start <= scroll_offset)
+                .saturating_sub(1);
+            let safe_start_line_index =
+                start_line_index.min(transcript_cache.all_lines.len().saturating_sub(1));
+            let slice_start_visual = transcript_cache
+                .logical_line_visual_starts
+                .get(safe_start_line_index)
+                .copied()
+                .unwrap_or(0);
+            let paragraph_scroll = scroll_offset.saturating_sub(slice_start_visual);
+
+            let mut end_line_index = safe_start_line_index;
+            while end_line_index < transcript_cache.all_lines.len() {
+                let line_start = transcript_cache.logical_line_visual_starts[end_line_index];
+                if line_start >= scroll_end {
+                    break;
+                }
+                end_line_index += 1;
+            }
+            if end_line_index == safe_start_line_index
+                && end_line_index < transcript_cache.all_lines.len()
+            {
+                end_line_index += 1;
+            }
+
+            let mut visible_lines: Vec<Line> =
+                transcript_cache.all_lines[safe_start_line_index..end_line_index].to_vec();
+
             let (start_line, start_col, end_line, end_col) = sel.normalised();
             let sel_style = Style::default()
                 .fg(self.state.theme.background)
                 .bg(self.state.theme.foreground)
                 .add_modifier(Modifier::BOLD);
-            for (line_idx, line) in all_lines.iter_mut().enumerate() {
-                if line_idx < start_line || line_idx > end_line {
+            for (visible_index, line) in visible_lines.iter_mut().enumerate() {
+                let global_line_index = safe_start_line_index + visible_index;
+                if global_line_index < start_line || global_line_index > end_line {
                     continue;
                 }
-                let col_start = if line_idx == start_line { start_col } else { 0 };
-                let line_char_len: usize =
-                    line.spans.iter().map(|s| s.content.chars().count()).sum();
-                let col_end = if line_idx == end_line {
+                let col_start = if global_line_index == start_line {
+                    start_col
+                } else {
+                    0
+                };
+                let line_char_len: usize = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.chars().count())
+                    .sum();
+                let col_end = if global_line_index == end_line {
                     end_col.min(line_char_len)
                 } else {
                     line_char_len
@@ -395,36 +192,32 @@ impl App {
                 }
                 *line = highlight_line_selection(line.clone(), col_start, col_end, sel_style);
             }
-        }
 
-        let total_lines = rendered_line_count(&all_lines, inner_area.width);
-        let content = Text::from(all_lines);
-        let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
-        self.state.chat_state.total_lines = total_lines;
-        self.state.chat_state.last_visible_height = inner_height;
-
-        let max_scroll = total_lines.saturating_sub(inner_height).min(total_lines);
-        if self.state.chat_state.stick_to_bottom {
-            self.state.chat_state.scroll_offset = max_scroll;
+            let paragraph = Paragraph::new(Text::from(visible_lines))
+                .wrap(Wrap { trim: false })
+                .scroll((paragraph_scroll as u16, 0));
+            frame.render_widget(paragraph, inner_area);
         } else {
-            self.state.chat_state.scroll_offset =
-                self.state.chat_state.scroll_offset.min(max_scroll);
+            let visual_end = scroll_end.min(transcript_cache.visual_lines.len());
+            let visible_visual_lines = if scroll_offset < visual_end {
+                transcript_cache.visual_lines[scroll_offset..visual_end].to_vec()
+            } else {
+                Vec::new()
+            };
+            let paragraph = Paragraph::new(Text::from(visible_visual_lines));
+            frame.render_widget(paragraph, inner_area);
         }
-        let scroll_offset = self.state.chat_state.scroll_offset;
 
         self.state.render_state.tool_toggle_regions.clear();
-        let mut absolute_row = 0usize;
-        for (message_index, lines, toggle_row_offset) in &message_entries {
-            if let Some(toggle_row_offset) = *toggle_row_offset {
-                let toggle_row = absolute_row.saturating_add(toggle_row_offset);
-                if toggle_row >= scroll_offset
-                    && toggle_row < scroll_offset.saturating_add(inner_height)
-                {
+        for layout in &transcript_cache.message_layouts {
+            if let Some(toggle_row_offset) = layout.tool_toggle_row_offset {
+                let toggle_row = layout.start_visual_row.saturating_add(toggle_row_offset);
+                if toggle_row >= scroll_offset && toggle_row < scroll_end {
                     self.state
                         .render_state
                         .tool_toggle_regions
                         .push(ToolToggleRegion {
-                            message_index: *message_index,
+                            message_index: layout.message_index,
                             rect: Rect {
                                 x: inner_area.x,
                                 y: inner_area.y + (toggle_row.saturating_sub(scroll_offset) as u16),
@@ -434,17 +227,13 @@ impl App {
                         });
                 }
             }
-            absolute_row += rendered_line_count(lines, inner_area.width);
         }
-
-        let paragraph = paragraph.scroll((scroll_offset as u16, 0));
-        frame.render_widget(paragraph, inner_area);
 
         self.state.chat_state.scrollbar_state = self
             .state
             .chat_state
             .scrollbar_state
-            .content_length(total_lines)
+            .content_length(transcript_cache.total_lines)
             .viewport_content_length(inner_height)
             .position(scroll_offset);
 
@@ -458,6 +247,447 @@ impl App {
             &mut self.state.chat_state.scrollbar_state,
         );
     }
+}
+
+fn render_message_entry(
+    message: &Message,
+    theme: &Theme,
+    width: u16,
+    is_active_stream_message: bool,
+    chat_is_loading: bool,
+    loading_animation: &str,
+) -> CachedMessageRender {
+    let mut tool_toggle_row_offset = None;
+
+    let lines = if let Some(tool) = &message.tool_state {
+        let tool_color = match tool.status {
+            ToolExecutionStatus::Running => theme.accent,
+            ToolExecutionStatus::Completed => theme.success,
+            ToolExecutionStatus::Failed => theme.error,
+        };
+        let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+        if is_subagent_tool(&tool.tool) {
+            tool_toggle_row_offset = Some(0);
+            let mut lines = render_subagent_tool_lines(tool, &timestamp, tool_color, theme, width);
+            lines.push(Line::raw(""));
+            lines
+        } else {
+            tool_toggle_row_offset = Some(1);
+            render_tool_message_lines(message, tool, tool_color, theme, width)
+        }
+    } else if let Some(todo) = &message.todo_state {
+        render_todo_message_lines(message, todo, theme)
+    } else if let Some(checker) = &message.completion_check_state {
+        render_completion_check_lines(message, checker, theme)
+    } else {
+        render_standard_message_lines(
+            message,
+            theme,
+            width,
+            is_active_stream_message,
+            chat_is_loading,
+            loading_animation,
+        )
+    };
+
+    CachedMessageRender {
+        revision: message.render_revision,
+        width,
+        theme: *theme,
+        tool_toggle_row_offset,
+        lines,
+    }
+}
+
+fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> TranscriptRenderCache {
+    let mut all_lines = Vec::new();
+    let mut visual_lines = Vec::new();
+    let mut line_texts = Vec::new();
+    let mut line_is_header = Vec::new();
+    let mut logical_line_visual_starts = Vec::new();
+    let mut message_layouts = Vec::with_capacity(message_renders.len());
+    let mut absolute_visual_row = 0usize;
+
+    for (message_index, render) in message_renders.iter().enumerate() {
+        message_layouts.push(CachedMessageLayout {
+            message_index,
+            start_visual_row: absolute_visual_row,
+            tool_toggle_row_offset: render.tool_toggle_row_offset,
+        });
+
+        for (line_index, line) in render.lines.iter().enumerate() {
+            let visual_count = rendered_line_count(std::slice::from_ref(line), render.width);
+            logical_line_visual_starts.push(absolute_visual_row);
+            absolute_visual_row += visual_count;
+            visual_lines.extend(wrap_line_to_visual_lines(line, render.width));
+
+            line_texts.push(
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+            );
+            line_is_header.push(line_index == 0);
+            all_lines.push(line.clone());
+        }
+    }
+
+    TranscriptRenderCache {
+        all_lines,
+        visual_lines,
+        line_texts,
+        line_is_header,
+        logical_line_visual_starts,
+        message_layouts,
+        total_lines: absolute_visual_row,
+    }
+}
+
+fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    if line.spans.is_empty() {
+        return vec![preserve_line_metadata(Line::from(String::new()), line)];
+    }
+
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width = 0usize;
+
+    for span in &line.spans {
+        let style = span.style;
+        let mut segment = String::new();
+
+        for ch in span.content.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width {
+                if !segment.is_empty() {
+                    current_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                }
+                rows.push(preserve_line_metadata(
+                    Line::from(std::mem::take(&mut current_spans)),
+                    line,
+                ));
+                current_width = 0;
+            }
+
+            segment.push(ch);
+            current_width += ch_width;
+
+            if current_width == width {
+                if !segment.is_empty() {
+                    current_spans.push(Span::styled(std::mem::take(&mut segment), style));
+                }
+                rows.push(preserve_line_metadata(
+                    Line::from(std::mem::take(&mut current_spans)),
+                    line,
+                ));
+                current_width = 0;
+            }
+        }
+
+        if !segment.is_empty() {
+            current_spans.push(Span::styled(segment, style));
+        }
+    }
+
+    if !current_spans.is_empty() || rows.is_empty() {
+        rows.push(preserve_line_metadata(Line::from(current_spans), line));
+    }
+
+    rows
+}
+
+fn preserve_line_metadata(mut rebuilt: Line<'static>, original: &Line<'static>) -> Line<'static> {
+    rebuilt.style = original.style;
+    rebuilt.alignment = original.alignment;
+    rebuilt
+}
+
+fn render_tool_message_lines(
+    message: &Message,
+    tool: &ToolMessageState,
+    tool_color: ratatui::style::Color,
+    theme: &Theme,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let status = match tool.status {
+        ToolExecutionStatus::Running => "running",
+        ToolExecutionStatus::Completed => "done",
+        ToolExecutionStatus::Failed => "failed",
+    };
+    let mut header = format!("{toggle} {}  {status}", tool.tool);
+    if let Some(exit_code) = tool.exit_code {
+        header.push_str(&format!("  exit={exit_code}"));
+    }
+    if let Some(duration_ms) = tool.duration_ms {
+        header.push_str(&format!("  {duration_ms}ms"));
+    }
+    if !tool.summary.trim().is_empty() {
+        header.push_str(&format!("  {}", tool.summary.trim()));
+    }
+    let max_header_width = width.saturating_sub(2) as usize;
+    let header = truncate_display_width(&header, max_header_width);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("▎ ", Style::default().fg(tool_color)),
+            Span::styled(
+                "Tool",
+                Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
+        ]),
+        Line::styled(header, Style::default().fg(tool_color)),
+    ];
+
+    let command_text = if tool.expanded {
+        tool.command.as_deref()
+    } else {
+        tool.command_preview.as_deref()
+    };
+    if let Some(command_text) = command_text.filter(|text| !text.trim().is_empty()) {
+        lines.push(Line::styled(
+            "  Command",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for line in command_text.lines() {
+            lines.push(Line::styled(
+                format!("    {line}"),
+                Style::default().fg(theme.foreground),
+            ));
+        }
+        if !tool.expanded && tool.command_preview != tool.command {
+            lines.push(Line::styled(
+                "    ... click to expand full command",
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
+
+    if tool.expanded && tool.command.is_none() && !tool.args_preview.trim().is_empty() {
+        lines.push(Line::styled(
+            "  Arguments",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for line in tool.args_preview.lines() {
+            lines.push(Line::styled(
+                format!("    {line}"),
+                Style::default().fg(theme.foreground),
+            ));
+        }
+    }
+
+    let detail_text = render_tool_detail_text(&tool.detail);
+    let detail_text = detail_text.trim();
+    if tool.expanded && !detail_text.is_empty() {
+        lines.push(Line::styled(
+            "  Output",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for line in detail_text.lines() {
+            lines.push(Line::styled(
+                format!("    {line}"),
+                Style::default().fg(theme.foreground),
+            ));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn render_todo_message_lines(
+    message: &Message,
+    todo: &crate::chat::TodoMessageState,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("▎ ", Style::default().fg(theme.secondary)),
+            Span::styled(
+                "Planner",
+                Style::default()
+                    .fg(theme.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
+        ]),
+        Line::styled(
+            format!("  {}", todo.title),
+            Style::default()
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    for (status, content) in &todo.items {
+        let (icon, color) = match status {
+            TodoDisplayStatus::Completed => ("✅", theme.success),
+            TodoDisplayStatus::InProgress => ("◔", theme.accent),
+            TodoDisplayStatus::Pending => ("☐", theme.muted),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {icon} "), Style::default().fg(color)),
+            Span::styled(content.clone(), Style::default().fg(theme.foreground)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn render_completion_check_lines(
+    message: &Message,
+    checker: &crate::chat::CompletionCheckMessageState,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("▎ ", Style::default().fg(theme.gradient_yellow)),
+            Span::styled(
+                "Checker",
+                Style::default()
+                    .fg(theme.gradient_yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
+        ]),
+        Line::styled(
+            "  next_step_hint",
+            Style::default()
+                .fg(theme.gradient_yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if !checker.next_step_hint.trim().is_empty() {
+        lines.push(Line::styled(
+            format!("  → {}", checker.next_step_hint.trim()),
+            Style::default().fg(theme.foreground),
+        ));
+    }
+    if !checker.missing_information.trim().is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "  missing_information: {}",
+                checker.missing_information.trim()
+            ),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    if !checker.reason.trim().is_empty() {
+        lines.push(Line::styled(
+            format!("  reason: {}", checker.reason.trim()),
+            Style::default().fg(theme.muted),
+        ));
+    }
+    lines.push(Line::raw(""));
+    lines
+}
+
+fn render_standard_message_lines(
+    message: &Message,
+    theme: &Theme,
+    width: u16,
+    is_active_stream_message: bool,
+    chat_is_loading: bool,
+    loading_animation: &str,
+) -> Vec<Line<'static>> {
+    let (indicator_color, role_label, role_style, content_style) = match message.role {
+        MessageRole::User => (
+            theme.primary,
+            "You",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.foreground),
+        ),
+        MessageRole::Assistant => (
+            theme.accent,
+            "Assistant",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.foreground),
+        ),
+        MessageRole::System => (
+            theme.success,
+            "System",
+            Style::default().fg(theme.success),
+            Style::default().fg(theme.foreground),
+        ),
+        MessageRole::Tool => (
+            theme.muted,
+            "Tool",
+            Style::default().fg(theme.muted),
+            Style::default().fg(theme.foreground),
+        ),
+    };
+
+    let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+    let show_stream_thinking = message.role == MessageRole::Assistant
+        && message.is_streaming
+        && is_active_stream_message
+        && message.content.is_empty();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("▎ ", Style::default().fg(indicator_color)),
+        Span::styled(role_label.to_string(), role_style),
+        Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
+    ])];
+
+    if !message.thinking_content.is_empty() {
+        let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
+        let thinking_header = if is_thinking {
+            format!("  ⟡ {loading_animation}")
+        } else {
+            "  ⟡ Thought".to_string()
+        };
+        lines.push(Line::styled(
+            thinking_header,
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
+        for line in message.thinking_content.lines() {
+            lines.push(Line::styled(format!("  │ {line}"), thinking_style));
+        }
+        lines.push(Line::raw(""));
+    }
+
+    if show_stream_thinking {
+        lines.push(Line::styled(
+            format!("  {loading_animation}"),
+            Style::default().fg(theme.accent),
+        ));
+    }
+
+    match message.role {
+        MessageRole::Assistant if !message.content.is_empty() => {
+            lines.extend(render_markdown(&message.content, theme, width));
+        }
+        _ => {
+            for line in message.content.lines() {
+                lines.push(Line::styled(format!("  {line}"), content_style));
+            }
+        }
+    }
+
+    if message.is_streaming && !show_stream_thinking {
+        lines.push(Line::styled("  ▌", Style::default().fg(theme.accent)));
+    }
+    lines.push(Line::raw(""));
+    lines
 }
 
 /// Restyle the characters in `col_start..col_end` (char indices) within a
@@ -509,7 +739,10 @@ fn highlight_line_selection(
         char_offset = span_end;
     }
 
-    Line::from(new_spans)
+    let mut rebuilt = Line::from(new_spans);
+    rebuilt.style = line.style;
+    rebuilt.alignment = line.alignment;
+    rebuilt
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

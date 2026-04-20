@@ -44,7 +44,9 @@ impl Hooker for BuiltinSessionCreatedHooker {
                     "[BuiltinSessionCreatedHooker] session '{}' created for sender '{}'",
                     input.session_id, input.sender_id
                 );
-                Ok(HookInvokeOutput::SessionCreated(SessionHookResult::Acknowledged))
+                Ok(HookInvokeOutput::SessionCreated(
+                    SessionHookResult::Acknowledged,
+                ))
             }
             other => Err(HookInvokeError::Tool(ToolExecutionError::ExecutionFailed {
                 message: format!(

@@ -22,6 +22,7 @@ pub struct ToolExecutionUpdate {
     pub duration_ms: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoDisplayStatus {
     Pending,
@@ -29,18 +30,21 @@ pub enum TodoDisplayStatus {
     Completed,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotItem {
     pub status: TodoDisplayStatus,
     pub content: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotUpdate {
     pub title: String,
     pub items: Vec<TodoSnapshotItem>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CompletionCheckUpdate {
     pub reason: String,
@@ -86,6 +90,7 @@ pub struct Message {
     pub tool_state: Option<ToolMessageState>,
     pub todo_state: Option<TodoMessageState>,
     pub completion_check_state: Option<CompletionCheckMessageState>,
+    pub render_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,19 +112,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
-        }
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: MessageRole::Assistant,
-            content: content.into(),
-            thinking_content: String::new(),
-            timestamp: chrono::Local::now(),
-            is_streaming: false,
-            tool_state: None,
-            todo_state: None,
-            completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -133,6 +126,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -146,6 +140,7 @@ impl Message {
             tool_state: None,
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
@@ -171,9 +166,11 @@ impl Message {
             }),
             todo_state: None,
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
+    #[allow(dead_code)]
     pub fn todo_snapshot(update: TodoSnapshotUpdate) -> Self {
         Self {
             role: MessageRole::System,
@@ -191,9 +188,11 @@ impl Message {
                     .collect(),
             }),
             completion_check_state: None,
+            render_revision: 0,
         }
     }
 
+    #[allow(dead_code)]
     pub fn completion_check(update: CompletionCheckUpdate) -> Self {
         Self {
             role: MessageRole::System,
@@ -208,7 +207,29 @@ impl Message {
                 missing_information: update.missing_information,
                 next_step_hint: update.next_step_hint,
             }),
+            render_revision: 0,
         }
+    }
+
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        self.content = content.into();
+        self.mark_render_dirty();
+    }
+
+    pub fn append_content(&mut self, chunk: &str) {
+        self.content.push_str(chunk);
+        self.mark_render_dirty();
+    }
+
+    pub fn set_streaming(&mut self, streaming: bool) {
+        if self.is_streaming != streaming {
+            self.is_streaming = streaming;
+            self.mark_render_dirty();
+        }
+    }
+
+    pub fn mark_render_dirty(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1);
     }
 }
 
@@ -474,30 +495,6 @@ impl ChatState {
         Self::default()
     }
 
-    pub fn messages_to_display(&self, height: usize) -> usize {
-        self.messages
-            .len()
-            .saturating_sub(self.scroll_offset)
-            .min(height.saturating_sub(4) / 3)
-    }
-
-    pub fn context_size(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|m| m.role != MessageRole::System)
-            .map(|m| m.content.chars().count())
-            .sum()
-    }
-
-    pub fn estimated_tokens(&self) -> usize {
-        const SAFETY_MARGIN: f64 = 1.2;
-        let total_chars = self.context_size();
-        let base_estimate = (total_chars + 3) / 4;
-        let message_overhead = self.messages.len() * 4;
-        let total = base_estimate + message_overhead;
-        ((total as f64) * SAFETY_MARGIN).ceil() as usize
-    }
-
     /// Max scroll offset (lines) so the last line is visible. Uses last_visible_height and total_lines.
     pub fn max_scroll_offset(&self) -> usize {
         self.total_lines
@@ -522,47 +519,34 @@ impl ChatState {
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
     }
 
-    /// Scroll up by a page (half the visible height).
-    pub fn page_up(&mut self) {
-        let page_size = (self.last_visible_height / 2).max(1);
-        self.stick_to_bottom = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll down by a page (half the visible height).
-    pub fn page_down(&mut self) {
-        let page_size = (self.last_visible_height / 2).max(1);
-        let max = self.max_scroll_offset();
-        if self.scroll_offset < max {
-            self.scroll_offset = (self.scroll_offset + page_size).min(max);
-        }
-        if self.scroll_offset >= max {
-            self.stick_to_bottom = true;
-        }
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll to the bottom of the message list.
-    pub fn scroll_to_bottom(&mut self) {
-        let max = self.max_scroll_offset();
-        self.scroll_offset = max;
-        self.stick_to_bottom = true;
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
-    }
-
-    /// Scroll to the top of the message list.
-    pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = 0;
-        self.stick_to_bottom = false;
-        self.scrollbar_state = self.scrollbar_state.position(0);
-    }
-
     /// Set scroll position by line index (e.g. from scrollbar drag). Clamps to valid range.
     pub fn set_scroll_offset(&mut self, line_offset: usize) {
         let max = self.max_scroll_offset();
         self.scroll_offset = line_offset.min(max);
         self.stick_to_bottom = self.scroll_offset >= max;
         self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Message;
+
+    #[test]
+    fn message_render_revision_updates_with_content_and_streaming_changes() {
+        let mut message = Message::assistant_streaming();
+        assert_eq!(message.render_revision, 0);
+
+        message.set_content("hello");
+        assert_eq!(message.render_revision, 1);
+
+        message.append_content(" world");
+        assert_eq!(message.render_revision, 2);
+
+        message.set_streaming(false);
+        assert_eq!(message.render_revision, 3);
+
+        message.set_streaming(false);
+        assert_eq!(message.render_revision, 3);
     }
 }

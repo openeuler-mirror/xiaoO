@@ -44,7 +44,9 @@ impl Hooker for BuiltinSessionClosedHooker {
                     "[BuiltinSessionClosedHooker] session '{}' closed for sender '{}'",
                     input.session_id, input.sender_id
                 );
-                Ok(HookInvokeOutput::SessionClosed(SessionHookResult::Acknowledged))
+                Ok(HookInvokeOutput::SessionClosed(
+                    SessionHookResult::Acknowledged,
+                ))
             }
             other => Err(HookInvokeError::Tool(ToolExecutionError::ExecutionFailed {
                 message: format!(

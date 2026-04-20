@@ -1,51 +1,73 @@
 **OPEN SOURCE SOFTWARE NOTICE**
 
-Please note we provide an open source software notice along with this product and/or this product firmware (in the following just “this product”). The open source software licenses are granted by the respective right holders. And the open source licenses prevail all other license information with regard to the respective open source software contained in the product, including but not limited to End User Software Licensing Agreement. This notice is provided on behalf of Huawei Technologies Co. Ltd. and any of its local subsidiaries which may have provided this product to you in your local country.
+Please note we provide an open source software notice along with this product and/or this product firmware (in the following just "this product"). The open source software licenses are granted by the respective right holders. And the open source licenses prevail all other license information with regard to the respective open source software contained in the product, including but not limited to End User Software Licensing Agreement. This notice is provided on behalf of Huawei Technologies Co. Ltd. and any of its local subsidiaries which may have provided this product to you in your local country.
 
-**Warranty Disclaimer **
+**Warranty Disclaimer**
 
 THE OPEN SOURCE SOFTWARE IN THIS PRODUCT IS DISTRIBUTED IN THE HOPE THAT IT WILL BE USEFUL, BUT WITHOUT ANY WARRANTY, WITHOUT EVEN THE IMPLIED WARRANTY OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE. SEE THE APPLICABLE LICENSES FOR MORE DETAILS.
 
-**Copyright Notice and License Texts **
+**Copyright Notice and License Texts**
 
-**Software**: github.com/antlr/antlr4 v0.0.0-20190726171924-e4737db19f4f
+The following lists the third-party open-source software components used in this product (xiaoO), along with their copyright notices and license terms. This product is written primarily in **Rust**, and all listed dependencies are Rust crates obtained from <https://crates.io/>.
 
-**Copyright notice: **
+---
 
-Copyright (c) 2012-2017 The ANTLR Project.
+## MIT License
 
-**License:** MIT
+The following software is distributed under the MIT License (SPDX identifier: `MIT`):
 
-Copyright <YEAR> <COPYRIGHT HOLDER>
+```
+MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+Copyright (c) <YEAR> <COPYRIGHT HOLDER>
 
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-**Software**: github.com/bndr/gotabulate v1.1.2
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
-**Copyright notice: **
+### Software under MIT License
 
-Copyright (c) 2014 Vadim Kravcenko
+| # | Software | Version | Copyright Notice |
+|---|----------|---------|------------------|
+| 1 | [tokio](https://crates.io/crates/tokio) | 1.52.1 | Copyright (c) Tokio Contributors |
+| 2 | [tracing](https://crates.io/crates/tracing) | 0.1.44 | Copyright (c) Eliza Weisman and Tokio Contributors |
+| 3 | [crossterm](https://crates.io/crates/crossterm) | 0.28.1 | Copyright (c) 2019-2024 T. Post, contributors |
+| 4 | [ratatui](https://crates.io/crates/ratatui) | 0.28.1 | Copyright (c) 2022-2024 The Ratatui Developers |
+| 5 | [rusqlite](https://crates.io/crates/rusqlite) | 0.32.1 | Copyright (c) The rusqlite developers |
+| 6 | [ulid](https://crates.io/crates/ulid) | 1.2.1 | Copyright (c) 2020-2024 ulid-rs contributors |
+| 7 | [axum](https://crates.io/crates/axum) | 0.7.9 | Copyright (c) 2021 Tower Contributors, Axum Contributors |
+| 8 | [tower-http](https://crates.io/crates/tower-http) | 0.5.2 | Copyright (c) 2021 Tower Contributors |
+| 9 | [htmd](https://crates.io/crates/htmd) | 0.5.4 | Copyright (c) 2023 htmd authors |
+| 10 | [html2text](https://crates.io/crates/html2text) | 0.16.7 | Copyright (c) 2021 Benjamin Schnitzler |
+| 11 | [image](https://crates.io/crates/image) | 0.25.10 | Copyright (c) 2014-2024 The image-rs Developers |
+| 12 | [lopdf](https://crates.io/crates/lopdf) | 0.35.0 | Copyright (c) 2018 Junfeng Liu |
+| 13 | [tracing-subscriber](https://crates.io/crates/tracing-subscriber) | 0.3.23 | Copyright (c) Eliza Weisman and Tokio Contributors |
+| 14 | [tokio-stream](https://crates.io/crates/tokio-stream) | 0.1.18 | Copyright (c) Tokio Contributors |
+| 14a | [unicode-width](https://crates.io/crates/unicode-width) | 0.1.14 | Copyright (c) 2015 The Rust Project Developers |
 
-**License:** Apache License Version 2.0
+---
 
-Apache License
+## Apache License Version 2.0
+
+The following software is distributed under the Apache License, Version 2.0 (SPDX identifier: `Apache-2.0`):
+
+```
+                                 Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
 
@@ -76,8 +98,8 @@ Apache License
 
       "Object" form shall mean any form resulting from mechanical
       transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
+      not limited to compiled object code, generated documentation, and
+      conversions to other media types.
 
       "Work" shall mean the work of authorship, whether in Source or
       Object form, made available under the License, as indicated by a
@@ -107,15 +129,15 @@ Apache License
       designated in writing by the copyright owner as "Not a Contribution."
 
       "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
+      on whose behalf a Contribution has been received by Licensor and
       subsequently incorporated within the Work.
 
    2. Grant of Copyright License. Subject to the terms and conditions of
       this License, each Contributor hereby grants to You a perpetual,
       worldwide, non-exclusive, no-charge, royalty-free, irrevocable
       copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
+      publicly display, publicly perform, sublicense, and distribute
+      the Work and such Derivative Works in Source or Object form.
 
    3. Grant of Patent License. Subject to the terms and conditions of
       this License, each Contributor hereby grants to You a perpetual,
@@ -124,14 +146,14 @@ Apache License
       use, offer to sell, sell, import, and otherwise transfer the Work,
       where such license applies only to those patent claims licensable
       by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
+      Contribution(s) alone or by combination of their Contribution(s) with
+      the Work to which such Contribution was submitted. If You institute
+      patent litigation against any entity (including a cross-claim or
+      counterclaim in a lawsuit) alleging that the Work or a Contribution
+      incorporated within the Work constitutes direct or contributory patent
+      infringement, then any patent licenses granted to You under this
+      License for that Work shall terminate as of the date such litigation
+      is filed.
 
    4. Redistribution. You may reproduce and distribute copies of the
       Work or Derivative Works thereof in any medium, with or without
@@ -164,11 +186,11 @@ Apache License
           do not modify the License. You may add Your own attribution
           notices within Derivative Works that You distribute, alongside
           or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
+      that such additional attribution notices cannot be construed as
+      modifying the License.
 
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
+      You may add Your own copyright statement to Your modifications
+      and may provide additional or different license terms and conditions
       for use, reproduction, or distribution of Your modifications, or
       for any such Derivative Works as a whole, provided Your use,
       reproduction, and distribution of the Work otherwise complies with
@@ -202,8 +224,8 @@ Apache License
       unless required by applicable law (such as deliberate and grossly
       negligent acts) or agreed to in writing, shall any Contributor be
       liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
+      incidental, or consequential damages of any character arising as
+      a result of this License or out of the use or inability to use the
       Work (including but not limited to damages for loss of goodwill,
       work stoppage, computer failure or malfunction, or any and all
       other commercial damages or losses), even if such Contributor
@@ -246,398 +268,105 @@ Apache License
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
-
-
-**Software**: github.com/caibirdme/yql v0.0.0-20190801103415-238f3c90b514
-
-**Copyright notice: **
-
-Copyright (c) 2019 Deen
-
-**License:** MIT
-
-Please see above.
-
-**Software**: github.com/coreos/go-systemd v0.0.0-20190719114852-fd7a80b32e1f
-
-**Copyright notice: **
-
-Copyright 2016 CoreOS, Inc.
-Copyright 2014 Docker, Inc.
-Copyright 2015-2018 CoreOS, Inc.
-
-**License:** Apache License Version 2.0
-
-Please see above.
-
-**Software**: github.com/go-ini/ini v1.42.0
-
-**Copyright notice: **
-Copyright 2017 Unknwon
-
-**License:** Apache License Version 2.0
-
-Please see above.
-
-**Software**: github.com/go-xorm/xorm v0.7.4
-
-**Copyright notice: **
-
-Copyright (c) 2013 - 2019 The Xorm Authors
-
-**License:** BSD License
-
-Copyright <YEAR> <OWNER>
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of the {organization} nor the names of its
-  contributors may be used to endorse or promote products derived from
-  this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-**Software**: github.com/golang-collections/collections v0.0.0-20130729185459-604e922904d3
-
-**Copyright notice: **
-
-Copyright (c) 2012 Caleb Doxsey
-
-**License:** MIT
-
-Please see above.
-
-**Software**: github.com/golang/protobuf v1.3.1
-
-**Copyright notice: **
-
-Copyright 2010 The Go Authors
-
-**License:** BSD License
-
-Please see above.
-
-**Software**: github.com/juju/errors v0.0.0-20190806202954-0232dcc7464d 
-
-**Copyright notice: **
-
-Copyright (C) 2015 Canonical Ltd.
-
-**License:** LGPLv3 License
-
-                   GNU LESSER GENERAL PUBLIC LICENSE
-                       Version 3, 29 June 2007
-
- Copyright (C) 2007 Free Software Foundation, Inc. <http://fsf.org/>
- Everyone is permitted to copy and distribute verbatim copies
- of this license document, but changing it is not allowed.
-
-
-  This version of the GNU Lesser General Public License incorporates
-the terms and conditions of version 3 of the GNU General Public
-License, supplemented by the additional permissions listed below.
-
-  0. Additional Definitions.
-
-  As used herein, "this License" refers to version 3 of the GNU Lesser
-General Public License, and the "GNU GPL" refers to version 3 of the GNU
-General Public License.
-
-  "The Library" refers to a covered work governed by this License,
-other than an Application or a Combined Work as defined below.
-
-  An "Application" is any work that makes use of an interface provided
-by the Library, but which is not otherwise based on the Library.
-Defining a subclass of a class defined by the Library is deemed a mode
-of using an interface provided by the Library.
-
-  A "Combined Work" is a work produced by combining or linking an
-Application with the Library.  The particular version of the Library
-with which the Combined Work was made is also called the "Linked
-Version".
-
-  The "Minimal Corresponding Source" for a Combined Work means the
-Corresponding Source for the Combined Work, excluding any source code
-for portions of the Combined Work that, considered in isolation, are
-based on the Application, and not on the Linked Version.
-
-  The "Corresponding Application Code" for a Combined Work means the
-object code and/or source code for the Application, including any data
-and utility programs needed for reproducing the Combined Work from the
-Application, but excluding the System Libraries of the Combined Work.
-
-  1. Exception to Section 3 of the GNU GPL.
-
-  You may convey a covered work under sections 3 and 4 of this License
-without being bound by section 3 of the GNU GPL.
-
-  2. Conveying Modified Versions.
-
-  If you modify a copy of the Library, and, in your modifications, a
-facility refers to a function or data to be supplied by an Application
-that uses the facility (other than as an argument passed when the
-facility is invoked), then you may convey a copy of the modified
-version:
-
-   a) under this License, provided that you make a good faith effort to
-   ensure that, in the event an Application does not supply the
-   function or data, the facility still operates, and performs
-   whatever part of its purpose remains meaningful, or
-
-   b) under the GNU GPL, with none of the additional permissions of
-   this License applicable to that copy.
-
-  3. Object Code Incorporating Material from Library Header Files.
-
-  The object code form of an Application may incorporate material from
-a header file that is part of the Library.  You may convey such object
-code under terms of your choice, provided that, if the incorporated
-material is not limited to numerical parameters, data structure
-layouts and accessors, or small macros, inline functions and templates
-(ten or fewer lines in length), you do both of the following:
-
-   a) Give prominent notice with each copy of the object code that the
-   Library is used in it and that the Library and its use are
-   covered by this License.
-
-   b) Accompany the object code with a copy of the GNU GPL and this license
-   document.
-
-  4. Combined Works.
-
-  You may convey a Combined Work under terms of your choice that,
-taken together, effectively do not restrict modification of the
-portions of the Library contained in the Combined Work and reverse
-engineering for debugging such modifications, if you also do each of
-the following:
-
-   a) Give prominent notice with each copy of the Combined Work that
-   the Library is used in it and that the Library and its use are
-   covered by this License.
-
-   b) Accompany the Combined Work with a copy of the GNU GPL and this license
-   document.
-
-   c) For a Combined Work that displays copyright notices during
-   execution, include the copyright notice for the Library among
-   these notices, as well as a reference directing the user to the
-   copies of the GNU GPL and this license document.
-
-   d) Do one of the following:
-
-       0) Convey the Minimal Corresponding Source under the terms of this
-       License, and the Corresponding Application Code in a form
-       suitable for, and under terms that permit, the user to
-       recombine or relink the Application with a modified version of
-       the Linked Version to produce a modified Combined Work, in the
-       manner specified by section 6 of the GNU GPL for conveying
-       Corresponding Source.
-
-       1) Use a suitable shared library mechanism for linking with the
-       Library.  A suitable mechanism is one that (a) uses at run time
-       a copy of the Library already present on the user's computer
-       system, and (b) will operate properly with a modified version
-       of the Library that is interface-compatible with the Linked
-       Version.
-
-   e) Provide Installation Information, but only if you would otherwise
-   be required to provide such information under section 6 of the
-   GNU GPL, and only to the extent that such information is
-   necessary to install and execute a modified version of the
-   Combined Work produced by recombining or relinking the
-   Application with a modified version of the Linked Version. (If
-   you use option 4d0, the Installation Information must accompany
-   the Minimal Corresponding Source and Corresponding Application
-   Code. If you use option 4d1, you must provide the Installation
-   Information in the manner specified by section 6 of the GNU GPL
-   for conveying Corresponding Source.)
-
-  5. Combined Libraries.
-
-  You may place library facilities that are a work based on the
-Library side by side in a single library together with other library
-facilities that are not Applications and are not covered by this
-License, and convey such a combined library under terms of your
-choice, if you do both of the following:
-
-   a) Accompany the combined library with a copy of the same work based
-   on the Library, uncombined with any other library facilities,
-   conveyed under the terms of this License.
-
-   b) Give prominent notice with the combined library that part of it
-   is a work based on the Library, and explaining where to find the
-   accompanying uncombined form of the same work.
-
-  6. Revised Versions of the GNU Lesser General Public License.
-
-  The Free Software Foundation may publish revised and/or new versions
-of the GNU Lesser General Public License from time to time. Such new
-versions will be similar in spirit to the present version, but may
-differ in detail to address new problems or concerns.
-
-  Each version is given a distinguishing version number. If the
-Library as you received it specifies that a certain numbered version
-of the GNU Lesser General Public License "or any later version"
-applies to it, you have the option of following the terms and
-conditions either of that published version or of any later version
-published by the Free Software Foundation. If the Library as you
-received it does not specify a version number of the GNU Lesser
-General Public License, you may choose any version of the GNU Lesser
-General Public License ever published by the Free Software Foundation.
-
-  If the Library as you received it specifies that a proxy can decide
-whether future versions of the GNU Lesser General Public License shall
-apply, that proxy's public statement of acceptance of any version is
-permanent authorization for you to choose that version for the
-Library.
-
-**Software**: github.com/mattn/go-sqlite3 v1.11.0
-
-**Copyright notice: **
-
-Copyright (c) 2014 Yasuhiro Matsumoto
-
-**License: **MIT
-
-Please see above.
-
-**Software**: github.com/mitchellh/mapstructure v1.1.2
-
-**Copyright notice: **
-
-Copyright (c) 2013 Mitchell Hashimoto
-
-**License: **MIT
-
-Please see above.
-
-**Software**: github.com/newm4n/grool v1.0.2
-
-**Copyright notice: **
-
-Copyright 2019 Ferdinand Neman
-
-**License: ** Apache License Version 2.0
-
-Please see above.
-
-**Software**: github.com/sirupsen/logrus v1.4.2
-
-**Copyright notice: **
-
-Copyright (c) 2014 Simon Eskildsen
-
-**License: **MIT
-
-Please see above.
-
-**Software**: github.com/urfave/cli v1.20.0
-
-**Copyright notice: **
-
-Copyright (c) 2016 Jeremy Saenz & Contributors
-
-**License: **MIT
-
-Please see above.
-
-**Software**: golang.org/x/net v0.0.0-20190628185345-da137c7871d7
-
-**Copyright notice: **
-
-Copyright (c) 2009 The Go Authors
-
-**License: **BSD License
-
-Please see above.
-
-**Software**: golang.org/x/sys v0.0.0-20190813064441-fde4db37ae7a
-
-**Copyright notice: **
-
-Copyright (c) 2009 The Go Authors.
-
-**License: ** BSD License
-
-Please see above.
-
-**Software**: golang.org/x/text v0.3.2
-
-**Copyright notice: **
-
-Copyright (c) 2009 The Go Authors.
-
-**License: ** BSD License
-
-Please see above.
-
-**Software**: google.golang.org/genproto v0.0.0-20190404172233-64821d5d2107
-
-**Copyright notice: **
-
-Copyright 2015 Google LLC
-
-**License: ** Apache License Version 2.0
-
-Please see above.
-
-**Software**: google.golang.org/grpc v1.22.0
-
-**Copyright notice: **
-
-Copyright 2019 gRPC authors
-
-**License: ** Apache License Version 2.0
-
-Please see above.
-
-**Software**: gopkg.in/yaml.v2 v2.2.2
-
-**Copyright notice: **
-
-Copyright 2011-2016 Canonical Ltd.
-Copyright (c) 2006 Kirill Simonov
-
-**License: ** Apache License Version 2.0
-
-Please see above.
-
-**Software**: xorm.io/builder v0.3.5
-
-**Copyright notice: **
-
-Copyright (c) 2016 The Xorm Authors
-
-**License: ** BSD License
-
-Please see above.
-
-**Software**: xorm.io/core v0.6.3
-
-**Copyright notice: **
-
-Copyright (c) 2013 - 2015 Lunny Xiao <xiaolunwen@gmail.com>
-
-**License: ** BSD License
-
-Please see above.
+```
+
+### Software under Apache-2.0 License
+
+| # | Software | Version | Copyright Notice |
+|---|----------|---------|------------------|
+| 15 | [similar](https://crates.io/crates/similar) | 2.7.0 | Copyright (c) 2021-2024 Pierre-Henri Symoneaux |
+
+---
+
+## MIT OR Apache-2.0 Dual License
+
+The following software is distributed under dual licensing — you may choose either the MIT License or the Apache License, Version 2.0 (SPDX identifier: `MIT OR Apache-2.0`). Full texts of both licenses are provided above.
+
+### Software under MIT OR Apache-2.0
+
+| # | Software | Version | Copyright Notice |
+|---|----------|---------|------------------|
+| 16 | [anyhow](https://crates.io/crates/anyhow) | 1.0.102 | Copyright (c) 2018 David Tolnay and anyhow contributors |
+| 17 | [serde](https://crates.io/crates/serde) | 1.0.228 | Copyright (c) 2016 serde contributors |
+| 18 | [serde_json](https://crates.io/crates/serde_json) | 1.0.149 | Copyright (c) 2016 serde contributors |
+| 19 | [async-trait](https://crates.io/crates/async-trait) | 0.1.89 | Copyright (c) 2019 David Tolnay and async-trait contributors |
+| 20 | [thiserror](https://crates.io/crates/thiserror) | 1.0.69 | Copyright (c) 2018 David Tolnay and thiserror contributors |
+| 21 | [tokio-util](https://crates.io/crates/tokio-util) | 0.7.18 | Copyright (c) Tokio Contributors |
+| 22 | [uuid](https://crates.io/crates/uuid) | 1.23.1 | Copyright (c) 2014-2024 UUID Contributors |
+| 23 | [arc-swap](https://crates.io/crates/arc-swap) | 1.9.1 | Copyright (c) 2019 ArcSwap Project Contributors |
+| 24 | [tempfile](https://crates.io/crates/tempfile) | 3.27.0 | Copyright (c) 2015 Steven Allen, contributors |
+| 25 | [reqwest](https://crates.io/crates/reqwest) | 0.12.28 | Copyright (c) reqwest contributors |
+| 26 | [chrono](https://crates.io/crates/chrono) | 0.4.44 | Copyright (c) 2014-2024 Chrono contributors and The Chrono Team |
+| 27 | [arboard](https://crates.io/crates/arboard) | 3.6.1 | Copyright (c) 2021-2024 Avram Weinstock |
+| 28 | [base64](https://crates.io/crates/base64) | 0.22.1 | Copyright (c) 2015 Alice Mazuric, Alice Mazuric-Michael |
+| 29 | [toml](https://crates.io/crates/toml) | 0.8.23 | Copyright (c) 2017 Alex Crichton |
+| 30 | [futures](https://crates.io/crates/futures) | 0.3.32 | Copyright (c) 2016 Alex Crichton, contributors |
+| 31 | [futures-util](https://crates.io/crates/futures-util) | 0.3.32 | Copyright (c) 2016 Alex Crichton, contributors |
+| 32 | [regex](https://crates.io/crates/regex) | 1.12.3 | Copyright (c) 2014 The Rust Project Developers |
+| 33 | [mockito](https://crates.io/crates/mockito) | 1.7.2 | Copyright (c) 2015 Guillaume Gomez |
+| 34 | [parking_lot](https://crates.io/crates/parking_lot) | 0.12.5 | Copyright (c) 2016 Amanieu d'Antras |
+| 35 | [sha2](https://crates.io/crates/sha2) | 0.10.9 | Copyright (c) 2015-2024 RustCrypto Developers |
+| 36 | [hex](https://crates.io/crates/hex) | 0.4.3 | Copyright (c) 2015-2024 KokaKiwi, RustCrypto Developers |
+| 37 | [glob](https://crates.io/crates/glob) | 0.3.3 | Copyright (c) 2014 The Rust Project Developers |
+| 38 | [clap](https://crates.io/crates/clap) | 4.6.1 | Copyright (c) 2015-2024 clap-rs contributors, Kevin Knapp, contributors |
+| 39 | [rust-embed](https://crates.io/crates/rust-embed) | 8.11.0 | Copyright (c) 2017 pyros2097 |
+| 40 | [mime_guess](https://crates.io/crates/mime_guess) | 2.0.5 | Copyright (c) Austin Bonander |
+| 41 | [dirs](https://crates.io/crates/dirs) | 5.0.1 / 6.0.0 | Copyright (c) 2015-2024 Simon Agerton and dirs-rs contributors |
+| 42 | [async-stream](https://crates.io/crates/async-stream) | 0.3.6 | Copyright (c) 2019 Carl Fredriksson, tokio contributors |
+| 43 | [regex-lite](https://crates.io/crates/regex-lite) | 0.1.9 | Copyright (c) 2023 The Rust Project Developers |
+
+---
+
+## Summary Table
+
+| # | Software | Version | License | Source URL |
+|---|----------|---------|---------|------------|
+| 1 | tokio | v1.52.1 | MIT | https://crates.io/crates/tokio |
+| 2 | tracing | v0.1.44 | MIT | https://crates.io/crates/tracing |
+| 3 | crossterm | v0.28.1 | MIT | https://crates.io/crates/crossterm |
+| 4 | ratatui | v0.28.1 | MIT | https://crates.io/crates/ratatui |
+| 5 | rusqlite | v0.32.1 | MIT | https://crates.io/crates/rusqlite |
+| 6 | ulid | v1.2.1 | MIT | https://crates.io/crates/ulid |
+| 7 | axum | v0.7.9 | MIT | https://crates.io/crates/axum |
+| 8 | tower-http | v0.5.2 | MIT | https://crates.io/crates/tower-http |
+| 9 | htmd | v0.5.4 | MIT | https://crates.io/crates/htmd |
+| 10 | html2text | v0.16.7 | MIT | https://crates.io/crates/html2text |
+| 11 | image | v0.25.10 | MIT | https://crates.io/crates/image |
+| 12 | lopdf | v0.35.0 | MIT | https://crates.io/crates/lopdf |
+| 13 | tracing-subscriber | v0.3.23 | MIT | https://crates.io/crates/tracing-subscriber |
+| 14 | tokio-stream | v0.1.18 | MIT | https://crates.io/crates/tokio-stream |
+| 14a | unicode-width | v0.1.14 | MIT OR Apache-2.0 | https://crates.io/crates/unicode-width |
+| 15 | similar | | v2.7.0 | Apache-2.0 | https://crates.io/crates/similar |
+| 16 | anyhow | v1.0.102 | MIT OR Apache-2.0 | https://crates.io/crates/anyhow |
+| 17 | serde | v1.0.228 | MIT OR Apache-2.0 | https://crates.io/crates/serde |
+| 18 | serde_json | v1.0.149 | MIT OR Apache-2.0 | https://crates.io/crates/serde_json |
+| 19 | async-trait | v0.1.89 | MIT OR Apache-2.0 | https://crates.io/crates/async-trait |
+| 20 | thiserror | v1.0.69 | MIT OR Apache-2.0 | https://crates.io/crates/thiserror |
+| 21 | tokio-util | v0.7.18 | MIT OR Apache-2.0 | https://crates.io/crates/tokio-util |
+| 22 | uuid | v1.23.1 | Apache-2.0 OR MIT | https://crates.io/crates/uuid |
+| 23 | arc-swap | v1.9.1 | MIT OR Apache-2.0 | https://crates.io/crates/arc-swap |
+| 24 | tempfile | v3.27.0 | MIT OR Apache-2.0 | https://crates.io/crates/tempfile |
+| 25 | reqwest | v0.12.28 | MIT OR Apache-2.0 | https://crates.io/crates/reqwest |
+| 26 | chrono | v0.4.44 | MIT OR Apache-2.0 | https://crates.io/crates/chrono |
+| 27 | arboard | v3.6.1 | MIT OR Apache-2.0 | https://crates.io/crates/arboard |
+| 28 | base64 | v0.22.1 | MIT OR Apache-2.0 | https://crates.io/crates/base64 |
+| 29 | toml | v0.8.23 | MIT OR Apache-2.0 | https://crates.io/crates/toml |
+| 30 | futures | v0.3.32 | MIT OR Apache-2.0 | https://crates.io/crates/futures |
+| 31 | futures-util | v0.3.32 | MIT OR Apache-2.0 | https://crates.io/crates/futures-util |
+| 32 | regex | v1.12.3 | MIT OR Apache-2.0 | https://crates.io/crates/regex |
+| 33 | mockito | v1.7.2 | MIT OR Apache-2.0 | https://crates.io/crates/mockito |
+| 34 | parking_lot | v0.12.5 | MIT OR Apache-2.0 | https://crates.io/crates/parking_lot |
+| 35 | sha2 | v0.10.9 | MIT OR Apache-2.0 | https://crates.io/crates/sha2 |
+| 36 | hex | v0.4.3 | MIT OR Apache-2.0 | https://crates.io/crates/hex |
+| 37 | glob | v0.3.3 | MIT OR Apache-2.0 | https://crates.io/crates/glob |
+| 38 | clap | v4.6.1 | MIT OR Apache-2.0 | https://crates.io/crates/clap |
+| 39 | rust-embed | v8.11.0 | MIT OR Apache-2.0 | https://crates.io/crates/rust-embed |
+| 40 | mime_guess | v2.0.5 | MIT OR Apache-2.0 | https://crates.io/crates/mime_guess |
+| 41 | dirs | v5.0.1 / v6.0.0 | MIT OR Apache-2.0 | https://crates.io/crates/dirs |
+| 42 | async-stream | v0.3.6 | MIT OR Apache-2.0 | https://crates.io/crates/async-stream |
+| 43 | regex-lite | v0.1.9 | MIT OR Apache-2.0 | https://crates.io/crates/regex-lite |
+
+---
 
 **Written Offer**
 

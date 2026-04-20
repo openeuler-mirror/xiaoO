@@ -11,7 +11,11 @@ use crate::selection::TranscriptSelection;
 
 impl App {
     pub(crate) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> Result<()> {
-        if self.state.api_key_dialog.is_some() || self.state.provider_dialog.is_some() {
+        if self.state.api_key_dialog.is_some() {
+            return self.handle_api_key_dialog_mouse(mouse_event);
+        }
+
+        if self.state.provider_dialog.is_some() {
             return Ok(());
         }
 
@@ -21,13 +25,53 @@ impl App {
         }
 
         if self.state.slash_menu_visible() {
+            if self.handle_header_mouse(mouse_event) {
+                return Ok(());
+            }
             self.handle_slash_popup_mouse(mouse_event)?;
+            return Ok(());
+        }
+
+        if self.handle_header_mouse(mouse_event) {
             return Ok(());
         }
 
         self.handle_slash_popup_mouse(mouse_event)?;
         self.handle_transcript_mouse(mouse_event);
         Ok(())
+    }
+
+    fn handle_api_key_dialog_mouse(&mut self, mouse_event: MouseEvent) -> Result<()> {
+        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return Ok(());
+        }
+
+        let Some(toggle_area) = self.state.render_state.api_key_toggle_area else {
+            return Ok(());
+        };
+
+        if mouse_in_rect(mouse_event.column, mouse_event.row, toggle_area) {
+            self.state.toggle_api_key_visibility();
+        }
+
+        Ok(())
+    }
+
+    fn handle_header_mouse(&mut self, mouse_event: MouseEvent) -> bool {
+        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+
+        let Some(theme_toggle_area) = self.state.render_state.theme_toggle_area else {
+            return false;
+        };
+
+        if !mouse_in_rect(mouse_event.column, mouse_event.row, theme_toggle_area) {
+            return false;
+        }
+
+        self.state.toggle_theme();
+        true
     }
 
     fn handle_interaction_prompt_mouse(&mut self, mouse_event: MouseEvent) -> Result<()> {
@@ -153,6 +197,7 @@ impl App {
                     {
                         if let Some(tool) = message.tool_state.as_mut() {
                             tool.expanded = !tool.expanded;
+                            message.mark_render_dirty();
                         }
                     }
                     return;

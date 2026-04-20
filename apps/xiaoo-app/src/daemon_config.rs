@@ -103,6 +103,7 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentRoleConfig {
     #[serde(default)]
+    #[allow(dead_code)]
     pub description: String,
     #[serde(default)]
     pub prompt: Option<String>,
@@ -159,6 +160,7 @@ pub struct ResolvedAgentConfig {
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub app: AppConfig,
+    #[allow(dead_code)]
     pub config_path: PathBuf,
 }
 
@@ -316,6 +318,11 @@ impl DaemonConfig {
             );
         }
         serde_json::Value::Object(map)
+    }
+
+    #[allow(dead_code)]
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
     }
 
     pub fn resolve_compact_config(&self) -> Option<&CompactConfig> {

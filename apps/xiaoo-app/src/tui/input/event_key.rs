@@ -281,11 +281,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     self.state.apply_slash_selection();
-                    self.state.slash.dismissed = true;
+                    self.state.dismiss_current_slash_menu();
                     return Ok(());
                 }
                 KeyCode::Esc => {
-                    self.state.slash.dismissed = true;
+                    self.state.dismiss_current_slash_menu();
                     return Ok(());
                 }
                 _ => {}
@@ -441,6 +441,7 @@ impl App {
                                 model: model_id,
                                 input: crate::input::Input::default(),
                                 error: None,
+                                show_plaintext: false,
                             });
                         } else {
                             selection_to_apply =

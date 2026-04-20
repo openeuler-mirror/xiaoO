@@ -348,7 +348,7 @@ impl App {
     }
 
     pub(crate) fn render_api_key_dialog(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: Rect,
         dialog: &ApiKeyDialogState,
@@ -387,24 +387,62 @@ impl App {
             .style(Style::default().fg(self.state.theme.muted));
         frame.render_widget(hint, chunks[0]);
 
-        let mask = "*".repeat(dialog.input.value().len().min(40));
+        let toggle_label = if dialog.show_plaintext {
+            "Hide"
+        } else {
+            "Show"
+        };
+        let toggle_width = toggle_label.chars().count() as u16;
+        let row_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(toggle_width.saturating_add(2)),
+            ])
+            .split(chunks[1]);
+
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(self.state.theme.border))
             .padding(Padding::horizontal(1));
-        let input_paragraph = Paragraph::new(mask)
-            .style(
-                Style::default()
-                    .fg(self.state.theme.foreground)
-                    .bg(self.state.theme.input_bg),
-            )
-            .block(input_block);
-        frame.render_widget(input_paragraph, chunks[1]);
+        let input_inner = input_block.inner(row_chunks[0]);
+        frame.render_widget(
+            input_block.style(Style::default().bg(self.state.theme.input_bg)),
+            row_chunks[0],
+        );
 
-        let cursor_x = (chunks[1].x + 1 + dialog.input.visual_cursor() as u16)
-            .min(chunks[1].x + chunks[1].width.saturating_sub(2));
-        frame.set_cursor_position((cursor_x, chunks[1].y + 1));
+        let display_value = if dialog.show_plaintext {
+            dialog.input.value().to_string()
+        } else {
+            "*".repeat(dialog.input.value().chars().count())
+        };
+        let input_paragraph = Paragraph::new(display_value).style(
+            Style::default()
+                .fg(self.state.theme.foreground)
+                .bg(self.state.theme.input_bg),
+        );
+        frame.render_widget(input_paragraph, input_inner);
+
+        let toggle_area = Rect {
+            x: row_chunks[1].x,
+            y: row_chunks[1].y + 1,
+            width: row_chunks[1].width,
+            height: 1,
+        };
+        let toggle_button =
+            Paragraph::new(toggle_label).style(Style::default().fg(self.state.theme.primary));
+        frame.render_widget(toggle_button, toggle_area);
+        self.state.render_state.api_key_toggle_area = Some(toggle_area);
+
+        let cursor_offset = if dialog.show_plaintext {
+            dialog.input.visual_cursor() as u16
+        } else {
+            dialog.input.cursor() as u16
+        };
+        let cursor_x = (input_inner.x + cursor_offset)
+            .min(input_inner.x + input_inner.width.saturating_sub(1));
+        frame.set_cursor_position((cursor_x, input_inner.y));
 
         if let Some(error) = &dialog.error {
             let error_paragraph = Paragraph::new(error.as_str())

@@ -1,0 +1,10 @@
+{
+    "session_id": "my-session-001",
+    "prompt_session": "帮我读取 /var/log/app.log 文件并分析其中的错误信息",
+    "action_history": [],
+    "a_next": {
+        "action_type": "shell_command",
+        "action_detail": "cat /var/log/app.log"
+    },
+    "reason": "需要读取日志文件内容以进行错误分析"
+}

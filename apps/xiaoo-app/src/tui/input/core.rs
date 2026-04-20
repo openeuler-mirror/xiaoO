@@ -53,12 +53,6 @@ impl Input {
         self.selection_anchor = Some(self.cursor);
     }
 
-    /// Extend the selection by moving the cursor to `pos` (anchor stays fixed).
-    pub fn extend_to(&mut self, pos: usize) {
-        let len = self.value.chars().count();
-        self.cursor = pos.min(len);
-    }
-
     /// Returns the selected character range as `start..end` (inclusive start,
     /// exclusive end), where `start <= end`.  Returns `None` when there is no
     /// anchor or the anchor equals the cursor (empty selection).

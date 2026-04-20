@@ -1,9 +1,9 @@
 use anyhow::Result;
-use ratatui::layout::Rect;
+use ratatui::{layout::Rect, text::Line};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::chat::{default_provider_list, merge_config_provider, ChatState, MessageRole};
+use crate::chat::{default_provider_list, merge_config_provider, ChatState};
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
@@ -28,11 +28,13 @@ pub enum RuntimeStatusLight {
     AwaitingInteraction,
 }
 
+#[derive(Clone)]
 pub struct ApiKeyDialogState {
     pub provider: String,
     pub model: String,
     pub input: Input,
     pub error: Option<String>,
+    pub show_plaintext: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,9 +43,40 @@ pub struct ToolToggleRegion {
     pub rect: Rect,
 }
 
+#[derive(Clone)]
+pub struct CachedMessageRender {
+    pub revision: u64,
+    pub width: u16,
+    pub theme: Theme,
+    pub lines: Vec<Line<'static>>,
+    pub tool_toggle_row_offset: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct CachedMessageLayout {
+    pub message_index: usize,
+    pub start_visual_row: usize,
+    pub tool_toggle_row_offset: Option<usize>,
+}
+
+#[derive(Clone)]
+pub struct TranscriptRenderCache {
+    pub all_lines: Vec<Line<'static>>,
+    pub visual_lines: Vec<Line<'static>>,
+    pub line_texts: Vec<String>,
+    pub line_is_header: Vec<bool>,
+    pub logical_line_visual_starts: Vec<usize>,
+    pub message_layouts: Vec<CachedMessageLayout>,
+    pub total_lines: usize,
+}
+
 #[derive(Default)]
 pub struct RenderState {
     pub messages_area: Option<Rect>,
+    pub theme_toggle_area: Option<Rect>,
+    pub api_key_toggle_area: Option<Rect>,
+    pub message_renders: Vec<Option<CachedMessageRender>>,
+    pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
@@ -60,7 +93,7 @@ pub struct RenderState {
 #[derive(Default)]
 pub struct SlashState {
     pub selected: usize,
-    pub dismissed: bool,
+    pub dismissed_prefix: Option<String>,
 }
 
 pub struct AppState {
@@ -89,6 +122,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
     pub fn new(config_path: PathBuf, workspace: PathBuf) -> Result<Self, anyhow::Error> {
         Ok(Self {
             theme: Theme::default(),
@@ -173,6 +207,16 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    pub fn toggle_theme(&mut self) {
+        self.theme = self.theme.toggled();
+    }
+
+    pub fn toggle_api_key_visibility(&mut self) {
+        if let Some(dialog) = self.api_key_dialog.as_mut() {
+            dialog.show_plaintext = !dialog.show_plaintext;
+        }
+    }
+
     /// Extract the plain text covered by the current transcript selection.
     /// Returns `None` if there is no active selection or the selection is empty.
     ///
@@ -250,33 +294,20 @@ impl AppState {
         if self.input_mode != InputMode::Editing || self.chat_state.is_loading {
             return false;
         }
-        if self.slash.dismissed {
-            return false;
-        }
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
         let Some(prefix) = slash_typed_prefix(value, cursor) else {
             return false;
         };
+        if self
+            .slash
+            .dismissed_prefix
+            .as_deref()
+            .is_some_and(|dismissed| dismissed == prefix)
+        {
+            return false;
+        }
         !candidates_for_prefix(&prefix, &self.external_commands).is_empty()
-    }
-
-    pub fn slash_popup_height(&self) -> u16 {
-        if !self.slash_menu_visible() {
-            return 0;
-        }
-        let value = self.chat_state.input.value();
-        let cursor = self.chat_state.input.cursor();
-        let Some(prefix) = slash_typed_prefix(value, cursor) else {
-            return 0;
-        };
-        let candidate_count = candidates_for_prefix(&prefix, &self.external_commands)
-            .len()
-            .min(6);
-        if candidate_count == 0 {
-            return 0;
-        }
-        candidate_count as u16 + 2
     }
 
     pub fn slash_candidate_count(&self) -> usize {
@@ -290,8 +321,14 @@ impl AppState {
     pub fn note_input_changed(&mut self) {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
-        if slash_typed_prefix(value, cursor).is_none() {
-            self.slash.dismissed = false;
+        let prefix = slash_typed_prefix(value, cursor);
+        if self
+            .slash
+            .dismissed_prefix
+            .as_deref()
+            .is_some_and(|dismissed| prefix.as_deref() != Some(dismissed))
+        {
+            self.slash.dismissed_prefix = None;
         }
         let candidate_count = self.slash_candidate_count();
         if candidate_count == 0 {
@@ -312,17 +349,10 @@ impl AppState {
         }
     }
 
-    pub fn get_last_assistant_content(&self) -> Option<String> {
-        self.chat_state
-            .messages
-            .iter()
-            .rev()
-            .find(|message| {
-                message.role == MessageRole::Assistant
-                    && !message.is_streaming
-                    && !message.content.is_empty()
-            })
-            .map(|message| message.content.clone())
+    pub fn dismiss_current_slash_menu(&mut self) {
+        let value = self.chat_state.input.value();
+        let cursor = self.chat_state.input.cursor();
+        self.slash.dismissed_prefix = slash_typed_prefix(value, cursor);
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
@@ -406,10 +436,9 @@ fn build_status_panel(config: &Config) -> StatusPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, RuntimeStatusLight};
+    use super::{ApiKeyDialogState, AppState, RuntimeStatusLight};
+    use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
-    use crate::selection::TranscriptSelection;
-    use agent_types::{ChatMessage, ContentBlock, MessageRole};
     use std::path::PathBuf;
 
     #[test]
@@ -439,6 +468,76 @@ mod tests {
             state.runtime_status_light(),
             RuntimeStatusLight::AwaitingInteraction
         );
+    }
+
+    #[test]
+    fn toggle_theme_switches_between_dark_and_light() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        let initial_is_light = state.theme.is_light();
+
+        state.toggle_theme();
+        assert_ne!(state.theme.is_light(), initial_is_light);
+
+        state.toggle_theme();
+        assert_eq!(state.theme.is_light(), initial_is_light);
+    }
+
+    #[test]
+    fn toggle_api_key_visibility_switches_between_hidden_and_plaintext() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.api_key_dialog = Some(ApiKeyDialogState {
+            provider: "demo".to_string(),
+            model: "model".to_string(),
+            input: Input::default(),
+            error: None,
+            show_plaintext: false,
+        });
+
+        state.toggle_api_key_visibility();
+        assert!(state
+            .api_key_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.show_plaintext));
+
+        state.toggle_api_key_visibility();
+        assert!(state
+            .api_key_dialog
+            .as_ref()
+            .is_some_and(|dialog| !dialog.show_plaintext));
+    }
+
+    #[test]
+    fn slash_menu_reopens_for_new_prefix_after_dismiss() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.input = "/skills".into();
+
+        assert!(state.slash_menu_visible());
+
+        state.dismiss_current_slash_menu();
+        assert!(!state.slash_menu_visible());
+
+        state.chat_state.input = "/".into();
+        state.note_input_changed();
+        assert!(state.slash_menu_visible());
+    }
+
+    #[test]
+    fn slash_menu_reopens_when_prefix_changes_after_escape() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state.chat_state.input = "/c".into();
+
+        assert!(state.slash_menu_visible());
+
+        state.dismiss_current_slash_menu();
+        assert!(!state.slash_menu_visible());
+
+        state.chat_state.input = "/co".into();
+        state.note_input_changed();
+        assert!(state.slash_menu_visible());
     }
 
     fn sample_prompt_request() -> PromptRequest {

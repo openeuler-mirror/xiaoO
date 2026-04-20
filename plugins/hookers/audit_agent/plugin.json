@@ -1,0 +1,7 @@
+[
+  {
+    "id": "plugin_audit_tool_input",
+    "hook_point": "*.Tool.*.pre",
+    "command": "audit_policy_checker/venv/bin/python3 audit.py"
+  }
+]
