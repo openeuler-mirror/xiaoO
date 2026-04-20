@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation},
     Frame,
 };
 use serde_json::Value;
@@ -159,43 +159,56 @@ impl App {
                 end_line_index += 1;
             }
 
-            let mut visible_lines: Vec<Line> =
-                transcript_cache.all_lines[safe_start_line_index..end_line_index].to_vec();
-
             let (start_line, start_col, end_line, end_col) = sel.normalised();
             let sel_style = Style::default()
                 .fg(self.state.theme.background)
                 .bg(self.state.theme.foreground)
                 .add_modifier(Modifier::BOLD);
-            for (visible_index, line) in visible_lines.iter_mut().enumerate() {
+            let mut selected_visual_lines = Vec::new();
+            for (visible_index, original_line) in transcript_cache.all_lines
+                [safe_start_line_index..end_line_index]
+                .iter()
+                .enumerate()
+            {
                 let global_line_index = safe_start_line_index + visible_index;
-                if global_line_index < start_line || global_line_index > end_line {
-                    continue;
-                }
-                let col_start = if global_line_index == start_line {
-                    start_col
+                let line = if global_line_index < start_line || global_line_index > end_line {
+                    original_line.clone()
                 } else {
-                    0
+                    let col_start = if global_line_index == start_line {
+                        start_col
+                    } else {
+                        0
+                    };
+                    let line_char_len: usize = original_line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.chars().count())
+                        .sum();
+                    let col_end = if global_line_index == end_line {
+                        end_col.min(line_char_len)
+                    } else {
+                        line_char_len
+                    };
+                    if col_start >= col_end {
+                        original_line.clone()
+                    } else {
+                        highlight_line_selection(original_line.clone(), col_start, col_end, sel_style)
+                    }
                 };
-                let line_char_len: usize = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.chars().count())
-                    .sum();
-                let col_end = if global_line_index == end_line {
-                    end_col.min(line_char_len)
-                } else {
-                    line_char_len
-                };
-                if col_start >= col_end {
-                    continue;
-                }
-                *line = highlight_line_selection(line.clone(), col_start, col_end, sel_style);
+                selected_visual_lines.extend(wrap_line_to_visual_lines(&line, inner_area.width));
             }
 
-            let paragraph = Paragraph::new(Text::from(visible_lines))
-                .wrap(Wrap { trim: false })
-                .scroll((paragraph_scroll as u16, 0));
+            let visual_slice_start = paragraph_scroll.min(selected_visual_lines.len());
+            let visual_slice_end = visual_slice_start
+                .saturating_add(inner_height)
+                .min(selected_visual_lines.len());
+            let visible_visual_lines = if visual_slice_start < visual_slice_end {
+                selected_visual_lines[visual_slice_start..visual_slice_end].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         } else {
             let visual_end = scroll_end.min(transcript_cache.visual_lines.len());
@@ -971,7 +984,13 @@ fn format_completed_at_ms(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_join_subagent_terminal, parse_spawn_subagent_agent_id};
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+
+    use super::{
+        highlight_line_selection, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
+        wrap_line_to_visual_lines,
+    };
 
     #[test]
     fn spawn_subagent_detail_parses_agent_id() {
@@ -992,5 +1011,24 @@ mod tests {
         assert_eq!(parsed.reply.as_deref(), Some("done"));
         assert_eq!(parsed.error, None);
         assert_eq!(parsed.completed_at_ms, Some(123));
+    }
+
+    #[test]
+    fn selection_highlight_preserves_wrapped_visual_layout() {
+        let line = Line::from("  assistant output with enough text to wrap");
+        let wrapped_before = wrap_line_to_visual_lines(&line.clone(), 12);
+        let highlighted = highlight_line_selection(line, 4, 18, Style::default());
+        let wrapped_after = wrap_line_to_visual_lines(&highlighted, 12);
+
+        let before_text: Vec<String> = wrapped_before
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        let after_text: Vec<String> = wrapped_after
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+
+        assert_eq!(before_text, after_text);
     }
 }
