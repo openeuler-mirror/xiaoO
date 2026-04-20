@@ -124,7 +124,7 @@ $ xiaoo run -p 'Count "hello world" char numbers'
 The Gateway operates in **daemon mode**, providing a RESTful API for external systems (such as Lark Webhook) to access.
 
 ```bash
-# default port（0.0.0.0:8080）
+# default port（0.0.0.0:18080）
 xiaoo-app daemon
 
 # Specify configuration file, address and port

@@ -86,7 +86,7 @@ impl Cli {
             "daemon" => {
                 let mut config = None;
                 let mut host = "0.0.0.0".to_string();
-                let mut port = 8080_u16;
+                let mut port = 18080_u16;
                 let remaining = args.collect::<Vec<_>>();
                 let mut index = 0;
                 while index < remaining.len() {
@@ -144,5 +144,18 @@ mod tests {
         .expect("cli should parse");
 
         assert!(matches!(cli.command, super::Command::Daemon { .. }));
+    }
+
+    #[test]
+    fn daemon_defaults_to_port_18080() {
+        let cli = Cli::parse(["daemon"].into_iter().map(str::to_string))
+            .expect("cli should parse with defaults");
+
+        match cli.command {
+            super::Command::Daemon { host, port, .. } => {
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, 18080);
+            }
+        }
     }
 }

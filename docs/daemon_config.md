@@ -4,7 +4,7 @@
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
 | `--host <HOST>` | Bind address | `0.0.0.0` |
-| `--port <PORT>` | Listen port | `8080` |
+| `--port <PORT>` | Listen port | `18080` |
 
 ### Daemon Configuration File (TOML)
 
@@ -94,7 +94,7 @@ Chat endpoint. Send messages to the Gateway and receive responses.
 **Example Request:**
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/chat \
+curl -X POST http://localhost:18080/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
@@ -157,7 +157,7 @@ Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **
 **Example Request:**
 
 ```bash
-curl -N -X POST http://localhost:8080/api/v1/chat/stream \
+curl -N -X POST http://localhost:18080/api/v1/chat/stream \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Hello",
