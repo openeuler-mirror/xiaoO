@@ -41,14 +41,6 @@ api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment vari
 max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
 context_window = 128000 # Optional, used for session compression budget
 
-[agent.code-reviewer]
-description = "Reviews code for best practices and potential issues"
-prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
-
-[agent.code-reviewer.tools]
-file_write = false
-file_edit = false
-
 [trace]
 storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
 db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-sqlite 时生效；未配置时为 ~/.moirai
