@@ -174,6 +174,7 @@ pub struct LspConfig {
 
     /// Server IDs to disable (e.g. ["pyright"] to turn off the built-in pyright).
     #[serde(default)]
+    #[allow(dead_code)]
     pub disabled_servers: Vec<String>,
 
     /// Extra language servers not covered by the built-in list.

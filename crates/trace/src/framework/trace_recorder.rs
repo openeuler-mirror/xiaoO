@@ -34,9 +34,6 @@ impl TraceRecorderImpl {
             TraceBackendType::MoiraiSqlite => {
                 Box::new(MoiraiSqliteBackend::new(config, trace_id.clone()).await?)
             }
-            TraceBackendType::MoiraiSqlite => {
-                Box::new(MoiraiSqliteBackend::new(config, trace_id.clone()).await?)
-            }
         };
 
         Ok(Self {
