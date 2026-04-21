@@ -1,5 +1,7 @@
 mod config;
 mod create;
+#[cfg(test)]
+mod tests;
 mod trace;
 mod wrapper;
 

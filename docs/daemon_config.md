@@ -28,6 +28,20 @@ base_url = "https://open.feishu.cn"  # Optional, default value
 bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
 # bearer_token = "local-dev-token"   # Optional, use env var in production; do not set both
 
+[http.rate_limit]                   # Optional, per-IP rate limiting for all HTTP endpoints
+enabled = true                      # Enable or disable rate limiting; default: true
+requests_per_second = 2             # Default refill rate; default: 2 (≈120 req/min)
+burst = 10                          # Max burst size; default: 10
+
+# Per-route overrides (optional)
+# [http.rate_limit.routes.health]
+# requests_per_second = 10          # Health checks get a wider quota
+# burst = 30
+
+# [http.rate_limit.routes.chat]
+# requests_per_second = 1           # Chat API is the most expensive endpoint
+# burst = 5
+
 [trace]                              # Optional, tracing/observability config
 storage_backend = "moirai-sqlite"    # moirai-sqlite (default) | stdout | noop
 db_path = "~/.xiaoo/traces.db"      # Database path for moirai-sqlite; uses trace crate built-in default if not configured
@@ -139,6 +153,9 @@ curl -X POST http://localhost:18080/api/v1/chat \
   ```
 - `500 Internal Server Error` — Session service internal error
 - `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
+- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
+
+> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/channels/feishu/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
 
 ---
 
@@ -194,6 +211,18 @@ data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! Ho
 
 - `400 Bad Request` — Same validation errors as `/api/v1/chat`
 - `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
+- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
+
+**429 Response:**
+
+```json
+{ "error": "rate limit exceeded; retry after 1s" }
+```
+
+| Header | Description |
+|--------|-------------|
+| `Retry-After` | Seconds until quota resets |
+| `X-RateLimit-Remaining` | Remaining requests (always `0` when 429) |
 
 ---
 

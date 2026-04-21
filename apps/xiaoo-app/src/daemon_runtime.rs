@@ -50,7 +50,7 @@ impl ConfiguredRuntimeResolver {
         let resolved_provider = resolve_config(ResolveInput {
             provider: Some(config.app.llm.provider.clone()),
             protocol: None,
-            api_key: config.app.llm.api_key.clone(),
+            api_key: None,
             api_key_env: config.app.llm.api_key_env.clone(),
             base_url: config.app.llm.api_base.clone(),
         })
