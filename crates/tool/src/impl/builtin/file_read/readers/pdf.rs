@@ -93,6 +93,7 @@ pub async fn read_pdf<P: AsRef<Path>>(file_path: P) -> Result<PdfOutput, PdfErro
     })
 }
 
+#[allow(dead_code)]
 pub fn read_pdf_from_bytes(file_path: &str, bytes: &[u8]) -> PdfOutput {
     let original_size = bytes.len() as u64;
     let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -171,6 +172,7 @@ pub async fn extract_pdf_pages<P: AsRef<Path>>(
     })
 }
 
+#[allow(dead_code)]
 pub fn extract_pdf_pages_from_bytes(
     file_path: &str,
     bytes: &[u8],

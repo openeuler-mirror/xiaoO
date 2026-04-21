@@ -78,6 +78,7 @@ pub async fn read_notebook<P: AsRef<Path>>(
     })
 }
 
+#[allow(dead_code)]
 pub fn read_notebook_from_bytes(
     file_path: &str,
     bytes: &[u8],
