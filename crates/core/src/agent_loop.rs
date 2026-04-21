@@ -801,9 +801,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Partition tool calls into valid (non-empty call_id + tool_name) and invalid.
-    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
-        .into_iter()
-        .partition(is_valid_tool_call);
+    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) =
+        tool_calls.into_iter().partition(is_valid_tool_call);
 
     // Handle the case where ALL tool calls are invalid and there is exactly one:
     // retry the LLM request once, but only if we can safely synthesize a tool_result.
@@ -1312,8 +1311,8 @@ mod tests {
     use agent_types::events::LoopEndSummary;
     use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
     use agent_types::{
-        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk,
-        ToolUseBlock, Usage,
+        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
+        Usage,
     };
     use async_trait::async_trait;
     use llm_client::LlmProviderWrapper;
@@ -1811,17 +1810,14 @@ mod tests {
             loop_state.messages[1].text_content(),
             Some("trying to use a tool")
         );
-        assert!(
-            !loop_state.messages[1]
-                .blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-        );
-        assert!(
-            !loop_state.messages
-                .iter()
-                .any(|message| matches!(message.role, MessageRole::Tool))
-        );
+        assert!(!loop_state.messages[1]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
+        assert!(!loop_state
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool)));
     }
 
     /// LLM provider that returns a single empty-name tool call on every invocation.

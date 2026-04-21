@@ -12,9 +12,9 @@ use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
     GatewayChannelMessage,
 };
+use crate::httpserver::rate_limit::RateLimitConfig;
 use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use crate::httpserver::rate_limit::RateLimitConfig;
 use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
@@ -191,7 +191,11 @@ pub fn create_router_with_auth(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    create_router_from_state(GatewayAppState::new(session_service), bearer_auth, rate_limit)
+    create_router_from_state(
+        GatewayAppState::new(session_service),
+        bearer_auth,
+        rate_limit,
+    )
 }
 
 pub fn create_router_with_feishu_and_timeout(

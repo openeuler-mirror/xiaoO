@@ -87,8 +87,7 @@ pub async fn resolve_binary(config: &ServerConfig) -> Result<PathBuf, LspError> 
 
 async fn try_auto_install(config: &ServerConfig) -> Result<PathBuf, String> {
     let bin_dir = global_bin_dir();
-    std::fs::create_dir_all(&bin_dir)
-        .map_err(|e| format!("failed to create bin dir: {e}"))?;
+    std::fs::create_dir_all(&bin_dir).map_err(|e| format!("failed to create bin dir: {e}"))?;
 
     match config.auto_install {
         AutoInstall::None => Err(format!(
@@ -180,9 +179,8 @@ async fn try_auto_install(config: &ServerConfig) -> Result<PathBuf, String> {
             if in_root_bin.is_file() {
                 return Ok(in_root_bin);
             }
-            which(config.command).ok_or_else(|| {
-                format!("'{}' still not found after cargo install", config.command)
-            })
+            which(config.command)
+                .ok_or_else(|| format!("'{}' still not found after cargo install", config.command))
         }
     }
 }

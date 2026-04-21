@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationBackendConfig {
-    /// Backend family identifier, for example local / docker / remote.
     pub kind: String,
-    /// Implementation-specific structured configuration payload.
     pub options: Value,
 }
 
@@ -15,4 +15,21 @@ impl OperationBackendConfig {
             options,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OperationBackendBuildInput {
+    pub config: Option<OperationBackendConfig>,
+    pub workspace_root: Option<PathBuf>,
+    pub agent_id: Option<String>,
+    pub session_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub channel: Option<String>,
+    pub channel_instance_id: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_backend_options() -> Value {
+    Value::Object(serde_json::Map::new())
 }

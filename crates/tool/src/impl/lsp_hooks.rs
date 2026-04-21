@@ -35,17 +35,18 @@ pub async fn fetch_diagnostics(
     file: &Path,
     timeout_secs: u64,
 ) -> Option<LspDiagnosticsInfo> {
-    let result = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        lsp.diagnostics(file),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), lsp.diagnostics(file)).await;
 
     match result {
         Ok(Ok(items)) => {
             let has_errors = items.iter().any(|d| d.severity == "error");
             let count = items.len();
-            Some(LspDiagnosticsInfo { has_errors, count, items })
+            Some(LspDiagnosticsInfo {
+                has_errors,
+                count,
+                items,
+            })
         }
         Ok(Err(_)) | Err(_) => None,
     }

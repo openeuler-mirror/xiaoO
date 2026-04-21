@@ -41,6 +41,7 @@ struct AskUserDirective {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum PluginAskUserRequest {
     Confirm {
         prompt: String,

@@ -37,15 +37,16 @@ impl ToolExecutor for LspExecutor {
         call: &FinalToolCall,
         runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
-        let input: LspInput =
-            serde_json::from_value(call.input.clone()).map_err(|e| {
-                ToolExecutionError::ExecutionFailed {
-                    message: format!("invalid input: {e}"),
-                }
-            })?;
+        let input: LspInput = serde_json::from_value(call.input.clone()).map_err(|e| {
+            ToolExecutionError::ExecutionFailed {
+                message: format!("invalid input: {e}"),
+            }
+        })?;
 
         let Some(lsp) = &self.services.lsp_service else {
-            return Ok(error_output("LSP service is not enabled. Set lsp.enabled = true in daemon config."));
+            return Ok(error_output(
+                "LSP service is not enabled. Set lsp.enabled = true in daemon config.",
+            ));
         };
 
         let workspace_root = runtime_workspace_root(runtime);
@@ -104,28 +105,40 @@ impl ToolExecutor for LspExecutor {
 
             LspAction::Implementation => {
                 let (line, col) = require_position(&input)?;
-                let locations = lsp.implementation(&file, line, col).await.map_err(exec_err)?;
+                let locations = lsp
+                    .implementation(&file, line, col)
+                    .await
+                    .map_err(exec_err)?;
                 let count = locations.len();
                 LspOutput::Implementation { locations, count }
             }
 
             LspAction::PrepareCallHierarchy => {
                 let (line, col) = require_position(&input)?;
-                let items = lsp.prepare_call_hierarchy(&file, line, col).await.map_err(exec_err)?;
+                let items = lsp
+                    .prepare_call_hierarchy(&file, line, col)
+                    .await
+                    .map_err(exec_err)?;
                 let count = items.len();
                 LspOutput::PrepareCallHierarchy { items, count }
             }
 
             LspAction::IncomingCalls => {
                 let (line, col) = require_position(&input)?;
-                let calls = lsp.incoming_calls(&file, line, col).await.map_err(exec_err)?;
+                let calls = lsp
+                    .incoming_calls(&file, line, col)
+                    .await
+                    .map_err(exec_err)?;
                 let count = calls.len();
                 LspOutput::IncomingCalls { calls, count }
             }
 
             LspAction::OutgoingCalls => {
                 let (line, col) = require_position(&input)?;
-                let calls = lsp.outgoing_calls(&file, line, col).await.map_err(exec_err)?;
+                let calls = lsp
+                    .outgoing_calls(&file, line, col)
+                    .await
+                    .map_err(exec_err)?;
                 let count = calls.len();
                 LspOutput::OutgoingCalls { calls, count }
             }

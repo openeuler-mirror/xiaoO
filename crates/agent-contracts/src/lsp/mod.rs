@@ -37,11 +37,7 @@ pub trait LspProvider: Send + Sync {
     ) -> Result<Vec<LspLocation>, LspError>;
 
     /// Document symbols (`query = None`) or workspace symbol search (`query = Some(q)`).
-    async fn symbols(
-        &self,
-        file: &Path,
-        query: Option<&str>,
-    ) -> Result<Vec<LspSymbol>, LspError>;
+    async fn symbols(&self, file: &Path, query: Option<&str>) -> Result<Vec<LspSymbol>, LspError>;
 
     /// Go-to-implementation: source locations of the concrete implementation(s).
     async fn implementation(

@@ -1,3 +1,4 @@
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
@@ -49,6 +50,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
+    #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
 }
@@ -229,8 +232,7 @@ impl Config {
             .map(|c| {
                 let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
                 let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str =
-                    Box::leak(c.language_id.clone().into_boxed_str());
+                let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
                 let extensions: &'static [&'static str] = Box::leak(
                     c.extensions
                         .iter()
