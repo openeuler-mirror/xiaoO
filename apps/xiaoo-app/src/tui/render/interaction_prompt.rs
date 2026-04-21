@@ -17,6 +17,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 
 use super::theme::Theme;
+use super::utils::sanitize_terminal_text;
 
 /// 单个可选项（可与 JSON 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,17 +271,17 @@ pub fn render_interaction_prompt(
             let mark = if state.request.multi_select {
                 let on = state.multi_checked.get(global_i).copied().unwrap_or(false);
                 if on {
-                    "[✓] "
+                    sanitize_terminal_text("[✓] ")
                 } else {
-                    "[ ] "
+                    "[ ] ".to_string()
                 }
             } else {
-                ""
+                String::new()
             };
             let mut spans = vec![Span::styled(format!("{}{} ", mark, ch.label), style)];
             if let Some(d) = &ch.description {
                 spans.push(Span::styled(
-                    format!(" — {}", d),
+                    sanitize_terminal_text(&format!(" — {}", d)),
                     Style::default().fg(theme.muted),
                 ));
             }

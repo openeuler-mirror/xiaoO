@@ -7,13 +7,15 @@ use ratatui::{
 
 use crate::app::App;
 
+use super::utils::sanitize_terminal_text;
+
 const LOADING_SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 impl App {
     pub fn loading_animation(&self) -> String {
         let spinner =
             LOADING_SPINNER_FRAMES[self.state.loading_tick % LOADING_SPINNER_FRAMES.len()];
-        format!("{} Thinking...", spinner)
+        sanitize_terminal_text(&format!("{spinner} Thinking..."))
     }
 
     pub fn ui(&mut self, frame: &mut Frame) {

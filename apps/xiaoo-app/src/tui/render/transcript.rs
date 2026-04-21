@@ -17,7 +17,9 @@ use crate::chat::{Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, 
 use crate::markdown::render_markdown;
 use crate::theme::Theme;
 
-use super::utils::{render_tool_detail_text, rendered_line_count, truncate_display_width};
+use super::utils::{
+    render_tool_detail_text, rendered_line_count, sanitize_terminal_text, truncate_display_width,
+};
 
 impl App {
     pub(crate) fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
@@ -424,7 +426,7 @@ fn render_tool_message_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
     let status = match tool.status {
         ToolExecutionStatus::Running => "running",
         ToolExecutionStatus::Completed => "done",
@@ -445,7 +447,7 @@ fn render_tool_message_lines(
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(tool_color)),
+            Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(tool_color)),
             Span::styled(
                 "Tool",
                 Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -469,7 +471,7 @@ fn render_tool_message_lines(
         ));
         for line in command_text.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -492,7 +494,7 @@ fn render_tool_message_lines(
         ));
         for line in tool.args_preview.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -509,7 +511,7 @@ fn render_tool_message_lines(
         ));
         for line in detail_text.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -526,7 +528,7 @@ fn render_todo_message_lines(
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(theme.secondary)),
+            Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(theme.secondary)),
             Span::styled(
                 "Planner",
                 Style::default()
@@ -536,7 +538,7 @@ fn render_todo_message_lines(
             Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
         ]),
         Line::styled(
-            format!("  {}", todo.title),
+            format!("  {}", sanitize_terminal_text(&todo.title)),
             Style::default()
                 .fg(theme.secondary)
                 .add_modifier(Modifier::BOLD),
@@ -550,8 +552,14 @@ fn render_todo_message_lines(
             TodoDisplayStatus::Pending => ("☐", theme.muted),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {icon} "), Style::default().fg(color)),
-            Span::styled(content.clone(), Style::default().fg(theme.foreground)),
+            Span::styled(
+                sanitize_terminal_text(&format!("  {icon} ")),
+                Style::default().fg(color),
+            ),
+            Span::styled(
+                sanitize_terminal_text(content),
+                Style::default().fg(theme.foreground),
+            ),
         ]));
     }
     lines.push(Line::raw(""));
@@ -566,7 +574,10 @@ fn render_completion_check_lines(
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(theme.gradient_yellow)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(theme.gradient_yellow),
+            ),
             Span::styled(
                 "Checker",
                 Style::default()
@@ -585,7 +596,11 @@ fn render_completion_check_lines(
 
     if !checker.next_step_hint.trim().is_empty() {
         lines.push(Line::styled(
-            format!("  → {}", checker.next_step_hint.trim()),
+            format!(
+                "  {} {}",
+                sanitize_terminal_text("→"),
+                sanitize_terminal_text(checker.next_step_hint.trim())
+            ),
             Style::default().fg(theme.foreground),
         ));
     }
@@ -653,7 +668,7 @@ fn render_standard_message_lines(
         && is_active_stream_message
         && message.content.is_empty();
     let mut lines = vec![Line::from(vec![
-        Span::styled("▎ ", Style::default().fg(indicator_color)),
+        Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(indicator_color)),
         Span::styled(role_label.to_string(), role_style),
         Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
     ])];
@@ -661,9 +676,9 @@ fn render_standard_message_lines(
     if !message.thinking_content.is_empty() {
         let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
         let thinking_header = if is_thinking {
-            format!("  ⟡ {loading_animation}")
+            format!("  {} {loading_animation}", sanitize_terminal_text("⟡"))
         } else {
-            "  ⟡ Thought".to_string()
+            format!("  {} Thought", sanitize_terminal_text("⟡"))
         };
         lines.push(Line::styled(
             thinking_header,
@@ -673,7 +688,10 @@ fn render_standard_message_lines(
         ));
         let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
         for line in message.thinking_content.lines() {
-            lines.push(Line::styled(format!("  │ {line}"), thinking_style));
+            lines.push(Line::styled(
+                format!("  {} {}", sanitize_terminal_text("│"), sanitize_terminal_text(line)),
+                thinking_style,
+            ));
         }
         lines.push(Line::raw(""));
     }
@@ -691,13 +709,19 @@ fn render_standard_message_lines(
         }
         _ => {
             for line in message.content.lines() {
-                lines.push(Line::styled(format!("  {line}"), content_style));
+                lines.push(Line::styled(
+                    format!("  {}", sanitize_terminal_text(line)),
+                    content_style,
+                ));
             }
         }
     }
 
     if message.is_streaming && !show_stream_thinking {
-        lines.push(Line::styled("  ▌", Style::default().fg(theme.accent)));
+        lines.push(Line::styled(
+            format!("  {}", sanitize_terminal_text("▌")),
+            Style::default().fg(theme.accent),
+        ));
     }
     lines.push(Line::raw(""));
     lines
@@ -782,7 +806,7 @@ fn render_subagent_tool_lines(
         "join_subagent" => "Join Subagent",
         _ => "Subagent",
     };
-    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
     let status = match tool.status {
         ToolExecutionStatus::Running => "running",
         ToolExecutionStatus::Completed => "done",
@@ -801,7 +825,7 @@ fn render_subagent_tool_lines(
     let header = truncate_display_width(&header, max_header_width);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled("▎ ", Style::default().fg(tool_color)),
+        Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(tool_color)),
         Span::styled(
             header,
             Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -821,7 +845,7 @@ fn render_subagent_tool_lines(
         ));
         for line in tool.args_preview.lines() {
             lines.push(Line::styled(
-                format!("    {}", line),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -849,7 +873,7 @@ fn render_spawn_subagent_detail_lines(
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(
-            format!("    agent_id: {}", agent_id),
+            format!("    agent_id: {}", sanitize_terminal_text(&agent_id)),
             Style::default().fg(theme.foreground),
         ));
         return;
@@ -892,7 +916,7 @@ fn render_join_subagent_detail_lines(
             ));
             for line in reply.lines() {
                 lines.push(Line::styled(
-                    format!("    {}", line),
+                    format!("    {}", sanitize_terminal_text(line)),
                     Style::default().fg(theme.foreground),
                 ));
             }
@@ -906,7 +930,7 @@ fn render_join_subagent_detail_lines(
             ));
             for line in error.lines() {
                 lines.push(Line::styled(
-                    format!("    {}", line),
+                    format!("    {}", sanitize_terminal_text(line)),
                     Style::default().fg(theme.error),
                 ));
             }
@@ -942,7 +966,7 @@ fn append_fallback_tool_output(
     ));
     for line in detail_text.lines() {
         lines.push(Line::styled(
-            format!("    {}", line),
+            format!("    {}", sanitize_terminal_text(line)),
             Style::default().fg(theme.foreground),
         ));
     }

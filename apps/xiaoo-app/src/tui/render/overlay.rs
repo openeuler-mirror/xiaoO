@@ -11,7 +11,7 @@ use crate::app_state::{ApiKeyDialogState, InputMode};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
 
-use super::utils::{cursor_row_col, line_prefix_width};
+use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
 
 fn expand_popup_area(area: Rect, bounds: Rect, margin: u16) -> Rect {
     let left = area.x.saturating_sub(margin).max(bounds.x);
@@ -199,7 +199,7 @@ impl App {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(self.state.theme.border_style(true))
-            .title(title)
+            .title(sanitize_terminal_text(title))
             .padding(Padding::horizontal(1))
             .style(Style::default().bg(self.state.theme.input_bg));
 
@@ -365,7 +365,8 @@ impl App {
         };
 
         render_popup_backdrop(frame, rect, area, self.state.theme.background);
-        let title = format!(" Enter API key — {} / {} ", dialog.provider, dialog.model);
+        let title =
+            sanitize_terminal_text(&format!(" Enter API key — {} / {} ", dialog.provider, dialog.model));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)

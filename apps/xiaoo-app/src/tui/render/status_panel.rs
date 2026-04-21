@@ -1,3 +1,5 @@
+use crate::render::utils::sanitize_terminal_text;
+
 use std::path::Path;
 
 pub struct StatusPanel {
@@ -79,6 +81,8 @@ fn shorten_path_display(path: &Path, max_chars: usize) -> String {
     if count <= max_chars {
         return s.into_owned();
     }
-    let skip = count.saturating_sub(max_chars - 1);
-    format!("…{}", s.chars().skip(skip).collect::<String>())
+    let prefix = sanitize_terminal_text("…");
+    let keep = max_chars.saturating_sub(prefix.chars().count());
+    let skip = count.saturating_sub(keep);
+    format!("{prefix}{}", s.chars().skip(skip).collect::<String>())
 }
