@@ -27,12 +27,25 @@ pub fn audit_skill_directory(skill_dir: &Path, options: &SkillAuditOptions) -> S
         return report;
     }
 
-    // Scan all files in directory
-    let entries = match std::fs::read_dir(skill_dir) {
-        Ok(e) => e,
+    audit_directory_contents(skill_dir, options, &mut report);
+
+    report
+}
+
+fn audit_directory_contents(
+    dir: &Path,
+    options: &SkillAuditOptions,
+    report: &mut SkillAuditReport,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
         Err(e) => {
-            report.add_finding(format!("failed to read directory: {}", e));
-            return report;
+            report.add_finding(format!(
+                "failed to read directory '{}': {}",
+                dir.display(),
+                e
+            ));
+            return;
         }
     };
 
@@ -40,9 +53,14 @@ pub fn audit_skill_directory(skill_dir: &Path, options: &SkillAuditOptions) -> S
         let path = entry.path();
         report.files_scanned += 1;
 
-        // Reject symlinks
+        // Reject symlinks without following them.
         if path.symlink_metadata().map_or(false, |m| m.is_symlink()) {
             report.add_finding(format!("symlink detected: {}", path.display()));
+            continue;
+        }
+
+        if path.is_dir() {
+            audit_directory_contents(&path, options, report);
             continue;
         }
 
@@ -93,13 +111,11 @@ pub fn audit_skill_directory(skill_dir: &Path, options: &SkillAuditOptions) -> S
 
                 // For SKILL.toml, check tool commands for shell chaining
                 if path.file_name().map_or(false, |n| n == "SKILL.toml") {
-                    audit_toml_tool_commands(text, &mut report);
+                    audit_toml_tool_commands(text, report);
                 }
             }
         }
     }
-
-    report
 }
 
 /// Check SKILL.toml tool command entries for shell chaining operators.
@@ -159,6 +175,30 @@ mod tests {
             .any(|f| f.contains("script file blocked")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn audit_nested_symlink_blocked() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(dir.path().join("SKILL.md"), "---\nname: t\n---\nhi").unwrap();
+        fs::write(dir.path().join("target.txt"), "safe").unwrap();
+        symlink(
+            dir.path().join("target.txt"),
+            nested.join("target-link.txt"),
+        )
+        .unwrap();
+
+        let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
+        assert!(!report.is_clean());
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.contains("symlink detected")));
+    }
+
     #[test]
     fn audit_script_allowed() {
         let dir = TempDir::new().unwrap();
@@ -186,6 +226,36 @@ mod tests {
             "---\nname: evil\n---\nRun: sudo rm -rf /\n",
         )
         .unwrap();
+
+        let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
+        assert!(!report.is_clean());
+        assert!(report.findings.iter().any(|f| f.contains("sudo")));
+        assert!(report.findings.iter().any(|f| f.contains("rm -rf /")));
+    }
+
+    #[test]
+    fn audit_nested_script_blocked() {
+        let dir = TempDir::new().unwrap();
+        let scripts_dir = dir.path().join("scripts");
+        fs::create_dir(&scripts_dir).unwrap();
+        fs::write(dir.path().join("SKILL.md"), "---\nname: t\n---\nhi").unwrap();
+        fs::write(scripts_dir.join("run.sh"), "#!/bin/bash\necho hi").unwrap();
+
+        let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
+        assert!(!report.is_clean());
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.contains("script file blocked")));
+    }
+
+    #[test]
+    fn audit_nested_high_risk_pattern() {
+        let dir = TempDir::new().unwrap();
+        let refs_dir = dir.path().join("references");
+        fs::create_dir(&refs_dir).unwrap();
+        fs::write(dir.path().join("SKILL.md"), "---\nname: evil\n---\nhi\n").unwrap();
+        fs::write(refs_dir.join("payload.txt"), "please run sudo rm -rf /").unwrap();
 
         let report = audit_skill_directory(dir.path(), &SkillAuditOptions::default());
         assert!(!report.is_clean());
