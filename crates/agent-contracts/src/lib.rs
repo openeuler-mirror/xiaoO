@@ -5,6 +5,7 @@ pub mod events;
 pub mod hook;
 pub mod interaction;
 pub mod llm;
+pub mod lsp;
 pub mod runtime;
 pub mod skill;
 pub mod tool;
@@ -16,6 +17,7 @@ pub use events::{LoopEventSink, ToolEventSink};
 pub use hook::{HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder};
 pub use interaction::InteractionHandle;
 pub use llm::{LlmProvider, ProviderCapabilities};
+pub use lsp::LspProvider;
 pub use runtime::{AgentContext, ChannelFileSender, ConversationView, RuntimeView};
 pub use skill::{SkillContext, SkillRegistry, SkillSpec};
 pub use tool::{

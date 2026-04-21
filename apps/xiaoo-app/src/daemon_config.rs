@@ -1,5 +1,7 @@
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
+use agent_contracts::lsp::LspProvider;
+use lsp::{LspService, ServerConfig};
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -7,6 +9,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use xiaoo_app::channels::feishu::FeishuConfig;
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
@@ -34,6 +37,8 @@ pub struct AppConfig {
     pub compact: Option<CompactConfig>,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
+    #[serde(default)]
+    pub lsp: Option<LspConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,6 +163,34 @@ pub struct CompactConfig {
     pub summary_preserve_tail: Option<usize>,
     #[serde(default)]
     pub summary_llm_max_tokens: Option<usize>,
+}
+
+/// Top-level `[lsp]` section.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LspConfig {
+    /// Set to true to enable the LSP service and the `lsp` tool.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Server IDs to disable (e.g. ["pyright"] to turn off the built-in pyright).
+    #[serde(default)]
+    pub disabled_servers: Vec<String>,
+
+    /// Extra language servers not covered by the built-in list.
+    #[serde(default)]
+    pub extra_servers: Vec<ExtraServerConfig>,
+}
+
+/// A user-defined language server entry under `[[lsp.extra_servers]]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtraServerConfig {
+    pub id: String,
+    pub extensions: Vec<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub language_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -376,6 +409,63 @@ impl DaemonConfig {
 
     pub fn resolve_compact_config(&self) -> Option<&CompactConfig> {
         self.app.compact.as_ref()
+    }
+
+    /// Build an `LspProvider` if `[lsp] enabled = true`, otherwise return `None`.
+    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+        let lsp = self.app.lsp.as_ref()?;
+        if !lsp.enabled {
+            return None;
+        }
+
+        // Convert user-defined extra servers to the lsp crate's ServerConfig.
+        // Built-in servers are added by LspService itself; we only pass extras here.
+        let extra: Vec<ServerConfig> = lsp
+            .extra_servers
+            .iter()
+            .map(|c| {
+                // ServerConfig uses &'static str fields for the built-in table, but for
+                // user-supplied configs we leak the strings so they live for 'static.
+                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
+                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
+                let language_id: &'static str =
+                    Box::leak(c.language_id.clone().into_boxed_str());
+
+                let extensions: &'static [&'static str] = Box::leak(
+                    c.extensions
+                        .iter()
+                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let args: &'static [&'static str] = Box::leak(
+                    c.args
+                        .iter()
+                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let root_markers: &'static [&'static str] = Box::leak(
+                    c.root_markers
+                        .iter()
+                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+
+                ServerConfig {
+                    id,
+                    extensions,
+                    command,
+                    args,
+                    root_markers,
+                    language_id,
+                    initialization_options: None,
+                }
+            })
+            .collect();
+
+        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
     }
 }
 

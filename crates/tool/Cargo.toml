@@ -12,6 +12,7 @@ hook = { path = "../hook" }
 agent-contracts = { path = "../agent-contracts" }
 agent-types = { path = "../agent-types" }
 subagent = { path = "../subagent" }
+lsp = { path = "../lsp" }
 trace = { path = "../trace" }
 async-trait.workspace = true
 thiserror.workspace = true

@@ -55,6 +55,7 @@ prompt = { path = "../../crates/prompt" }
 skill = { path = "../../crates/skill" }
 tool = { path = "../../crates/tool" }
 subagent = { path = "../../crates/subagent" }
+lsp = { path = "../../crates/lsp" }
 trace = { path = "../../crates/trace" }
 
 [dev-dependencies]

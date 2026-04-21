@@ -1689,6 +1689,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsp"
+version = "0.1.0"
+dependencies = [
+ "agent-contracts",
+ "agent-types",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "markup5ever"
 version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3319,6 +3335,7 @@ dependencies = [
  "html2text",
  "image",
  "lopdf",
+ "lsp",
  "reqwest",
  "serde",
  "serde_json",
@@ -4290,6 +4307,7 @@ dependencies = [
  "governor",
  "hook",
  "llm-client",
+ "lsp",
  "memory",
  "mime_guess",
  "prompt",

@@ -7,6 +7,7 @@ mod file_write;
 mod glob;
 mod grep;
 mod join_subagent;
+mod lsp;
 mod print_hello_world;
 mod send_file;
 mod skill;
