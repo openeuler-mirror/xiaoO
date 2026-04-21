@@ -244,7 +244,10 @@ impl LlmProvider for AnthropicProvider {
                         full_text.push_str(content);
                     }
                     if let Some(ref usage) = parsed.usage {
-                        final_usage = Some(wire_usage_to_usage(usage));
+                        final_usage = Some(merge_usage(
+                            final_usage.take(),
+                            wire_usage_to_usage(usage),
+                        ));
                     }
                     if let Some(ref reason) = parsed.finish_reason {
                         final_stop_reason = match reason.as_str() {
@@ -312,6 +315,24 @@ impl AnthropicProvider {
         let event_type = self.current_event.lock().unwrap().clone();
 
         match event_type.as_deref() {
+            Some("message_start") => {
+                let input_tokens = json["message"]["usage"]["input_tokens"]
+                    .as_u64()
+                    .or_else(|| json["usage"]["input_tokens"].as_u64())
+                    .map(|t| t as u32);
+                let usage = input_tokens.map(|t| WireUsage {
+                    prompt_tokens: t,
+                    completion_tokens: 0,
+                    total_tokens: t,
+                });
+                Ok(Some(ParsedChunk {
+                    content: None,
+                    reasoning: None,
+                    finish_reason: None,
+                    usage,
+                    tool_calls: None,
+                }))
+            }
             Some("content_block_delta") => {
                 let delta_type = json["delta"]["type"].as_str();
                 let text = json["delta"]["text"].as_str().map(|s| s.to_string());
@@ -384,6 +405,14 @@ impl AnthropicProvider {
     }
 }
 
+fn merge_usage(existing: Option<Usage>, incoming: Usage) -> Usage {
+    let mut merged = existing.unwrap_or_default();
+    merged.prompt_tokens = merged.prompt_tokens.max(incoming.prompt_tokens);
+    merged.completion_tokens = merged.completion_tokens.max(incoming.completion_tokens);
+    merged.total_tokens = merged.prompt_tokens + merged.completion_tokens;
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +453,40 @@ mod tests {
         assert_eq!(chunk.finish_reason, Some("end_turn".to_string()));
         assert!(chunk.usage.is_some());
         assert_eq!(chunk.usage.unwrap().completion_tokens, 15);
+    }
+
+    #[test]
+    fn test_parse_message_start_usage() {
+        let provider = make_provider();
+        provider
+            .parse_anthropic_stream_line("event: message_start")
+            .unwrap();
+        let result = provider.parse_anthropic_stream_line(
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
+        ).unwrap();
+        let chunk = result.unwrap();
+        assert!(chunk.usage.is_some());
+        assert_eq!(chunk.usage.unwrap().prompt_tokens, 21);
+    }
+
+    #[test]
+    fn merge_usage_keeps_prompt_and_completion_totals() {
+        let merged = merge_usage(
+            Some(Usage {
+                prompt_tokens: 21,
+                completion_tokens: 0,
+                total_tokens: 21,
+            }),
+            Usage {
+                prompt_tokens: 0,
+                completion_tokens: 15,
+                total_tokens: 15,
+            },
+        );
+
+        assert_eq!(merged.prompt_tokens, 21);
+        assert_eq!(merged.completion_tokens, 15);
+        assert_eq!(merged.total_tokens, 36);
     }
 
     #[test]
