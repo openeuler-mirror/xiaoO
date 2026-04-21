@@ -18,7 +18,9 @@ use super::output::FileReadOutput;
 use super::readers;
 use super::spec::FileReadToolSpec;
 use super::validation;
+use crate::r#impl::lsp_hooks::spawn_touch_file;
 use crate::r#impl::path_resolver::{expand_path_from_base, runtime_workspace_root};
+use crate::r#impl::ToolRuntimeServices;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::executor::ToolExecutor;
 use agent_contracts::tool::spec::ToolSpecView;
@@ -27,14 +29,16 @@ use agent_contracts::tool::spec::ToolSpecView;
 pub struct FileReadExecutor {
     spec: Arc<FileReadToolSpec>,
     dedup_store: Mutex<DedupStateStore>,
+    services: ToolRuntimeServices,
 }
 
 impl FileReadExecutor {
     /// Creates a new FileReadExecutor.
-    pub fn new(spec: Arc<FileReadToolSpec>) -> Self {
+    pub fn new(spec: Arc<FileReadToolSpec>, services: ToolRuntimeServices) -> Self {
         Self {
             spec,
             dedup_store: Mutex::new(DedupStateStore::new()),
+            services,
         }
     }
 
@@ -190,7 +194,7 @@ impl FileReadExecutor {
 
 impl Default for FileReadExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileReadToolSpec::new()))
+        Self::new(Arc::new(FileReadToolSpec::new()), ToolRuntimeServices::default())
     }
 }
 
@@ -266,7 +270,7 @@ impl ToolExecutor for FileReadExecutor {
             }
         }
 
-        match self
+        let call_result = self
             .call_inner(
                 &input,
                 &resolved_file_path,
@@ -275,8 +279,27 @@ impl ToolExecutor for FileReadExecutor {
                 DEFAULT_MAX_SIZE_BYTES,
                 DEFAULT_MAX_TOKENS,
             )
-            .await
-        {
+            .await;
+
+        match call_result {
+            Ok(FileReadOutput::Text(text_output)) => {
+                // Fire-and-forget: warm the LSP server so subsequent hover/definition/diagnostics
+                // calls return faster. Mirrors opencode's `LSP.touchFile(filepath, false)`.
+                if let Some(lsp) = &self.services.lsp_service {
+                    spawn_touch_file(lsp, Path::new(&resolved_file_path));
+                }
+                let json_output =
+                    serde_json::to_string(&FileReadOutput::Text(text_output)).map_err(|e| {
+                        ToolExecutionError::ExecutionFailed {
+                            message: format!("Failed to serialize output: {}", e),
+                        }
+                    })?;
+                Ok(ToolExecutorOutput::Completed {
+                    raw_outcome: RawToolOutcome::Success {
+                        output: json_output,
+                    },
+                })
+            }
             Ok(output) => {
                 let json_output = serde_json::to_string(&output).map_err(|e| {
                     ToolExecutionError::ExecutionFailed {

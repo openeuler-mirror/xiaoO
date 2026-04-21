@@ -1,15 +1,39 @@
-use agent_types::hook::HookerRegistryConfig;
+use agent_contracts::lsp::LspProvider;
+use agent_types::hooker::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
+use lsp::{AutoInstall, LspService, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const DEFAULT_AGENT_ID: &str = "main";
 const LLM_SECRETS_FILE: &str = "llm_secrets.json";
 const DEFAULT_LLM_MAX_TOKENS: u32 = 128000;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LspConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub disabled_servers: Vec<String>,
+    #[serde(default)]
+    pub extra_servers: Vec<ExtraServerConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtraServerConfig {
+    pub id: String,
+    pub extensions: Vec<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub language_id: String,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -25,6 +49,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
+    #[serde(default)]
+    pub lsp: Option<LspConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -189,6 +215,57 @@ impl Config {
                 .unwrap_or(false),
             ..ResolvedSkillsConfig::default()
         }
+    }
+
+    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+        let lsp = self.lsp.as_ref()?;
+        if !lsp.enabled {
+            return None;
+        }
+
+        let extra: Vec<ServerConfig> = lsp
+            .extra_servers
+            .iter()
+            .map(|c| {
+                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
+                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
+                let language_id: &'static str =
+                    Box::leak(c.language_id.clone().into_boxed_str());
+                let extensions: &'static [&'static str] = Box::leak(
+                    c.extensions
+                        .iter()
+                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let args: &'static [&'static str] = Box::leak(
+                    c.args
+                        .iter()
+                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                let root_markers: &'static [&'static str] = Box::leak(
+                    c.root_markers
+                        .iter()
+                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                );
+                ServerConfig {
+                    id,
+                    extensions,
+                    command,
+                    args,
+                    root_markers,
+                    language_id,
+                    initialization_options: None,
+                    auto_install: AutoInstall::None,
+                }
+            })
+            .collect();
+
+        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
     }
 }
 

@@ -114,4 +114,8 @@ impl LspProvider for LspService {
     ) -> Result<Vec<LspOutgoingCall>, LspError> {
         self.manager.lock().await.outgoing_calls(file, line, col).await
     }
+
+    async fn touch_file(&self, file: &Path) {
+        self.manager.lock().await.touch_file(file).await;
+    }
 }

@@ -92,6 +92,12 @@ impl LspServerManager {
         Ok(ready)
     }
 
+    /// Open `file` in all matching LSP servers without waiting for any result.
+    /// Used to warm up the server so subsequent requests return faster.
+    pub async fn touch_file(&mut self, file: &Path) {
+        let _ = self.prepare_file(file).await;
+    }
+
     pub async fn diagnostics(&mut self, file: &Path) -> Result<Vec<LspDiagnostic>, LspError> {
         let keys = self.prepare_file(file).await?;
         let mut result = Vec::new();

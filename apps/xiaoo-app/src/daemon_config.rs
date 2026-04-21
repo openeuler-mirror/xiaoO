@@ -1,7 +1,7 @@
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use agent_contracts::lsp::LspProvider;
-use lsp::{LspService, ServerConfig};
+use lsp::{AutoInstall, LspService, ServerConfig};
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -461,6 +461,7 @@ impl DaemonConfig {
                     root_markers,
                     language_id,
                     initialization_options: None,
+                    auto_install: AutoInstall::None,
                 }
             })
             .collect();

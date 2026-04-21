@@ -141,20 +141,33 @@ impl LspServerInstance {
     pub async fn open_file(&mut self, path: &Path, text: String) -> Result<(), LspError> {
         self.ensure_started().await?;
         let uri = path_to_uri(path);
-        let version = 1;
-        self.open_files.insert(uri.clone(), version);
 
-        self.client().notify(
-            "textDocument/didOpen",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": self.config.language_id,
-                    "version": version,
-                    "text": text,
-                }
-            }),
-        );
+        if let Some(version) = self.open_files.get_mut(&uri) {
+            // Already open: send didChange only if content differs from what we last sent.
+            // We don't cache the text, so always send didChange to keep the server in sync.
+            *version += 1;
+            let v = *version;
+            self.client().notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": v },
+                    "contentChanges": [{ "text": text }]
+                }),
+            );
+        } else {
+            self.open_files.insert(uri.clone(), 1);
+            self.client().notify(
+                "textDocument/didOpen",
+                json!({
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": self.config.language_id,
+                        "version": 1,
+                        "text": text,
+                    }
+                }),
+            );
+        }
         Ok(())
     }
 
@@ -263,9 +276,9 @@ impl LspServerInstance {
         Ok(result)
     }
 
-    /// Wait until rust-analyzer has sent at least one diagnostics notification for
-    /// any file (signals that initial indexing is done) or until the timeout expires.
-    async fn wait_for_indexed(&self) {
+    /// Wait until the LSP server has sent at least one publishDiagnostics for any file
+    /// (used for workspace-scope queries like workspace/symbol).
+    async fn wait_for_any_file_indexed(&self) {
         let diag_store = Arc::clone(&self.diagnostics);
         let diag_updated = Arc::clone(&self.diag_updated);
         let _ = tokio::time::timeout(
@@ -282,13 +295,34 @@ impl LspServerInstance {
         .await;
     }
 
+    /// Wait until the LSP server has sent at least one publishDiagnostics notification
+    /// for `path` (even if empty). This signals that the server has parsed and indexed
+    /// the file, so hover/definition/call-hierarchy queries will return real results.
+    async fn wait_for_file_ready(&self, path: &Path) {
+        let uri = path_to_uri(path);
+        let diag_store = Arc::clone(&self.diagnostics);
+        let diag_updated = Arc::clone(&self.diag_updated);
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_secs(DIAG_TIMEOUT_SECS),
+            async move {
+                loop {
+                    diag_updated.notified().await;
+                    if diag_store.lock().await.contains_key(&uri) {
+                        return; // server has processed this file (entry exists, even if empty)
+                    }
+                }
+            },
+        )
+        .await;
+    }
+
     pub async fn hover(
         &self,
         path: &Path,
         line: u32,
         col: u32,
     ) -> Result<Option<String>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let pos = LspPos::from_1based(line, col);
         let result = self
@@ -314,7 +348,7 @@ impl LspServerInstance {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspLocation>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let pos = LspPos::from_1based(line, col);
         let result = self
@@ -338,7 +372,7 @@ impl LspServerInstance {
         col: u32,
         include_declaration: bool,
     ) -> Result<Vec<LspLocation>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let pos = LspPos::from_1based(line, col);
         let result = self
@@ -357,7 +391,7 @@ impl LspServerInstance {
     }
 
     pub async fn document_symbols(&self, path: &Path) -> Result<Vec<LspSymbol>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let result = self
             .client()
@@ -371,7 +405,7 @@ impl LspServerInstance {
     }
 
     pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<LspSymbol>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_any_file_indexed().await;
         let result = self
             .client()
             .request("workspace/symbol", json!({ "query": query }))
@@ -386,7 +420,7 @@ impl LspServerInstance {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspLocation>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let pos = LspPos::from_1based(line, col);
         let result = self
@@ -453,7 +487,7 @@ impl LspServerInstance {
         line: u32,
         col: u32,
     ) -> Result<Vec<Value>, LspError> {
-        self.wait_for_indexed().await;
+        self.wait_for_file_ready(path).await;
         let uri = path_to_uri(path);
         let pos = LspPos::from_1based(line, col);
         let result = self

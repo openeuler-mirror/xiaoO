@@ -74,4 +74,11 @@ pub trait LspProvider: Send + Sync {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspOutgoingCall>, LspError>;
+
+    /// Open `file` in the LSP server without waiting for any result.
+    ///
+    /// This sends `textDocument/didOpen` (and starts the server if needed) so
+    /// that subsequent hover / definition / diagnostics calls return faster.
+    /// Errors are silently ignored — callers must not depend on this succeeding.
+    async fn touch_file(&self, file: &Path);
 }

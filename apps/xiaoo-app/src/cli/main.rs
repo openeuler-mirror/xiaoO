@@ -429,6 +429,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         compression_pipeline: Some(compression_pipeline),
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
+        lsp_service: None,
     };
 
     // 4. Bindings (CliEventSink for debug output)
