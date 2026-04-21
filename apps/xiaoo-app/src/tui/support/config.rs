@@ -1,5 +1,5 @@
 use agent_contracts::lsp::LspProvider;
-use agent_types::hooker::HookerRegistryConfig;
+use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::{AutoInstall, LspService, ServerConfig};
 use serde::{Deserialize, Serialize};
