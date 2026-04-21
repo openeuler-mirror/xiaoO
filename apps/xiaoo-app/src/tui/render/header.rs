@@ -181,7 +181,10 @@ impl App {
             ),
             Span::styled(")  Ctx ", Style::default().fg(self.state.theme.muted)),
             Span::styled(
-                StatusPanel::format_token_count(self.state.status_panel.context_tokens),
+                StatusPanel::format_context_usage(
+                    self.state.status_panel.input_context_tokens,
+                    self.state.status_panel.context_window_tokens,
+                ),
                 Style::default()
                     .fg(self.state.theme.gradient_yellow)
                     .add_modifier(Modifier::BOLD),

@@ -12,7 +12,8 @@ pub struct StatusPanel {
     pub completion_tokens: u64,
     pub last_latency_ms: u64,
     pub is_connected: bool,
-    pub context_tokens: u64,
+    pub input_context_tokens: u64,
+    pub context_window_tokens: u64,
 }
 
 impl Default for StatusPanel {
@@ -26,7 +27,8 @@ impl Default for StatusPanel {
             completion_tokens: 0,
             last_latency_ms: 0,
             is_connected: false,
-            context_tokens: 0,
+            input_context_tokens: 0,
+            context_window_tokens: 0,
         }
     }
 }
@@ -42,6 +44,10 @@ impl StatusPanel {
         self.is_connected = true;
     }
 
+    pub fn set_context_window(&mut self, context_window_tokens: u64) {
+        self.context_window_tokens = context_window_tokens;
+    }
+
     /// Update the workspace line from an absolute path (caller should pass canonical path when possible).
     pub fn set_workspace(&mut self, path: &Path) {
         self.workspace_display = shorten_path_display(path, 26);
@@ -52,9 +58,9 @@ impl StatusPanel {
         prompt_tokens: u64,
         completion_tokens: u64,
         latency_ms: u64,
-        context_tokens: u64,
+        input_context_tokens: u64,
     ) {
-        self.context_tokens = context_tokens;
+        self.input_context_tokens = input_context_tokens;
         self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
         self.completion_tokens = self.completion_tokens.saturating_add(completion_tokens);
         self.total_tokens = self
@@ -72,6 +78,18 @@ impl StatusPanel {
         } else {
             format!("{:.1}M", tokens as f64 / 1_000_000.0)
         }
+    }
+
+    pub(crate) fn format_context_usage(input_tokens: u64, context_window_tokens: u64) -> String {
+        if context_window_tokens == 0 {
+            return Self::format_token_count(input_tokens);
+        }
+
+        format!(
+            "{}/{}",
+            Self::format_token_count(input_tokens),
+            Self::format_token_count(context_window_tokens)
+        )
     }
 }
 

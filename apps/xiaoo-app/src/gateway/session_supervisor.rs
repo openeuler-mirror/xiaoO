@@ -645,50 +645,58 @@ fn terminal_from_outcome(
 ) -> LaneTerminal {
     let completed_at_ms = current_time_ms();
 
-    let (status, reply, messages, token_usage) = match outcome {
+    let (status, reply, messages, token_usage, estimated_input_tokens) = match outcome {
         AgentOutcome::Complete {
             reply,
             messages,
             token_usage,
+            estimated_input_tokens,
             ..
         } => (
             SubagentTerminalKind::Completed,
             reply,
             messages,
             token_usage,
+            estimated_input_tokens,
         ),
         AgentOutcome::MaxTurnsReached {
             partial_reply,
             messages,
             token_usage,
+            estimated_input_tokens,
             ..
         } => (
             SubagentTerminalKind::MaxTurnsReached,
             partial_reply.unwrap_or_default(),
             messages,
             token_usage,
+            estimated_input_tokens,
         ),
         AgentOutcome::BudgetExhausted {
             partial_reply,
             messages,
             token_usage,
+            estimated_input_tokens,
             ..
         } => (
             SubagentTerminalKind::BudgetExhausted,
             partial_reply.unwrap_or_default(),
             messages,
             token_usage,
+            estimated_input_tokens,
         ),
         AgentOutcome::Cancelled {
             partial_reply,
             messages,
             token_usage,
+            estimated_input_tokens,
             ..
         } => (
             SubagentTerminalKind::Cancelled,
             partial_reply.unwrap_or_default(),
             messages,
             token_usage,
+            estimated_input_tokens,
         ),
     };
 
@@ -700,6 +708,7 @@ fn terminal_from_outcome(
             prompt_tokens: token_usage.prompt_tokens as u64,
             completion_tokens: token_usage.completion_tokens as u64,
             total_tokens: token_usage.total_tokens as u64,
+            estimated_input_tokens: estimated_input_tokens as u64,
         },
         terminal: SubagentTerminalSnapshot {
             status,
