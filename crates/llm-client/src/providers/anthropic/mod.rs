@@ -244,10 +244,8 @@ impl LlmProvider for AnthropicProvider {
                         full_text.push_str(content);
                     }
                     if let Some(ref usage) = parsed.usage {
-                        final_usage = Some(merge_usage(
-                            final_usage.take(),
-                            wire_usage_to_usage(usage),
-                        ));
+                        final_usage =
+                            Some(merge_usage(final_usage.take(), wire_usage_to_usage(usage)));
                     }
                     if let Some(ref reason) = parsed.finish_reason {
                         final_stop_reason = match reason.as_str() {
@@ -461,9 +459,11 @@ mod tests {
         provider
             .parse_anthropic_stream_line("event: message_start")
             .unwrap();
-        let result = provider.parse_anthropic_stream_line(
-            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
-        ).unwrap();
+        let result = provider
+            .parse_anthropic_stream_line(
+                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
+            )
+            .unwrap();
         let chunk = result.unwrap();
         assert!(chunk.usage.is_some());
         assert_eq!(chunk.usage.unwrap().prompt_tokens, 21);

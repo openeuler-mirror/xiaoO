@@ -365,8 +365,10 @@ impl App {
         };
 
         render_popup_backdrop(frame, rect, area, self.state.theme.background);
-        let title =
-            sanitize_terminal_text(&format!(" Enter API key — {} / {} ", dialog.provider, dialog.model));
+        let title = sanitize_terminal_text(&format!(
+            " Enter API key — {} / {} ",
+            dialog.provider, dialog.model
+        ));
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)

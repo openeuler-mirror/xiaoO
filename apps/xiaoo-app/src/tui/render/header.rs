@@ -112,7 +112,10 @@ impl App {
                 ),
             };
         let status = Paragraph::new(Line::from(vec![
-            Span::styled(sanitize_terminal_text("● "), Style::default().fg(status_light_color)),
+            Span::styled(
+                sanitize_terminal_text("● "),
+                Style::default().fg(status_light_color),
+            ),
             Span::styled(format!("{status_label} "), status_label_style),
             Span::styled(now, Style::default().fg(self.state.theme.muted)),
         ]))

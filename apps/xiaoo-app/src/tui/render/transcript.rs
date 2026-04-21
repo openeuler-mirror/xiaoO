@@ -194,7 +194,12 @@ impl App {
                     if col_start >= col_end {
                         original_line.clone()
                     } else {
-                        highlight_line_selection(original_line.clone(), col_start, col_end, sel_style)
+                        highlight_line_selection(
+                            original_line.clone(),
+                            col_start,
+                            col_end,
+                            sel_style,
+                        )
                     }
                 };
                 selected_visual_lines.extend(wrap_line_to_visual_lines(&line, inner_area.width));
@@ -447,7 +452,10 @@ fn render_tool_message_lines(
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(tool_color)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(tool_color),
+            ),
             Span::styled(
                 "Tool",
                 Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -528,7 +536,10 @@ fn render_todo_message_lines(
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(theme.secondary)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(theme.secondary),
+            ),
             Span::styled(
                 "Planner",
                 Style::default()
@@ -668,7 +679,10 @@ fn render_standard_message_lines(
         && is_active_stream_message
         && message.content.is_empty();
     let mut lines = vec![Line::from(vec![
-        Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(indicator_color)),
+        Span::styled(
+            sanitize_terminal_text("▎ "),
+            Style::default().fg(indicator_color),
+        ),
         Span::styled(role_label.to_string(), role_style),
         Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
     ])];
@@ -689,7 +703,11 @@ fn render_standard_message_lines(
         let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
         for line in message.thinking_content.lines() {
             lines.push(Line::styled(
-                format!("  {} {}", sanitize_terminal_text("│"), sanitize_terminal_text(line)),
+                format!(
+                    "  {} {}",
+                    sanitize_terminal_text("│"),
+                    sanitize_terminal_text(line)
+                ),
                 thinking_style,
             ));
         }
@@ -825,7 +843,10 @@ fn render_subagent_tool_lines(
     let header = truncate_display_width(&header, max_header_width);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled(sanitize_terminal_text("▎ "), Style::default().fg(tool_color)),
+        Span::styled(
+            sanitize_terminal_text("▎ "),
+            Style::default().fg(tool_color),
+        ),
         Span::styled(
             header,
             Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -1046,11 +1067,21 @@ mod tests {
 
         let before_text: Vec<String> = wrapped_before
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
         let after_text: Vec<String> = wrapped_after
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
 
         assert_eq!(before_text, after_text);

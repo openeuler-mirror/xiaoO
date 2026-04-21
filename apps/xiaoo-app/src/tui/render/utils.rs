@@ -196,10 +196,7 @@ mod tests {
 
     #[test]
     fn truncate_display_width_uses_ascii_ellipsis_in_ascii_mode() {
-        assert_eq!(
-            truncate_display_width_for_mode("abcdef", 5, true),
-            "ab..."
-        );
+        assert_eq!(truncate_display_width_for_mode("abcdef", 5, true), "ab...");
     }
 
     #[test]
