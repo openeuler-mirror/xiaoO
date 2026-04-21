@@ -5,6 +5,7 @@ pub mod events;
 pub mod hook;
 pub mod interaction;
 pub mod llm;
+pub mod lsp;
 pub mod outcome;
 pub mod session;
 pub mod tool;
@@ -20,6 +21,7 @@ pub use llm::{
     LlmResponse, MessageRole, ResponseFormat, StopReason, StreamChunk, Tool, ToolChoice,
     ToolUseBlock, Usage,
 };
+pub use lsp::{LspDiagnostic, LspError, LspLocation, LspPosition, LspSymbol, Severity};
 pub use outcome::{AgentError, AgentOutcome, TokenUsage};
 pub use session::{SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult};
 pub use tool::{ToolRegistryConfig, ToolStateStoreConfig, ToolVisibilityConfig};

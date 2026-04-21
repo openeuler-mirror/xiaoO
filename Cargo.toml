@@ -17,6 +17,7 @@ members = [
     "crates/trace",
     "crates/trace/src/moirai",
     #"crates/operation_backend",
+    "crates/lsp",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
     # "crates/cerberus/cerberus-core",
     # "crates/cerberus/cerberus-cli",

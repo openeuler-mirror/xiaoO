@@ -1,0 +1,24 @@
+[package]
+name = "lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-types = { path = "../agent-types" }
+agent-contracts = { path = "../agent-contracts" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "rt"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "mock_lsp_server"
+path = "src/bin/mock_lsp_server.rs"

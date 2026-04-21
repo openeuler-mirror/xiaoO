@@ -9,7 +9,10 @@ use agent_types::common::{AgentId, ToolName};
 use agent_types::tool::ToolRegistryConfig;
 use agent_types::tool::{RawToolCall, RawToolOutcome, ToolExecutionError, ToolVisibilityConfig};
 use tokio::runtime::{Builder, Runtime};
-use tool::{load_tool_sources, ToolCallBuilderImpl, ToolRegistryBuilderImpl};
+use agent_contracts::lsp::LspProvider;
+use lsp::LspService;
+use std::sync::Arc;
+use tool::{load_tool_sources_with_services, ToolCallBuilderImpl, ToolRegistryBuilderImpl, ToolRuntimeServices};
 
 use tool_cli_runtime::{ToolCliRuntime, ToolCliTraceConfig};
 
@@ -50,7 +53,19 @@ struct CliOptions {
 impl ToolCli {
     async fn new(trace_config: ToolCliTraceConfig) -> Result<Self, ToolCliError> {
         let agent_id = AgentId("tool_cli".to_string());
-        let sources = load_tool_sources();
+
+        // Honour XIAOO_LSP=1 to enable LSP service for tool-cli testing
+        let lsp_service: Option<Arc<dyn LspProvider>> =
+            if std::env::var("XIAOO_LSP").as_deref() == Ok("1") {
+                Some(Arc::new(LspService::new(vec![])))
+            } else {
+                None
+            };
+        let services = ToolRuntimeServices {
+            lsp_service,
+            ..ToolRuntimeServices::default()
+        };
+        let sources = load_tool_sources_with_services(services);
         let config = build_tool_cli_registry_config(&sources, &agent_id);
 
         let registry = ToolRegistryBuilderImpl::new()

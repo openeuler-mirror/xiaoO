@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::r#impl::lsp_hooks::LspDiagnosticsInfo;
+
 /// Output types for FileEditTool.
 ///
 /// Matches the TypeScript outputSchema:
@@ -80,4 +82,7 @@ pub struct FileEditOutput {
     /// Git diff metadata for the edit (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<GitDiff>,
+    /// LSP diagnostics for the file after the edit (None if LSP unavailable or timed out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
 }

@@ -3,6 +3,7 @@ use crate::gateway::{
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
+use agent_contracts::lsp::LspProvider;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
@@ -30,6 +31,7 @@ pub struct HostedSessionRuntimeConfig {
     pub llm_provider: Option<Arc<LlmProviderWrapper>>,
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
+    pub lsp_service: Option<Arc<dyn LspProvider>>,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -40,10 +42,14 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
+        let initial_services = ToolRuntimeServices {
+            lsp_service: config.lsp_service.clone(),
+            ..ToolRuntimeServices::default()
+        };
         Self {
             config,
             bindings,
-            tool_runtime_services: Arc::new(RwLock::new(ToolRuntimeServices::default())),
+            tool_runtime_services: Arc::new(RwLock::new(initial_services)),
         }
     }
 

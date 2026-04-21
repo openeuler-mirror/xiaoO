@@ -1,4 +1,5 @@
 mod builtin;
+pub mod lsp_hooks;
 mod path_resolver;
 mod plugin;
 mod runtime_services;
