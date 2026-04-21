@@ -4,9 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::convert::{
-    chat_messages_to_wire, parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage,
-};
+use crate::convert::{parse_tool_arguments, parsed_chunk_to_stream_chunk, wire_usage_to_usage};
 use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, LlmError};
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -17,8 +15,8 @@ use agent_types::{
 mod convert;
 
 use convert::{
-    extract_anthropic_tool_calls, to_anthropic_output_format, to_anthropic_tool,
-    to_anthropic_tool_choice,
+    anthropic_messages, anthropic_system_message, extract_anthropic_tool_calls,
+    to_anthropic_output_format, to_anthropic_tool, to_anthropic_tool_choice,
 };
 
 pub(crate) struct AnthropicProvider {
@@ -50,20 +48,8 @@ impl AnthropicProvider {
     }
 
     fn build_body(&self, request: &LlmRequest, stream: bool) -> serde_json::Value {
-        let wire_messages = chat_messages_to_wire(&request.messages);
-
-        let system_message = wire_messages
-            .iter()
-            .filter(|m| m.role == "system")
-            .filter_map(|m| m.content.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let other_messages: Vec<_> = wire_messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
-            .collect();
+        let system_message = anthropic_system_message(&request.messages);
+        let other_messages = anthropic_messages(&request.messages);
 
         let mut body = serde_json::json!({
             "model": self.capabilities.model_name,

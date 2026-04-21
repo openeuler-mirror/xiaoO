@@ -795,74 +795,84 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         .tool_calls
         .clone();
 
-    append_assistant_to_history(ctx);
-
     if ctx.input.agent_id.is_none() {
         return Ok(None);
     }
 
-    // Partition tool calls into valid (non-empty name) and invalid (empty name).
+    // Partition tool calls into valid (non-empty call_id + tool_name) and invalid.
     let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
         .into_iter()
-        .partition(|tc| is_valid_tool_name(&tc.tool_name));
+        .partition(is_valid_tool_call);
 
     // Handle the case where ALL tool calls are invalid and there is exactly one:
-    // retry the LLM request once.
+    // retry the LLM request once, but only if we can safely synthesize a tool_result.
     let (valid_calls, invalid_calls) = if valid_calls.is_empty() && invalid_calls.len() == 1 {
-        tracing::warn!(
-            call_id = %invalid_calls[0].call_id,
-            "LLM returned a single tool call with empty name; retrying LLM request"
-        );
-
-        // Push error tool_result for the invalid call so conversation stays well-formed.
-        ctx.state
-            .messages
-            .push(build_invalid_tool_name_result(&invalid_calls[0]));
-
-        // Re-build prompt (includes the error result) and re-call LLM.
-        build_messages(ctx)
-            .await
-            .map_err(|e| AgentError::PromptBuild(format!("retry after empty tool name: {e}")))?;
-        llm_call_with_context_limit_recovery(ctx).await?;
-
-        let retry_tool_calls: Vec<ToolUseBlock> = ctx
-            .turn
-            .assistant_message
-            .as_ref()
-            .map(|m| m.tool_calls.clone())
-            .unwrap_or_default();
-
-        append_assistant_to_history(ctx);
-
-        let (retry_valid, retry_invalid): (Vec<_>, Vec<_>) = retry_tool_calls
-            .into_iter()
-            .partition(|tc| is_valid_tool_name(&tc.tool_name));
-
-        if retry_valid.is_empty() && !retry_invalid.is_empty() {
-            // Retry also failed — push error results for conversation completeness,
-            // then degrade gracefully instead of killing the entire loop.
-            tracing::error!(
-                count = retry_invalid.len(),
-                "LLM returned tool call(s) with empty name after retry; degrading to failed tool results"
+        let invalid_call = &invalid_calls[0];
+        if can_retry_invalid_tool_call(invalid_call) {
+            tracing::warn!(
+                call_id = %invalid_call.call_id,
+                tool_name = %invalid_call.tool_name,
+                "LLM returned a single invalid tool call; retrying LLM request"
             );
-            for inv in &retry_invalid {
-                ctx.state.messages.push(build_invalid_tool_name_result(inv));
-            }
-            return Ok(None);
-        }
 
-        (retry_valid, retry_invalid)
+            // Inject a temporary error tool_result so the model can recover with a
+            // corrected tool call, but do not keep that synthetic message in history.
+            ctx.state
+                .messages
+                .push(build_invalid_tool_call_result(invalid_call));
+            let retry_result = async {
+                build_messages(ctx).await.map_err(|e| {
+                    AgentError::PromptBuild(format!("retry after invalid tool call: {e}"))
+                })?;
+                llm_call_with_context_limit_recovery(ctx).await
+            }
+            .await;
+            ctx.state.messages.pop();
+            retry_result?;
+
+            let retry_tool_calls: Vec<ToolUseBlock> = ctx
+                .turn
+                .assistant_message
+                .as_ref()
+                .map(|m| m.tool_calls.clone())
+                .unwrap_or_default();
+
+            let (retry_valid, retry_invalid): (Vec<_>, Vec<_>) =
+                retry_tool_calls.into_iter().partition(is_valid_tool_call);
+
+            if retry_valid.is_empty() && !retry_invalid.is_empty() {
+                tracing::error!(
+                    count = retry_invalid.len(),
+                    "LLM returned invalid tool call(s) after retry; degrading to assistant text only"
+                );
+            }
+
+            (retry_valid, retry_invalid)
+        } else {
+            tracing::warn!(
+                call_id = %invalid_call.call_id,
+                tool_name = %invalid_call.tool_name,
+                "LLM returned a single invalid tool call without a retry-safe call_id; degrading to assistant text only"
+            );
+            (valid_calls, invalid_calls)
+        }
     } else {
         (valid_calls, invalid_calls)
     };
 
-    // Push error tool_results for all remaining invalid calls (covers the "mixed" case).
+    if let Some(msg) = ctx.turn.assistant_message.as_mut() {
+        msg.tool_calls = valid_calls.clone();
+    }
+    append_assistant_to_history(ctx);
+
+    // Emit error events for invalid calls, but do not write them into history unless
+    // we can safely pair them to a real tool_use call.
     for inv in &invalid_calls {
         tracing::warn!(
             call_id = %inv.call_id,
-            "Discarding tool call with empty/invalid name"
+            tool_name = %inv.tool_name,
+            "Discarding invalid tool call from LLM response"
         );
-        ctx.state.messages.push(build_invalid_tool_name_result(inv));
 
         if let Some(ref sink) = ctx.input.event_sink {
             let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
@@ -872,7 +882,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 &ToolResultEvent {
                     call_id: inv.call_id.clone(),
                     tool_name: inv.tool_name.clone(),
-                    output_preview: "invalid empty tool name".to_string(),
+                    output_preview: invalid_tool_call_message(inv),
                     is_error: true,
                     args_preview: serde_json::to_string_pretty(&inv.input)
                         .unwrap_or_else(|_| inv.input.to_string()),
@@ -945,18 +955,41 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     Ok(None)
 }
 
-/// Check whether a tool name from the LLM response is valid (non-empty, non-whitespace).
+fn is_valid_tool_call(tc: &ToolUseBlock) -> bool {
+    is_valid_tool_call_id(&tc.call_id) && is_valid_tool_name(&tc.tool_name)
+}
+
+fn is_valid_tool_call_id(call_id: &str) -> bool {
+    !call_id.trim().is_empty()
+}
+
 fn is_valid_tool_name(name: &str) -> bool {
     !name.trim().is_empty()
 }
 
-/// Build an error tool_result message for a tool call whose name was empty/invalid.
-/// This keeps the conversation history well-formed (every tool_use gets a tool_result).
-fn build_invalid_tool_name_result(tc: &ToolUseBlock) -> ChatMessage {
+fn can_retry_invalid_tool_call(tc: &ToolUseBlock) -> bool {
+    is_valid_tool_call_id(&tc.call_id)
+}
+
+fn invalid_tool_call_message(tc: &ToolUseBlock) -> String {
+    match (
+        is_valid_tool_call_id(&tc.call_id),
+        is_valid_tool_name(&tc.tool_name),
+    ) {
+        (false, false) => "invalid tool call: missing call_id and tool_name".to_string(),
+        (false, true) => "invalid tool call: missing call_id".to_string(),
+        (true, false) => "invalid tool call: missing tool_name".to_string(),
+        (true, true) => "invalid tool call".to_string(),
+    }
+}
+
+/// Build an error tool_result message for a tool call whose metadata was invalid.
+/// This is only safe when the call_id is present, so the model can pair the result.
+fn build_invalid_tool_call_result(tc: &ToolUseBlock) -> ChatMessage {
     ChatMessage::tool_result(
         tc.call_id.clone(),
         tc.tool_name.clone(),
-        "Error: tool call was discarded because the tool name was empty or invalid.",
+        format!("Error: {}.", invalid_tool_call_message(tc)),
         true,
         now_ms(),
     )
@@ -1255,23 +1288,26 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use agent_contracts::context::budget::TokenBudgetPolicy;
+    use agent_contracts::tool::ToolSpecView;
     use agent_contracts::{
         CompressionPipeline, LlmProvider, PromptBuilder, ProviderCapabilities, SkillRegistry,
     };
     use agent_llm::LlmRequestExt;
-    use agent_types::common::ids::AgentId;
+    use agent_types::common::ids::{AgentId, ToolId, ToolName};
     use agent_types::context::budget::BudgetError;
     use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
     use agent_types::context::{FeatureFlags, TokenBudgetConfig};
     use agent_types::events::LoopEndSummary;
+    use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
     use agent_types::{
-        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, Usage,
+        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk,
+        ToolUseBlock, Usage,
     };
     use async_trait::async_trait;
     use llm_client::LlmProviderWrapper;
     use tool::EmptyToolRegistry;
 
-    use crate::runtime_support::EmptySkillRegistry;
+    use crate::runtime_support::{EmptySkillRegistry, NoopRuntimeView};
 
     struct StreamingTestProvider {
         capabilities: ProviderCapabilities,
@@ -1459,6 +1495,97 @@ mod tests {
         }
     }
 
+    struct VisibleToolSpec {
+        id: ToolId,
+        name: ToolName,
+        description: String,
+        input_schema: InputSchemaRef,
+        output_contract: OutputContract,
+        effect_profile: EffectProfile,
+    }
+
+    impl ToolSpecView for VisibleToolSpec {
+        fn id(&self) -> &ToolId {
+            &self.id
+        }
+
+        fn name(&self) -> &ToolName {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            &self.description
+        }
+
+        fn input_schema(&self) -> &InputSchemaRef {
+            &self.input_schema
+        }
+
+        fn output_contract(&self) -> &OutputContract {
+            &self.output_contract
+        }
+
+        fn effect_profile(&self) -> &EffectProfile {
+            &self.effect_profile
+        }
+    }
+
+    fn dummy_visible_tools() -> Vec<Arc<dyn ToolSpecView>> {
+        vec![Arc::new(VisibleToolSpec {
+            id: ToolId("tool.bash".to_string()),
+            name: ToolName("bash".to_string()),
+            description: "Execute a shell command".to_string(),
+            input_schema: InputSchemaRef {
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            output_contract: OutputContract {
+                description: "Command output".to_string(),
+            },
+            effect_profile: EffectProfile {
+                reads_filesystem: true,
+                writes_filesystem: false,
+                network_access: false,
+                side_effects: true,
+            },
+        })]
+    }
+
+    fn test_runtime(provider: Arc<LlmProviderWrapper>) -> AgentRuntime {
+        let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(FixedPromptBuilder);
+        let compression_pipeline: Arc<dyn CompressionPipeline> =
+            Arc::new(compact::PassthroughCompressionPipeline::new());
+        let tool_registry = Arc::new(EmptyToolRegistry::new());
+        let skill_registry: Arc<dyn SkillRegistry> = Arc::new(EmptySkillRegistry::new());
+        let budget_config = TokenBudgetConfig {
+            total_budget: 4096,
+            reserved_for_output: 512,
+            reserved_for_system: 256,
+            hard_limit_ratio: 1.0,
+        };
+        let budget_policy: Arc<dyn TokenBudgetPolicy> =
+            Arc::new(FixedBudgetPolicy::new(budget_config.clone()));
+
+        AgentRuntime::builder()
+            .llm_provider(provider)
+            .compression_pipeline(compression_pipeline)
+            .prompt_builder(prompt_builder)
+            .system_prompt("You are a coding agent.")
+            .tool_registry(tool_registry)
+            .skill_registry(skill_registry)
+            .feature_flags(FeatureFlags::default())
+            .max_turns(4)
+            .token_budget_config(budget_config)
+            .token_budget_policy(budget_policy)
+            .build()
+            .expect("test runtime should build")
+    }
+
     struct ForceRetryCompressionPipeline {
         forced_count: Arc<StdMutex<usize>>,
     }
@@ -1558,32 +1685,7 @@ mod tests {
             None,
             None,
         ));
-        let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(FixedPromptBuilder);
-        let compression_pipeline: Arc<dyn CompressionPipeline> =
-            Arc::new(compact::PassthroughCompressionPipeline::new());
-        let tool_registry = Arc::new(EmptyToolRegistry::new());
-        let skill_registry: Arc<dyn SkillRegistry> = Arc::new(EmptySkillRegistry::new());
-        let budget_config = TokenBudgetConfig {
-            total_budget: 4096,
-            reserved_for_output: 512,
-            reserved_for_system: 256,
-            hard_limit_ratio: 1.0,
-        };
-        let budget_policy: Arc<dyn TokenBudgetPolicy> =
-            Arc::new(FixedBudgetPolicy::new(budget_config.clone()));
-        let runtime = AgentRuntime::builder()
-            .llm_provider(provider)
-            .compression_pipeline(compression_pipeline)
-            .prompt_builder(prompt_builder)
-            .system_prompt("You are a coding agent.")
-            .tool_registry(tool_registry)
-            .skill_registry(skill_registry)
-            .feature_flags(FeatureFlags::default())
-            .max_turns(4)
-            .token_budget_config(budget_config)
-            .token_budget_policy(budget_policy)
-            .build()
-            .expect("test runtime should build");
+        let runtime = test_runtime(provider);
         let sink = Arc::new(RecordingLoopEventSink::default());
         let input = AgentLoopInput::new("hello")
             .with_agent_id(AgentId("test-agent".to_string()))
@@ -1609,6 +1711,104 @@ mod tests {
                 .last()
                 .and_then(ChatMessage::text_content),
             Some("Hello world")
+        );
+    }
+
+    struct EmptyCallIdToolCallProvider {
+        capabilities: ProviderCapabilities,
+    }
+
+    impl EmptyCallIdToolCallProvider {
+        fn new() -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: true,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "empty-call-id-test".to_string(),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for EmptyCallIdToolCallProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            on_chunk(StreamChunk {
+                delta_text: Some("trying to use a tool".to_string()),
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some("trying to use a tool".to_string()),
+                    tool_calls: vec![ToolUseBlock {
+                        call_id: String::new(),
+                        tool_name: "bash".to_string(),
+                        input: serde_json::json!({"command": "date"}),
+                    }],
+                    usage: Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                    },
+                    stop_reason: StopReason::ToolUse,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    #[tokio::test]
+    async fn run_agent_loop_drops_invalid_tool_calls_with_empty_call_id() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(EmptyCallIdToolCallProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let input = AgentLoopInput::new("现在几点")
+            .with_agent_id(AgentId("test-agent".to_string()))
+            .with_visible_tools(dummy_visible_tools())
+            .with_runtime_view(Arc::new(NoopRuntimeView::new()));
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, input)
+            .await
+            .expect("loop should degrade invalid tool call into assistant text");
+
+        assert!(matches!(
+            outcome,
+            LoopRunResult::Complete(AgentOutcome::Complete { .. })
+        ));
+        assert_eq!(loop_state.turn_count, 1);
+        assert_eq!(loop_state.messages.len(), 2);
+        assert_eq!(
+            loop_state.messages[1].text_content(),
+            Some("trying to use a tool")
+        );
+        assert!(
+            !loop_state.messages[1]
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        );
+        assert!(
+            !loop_state.messages
+                .iter()
+                .any(|message| matches!(message.role, MessageRole::Tool))
         );
     }
 

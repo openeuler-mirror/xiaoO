@@ -13,6 +13,7 @@ use agent_types::llm::{
 use async_trait::async_trait;
 use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
+use tokio::time::{sleep, Duration};
 
 use super::trace::{
     begin_trace_span, effective_request_trace_fields, end_trace_span, error_trace_fields,
@@ -485,6 +486,48 @@ fn hook_invoke_metadata(hook_span: &TraceSpanHandle) -> HookInvokeMetadata {
 }
 
 impl LlmProviderWrapper {
+    async fn complete_with_retry(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let mut attempts = 0;
+        loop {
+            match self.inner.complete(request).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let Some(delay_ms) = retry_delay_ms(&error) else {
+                        return Err(error);
+                    };
+                    if attempts >= 1 {
+                        return Err(error);
+                    }
+                    attempts += 1;
+                    sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
+    async fn complete_stream_with_retry(
+        &self,
+        request: &LlmRequest,
+        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<LlmResponse, LlmError> {
+        let mut attempts = 0;
+        loop {
+            match self.inner.complete_stream(request, on_chunk).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let Some(delay_ms) = retry_delay_ms(&error) else {
+                        return Err(error);
+                    };
+                    if attempts >= 1 {
+                        return Err(error);
+                    }
+                    attempts += 1;
+                    sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
     pub async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let mut effective_request = request.clone();
         let runtime_view = self.runtime_view();
@@ -529,7 +572,7 @@ impl LlmProviderWrapper {
             .await;
         }
 
-        match self.inner.complete(&effective_request).await {
+        match self.complete_with_retry(&effective_request).await {
             Ok(mut response) => {
                 update_trace_span(
                     runtime_ref,
@@ -704,8 +747,7 @@ impl LlmProviderWrapper {
         }
 
         match self
-            .inner
-            .complete_stream(&effective_request, &traced_on_chunk)
+            .complete_stream_with_retry(&effective_request, &traced_on_chunk)
             .await
         {
             Ok(mut response) => {
@@ -854,6 +896,15 @@ impl LlmProviderWrapper {
 
     pub fn capabilities(&self) -> &ProviderCapabilities {
         self.inner.capabilities()
+    }
+}
+
+fn retry_delay_ms(error: &LlmError) -> Option<u64> {
+    match error {
+        LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
+            Some(*retry_after_ms)
+        }
+        _ => None,
     }
 }
 
