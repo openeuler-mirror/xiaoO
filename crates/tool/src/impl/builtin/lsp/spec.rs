@@ -49,7 +49,7 @@ impl LspToolSpec {
         Self {
             id: ToolId("builtin_lsp".to_string()),
             name: ToolName("lsp".to_string()),
-            description: "Query language server information: diagnostics, hover, definition, references, or symbols for source files.".to_string(),
+            description: "Query language server (LSP) for code diagnostics, symbol info, navigation, and call hierarchy.".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
                 description: "LSP query result".to_string(),
