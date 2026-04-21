@@ -7,6 +7,7 @@ pub(crate) struct WireTool {
     pub function: WireToolFunction,
 }
 
+#[allow(dead_code)]
 impl WireTool {
     #[allow(dead_code)]
     pub(crate) fn function(

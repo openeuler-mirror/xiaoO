@@ -47,8 +47,8 @@ fn test_openai_compatible_requires_api_base() {
 mod wrapper_tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use agent_contracts::hook::{Hooker, HookerRegistry};
     use agent_contracts::runtime::runtime_view::RuntimeView;

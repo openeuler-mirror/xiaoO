@@ -74,6 +74,7 @@ pub struct CliConfig {
     pub context_window: usize,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
+    pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
 }
 
 // ---------------------------------------------------------------------------

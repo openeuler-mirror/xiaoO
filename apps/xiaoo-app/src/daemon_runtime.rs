@@ -1,4 +1,6 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use agent_contracts::backend::OperationBackendConfig;
+use agent_contracts::lsp::LspProvider;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -6,7 +8,6 @@ use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use agent_contracts::lsp::LspProvider;
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
     RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
@@ -20,8 +21,8 @@ use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
 use tool::ToolRuntimeServices;
+use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
 use xiaoo_app::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -43,6 +44,7 @@ pub struct ConfiguredRuntimeResolver {
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
     lsp_service: Option<Arc<dyn LspProvider>>,
+    operation_backend: Option<OperationBackendConfig>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -90,6 +92,7 @@ impl ConfiguredRuntimeResolver {
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
+            operation_backend: config.app.operation_backend.clone(),
             lsp_service,
         })
     }
@@ -164,6 +167,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             compression_pipeline: self.compression_pipeline.clone(),
             trace: self.trace.clone(),
             hooker: self.hooker.clone(),
+            operation_backend: self.operation_backend.clone(),
         })
     }
 }

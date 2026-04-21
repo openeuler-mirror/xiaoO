@@ -85,7 +85,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspLocation>, LspError> {
-        self.manager.lock().await.implementation(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .implementation(file, line, col)
+            .await
     }
 
     async fn prepare_call_hierarchy(
@@ -94,7 +98,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspCallHierarchyItem>, LspError> {
-        self.manager.lock().await.prepare_call_hierarchy(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .prepare_call_hierarchy(file, line, col)
+            .await
     }
 
     async fn incoming_calls(
@@ -103,7 +111,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspIncomingCall>, LspError> {
-        self.manager.lock().await.incoming_calls(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .incoming_calls(file, line, col)
+            .await
     }
 
     async fn outgoing_calls(
@@ -112,7 +124,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspOutgoingCall>, LspError> {
-        self.manager.lock().await.outgoing_calls(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .outgoing_calls(file, line, col)
+            .await
     }
 
     async fn touch_file(&self, file: &Path) {

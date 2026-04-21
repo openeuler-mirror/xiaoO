@@ -64,7 +64,10 @@ impl FileEditExecutor {
 
 impl Default for FileEditExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileEditToolSpec::new()), ToolRuntimeServices::default())
+        Self::new(
+            Arc::new(FileEditToolSpec::new()),
+            ToolRuntimeServices::default(),
+        )
     }
 }
 
@@ -124,7 +127,12 @@ impl ToolExecutor for FileEditExecutor {
             }
 
             let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
-                fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+                fetch_diagnostics(
+                    lsp,
+                    std::path::Path::new(&expanded_path),
+                    LSP_DIAG_TIMEOUT_SECS,
+                )
+                .await
             } else {
                 None
             };
@@ -189,7 +197,12 @@ impl ToolExecutor for FileEditExecutor {
         }
 
         let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
-            fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+            fetch_diagnostics(
+                lsp,
+                std::path::Path::new(&expanded_path),
+                LSP_DIAG_TIMEOUT_SECS,
+            )
+            .await
         } else {
             None
         };

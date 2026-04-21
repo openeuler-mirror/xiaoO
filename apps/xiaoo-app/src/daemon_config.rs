@@ -1,6 +1,7 @@
+use agent_contracts::backend::OperationBackendConfig;
+use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
-use agent_contracts::lsp::LspProvider;
 use lsp::{AutoInstall, LspService, ServerConfig};
 use serde::Deserialize;
 use serde_json;
@@ -39,6 +40,8 @@ pub struct AppConfig {
     pub hooker: HookerRegistryConfig,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
+    #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -429,8 +432,7 @@ impl DaemonConfig {
                 // user-supplied configs we leak the strings so they live for 'static.
                 let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
                 let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str =
-                    Box::leak(c.language_id.clone().into_boxed_str());
+                let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
 
                 let extensions: &'static [&'static str] = Box::leak(
                     c.extensions

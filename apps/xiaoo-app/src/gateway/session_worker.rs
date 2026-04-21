@@ -91,7 +91,7 @@ impl SessionWorker {
         };
 
         let mut loop_input = AgentLoopInput::new(input.user_message)
-            .with_agent_id(input.agent_id)
+            .with_agent_id(input.agent_id.clone())
             .with_visible_tools(assembly.visible_tools.clone());
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
@@ -103,11 +103,31 @@ impl SessionWorker {
             loop_input = loop_input.with_runtime_view(runtime_view);
         }
 
-        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input)
-            .await
-            .map_err(|error| SessionServiceError::CoreRun {
+        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input).await;
+        let shutdown_result = assembly.shutdown().await;
+
+        let loop_result = match loop_result {
+            Ok(loop_result) => loop_result,
+            Err(error) => {
+                if let Err(shutdown_error) = shutdown_result {
+                    tracing::warn!(
+                        session_id = %input.session.session_id,
+                        agent_id = %input.agent_id,
+                        shutdown_error = %shutdown_error,
+                        "runtime shutdown failed after loop error"
+                    );
+                }
+                return Err(SessionServiceError::CoreRun {
+                    message: error.to_string(),
+                });
+            }
+        };
+
+        if let Err(error) = shutdown_result {
+            return Err(SessionServiceError::RuntimeShutdown {
                 message: error.to_string(),
-            })?;
+            });
+        }
 
         memory_manager.sync_from_loop_state(&loop_state.messages, current_time_ms());
 

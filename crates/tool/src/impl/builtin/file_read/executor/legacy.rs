@@ -194,7 +194,10 @@ impl FileReadExecutor {
 
 impl Default for FileReadExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileReadToolSpec::new()), ToolRuntimeServices::default())
+        Self::new(
+            Arc::new(FileReadToolSpec::new()),
+            ToolRuntimeServices::default(),
+        )
     }
 }
 
@@ -288,11 +291,9 @@ impl ToolExecutor for FileReadExecutor {
                 if let Some(lsp) = &self.services.lsp_service {
                     spawn_touch_file(lsp, Path::new(&resolved_file_path));
                 }
-                let json_output =
-                    serde_json::to_string(&FileReadOutput::Text(text_output)).map_err(|e| {
-                        ToolExecutionError::ExecutionFailed {
-                            message: format!("Failed to serialize output: {}", e),
-                        }
+                let json_output = serde_json::to_string(&FileReadOutput::Text(text_output))
+                    .map_err(|e| ToolExecutionError::ExecutionFailed {
+                        message: format!("Failed to serialize output: {}", e),
                     })?;
                 Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success {
