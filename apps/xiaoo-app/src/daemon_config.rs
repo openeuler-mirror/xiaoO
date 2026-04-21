@@ -42,8 +42,6 @@ pub struct LlmConfig {
     #[serde(default)]
     pub api_base: Option<String>,
     #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
     pub api_key_env: Option<String>,
     pub model: String,
     #[serde(default)]
