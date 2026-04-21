@@ -124,7 +124,10 @@ fn extract_host(url_str: &str) -> String {
         .unwrap_or(after_scheme);
 
     // Strip userinfo (user:pass@) — not part of host for IP check
-    let host_port = host_port.rfind('@').map(|i| &host_port[i + 1..]).unwrap_or(host_port);
+    let host_port = host_port
+        .rfind('@')
+        .map(|i| &host_port[i + 1..])
+        .unwrap_or(host_port);
 
     let host = if let Some(colon_pos) = host_port.rfind(':') {
         if host_port.starts_with('[') {
@@ -242,7 +245,9 @@ mod tests {
     fn test_is_ip_blocks_loopback_ipv4() {
         assert!(is_ip_blocked(IpAddr::V4("127.0.0.1".parse().unwrap())));
         assert!(is_ip_blocked(IpAddr::V4("127.0.0.2".parse().unwrap())));
-        assert!(is_ip_blocked(IpAddr::V4("127.255.255.255".parse().unwrap())));
+        assert!(is_ip_blocked(IpAddr::V4(
+            "127.255.255.255".parse().unwrap()
+        )));
     }
 
     #[test]
@@ -259,12 +264,16 @@ mod tests {
         assert!(is_ip_blocked(IpAddr::V4("172.31.255.255".parse().unwrap())));
         assert!(!is_ip_blocked(IpAddr::V4("172.32.0.1".parse().unwrap())));
         assert!(is_ip_blocked(IpAddr::V4("192.168.0.1".parse().unwrap())));
-        assert!(is_ip_blocked(IpAddr::V4("192.168.255.255".parse().unwrap())));
+        assert!(is_ip_blocked(IpAddr::V4(
+            "192.168.255.255".parse().unwrap()
+        )));
     }
 
     #[test]
     fn test_is_ip_blocks_link_local() {
-        assert!(is_ip_blocked(IpAddr::V4("169.254.169.254".parse().unwrap())));
+        assert!(is_ip_blocked(IpAddr::V4(
+            "169.254.169.254".parse().unwrap()
+        )));
         assert!(is_ip_blocked(IpAddr::V4("169.254.1.1".parse().unwrap())));
 
         assert!(is_ip_blocked(IpAddr::V6("fe80::1".parse().unwrap())));
@@ -278,19 +287,21 @@ mod tests {
 
     #[test]
     fn test_is_ip_blocks_ipv4_mapped_ipv6() {
-        assert!(is_ip_blocked(
-            IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())
-        ));
-        assert!(is_ip_blocked(
-            IpAddr::V6("::ffff:10.0.0.1".parse().unwrap())
-        ));
+        assert!(is_ip_blocked(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
+        assert!(is_ip_blocked(IpAddr::V6(
+            "::ffff:10.0.0.1".parse().unwrap()
+        )));
     }
 
     #[test]
     fn test_is_ip_allows_public_ips() {
         assert!(!is_ip_blocked(IpAddr::V4("8.8.8.8".parse().unwrap())));
         assert!(!is_ip_blocked(IpAddr::V4("1.1.1.1".parse().unwrap())));
-        assert!(!is_ip_blocked(IpAddr::V6("2001:4860:4860::8888".parse().unwrap())));
+        assert!(!is_ip_blocked(IpAddr::V6(
+            "2001:4860:4860::8888".parse().unwrap()
+        )));
     }
 
     #[test]
@@ -314,12 +325,18 @@ mod tests {
     #[test]
     fn test_extract_host_ipv6() {
         assert_eq!(extract_host("http://[::1]:8080/"), "[::1]");
-        assert_eq!(extract_host("http://[::ffff:127.0.0.1]/path"), "[::ffff:127.0.0.1]");
+        assert_eq!(
+            extract_host("http://[::ffff:127.0.0.1]/path"),
+            "[::ffff:127.0.0.1]"
+        );
     }
 
     #[test]
     fn test_extract_host_with_userinfo() {
-        assert_eq!(extract_host("http://user:pass@example.com/path"), "example.com");
+        assert_eq!(
+            extract_host("http://user:pass@example.com/path"),
+            "example.com"
+        );
     }
 
     #[test]

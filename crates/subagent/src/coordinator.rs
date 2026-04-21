@@ -102,7 +102,13 @@ impl SubagentCoordinator {
             });
         }
 
-        if state.agents.values().filter(|r| r.status == SubagentStatus::Running).count() >= self.config.max_subagents_per_session {
+        if state
+            .agents
+            .values()
+            .filter(|r| r.status == SubagentStatus::Running)
+            .count()
+            >= self.config.max_subagents_per_session
+        {
             return Err(SubagentControlError::InvalidState {
                 message: format!(
                     "maximum number of concurrent subagents ({}) reached for this session",
@@ -336,7 +342,10 @@ mod tests {
         let child_id = AgentId("child-2".to_string());
         let request = make_request(&parent_id, "task-2");
         let result = coordinator.spawn(&mut state, &request, child_id, 1000);
-        assert!(result.is_err(), "3rd spawn should be rejected when limit is 2");
+        assert!(
+            result.is_err(),
+            "3rd spawn should be rejected when limit is 2"
+        );
     }
 
     #[test]
@@ -367,7 +376,10 @@ mod tests {
         let child_id = AgentId("child-2".to_string());
         let request = make_request(&parent_id, "task-2");
         let result = coordinator.spawn(&mut state, &request, child_id, 3000);
-        assert!(result.is_ok(), "spawn after completion should succeed (concurrent limit, not historical)");
+        assert!(
+            result.is_ok(),
+            "spawn after completion should succeed (concurrent limit, not historical)"
+        );
     }
 
     #[test]
@@ -379,7 +391,9 @@ mod tests {
         for i in 0..2 {
             let child_id = AgentId(format!("child-{}", i));
             let request = make_request(&parent_id, &format!("task-{}", i));
-            coordinator.spawn(&mut state, &request, child_id, 1000).unwrap();
+            coordinator
+                .spawn(&mut state, &request, child_id, 1000)
+                .unwrap();
         }
 
         // child-0 completes
@@ -389,18 +403,25 @@ mod tests {
             error: None,
             completed_at_ms: 2000,
         };
-        coordinator.on_terminal(&mut state, &AgentId("child-0".to_string()), terminal).unwrap();
+        coordinator
+            .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+            .unwrap();
 
         // child-2 fills the freed spot
         let child_id = AgentId("child-2".to_string());
         let request = make_request(&parent_id, "task-2");
-        coordinator.spawn(&mut state, &request, child_id, 3000).unwrap();
+        coordinator
+            .spawn(&mut state, &request, child_id, 3000)
+            .unwrap();
 
         // Now both child-1 and child-2 are Running, limit reached again
         let child_id = AgentId("child-3".to_string());
         let request = make_request(&parent_id, "task-3");
         let result = coordinator.spawn(&mut state, &request, child_id, 4000);
-        assert!(result.is_err(), "should be rejected when limit reached again");
+        assert!(
+            result.is_err(),
+            "should be rejected when limit reached again"
+        );
     }
 
     #[test]

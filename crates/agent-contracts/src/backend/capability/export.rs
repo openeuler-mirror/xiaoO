@@ -12,6 +12,8 @@ pub struct ExportFileRequest {
 #[async_trait]
 pub trait OperationExport: Send + Sync {
     /// Export a file for external use (e.g., sending via channel).
-    async fn export_file(&self, request: ExportFileRequest)
-        -> Result<SharedExportedFileHandle, OperationError>;
+    async fn export_file(
+        &self,
+        request: ExportFileRequest,
+    ) -> Result<SharedExportedFileHandle, OperationError>;
 }

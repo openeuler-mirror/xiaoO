@@ -298,6 +298,7 @@ pub async fn run_agent_loop(
         messages: ctx.state.messages.clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
+        estimated_input_tokens: current_turn_estimated_input_tokens(&ctx),
     }))
 }
 
@@ -1220,6 +1221,7 @@ fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
         messages: ctx.state.messages.clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
+        estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
     }
 }
 
@@ -1233,6 +1235,7 @@ fn build_outcome_budget(ctx: &LoopContext<'_>) -> AgentOutcome {
         messages: ctx.state.messages.clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
+        estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
     }
 }
 
@@ -1246,7 +1249,16 @@ fn build_outcome_cancelled(ctx: &LoopContext<'_>) -> AgentOutcome {
         messages: ctx.state.messages.clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
+        estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
     }
+}
+
+fn current_turn_estimated_input_tokens(ctx: &LoopContext<'_>) -> usize {
+    ctx.turn
+        .build_messages_output
+        .as_ref()
+        .map(|result| result.estimated_input_tokens)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

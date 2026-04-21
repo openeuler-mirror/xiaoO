@@ -13,7 +13,6 @@ use agent_contracts::tool::spec::ToolSpecView;
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use crate::r#impl::builtin::file_read::dedup::DedupStateStore;
 use super::input::FileEditInput;
 use super::output::FileEditOutput;
 use super::spec::FileEditToolSpec;
@@ -22,6 +21,7 @@ use super::utils::{
 };
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::builtin::file_read::dedup::DedupStateStore;
 use crate::r#impl::path_resolver::runtime_workspace_root;
 
 /// Executor for FileEditTool.

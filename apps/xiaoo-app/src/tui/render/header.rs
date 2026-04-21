@@ -10,6 +10,8 @@ use crate::app::App;
 use crate::app_state::RuntimeStatusLight;
 use crate::status_panel::StatusPanel;
 
+use super::utils::sanitize_terminal_text;
+
 impl App {
     pub(crate) fn render_header(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
@@ -110,7 +112,10 @@ impl App {
                 ),
             };
         let status = Paragraph::new(Line::from(vec![
-            Span::styled("● ", Style::default().fg(status_light_color)),
+            Span::styled(
+                sanitize_terminal_text("● "),
+                Style::default().fg(status_light_color),
+            ),
             Span::styled(format!("{status_label} "), status_label_style),
             Span::styled(now, Style::default().fg(self.state.theme.muted)),
         ]))
@@ -146,7 +151,7 @@ impl App {
             "Disconnected".to_string()
         };
         let workspace = if self.state.status_panel.workspace_display.is_empty() {
-            "—".to_string()
+            sanitize_terminal_text("—")
         } else {
             self.state.status_panel.workspace_display.clone()
         };
@@ -179,7 +184,10 @@ impl App {
             ),
             Span::styled(")  Ctx ", Style::default().fg(self.state.theme.muted)),
             Span::styled(
-                StatusPanel::format_token_count(self.state.status_panel.context_tokens),
+                StatusPanel::format_context_usage(
+                    self.state.status_panel.input_context_tokens,
+                    self.state.status_panel.context_window_tokens,
+                ),
                 Style::default()
                     .fg(self.state.theme.gradient_yellow)
                     .add_modifier(Modifier::BOLD),

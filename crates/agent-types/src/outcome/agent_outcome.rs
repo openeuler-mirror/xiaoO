@@ -15,6 +15,7 @@ pub enum AgentOutcome {
         messages: Vec<ChatMessage>,
         turn_count: u32,
         token_usage: TokenUsage,
+        estimated_input_tokens: usize,
     },
 
     MaxTurnsReached {
@@ -22,6 +23,7 @@ pub enum AgentOutcome {
         messages: Vec<ChatMessage>,
         turn_count: u32,
         token_usage: TokenUsage,
+        estimated_input_tokens: usize,
     },
 
     BudgetExhausted {
@@ -29,6 +31,7 @@ pub enum AgentOutcome {
         messages: Vec<ChatMessage>,
         turn_count: u32,
         token_usage: TokenUsage,
+        estimated_input_tokens: usize,
     },
 
     Cancelled {
@@ -36,6 +39,7 @@ pub enum AgentOutcome {
         messages: Vec<ChatMessage>,
         turn_count: u32,
         token_usage: TokenUsage,
+        estimated_input_tokens: usize,
     },
 }
 

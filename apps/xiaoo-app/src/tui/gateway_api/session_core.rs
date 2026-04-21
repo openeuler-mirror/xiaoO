@@ -111,6 +111,7 @@ impl SessionGateway {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
+                    estimated_input_tokens,
                     ..
                 }) => {
                     let total_tokens = if total_tokens == 0 {
@@ -126,6 +127,7 @@ impl SessionGateway {
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
+                        estimated_input_tokens,
                         messages,
                     });
                 }

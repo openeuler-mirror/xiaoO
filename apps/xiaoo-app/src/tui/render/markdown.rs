@@ -2,6 +2,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::theme::Theme;
+use super::utils::sanitize_terminal_text;
 
 pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
     if text.is_empty() {
@@ -34,7 +35,7 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
             if show_code_language_label {
                 let label_style = Style::default().fg(theme.muted).bg(theme.code_bg);
                 lines.push(Line::from(vec![Span::styled(
-                    format!("  {} ", code_language),
+                    sanitize_terminal_text(&format!("  {} ", code_language)),
                     label_style,
                 )]));
                 show_code_language_label = false;
@@ -42,7 +43,7 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
 
             let code_style = Style::default().fg(theme.code_fg).bg(theme.code_bg);
             lines.push(Line::from(vec![Span::styled(
-                format!("  {raw_line}"),
+                sanitize_terminal_text(&format!("  {raw_line}")),
                 code_style,
             )]));
             continue;
@@ -58,7 +59,10 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
                 .fg(theme.secondary)
                 .bg(theme.background)
                 .add_modifier(Modifier::BOLD);
-            lines.push(Line::from(vec![Span::styled(content.to_string(), style)]));
+            lines.push(Line::from(vec![Span::styled(
+                sanitize_terminal_text(content),
+                style,
+            )]));
             continue;
         }
 
@@ -67,7 +71,10 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
                 .fg(theme.accent)
                 .bg(theme.background)
                 .add_modifier(Modifier::BOLD);
-            lines.push(Line::from(vec![Span::styled(content.to_string(), style)]));
+            lines.push(Line::from(vec![Span::styled(
+                sanitize_terminal_text(content),
+                style,
+            )]));
             continue;
         }
 
@@ -76,14 +83,20 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
                 .fg(theme.accent)
                 .bg(theme.background)
                 .add_modifier(Modifier::BOLD);
-            lines.push(Line::from(vec![Span::styled(content.to_string(), style)]));
+            lines.push(Line::from(vec![Span::styled(
+                sanitize_terminal_text(content),
+                style,
+            )]));
             continue;
         }
 
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
             let hr_len = usize::max(1, width as usize);
             let style = Style::default().fg(theme.muted).bg(Color::Reset);
-            lines.push(Line::from(vec![Span::styled("─".repeat(hr_len), style)]));
+            lines.push(Line::from(vec![Span::styled(
+                sanitize_terminal_text(&"─".repeat(hr_len)),
+                style,
+            )]));
             continue;
         }
 
@@ -92,7 +105,7 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
             .or_else(|| trimmed_start.strip_prefix("* "))
         {
             let mut spans = vec![Span::styled(
-                "  • ".to_string(),
+                sanitize_terminal_text("  • "),
                 Style::default().fg(theme.secondary).bg(theme.background),
             )];
             spans.extend(parse_inline(content, theme).spans);
@@ -314,5 +327,8 @@ fn push_buffer(spans: &mut Vec<Span<'static>>, buffer: &mut String, style: Style
         return;
     }
 
-    spans.push(Span::styled(std::mem::take(buffer), style));
+    spans.push(Span::styled(
+        sanitize_terminal_text(&std::mem::take(buffer)),
+        style,
+    ));
 }

@@ -47,18 +47,13 @@ impl WebFetchExecutor {
                 let addr_vec: Vec<_> = addrs.collect();
                 let dns_check = validation::validate_resolved_addrs(&addr_vec);
                 if !dns_check.result {
-                    return Err(
-                        dns_check
-                            .message
-                            .unwrap_or_else(|| "URL resolves to blocked IP".to_string()),
-                    );
+                    return Err(dns_check
+                        .message
+                        .unwrap_or_else(|| "URL resolves to blocked IP".to_string()));
                 }
             }
             Err(e) => {
-                return Err(format!(
-                    "DNS resolution failed for '{}': {}",
-                    host, e
-                ));
+                return Err(format!("DNS resolution failed for '{}': {}", host, e));
             }
         }
 
@@ -156,9 +151,7 @@ fn extract_text_from_html(html: &str) -> String {
 }
 
 fn convert_html_to_markdown(html: &str) -> String {
-    htmd::convert(html).unwrap_or_else(|_| {
-        extract_text_from_html(html)
-    })
+    htmd::convert(html).unwrap_or_else(|_| extract_text_from_html(html))
 }
 
 /// Extract host from URL for DNS resolution.
@@ -175,7 +168,10 @@ fn extract_host_for_dns(url_str: &str) -> &str {
         .unwrap_or(after_scheme);
 
     // Strip userinfo (@ separates credentials from host)
-    let host_port = authority.rfind('@').map(|i| &authority[i + 1..]).unwrap_or(authority);
+    let host_port = authority
+        .rfind('@')
+        .map(|i| &authority[i + 1..])
+        .unwrap_or(authority);
 
     if host_port.starts_with('[') {
         if let Some(bracket_end) = host_port.find(']') {
