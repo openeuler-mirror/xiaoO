@@ -54,6 +54,7 @@ pub(crate) fn to_anthropic_output_format(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn response_format_warning(
     response_format: &WireResponseFormat,
 ) -> Option<crate::wire_types::Warning> {

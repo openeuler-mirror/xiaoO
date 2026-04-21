@@ -553,6 +553,7 @@ async fn compress(
     }
 }
 
+#[allow(dead_code)]
 fn microcompact(ctx: &mut LoopContext<'_>) {
     let result = ctx
         .snapshot

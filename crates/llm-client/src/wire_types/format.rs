@@ -8,6 +8,7 @@ pub(crate) struct WireResponseFormat {
     pub json_schema: Option<JsonSchemaDef>,
 }
 
+#[allow(dead_code)]
 impl WireResponseFormat {
     pub(crate) fn json_object() -> Self {
         Self {

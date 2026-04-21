@@ -12,6 +12,7 @@ pub(crate) struct Warning {
     pub message: Option<String>,
 }
 
+#[allow(dead_code)]
 impl Warning {
     pub(crate) fn new(
         feature: impl Into<String>,
@@ -25,7 +26,7 @@ impl Warning {
             message: None,
         }
     }
-
+    #[allow(dead_code)]
     pub(crate) fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self

@@ -7,7 +7,7 @@ pub(crate) mod stream;
 pub(crate) mod temperature;
 pub(crate) mod tool;
 
-pub(crate) use format::{JsonSchemaDef, WireResponseFormat};
+pub(crate) use format::WireResponseFormat;
 pub(crate) use message::WireMessage;
 pub(crate) use request::WireRequest;
 pub(crate) use response::{Warning, WireChoice, WireResponse, WireUsage};
