@@ -1,4 +1,5 @@
 pub mod channel_ingress;
+pub mod rate_limit;
 pub mod router;
 pub mod service;
 pub mod sse_sink;

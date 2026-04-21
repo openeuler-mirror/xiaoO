@@ -8,6 +8,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use xiaoo_app::channels::feishu::FeishuConfig;
+use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 128000;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
@@ -79,6 +80,8 @@ pub struct HttpConfig {
     pub bearer_token: Option<String>,
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -556,5 +559,44 @@ mod tests {
         assert!(error
             .to_string()
             .contains("http.bearer_token and http.bearer_token_env are mutually exclusive"));
+    }
+
+    #[test]
+    fn parses_http_rate_limit_config() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [http.rate_limit]
+            enabled = true
+            requests_per_second = 5
+            burst = 20
+
+            [http.rate_limit.routes.health]
+            requests_per_second = 10
+            burst = 30
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        assert!(config.http.rate_limit.is_some());
+
+        let rl = config.http.rate_limit.unwrap();
+        assert!(rl.enabled);
+        assert_eq!(rl.requests_per_second, 5);
+        assert_eq!(rl.burst, 20);
+
+        let health_override = rl.routes.get("health").expect("health route override");
+        assert_eq!(health_override.requests_per_second, 10);
+        assert_eq!(health_override.burst, 30);
+    }
+
+    #[test]
+    fn http_config_defaults_to_no_rate_limit() {
+        use crate::daemon_config::HttpConfig;
+        let config: HttpConfig = toml::from_str("").expect("empty should parse");
+        assert!(config.rate_limit.is_none());
+        assert!(config.bearer_token.is_none());
+        assert!(config.bearer_token_env.is_none());
     }
 }
