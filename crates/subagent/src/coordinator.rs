@@ -58,7 +58,7 @@ impl SubagentPromptBuilder {
 /// Configuration options for controlling subagent boundaries and quotas.
 #[derive(Debug, Clone, Copy)]
 pub struct SubagentCoordinatorConfig {
-    /// The maximum total number of subagents allowed to exist within a given session simultaneously.
+    /// The maximum number of subagents allowed to run concurrently within a given session.
     pub max_subagents_per_session: usize,
 }
 
@@ -102,10 +102,10 @@ impl SubagentCoordinator {
             });
         }
 
-        if state.agents.len() >= self.config.max_subagents_per_session {
+        if state.agents.values().filter(|r| r.status == SubagentStatus::Running).count() >= self.config.max_subagents_per_session {
             return Err(SubagentControlError::InvalidState {
                 message: format!(
-                    "maximum number of subagents ({}) reached for this session",
+                    "maximum number of concurrent subagents ({}) reached for this session",
                     self.config.max_subagents_per_session
                 ),
             });
@@ -278,7 +278,130 @@ fn terminal_kind_to_status(kind: &SubagentTerminalKind) -> SubagentStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::SubagentPromptBuilder;
+    use super::*;
+    use crate::state::SubagentSessionState;
+    use crate::types::SpawnSubagentRequest;
+    use agent_types::common::ids::AgentId;
+
+    fn make_parent_agent_id() -> AgentId {
+        AgentId("parent-1".to_string())
+    }
+
+    fn make_request(parent_id: &AgentId, desc: &str) -> SpawnSubagentRequest {
+        SpawnSubagentRequest {
+            session_id: "test-session".to_string(),
+            parent_agent_id: parent_id.clone(),
+            task_goal: desc.to_string(),
+            task_context: String::new(),
+            output_schema: None,
+            description: desc.to_string(),
+        }
+    }
+
+    fn make_coordinator(max: usize) -> SubagentCoordinator {
+        SubagentCoordinator::with_config(SubagentCoordinatorConfig {
+            max_subagents_per_session: max,
+        })
+    }
+
+    #[test]
+    fn concurrent_limit_allows_spawn_when_under_limit() {
+        let coordinator = make_coordinator(3);
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        for i in 0..3 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            let result = coordinator.spawn(&mut state, &request, child_id, 1000);
+            assert!(result.is_ok(), "spawn {} should succeed", i);
+        }
+
+        assert_eq!(state.agents.len(), 3);
+    }
+
+    #[test]
+    fn concurrent_limit_rejects_when_all_running() {
+        let coordinator = make_coordinator(2);
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        for i in 0..2 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            let result = coordinator.spawn(&mut state, &request, child_id, 1000);
+            assert!(result.is_ok(), "spawn {} should succeed", i);
+        }
+
+        let child_id = AgentId("child-2".to_string());
+        let request = make_request(&parent_id, "task-2");
+        let result = coordinator.spawn(&mut state, &request, child_id, 1000);
+        assert!(result.is_err(), "3rd spawn should be rejected when limit is 2");
+    }
+
+    #[test]
+    fn concurrent_limit_allows_spawn_after_one_completes() {
+        let coordinator = make_coordinator(2);
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        for i in 0..2 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            let result = coordinator.spawn(&mut state, &request, child_id, 1000);
+            assert!(result.is_ok(), "spawn {} should succeed", i);
+        }
+
+        // child-0 completes
+        let terminal = SubagentTerminalSnapshot {
+            status: SubagentTerminalKind::Completed,
+            reply: Some("done".to_string()),
+            error: None,
+            completed_at_ms: 2000,
+        };
+        coordinator
+            .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+            .expect("on_terminal should succeed");
+
+        // Now a new spawn should succeed because only 1 is still Running
+        let child_id = AgentId("child-2".to_string());
+        let request = make_request(&parent_id, "task-2");
+        let result = coordinator.spawn(&mut state, &request, child_id, 3000);
+        assert!(result.is_ok(), "spawn after completion should succeed (concurrent limit, not historical)");
+    }
+
+    #[test]
+    fn concurrent_limit_rejects_again_after_all_spots_refilled() {
+        let coordinator = make_coordinator(2);
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        for i in 0..2 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            coordinator.spawn(&mut state, &request, child_id, 1000).unwrap();
+        }
+
+        // child-0 completes
+        let terminal = SubagentTerminalSnapshot {
+            status: SubagentTerminalKind::Completed,
+            reply: Some("done".to_string()),
+            error: None,
+            completed_at_ms: 2000,
+        };
+        coordinator.on_terminal(&mut state, &AgentId("child-0".to_string()), terminal).unwrap();
+
+        // child-2 fills the freed spot
+        let child_id = AgentId("child-2".to_string());
+        let request = make_request(&parent_id, "task-2");
+        coordinator.spawn(&mut state, &request, child_id, 3000).unwrap();
+
+        // Now both child-1 and child-2 are Running, limit reached again
+        let child_id = AgentId("child-3".to_string());
+        let request = make_request(&parent_id, "task-3");
+        let result = coordinator.spawn(&mut state, &request, child_id, 4000);
+        assert!(result.is_err(), "should be rejected when limit reached again");
+    }
 
     #[test]
     fn subagent_prompt_builder_with_schema() {
