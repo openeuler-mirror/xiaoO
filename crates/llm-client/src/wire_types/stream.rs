@@ -36,6 +36,7 @@ pub(crate) struct Delta {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParsedChunk {
     pub content: Option<String>,
+    #[allow(dead_code)]
     pub reasoning: Option<String>,
     pub finish_reason: Option<String>,
     pub usage: Option<WireUsage>,

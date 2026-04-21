@@ -13,6 +13,7 @@ pub(crate) struct WireMessage {
     pub tool_call_id: Option<String>,
 }
 
+#[allow(dead_code)]
 impl WireMessage {
     pub(crate) fn user(content: impl Into<String>) -> Self {
         Self {
