@@ -19,6 +19,3 @@ url = "2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = { workspace = true }
 
-[[bin]]
-name = "mock_lsp_server"
-path = "src/bin/mock_lsp_server.rs"
