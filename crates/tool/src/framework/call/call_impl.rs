@@ -11,6 +11,7 @@ use agent_contracts::tool::{ToolCall, ToolExecutor, ToolSpecView};
 use agent_contracts::trace::TraceOutcome;
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::tool::{FinalToolCall, PreHookResult, ToolExecutionError, ToolExecutionResult};
+use agent_types::ChatMessage;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -59,11 +60,12 @@ impl ToolCall for ToolCallImpl {
     async fn execute(
         &self,
         runtime: &dyn RuntimeView,
+        recent_messages: &[ChatMessage],
     ) -> Result<ToolExecutionResult, ToolExecutionError> {
         let mut state = self.initialize_execution_state();
         self.begin_trace_span(&mut state, runtime).await;
 
-        match self.run_pre_hook_sequence(&mut state, runtime).await {
+        match self.run_pre_hook_sequence(&mut state, runtime, recent_messages).await {
             Ok(pre_hook_results) => {
                 state.pre_hook_results = pre_hook_results;
                 self.update_trace_span(&state, runtime, "pre_hooks_done")

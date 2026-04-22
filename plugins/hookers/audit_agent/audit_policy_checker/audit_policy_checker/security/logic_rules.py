@@ -158,8 +158,11 @@ class LogicRulesChecker:
                 path == rp or path.startswith(rp) or rp.startswith(path)
                 for rp in history_read_paths
             ):
-                # 排除新文件创建（路径不在历史中且 reason 表明是创建）
-                unread_paths.append(path)
+                # 排除新文件创建：检查 reason 或 action_detail 中是否有创建/新建关键词
+                create_keywords = ["创建", "新建", "create", "new file", "touch"]
+                is_create = any(kw in reason.lower() or kw in action_detail for kw in create_keywords)
+                if not is_create:
+                    unread_paths.append(path)
 
         if unread_paths:
             return LogicRuleResult(

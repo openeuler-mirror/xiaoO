@@ -10,6 +10,8 @@ Step 2: Allow → 查缓存 / 生成 policy
   ├── 缓存命中 → 使用缓存 policy
   └── 缓存未命中 → LLM 生成 policy + 写入缓存
   → 返回 Allow + policy
+
+优化：白名单只读工具（whitelist_bypass）跳过 Step 2 LLM 调用，使用预定义的最小权限 Policy。
 """
 
 import tempfile
@@ -26,6 +28,34 @@ from .security import judge_security
 
 # Policy 临时文件输出目录
 POLICY_OUTPUT_DIR = Path(tempfile.gettempdir()) / "audit_policy_checker"
+
+# 白名单只读工具的默认最小权限 Policy（与 xiaoO Policy.minimal() 保持一致）
+# 参考: crates/cerberus/cerberus-core/src/policy/policy.rs
+DEFAULT_READONLY_POLICY = """landlock_optional = false
+mount_isolation_fallback = false
+
+[path_groups]
+system_binaries = true
+system_libraries = true
+temp_directories = true
+device_files = false
+proc_filesystem = false
+network_config = false
+wsl_paths = false
+
+[namespaces]
+mount = true
+pid = false
+network = true
+user = false
+
+[resources]
+timeout_secs = 30
+max_memory_bytes = 268435456
+
+[environment]
+whitelist = ["PATH", "LANG", "HOME", "USER", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
+"""
 
 
 def audit_action(
@@ -104,6 +134,23 @@ def audit_action(
             _ = _save_policy_to_file(session_id, policy_a_next)
         else:
             audit_log.end_step("step2_cache_lookup", detail="缓存未命中")
+
+            # 白名单只读工具：跳过 LLM 调用，使用预定义的最小权限 Policy
+            if judgment.source == "whitelist_bypass":
+                audit_log.start_step("step2_whitelist_policy")
+                policy_a_next = DEFAULT_READONLY_POLICY
+                # 写入缓存供后续使用
+                policy_cache.put(session_id, prompt_session, policy_a_next)
+                _ = _save_policy_to_file(session_id, policy_a_next)
+                audit_log.end_step("step2_whitelist_policy", detail="白名单工具使用预定义最小权限 Policy")
+                result = {
+                    "decision": "Allow",
+                    "policy": policy_a_next,
+                    "reason": judgment.reason,
+                    "violated_policy": "",
+                }
+                audit_log.log_result("Allow", result["reason"], policy_a_next)
+                return result
 
             # Step1 与 Step2 之间的间隔（避免 API 限流）
             if cfg.timeout.step_interval > 0:

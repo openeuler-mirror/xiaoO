@@ -28,7 +28,7 @@ auditagent = "audit_policy_checker.cli:main"
 include = ["audit_policy_checker*"]
 
 [tool.setuptools.package-data]
-audit_policy_checker = ["templates/*.txt", "skills/*.md", "rules/*.json"]
+audit_policy_checker = ["templates/*.txt", "templates/*.md", "skills/*.md", "rules/*.json"]
 
 [tool.setuptools.exclude-package-data]
 audit_policy_checker = ["config.json"]

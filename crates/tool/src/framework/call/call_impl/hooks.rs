@@ -5,6 +5,7 @@ use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
 };
+use agent_types::ChatMessage;
 use hook::{resolve_hook_point_category, HookPointCategory};
 use serde_json::json;
 use std::borrow::Cow;
@@ -17,6 +18,7 @@ impl ToolCallImpl {
         &self,
         state: &mut ToolExecutionState,
         runtime: &dyn RuntimeView,
+        recent_messages: &[ChatMessage],
     ) -> Result<Vec<PreHookResult>, ToolExecutionError> {
         let hook_point = self.build_tool_hook_point(runtime, &state.final_call.tool_name, "pre");
         let category = resolve_hook_point_category(&hook_point).map_err(|error| {
@@ -66,6 +68,7 @@ impl ToolCallImpl {
             let input = HookInvokeInput::Pre {
                 input: PreToolHookInput {
                     call: state.final_call.clone(),
+                    recent_messages: recent_messages.to_vec(),
                 },
                 metadata: hook_invoke_metadata(&hook_span),
             };

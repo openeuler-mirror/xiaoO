@@ -949,7 +949,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             }
         };
 
-        let result = match tool_call.execute(&**runtime_view).await {
+        let result = match tool_call.execute(&**runtime_view, &ctx.state.messages).await {
             Ok(result) => result,
             Err(error) => {
                 let result =
