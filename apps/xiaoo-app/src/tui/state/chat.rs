@@ -8,6 +8,13 @@ pub enum ToolExecutionStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChangeDelta {
+    pub file_path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolExecutionUpdate {
     pub call_id: String,
@@ -20,6 +27,7 @@ pub struct ToolExecutionUpdate {
     pub status: ToolExecutionStatus,
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
+    pub file_change: Option<FileChangeDelta>,
 }
 
 #[allow(dead_code)]
