@@ -98,6 +98,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Error,
     Tool,
 }
 
@@ -133,6 +134,20 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::System,
+            content: content.into(),
+            thinking_content: String::new(),
+            timestamp: chrono::Local::now(),
+            is_streaming: false,
+            tool_state: None,
+            todo_state: None,
+            completion_check_state: None,
+            render_revision: 0,
+        }
+    }
+
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Error,
             content: content.into(),
             thinking_content: String::new(),
             timestamp: chrono::Local::now(),

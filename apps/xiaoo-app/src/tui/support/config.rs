@@ -310,24 +310,6 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
         );
     }
 
-    if let Some(env_name) = config.llm.api_key_env.as_deref() {
-        let trimmed = env_name.trim();
-        if trimmed.is_empty() {
-            bail!(
-                "invalid TUI config {}: [llm].api_key_env must not be empty when set",
-                config_path.display()
-            );
-        }
-        let env_value = std::env::var(trimmed).unwrap_or_default();
-        if env_value.trim().is_empty() {
-            bail!(
-                "invalid TUI config {}: env var {} is not set",
-                config_path.display(),
-                trimmed
-            );
-        }
-    }
-
     config.validate_default_agent_id().with_context(|| {
         format!(
             "invalid TUI config {}: agents.default_agent_id validation failed",
