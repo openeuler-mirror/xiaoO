@@ -1,6 +1,7 @@
 use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
+use llm_client::ProtocolFamily;
 use lsp::{AutoInstall, LspService, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -229,8 +230,7 @@ impl Config {
             .map(|c| {
                 let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
                 let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str =
-                    Box::leak(c.language_id.clone().into_boxed_str());
+                let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
                 let extensions: &'static [&'static str] = Box::leak(
                     c.extensions
                         .iter()
@@ -286,22 +286,20 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
         );
     }
 
-    let context_window = config
-        .llm
-        .context_window
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+    if let Some(context_window) = config.llm.context_window {
+        if context_window == 0 {
+            bail!(
                 "invalid TUI config {}: [llm].context_window must be > 0",
+                config_path.display()
+            );
+        }
+        let _ = usize::try_from(context_window).map_err(|_| {
+            anyhow::anyhow!(
+                "invalid TUI config {}: [llm].context_window does not fit platform usize",
                 config_path.display()
             )
         })?;
-    let _ = usize::try_from(context_window).map_err(|_| {
-        anyhow::anyhow!(
-            "invalid TUI config {}: [llm].context_window does not fit platform usize",
-            config_path.display()
-        )
-    })?;
+    }
 
     if config.llm.max_tokens == 0 {
         bail!(
@@ -371,9 +369,23 @@ fn default_llm_max_tokens() -> u32 {
     DEFAULT_LLM_MAX_TOKENS
 }
 
+pub fn resolve_context_window(config: &Config) -> Option<usize> {
+    if let Some(configured) = config.llm.context_window.filter(|value| *value > 0) {
+        return usize::try_from(configured).ok();
+    }
+
+    match llm_client::resolve_protocol_family(&config.llm.provider)? {
+        ProtocolFamily::OpenAiCompatible | ProtocolFamily::Ollama | ProtocolFamily::Zhipu => {
+            Some(128_000)
+        }
+        ProtocolFamily::Anthropic => Some(200_000),
+        ProtocolFamily::Gemini => Some(1_000_000),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{require_tui_bootstrap_config, Config};
+    use super::{require_tui_bootstrap_config, resolve_context_window, Config};
     use std::path::Path;
 
     fn valid_config() -> Config {
@@ -396,18 +408,36 @@ mod tests {
     }
 
     #[test]
-    fn tui_bootstrap_requires_context_window() {
+    fn tui_bootstrap_allows_missing_context_window() {
         let mut config = valid_config();
         config.llm.context_window = None;
 
+        require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
+            .expect("missing context_window should fall back to provider defaults");
+    }
+
+    #[test]
+    fn tui_bootstrap_rejects_zero_context_window() {
+        let mut config = valid_config();
+        config.llm.context_window = Some(0);
+
         let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect_err("missing context_window should fail");
+            .expect_err("zero context_window should fail");
         assert!(
             error
                 .to_string()
                 .contains("[llm].context_window must be > 0"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn resolve_context_window_falls_back_to_provider_default() {
+        let mut config = valid_config();
+        config.llm.context_window = None;
+        config.llm.provider = "anthropic".to_string();
+
+        assert_eq!(resolve_context_window(&config), Some(200_000));
     }
 
     #[test]

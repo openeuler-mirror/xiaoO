@@ -84,13 +84,10 @@ impl GatewayRuntime {
                     .trim_end_matches(['\r', '\n'])
                     .to_string()
             });
-        let total_budget = state
-            .agent_config
-            .llm
-            .context_window
-            .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| "invalid TUI runtime state: missing [llm].context_window".to_string())?;
+        let total_budget =
+            crate::config::resolve_context_window(&state.agent_config).ok_or_else(|| {
+                "invalid TUI runtime state: unable to resolve context window".to_string()
+            })?;
         let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
             .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
 

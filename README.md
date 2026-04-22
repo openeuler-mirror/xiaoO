@@ -52,13 +52,22 @@ provider = "openrouter" # openai, anthropic, ollama, openrouter, deepseek, zai, 
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment variable
 max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
-context_window = 128000 # Optional, used for session compression budget
+context_window = 128000 # Optional: explicit total context budget override
 
 [trace]
 storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
 db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-sqlite 时生效；未配置时为 ~/.moirai
 
 ```
+
+`[llm].context_window` is optional. It sets an explicit total context budget override for runtime token budgeting and context compression. We resolves the effective value in this order:
+
+1. Explicit user config: `[llm].context_window`
+2. Dynamic model lookup: currently supported for `gemini`, `anthropic`, and `ollama`
+3. Local fallback defaults:
+   OpenAI-compatible / Ollama / Zhipu families default to `128000`
+   Anthropic defaults to `200000`
+   Gemini defaults to `1000000`
 
 Set environment variables
 
