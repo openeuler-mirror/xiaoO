@@ -22,6 +22,19 @@ const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_syst
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
+        if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
+            let trimmed = env_name.trim();
+            if !trimmed.is_empty() {
+                let env_value = std::env::var(trimmed).unwrap_or_default();
+                if env_value.trim().is_empty() {
+                    return Err(format!(
+                        "env var {} is not set. Please configure your API key with /connect or set the environment variable.",
+                        trimmed
+                    ));
+                }
+            }
+        }
+
         let runtime_config = self.build_runtime_config(state)?;
         let open_request = self.session_open_request(state)?;
         let turn_request = self.turn_request(state, prompt.clone())?;

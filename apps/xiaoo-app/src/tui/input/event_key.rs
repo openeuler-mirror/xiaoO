@@ -394,9 +394,7 @@ impl App {
                     self.state
                         .chat_state
                         .messages
-                        .push(crate::chat::Message::system(format!(
-                            "无法启动当前请求: {error}"
-                        )));
+                        .push(crate::chat::Message::error(error));
                     self.state.chat_state.stick_to_bottom = true;
                 }
                 return Ok(());
@@ -407,9 +405,7 @@ impl App {
             self.state
                 .chat_state
                 .messages
-                .push(crate::chat::Message::system(format!(
-                    "无法启动当前请求: {error}"
-                )));
+                .push(crate::chat::Message::error(error));
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())
