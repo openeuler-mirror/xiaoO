@@ -7,7 +7,9 @@
 4. 危险操作模式检测 — 批量删除/修改、通配符滥用
 """
 
+import os
 import re
+from pathlib import Path
 
 from .types import LogicRuleResult
 
@@ -36,6 +38,8 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": "/dev/urandom", "risk_level": "medium", "desc": "伪随机数设备"},
     {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备"},
     {"path": "/dev/kmsg", "risk_level": "high", "desc": "内核消息缓冲区"},
+    # xiaoO 系统级安全 Skill（保护目录及所有子目录/文件）
+    {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 安全防护 Skill 目录"},
 ]
 
 # ==================== 写入操作关键词 ====================
@@ -209,13 +213,40 @@ class LogicRulesChecker:
     def _check_sensitive_path_access(self, a_next: dict[str, str]) -> LogicRuleResult:
         """
         敏感路径访问检测：
-        检查 a_next 中是否包含对敏感路径的访问。
+        检查 a_next 中是否包含对敏感路径的修改/删除操作（读取操作放行）。
+        支持 ~ 路径展开，同时检查原始模式和展开后的绝对路径。
         """
+        action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
 
+        # 判断是否为写入/删除操作
+        is_write_op = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
+
         for sp in SENSITIVE_PATHS:
-            path = sp["path"].lower()
-            if path in action_detail:
+            raw_path = sp["path"]
+            path = raw_path.lower()
+
+            # 检查路径是否在操作中出现
+            path_match = path in action_detail
+
+            # 如果路径以 ~ 开头， also 检查展开后的绝对路径
+            if not path_match and raw_path.startswith("~"):
+                expanded = os.path.expanduser(raw_path)
+                if expanded.lower() in action_detail:
+                    path_match = True
+                else:
+                    # 检查家目录的绝对路径形式（如 /home/hkl/.xiaoo/...）
+                    home_dir = str(Path.home())
+                    if expanded.startswith(home_dir):
+                        rel_path = expanded[len(home_dir):]
+                        if rel_path.lower() in action_detail or expanded.lower() in action_detail:
+                            path_match = True
+
+            if path_match:
+                # 对于 xiaoo-guardian 保护目录：只拦截写入/删除操作，读取操作放行
+                if raw_path.startswith("~") and not is_write_op:
+                    continue  # 允许读取操作
+                # 对于其他敏感路径，所有访问都拦截（保持原有逻辑）
                 return LogicRuleResult(
                     hit=True,
                     violated_rule="sensitive_path_access",

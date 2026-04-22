@@ -75,6 +75,20 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "risk_type": "config_tampering",
         "reason": "检测到尝试访问或修改 xiaoO 配置文件",
     },
+    # xiaoO 安全 Skill 目录保护：检测删除/修改操作（允许读取/执行）
+    # 只拦截写入类命令，放行 cat/read/ls/grep 等读取操作
+    {
+        "pattern": r"\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
+    },
+    {
+        "pattern": r"\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b.*\.xiaoo/skills/xiaoo-guardian/",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
+    },
 ]
 
 # ==================== 额外危险命令模式 ====================
