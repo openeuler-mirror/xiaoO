@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::app_state::{AppState, InputMode};
-use crate::chat::{Message, ToolExecutionUpdate};
+use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::debug_log;
 use crate::session_gateway::SessionTurnUpdate;
 
@@ -257,6 +257,21 @@ impl GatewayRuntime {
 
     fn apply_tool_update(&mut self, state: &mut AppState, update: ToolExecutionUpdate) {
         self.finalize_stream_message_before_aux(state);
+        match update.status {
+            ToolExecutionStatus::Running => {
+                state.capture_tool_file_baseline(&update.call_id, &update.tool, &update.args_preview);
+            }
+            ToolExecutionStatus::Completed => {
+                state.reconcile_tool_file_change_from_baseline(
+                    &update.call_id,
+                    update.file_change.clone(),
+                );
+            }
+            ToolExecutionStatus::Failed => {
+                state.discard_tool_file_baseline(&update.call_id);
+                state.reconcile_tool_file_change(&update.call_id, update.file_change.clone());
+            }
+        }
 
         if let Some(existing) = state.chat_state.messages.iter_mut().find(|message| {
             message
@@ -354,6 +369,7 @@ impl GatewayRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -381,6 +397,7 @@ mod tests {
             status: ToolExecutionStatus::Running,
             exit_code: None,
             duration_ms: None,
+            file_change: None,
         }
     }
 
@@ -431,6 +448,63 @@ mod tests {
         assert_eq!(state.chat_state.messages.len(), 1);
         assert!(state.chat_state.messages[0].tool_state.is_some());
         assert!(runtime.stream_message_index.is_none());
+    }
+
+    #[test]
+    fn tool_update_tracks_session_file_changes_by_call_id() {
+        let mut runtime = GatewayRuntime::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace.clone())
+            .expect("test app state should initialize");
+        state.chat_state.messages.clear();
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "call-1".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Running,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            },
+        );
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "call-1".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: Some(crate::chat::FileChangeDelta {
+                    file_path: "src/main.rs".to_string(),
+                    additions: 2,
+                    deletions: 1,
+                }),
+            },
+        );
+
+        let stats = state
+            .session_file_changes
+            .get("src/main.rs")
+            .expect("file stats should be tracked");
+        assert_eq!(stats.additions, 2);
+        assert_eq!(stats.deletions, 1);
     }
 
     #[test]
