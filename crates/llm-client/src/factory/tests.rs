@@ -48,6 +48,7 @@ mod wrapper_tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use agent_contracts::hook::{Hooker, HookerRegistry};
     use agent_contracts::runtime::runtime_view::RuntimeView;
@@ -160,6 +161,51 @@ mod wrapper_tests {
         ) -> Result<LlmResponse, LlmError> {
             *self.captured.lock().unwrap() = Some(request.clone());
             self.result.clone()
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.caps
+        }
+    }
+
+    struct SequencedMockLlmProvider {
+        captured: Mutex<Vec<LlmRequest>>,
+        results: Mutex<Vec<Result<LlmResponse, LlmError>>>,
+        call_count: AtomicUsize,
+        caps: ProviderCapabilities,
+    }
+
+    impl SequencedMockLlmProvider {
+        fn new(results: Vec<Result<LlmResponse, LlmError>>) -> Arc<Self> {
+            Arc::new(Self {
+                captured: Mutex::new(Vec::new()),
+                results: Mutex::new(results),
+                call_count: AtomicUsize::new(0),
+                caps: default_caps(),
+            })
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequencedMockLlmProvider {
+        async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.captured.lock().unwrap().push(request.clone());
+            self.results.lock().unwrap().remove(0)
+        }
+
+        async fn complete_stream(
+            &self,
+            request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            self.captured.lock().unwrap().push(request.clone());
+            self.results.lock().unwrap().remove(0)
         }
 
         fn capabilities(&self) -> &ProviderCapabilities {
@@ -633,6 +679,23 @@ mod wrapper_tests {
         assert!(matches!(err, LlmError::Timeout));
     }
 
+    #[tokio::test]
+    async fn rate_limited_complete_retries_once_and_succeeds() {
+        let mock = SequencedMockLlmProvider::new(vec![
+            Err(LlmError::RateLimited {
+                retry_after_ms: 1,
+                message: "busy".to_string(),
+            }),
+            Ok(make_response("recovered")),
+        ]);
+        let wrapper = wrapper_without_runtime(mock.clone());
+
+        let result = wrapper.complete(&make_request("hi")).await.unwrap();
+
+        assert_eq!(result.message.text.as_deref(), Some("recovered"));
+        assert_eq!(mock.call_count(), 2);
+    }
+
     /// A registered but disabled hooker must not fire.
     #[tokio::test]
     async fn disabled_pre_hook_does_not_modify_request() {
@@ -781,5 +844,25 @@ mod wrapper_tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn rate_limited_stream_retries_once_and_succeeds() {
+        let mock = SequencedMockLlmProvider::new(vec![
+            Err(LlmError::RateLimited {
+                retry_after_ms: 1,
+                message: "busy".to_string(),
+            }),
+            Ok(make_response("stream-recovered")),
+        ]);
+        let wrapper = wrapper_without_runtime(mock.clone());
+
+        let result = wrapper
+            .complete_stream(&make_request("hi"), &|_| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.message.text.as_deref(), Some("stream-recovered"));
+        assert_eq!(mock.call_count(), 2);
     }
 }

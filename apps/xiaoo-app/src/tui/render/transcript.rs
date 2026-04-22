@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation},
     Frame,
 };
 use serde_json::Value;
@@ -17,7 +17,9 @@ use crate::chat::{Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, 
 use crate::markdown::render_markdown;
 use crate::theme::Theme;
 
-use super::utils::{render_tool_detail_text, rendered_line_count, truncate_display_width};
+use super::utils::{
+    render_tool_detail_text, rendered_line_count, sanitize_terminal_text, truncate_display_width,
+};
 
 impl App {
     pub(crate) fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
@@ -159,43 +161,61 @@ impl App {
                 end_line_index += 1;
             }
 
-            let mut visible_lines: Vec<Line> =
-                transcript_cache.all_lines[safe_start_line_index..end_line_index].to_vec();
-
             let (start_line, start_col, end_line, end_col) = sel.normalised();
             let sel_style = Style::default()
                 .fg(self.state.theme.background)
                 .bg(self.state.theme.foreground)
                 .add_modifier(Modifier::BOLD);
-            for (visible_index, line) in visible_lines.iter_mut().enumerate() {
+            let mut selected_visual_lines = Vec::new();
+            for (visible_index, original_line) in transcript_cache.all_lines
+                [safe_start_line_index..end_line_index]
+                .iter()
+                .enumerate()
+            {
                 let global_line_index = safe_start_line_index + visible_index;
-                if global_line_index < start_line || global_line_index > end_line {
-                    continue;
-                }
-                let col_start = if global_line_index == start_line {
-                    start_col
+                let line = if global_line_index < start_line || global_line_index > end_line {
+                    original_line.clone()
                 } else {
-                    0
+                    let col_start = if global_line_index == start_line {
+                        start_col
+                    } else {
+                        0
+                    };
+                    let line_char_len: usize = original_line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.chars().count())
+                        .sum();
+                    let col_end = if global_line_index == end_line {
+                        end_col.min(line_char_len)
+                    } else {
+                        line_char_len
+                    };
+                    if col_start >= col_end {
+                        original_line.clone()
+                    } else {
+                        highlight_line_selection(
+                            original_line.clone(),
+                            col_start,
+                            col_end,
+                            sel_style,
+                        )
+                    }
                 };
-                let line_char_len: usize = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.chars().count())
-                    .sum();
-                let col_end = if global_line_index == end_line {
-                    end_col.min(line_char_len)
-                } else {
-                    line_char_len
-                };
-                if col_start >= col_end {
-                    continue;
-                }
-                *line = highlight_line_selection(line.clone(), col_start, col_end, sel_style);
+                selected_visual_lines.extend(wrap_line_to_visual_lines(&line, inner_area.width));
             }
 
-            let paragraph = Paragraph::new(Text::from(visible_lines))
-                .wrap(Wrap { trim: false })
-                .scroll((paragraph_scroll as u16, 0));
+            let visual_slice_start = paragraph_scroll.min(selected_visual_lines.len());
+            let visual_slice_end = visual_slice_start
+                .saturating_add(inner_height)
+                .min(selected_visual_lines.len());
+            let visible_visual_lines = if visual_slice_start < visual_slice_end {
+                selected_visual_lines[visual_slice_start..visual_slice_end].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         } else {
             let visual_end = scroll_end.min(transcript_cache.visual_lines.len());
@@ -411,7 +431,7 @@ fn render_tool_message_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
     let status = match tool.status {
         ToolExecutionStatus::Running => "running",
         ToolExecutionStatus::Completed => "done",
@@ -432,7 +452,10 @@ fn render_tool_message_lines(
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(tool_color)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(tool_color),
+            ),
             Span::styled(
                 "Tool",
                 Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -456,7 +479,7 @@ fn render_tool_message_lines(
         ));
         for line in command_text.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -479,7 +502,7 @@ fn render_tool_message_lines(
         ));
         for line in tool.args_preview.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -496,7 +519,7 @@ fn render_tool_message_lines(
         ));
         for line in detail_text.lines() {
             lines.push(Line::styled(
-                format!("    {line}"),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -513,7 +536,10 @@ fn render_todo_message_lines(
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(theme.secondary)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(theme.secondary),
+            ),
             Span::styled(
                 "Planner",
                 Style::default()
@@ -523,7 +549,7 @@ fn render_todo_message_lines(
             Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
         ]),
         Line::styled(
-            format!("  {}", todo.title),
+            format!("  {}", sanitize_terminal_text(&todo.title)),
             Style::default()
                 .fg(theme.secondary)
                 .add_modifier(Modifier::BOLD),
@@ -537,8 +563,14 @@ fn render_todo_message_lines(
             TodoDisplayStatus::Pending => ("☐", theme.muted),
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {icon} "), Style::default().fg(color)),
-            Span::styled(content.clone(), Style::default().fg(theme.foreground)),
+            Span::styled(
+                sanitize_terminal_text(&format!("  {icon} ")),
+                Style::default().fg(color),
+            ),
+            Span::styled(
+                sanitize_terminal_text(content),
+                Style::default().fg(theme.foreground),
+            ),
         ]));
     }
     lines.push(Line::raw(""));
@@ -553,7 +585,10 @@ fn render_completion_check_lines(
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(theme.gradient_yellow)),
+            Span::styled(
+                sanitize_terminal_text("▎ "),
+                Style::default().fg(theme.gradient_yellow),
+            ),
             Span::styled(
                 "Checker",
                 Style::default()
@@ -572,7 +607,11 @@ fn render_completion_check_lines(
 
     if !checker.next_step_hint.trim().is_empty() {
         lines.push(Line::styled(
-            format!("  → {}", checker.next_step_hint.trim()),
+            format!(
+                "  {} {}",
+                sanitize_terminal_text("→"),
+                sanitize_terminal_text(checker.next_step_hint.trim())
+            ),
             Style::default().fg(theme.foreground),
         ));
     }
@@ -640,7 +679,10 @@ fn render_standard_message_lines(
         && is_active_stream_message
         && message.content.is_empty();
     let mut lines = vec![Line::from(vec![
-        Span::styled("▎ ", Style::default().fg(indicator_color)),
+        Span::styled(
+            sanitize_terminal_text("▎ "),
+            Style::default().fg(indicator_color),
+        ),
         Span::styled(role_label.to_string(), role_style),
         Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
     ])];
@@ -648,9 +690,9 @@ fn render_standard_message_lines(
     if !message.thinking_content.is_empty() {
         let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
         let thinking_header = if is_thinking {
-            format!("  ⟡ {loading_animation}")
+            format!("  {} {loading_animation}", sanitize_terminal_text("⟡"))
         } else {
-            "  ⟡ Thought".to_string()
+            format!("  {} Thought", sanitize_terminal_text("⟡"))
         };
         lines.push(Line::styled(
             thinking_header,
@@ -660,7 +702,14 @@ fn render_standard_message_lines(
         ));
         let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
         for line in message.thinking_content.lines() {
-            lines.push(Line::styled(format!("  │ {line}"), thinking_style));
+            lines.push(Line::styled(
+                format!(
+                    "  {} {}",
+                    sanitize_terminal_text("│"),
+                    sanitize_terminal_text(line)
+                ),
+                thinking_style,
+            ));
         }
         lines.push(Line::raw(""));
     }
@@ -678,13 +727,19 @@ fn render_standard_message_lines(
         }
         _ => {
             for line in message.content.lines() {
-                lines.push(Line::styled(format!("  {line}"), content_style));
+                lines.push(Line::styled(
+                    format!("  {}", sanitize_terminal_text(line)),
+                    content_style,
+                ));
             }
         }
     }
 
     if message.is_streaming && !show_stream_thinking {
-        lines.push(Line::styled("  ▌", Style::default().fg(theme.accent)));
+        lines.push(Line::styled(
+            format!("  {}", sanitize_terminal_text("▌")),
+            Style::default().fg(theme.accent),
+        ));
     }
     lines.push(Line::raw(""));
     lines
@@ -769,7 +824,7 @@ fn render_subagent_tool_lines(
         "join_subagent" => "Join Subagent",
         _ => "Subagent",
     };
-    let toggle = if tool.expanded { "▾" } else { "▸" };
+    let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
     let status = match tool.status {
         ToolExecutionStatus::Running => "running",
         ToolExecutionStatus::Completed => "done",
@@ -788,7 +843,10 @@ fn render_subagent_tool_lines(
     let header = truncate_display_width(&header, max_header_width);
 
     let mut lines = vec![Line::from(vec![
-        Span::styled("▎ ", Style::default().fg(tool_color)),
+        Span::styled(
+            sanitize_terminal_text("▎ "),
+            Style::default().fg(tool_color),
+        ),
         Span::styled(
             header,
             Style::default().fg(tool_color).add_modifier(Modifier::BOLD),
@@ -808,7 +866,7 @@ fn render_subagent_tool_lines(
         ));
         for line in tool.args_preview.lines() {
             lines.push(Line::styled(
-                format!("    {}", line),
+                format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
@@ -836,7 +894,7 @@ fn render_spawn_subagent_detail_lines(
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::styled(
-            format!("    agent_id: {}", agent_id),
+            format!("    agent_id: {}", sanitize_terminal_text(&agent_id)),
             Style::default().fg(theme.foreground),
         ));
         return;
@@ -879,7 +937,7 @@ fn render_join_subagent_detail_lines(
             ));
             for line in reply.lines() {
                 lines.push(Line::styled(
-                    format!("    {}", line),
+                    format!("    {}", sanitize_terminal_text(line)),
                     Style::default().fg(theme.foreground),
                 ));
             }
@@ -893,7 +951,7 @@ fn render_join_subagent_detail_lines(
             ));
             for line in error.lines() {
                 lines.push(Line::styled(
-                    format!("    {}", line),
+                    format!("    {}", sanitize_terminal_text(line)),
                     Style::default().fg(theme.error),
                 ));
             }
@@ -929,7 +987,7 @@ fn append_fallback_tool_output(
     ));
     for line in detail_text.lines() {
         lines.push(Line::styled(
-            format!("    {}", line),
+            format!("    {}", sanitize_terminal_text(line)),
             Style::default().fg(theme.foreground),
         ));
     }
@@ -971,7 +1029,13 @@ fn format_completed_at_ms(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_join_subagent_terminal, parse_spawn_subagent_agent_id};
+    use ratatui::style::Style;
+    use ratatui::text::Line;
+
+    use super::{
+        highlight_line_selection, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
+        wrap_line_to_visual_lines,
+    };
 
     #[test]
     fn spawn_subagent_detail_parses_agent_id() {
@@ -992,5 +1056,34 @@ mod tests {
         assert_eq!(parsed.reply.as_deref(), Some("done"));
         assert_eq!(parsed.error, None);
         assert_eq!(parsed.completed_at_ms, Some(123));
+    }
+
+    #[test]
+    fn selection_highlight_preserves_wrapped_visual_layout() {
+        let line = Line::from("  assistant output with enough text to wrap");
+        let wrapped_before = wrap_line_to_visual_lines(&line.clone(), 12);
+        let highlighted = highlight_line_selection(line, 4, 18, Style::default());
+        let wrapped_after = wrap_line_to_visual_lines(&highlighted, 12);
+
+        let before_text: Vec<String> = wrapped_before
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let after_text: Vec<String> = wrapped_after
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(before_text, after_text);
     }
 }

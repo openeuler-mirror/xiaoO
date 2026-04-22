@@ -25,6 +25,18 @@ pub(crate) fn map_api_status_error(
     request_body: &str,
     headers: Option<&reqwest::header::HeaderMap>,
 ) -> LlmError {
+    if status.as_u16() == 529 {
+        let message = if response_body.trim().is_empty() {
+            "no response body".to_string()
+        } else {
+            response_body.to_string()
+        };
+        return LlmError::RateLimited {
+            retry_after_ms: 5000,
+            message,
+        };
+    }
+
     if status == StatusCode::TOO_MANY_REQUESTS {
         let retry_after_ms = headers
             .and_then(|h| h.get("retry-after"))
@@ -211,6 +223,28 @@ mod tests {
         );
 
         assert!(matches!(error, LlmError::ApiError(_)));
+    }
+
+    #[test]
+    fn map_api_status_error_classifies_529_as_rate_limited_with_retry() {
+        let status = StatusCode::from_u16(529).expect("529 should be a valid status code");
+        let error = map_api_status_error(
+            status,
+            r#"{"error":{"type":"overloaded_error","message":"busy"}}"#,
+            "{}",
+            None,
+        );
+
+        match error {
+            LlmError::RateLimited {
+                retry_after_ms,
+                message,
+            } => {
+                assert_eq!(retry_after_ms, 5000);
+                assert!(message.contains("overloaded_error"));
+            }
+            other => panic!("expected RateLimited for 529, got {:?}", other),
+        }
     }
 
     #[test]

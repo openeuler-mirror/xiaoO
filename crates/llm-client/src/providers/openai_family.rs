@@ -69,6 +69,7 @@ impl OpenAiFamilyProvider {
         let mut body = serde_json::to_value(&wire).map_err(map_serde_error)?;
         if force_stream {
             body["stream"] = serde_json::json!(true);
+            body["stream_options"] = serde_json::json!({ "include_usage": true });
         }
         Ok(body)
     }

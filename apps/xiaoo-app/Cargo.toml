@@ -36,6 +36,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tower = { workspace = true }
+tower_governor = "0.4"
+governor = "0.6"
 tracing.workspace = true
 unicode-width = "0.1.14"
 uuid.workspace = true
@@ -52,8 +55,9 @@ prompt = { path = "../../crates/prompt" }
 skill = { path = "../../crates/skill" }
 tool = { path = "../../crates/tool" }
 subagent = { path = "../../crates/subagent" }
+lsp = { path = "../../crates/lsp" }
 trace = { path = "../../crates/trace" }
 
 [dev-dependencies]
 tempfile.workspace = true
-tower = { version = "0.5", features = ["util"] }
+tower = { workspace = true, features = ["util"] }

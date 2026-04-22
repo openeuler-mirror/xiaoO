@@ -1,4 +1,4 @@
-pub(super) use super::{input, spec};
+//pub(super) use super::{input, spec}; // unused: executor uses legacy path directly
 
 //pub(crate) mod backend;
 pub(crate) mod legacy;

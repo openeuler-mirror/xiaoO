@@ -28,6 +28,7 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let config = DaemonConfig::load_from(&config_path)?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
+    let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config)?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let app =
@@ -38,10 +39,11 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
             feishu,
             config.interaction_timeout_secs(),
             bearer_auth,
+            rate_limit.clone(),
         )
         .map_err(anyhow::Error::new)
         .context("failed to create router with feishu")?,
-        None => create_router_with_auth(app.session_service, bearer_auth),
+        None => create_router_with_auth(app.session_service, bearer_auth, rate_limit),
     };
 
     let addr: SocketAddr = format!("{host}:{port}")

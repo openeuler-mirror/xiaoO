@@ -6,6 +6,7 @@ use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use agent_contracts::lsp::LspProvider;
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
     RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
@@ -19,7 +20,8 @@ use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::{load_tool_sources, ToolRegistryBuilderImpl};
+use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
+use tool::ToolRuntimeServices;
 use xiaoo_app::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -40,6 +42,7 @@ pub struct ConfiguredRuntimeResolver {
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
+    lsp_service: Option<Arc<dyn LspProvider>>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -50,7 +53,7 @@ impl ConfiguredRuntimeResolver {
         let resolved_provider = resolve_config(ResolveInput {
             provider: Some(config.app.llm.provider.clone()),
             protocol: None,
-            api_key: config.app.llm.api_key.clone(),
+            api_key: None,
             api_key_env: config.app.llm.api_key_env.clone(),
             base_url: config.app.llm.api_base.clone(),
         })
@@ -75,6 +78,8 @@ impl ConfiguredRuntimeResolver {
         let skill_registry: Arc<dyn SkillRegistry> =
             Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
 
+        let lsp_service = config.resolve_lsp_service();
+
         Ok(Self {
             agent,
             agent_roles: config.app.agent.clone(),
@@ -85,6 +90,7 @@ impl ConfiguredRuntimeResolver {
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
+            lsp_service,
         })
     }
 
@@ -92,7 +98,11 @@ impl ConfiguredRuntimeResolver {
         &self,
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
-        let tool_sources = load_tool_sources();
+        let services = ToolRuntimeServices {
+            lsp_service: self.lsp_service.clone(),
+            ..ToolRuntimeServices::default()
+        };
+        let tool_sources = load_tool_sources_with_services(services);
         let all_tool_names: Vec<ToolName> = tool_sources
             .iter()
             .flat_map(|source| source.discover())

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::r#impl::lsp_hooks::LspDiagnosticsInfo;
+
 /// Output types for FileWriteTool.
 ///
 /// Matches the TypeScript outputSchema:
@@ -57,6 +59,9 @@ pub struct CreateOutput {
     /// Git diff information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<GitDiff>,
+    /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
 }
 
 /// Output for updated/modified files.
@@ -74,6 +79,9 @@ pub struct UpdateOutput {
     /// Git diff information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<GitDiff>,
+    /// LSP diagnostics for the file after the write (None if LSP unavailable or timed out).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
 }
 
 /// Enum representing all possible FileWriteTool outputs.

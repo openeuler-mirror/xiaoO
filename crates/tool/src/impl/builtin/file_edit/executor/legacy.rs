@@ -13,7 +13,6 @@ use agent_contracts::tool::spec::ToolSpecView;
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use crate::r#impl::builtin::file_read::dedup::DedupStateStore;
 use super::input::FileEditInput;
 use super::output::FileEditOutput;
 use super::spec::FileEditToolSpec;
@@ -22,20 +21,27 @@ use super::utils::{
 };
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::builtin::file_read::dedup::DedupStateStore;
+use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::path_resolver::runtime_workspace_root;
+use crate::r#impl::ToolRuntimeServices;
+
+const LSP_DIAG_TIMEOUT_SECS: u64 = 15;
 
 /// Executor for FileEditTool.
 pub struct FileEditExecutor {
     spec: Arc<FileEditToolSpec>,
     dedup_store: Mutex<DedupStateStore>,
+    services: ToolRuntimeServices,
 }
 
 impl FileEditExecutor {
     /// Creates a new FileEditExecutor.
-    pub fn new(spec: Arc<FileEditToolSpec>) -> Self {
+    pub fn new(spec: Arc<FileEditToolSpec>, services: ToolRuntimeServices) -> Self {
         Self {
             spec,
             dedup_store: Mutex::new(DedupStateStore::new()),
+            services,
         }
     }
 
@@ -58,7 +64,7 @@ impl FileEditExecutor {
 
 impl Default for FileEditExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileEditToolSpec::new()))
+        Self::new(Arc::new(FileEditToolSpec::new()), ToolRuntimeServices::default())
     }
 }
 
@@ -112,6 +118,17 @@ impl ToolExecutor for FileEditExecutor {
 
             Self::write_file_content(&expanded_path, new_content)?;
 
+            // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
+            if let Some(lsp) = &self.services.lsp_service {
+                spawn_touch_file(lsp, std::path::Path::new(&expanded_path));
+            }
+
+            let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+                fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+            } else {
+                None
+            };
+
             let output = FileEditOutput {
                 file_path: input.file_path.clone(),
                 old_string: String::new(),
@@ -121,6 +138,7 @@ impl ToolExecutor for FileEditExecutor {
                 user_modified: false,
                 replace_all: false,
                 git_diff: None,
+                lsp_diagnostics,
             };
 
             let json_output = serde_json::to_string(&output).map_err(|e| {
@@ -165,6 +183,17 @@ impl ToolExecutor for FileEditExecutor {
 
         Self::write_file_content(&expanded_path, &updated_content)?;
 
+        // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
+        if let Some(lsp) = &self.services.lsp_service {
+            spawn_touch_file(lsp, std::path::Path::new(&expanded_path));
+        }
+
+        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+            fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+        } else {
+            None
+        };
+
         let output = FileEditOutput {
             file_path: input.file_path.clone(),
             old_string: actual_old_string,
@@ -174,6 +203,7 @@ impl ToolExecutor for FileEditExecutor {
             user_modified: false,
             replace_all: input.replace_all,
             git_diff: None,
+            lsp_diagnostics,
         };
 
         let json_output =

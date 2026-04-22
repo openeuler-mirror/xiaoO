@@ -13,6 +13,7 @@ pub(super) struct PendingStreamDone {
     pub(super) prompt_tokens: u64,
     pub(super) completion_tokens: u64,
     pub(super) total_tokens: u64,
+    pub(super) estimated_input_tokens: u64,
     pub(super) messages: Vec<llm_client::ChatMessage>,
 }
 

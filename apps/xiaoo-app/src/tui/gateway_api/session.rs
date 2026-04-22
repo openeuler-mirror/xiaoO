@@ -24,6 +24,7 @@ pub enum SessionTurnUpdate {
         prompt_tokens: u64,
         completion_tokens: u64,
         total_tokens: u64,
+        estimated_input_tokens: u64,
         messages: Vec<llm_client::ChatMessage>,
     },
     Err(String),

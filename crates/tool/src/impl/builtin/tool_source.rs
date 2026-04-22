@@ -12,6 +12,7 @@ use super::join_subagent::discover_join_subagent;
 use super::print_hello_world::discover_print_hello_world;
 use super::send_file::discover_send_file;
 use super::skill::discover_skill;
+use super::lsp::discover_lsp;
 use super::spawn_subagent::discover_spawn_subagent;
 use super::webfetch::discover_webfetch;
 use super::websearch::discover_web_search;
@@ -35,9 +36,9 @@ impl ToolSource for BuiltinToolSource {
             discover_ask_user_question(),
             discover_print_hello_world(),
             discover_count_text_length(),
-            discover_file_edit(),
-            discover_file_read(),
-            discover_file_write(),
+            discover_file_edit(self.services.clone()),
+            discover_file_read(self.services.clone()),
+            discover_file_write(self.services.clone()),
             discover_bash(),
             discover_glob(),
             discover_grep(),
@@ -47,6 +48,7 @@ impl ToolSource for BuiltinToolSource {
             discover_join_subagent(self.services.clone()),
             discover_skill(),
             discover_send_file(),
+            discover_lsp(self.services.clone()),
         ]
     }
 }

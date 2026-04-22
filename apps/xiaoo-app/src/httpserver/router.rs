@@ -14,6 +14,7 @@ use crate::httpserver::channel_ingress::{
 };
 use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
+use crate::httpserver::rate_limit::RateLimitConfig;
 use agent_contracts::{ChannelFileSender, LoopEventSink};
 use axum::{
     body::Bytes,
@@ -182,14 +183,15 @@ pub struct TestChatResponse {
 }
 
 pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
-    create_router_with_auth(session_service, None)
+    create_router_with_auth(session_service, None, None)
 }
 
 pub fn create_router_with_auth(
     session_service: Arc<dyn SessionService>,
     bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    create_router_from_state(GatewayAppState::new(session_service), bearer_auth)
+    create_router_from_state(GatewayAppState::new(session_service), bearer_auth, rate_limit)
 }
 
 pub fn create_router_with_feishu_and_timeout(
@@ -202,6 +204,7 @@ pub fn create_router_with_feishu_and_timeout(
         feishu_config,
         interaction_timeout_secs,
         None,
+        None,
     )
 }
 
@@ -210,15 +213,17 @@ pub fn create_router_with_feishu_and_timeout_and_auth(
     feishu_config: FeishuConfig,
     interaction_timeout_secs: u64,
     bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
 ) -> ChannelResult<Router> {
     let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
     state.interaction_timeout_secs = interaction_timeout_secs;
-    Ok(create_router_from_state(state, bearer_auth))
+    Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
 
 fn create_router_from_state(
     state: GatewayAppState,
     bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
 ) -> Router {
     let protected_routes = apply_http_bearer_auth(
         Router::new()
@@ -227,11 +232,16 @@ fn create_router_from_state(
         bearer_auth,
     );
 
-    Router::new()
+    let router = Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
         .merge(protected_routes)
-        .with_state(Arc::new(state))
+        .with_state(Arc::new(state));
+
+    match rate_limit.and_then(|c| c.governor_layer()) {
+        Some(layer) => router.layer(layer),
+        None => router,
+    }
 }
 
 fn apply_http_bearer_auth<S>(
@@ -919,6 +929,7 @@ mod tests {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
         );
 
         let response = router
@@ -958,6 +969,7 @@ mod tests {
         let router = create_router_with_auth(
             session_service.clone(),
             Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
         );
 
         let response = router
@@ -991,6 +1003,7 @@ mod tests {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
         );
 
         let health_response = router
@@ -1060,6 +1073,7 @@ mod tests {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                estimated_input_tokens: 0,
             })
         }
     }

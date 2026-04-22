@@ -25,6 +25,7 @@ pub(crate) struct WireRequest {
     #[serde(skip)]
     pub route_info: Option<RouteInfo>,
     #[serde(skip)]
+    #[allow(dead_code)]
     pub extra_fields: Option<serde_json::Value>,
 }
 
@@ -47,53 +48,53 @@ impl std::fmt::Debug for WireRequest {
     }
 }
 
-impl WireRequest {
-    pub(crate) fn new(model: String, messages: Vec<WireMessage>) -> Self {
-        Self {
-            model,
-            messages,
-            temperature: None,
-            max_tokens: None,
-            stream: None,
-            tools: None,
-            tool_choice: None,
-            response_format: None,
-            route_info: None,
-            extra_fields: None,
-        }
-    }
+// impl WireRequest {
+//     pub(crate) fn new(model: String, messages: Vec<WireMessage>) -> Self {
+//         Self {
+//             model,
+//             messages,
+//             temperature: None,
+//             max_tokens: None,
+//             stream: None,
+//             tools: None,
+//             tool_choice: None,
+//             response_format: None,
+//             route_info: None,
+//             extra_fields: None,
+//         }
+//     }
 
-    pub(crate) fn with_temperature(mut self, temp: f32) -> Self {
-        self.temperature = Some(Temperature::new(temp));
-        self
-    }
+//     pub(crate) fn with_temperature(mut self, temp: f32) -> Self {
+//         self.temperature = Some(Temperature::new(temp));
+//         self
+//     }
 
-    pub(crate) fn with_max_tokens(mut self, tokens: u32) -> Self {
-        self.max_tokens = Some(tokens);
-        self
-    }
+//     pub(crate) fn with_max_tokens(mut self, tokens: u32) -> Self {
+//         self.max_tokens = Some(tokens);
+//         self
+//     }
 
-    pub(crate) fn with_stream(mut self, stream: bool) -> Self {
-        self.stream = Some(stream);
-        self
-    }
+//     pub(crate) fn with_stream(mut self, stream: bool) -> Self {
+//         self.stream = Some(stream);
+//         self
+//     }
 
-    pub(crate) fn with_tools(mut self, tools: Vec<WireTool>) -> Self {
-        self.tools = Some(tools);
-        self
-    }
+//     pub(crate) fn with_tools(mut self, tools: Vec<WireTool>) -> Self {
+//         self.tools = Some(tools);
+//         self
+//     }
 
-    pub(crate) fn with_tool_choice(mut self, tool_choice: WireToolChoice) -> Self {
-        self.tool_choice = Some(tool_choice);
-        self
-    }
+//     pub(crate) fn with_tool_choice(mut self, tool_choice: WireToolChoice) -> Self {
+//         self.tool_choice = Some(tool_choice);
+//         self
+//     }
 
-    pub(crate) fn with_response_format(mut self, response_format: WireResponseFormat) -> Self {
-        self.response_format = Some(response_format);
-        self
-    }
+//     pub(crate) fn with_response_format(mut self, response_format: WireResponseFormat) -> Self {
+//         self.response_format = Some(response_format);
+//         self
+//     }
 
-    pub(crate) fn is_streaming(&self) -> bool {
-        self.stream.unwrap_or(false)
-    }
-}
+//     pub(crate) fn is_streaming(&self) -> bool {
+//         self.stream.unwrap_or(false)
+//     }
+// }

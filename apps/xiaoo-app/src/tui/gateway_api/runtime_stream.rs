@@ -53,12 +53,14 @@ impl GatewayRuntime {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
+                    estimated_input_tokens,
                     messages,
                 } => {
                     self.pending_stream_done = Some(PendingStreamDone {
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
+                        estimated_input_tokens,
                         messages,
                     });
                     self.stream_rx = None;
@@ -335,11 +337,16 @@ impl GatewayRuntime {
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
         if self.request_start.take().is_some() {
+            let input_context_tokens = if done.estimated_input_tokens > 0 {
+                done.estimated_input_tokens
+            } else {
+                done.prompt_tokens
+            };
             state.status_panel.update_metrics(
                 done.prompt_tokens,
                 done.completion_tokens,
                 state.status_panel.last_latency_ms,
-                done.total_tokens,
+                input_context_tokens,
             );
         }
     }
@@ -454,6 +461,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 42,
+                estimated_input_tokens: 18,
                 messages: Vec::new(),
             },
         );
@@ -461,6 +469,32 @@ mod tests {
         assert_eq!(state.status_panel.last_latency_ms, first_token_latency_ms);
         assert_eq!(state.status_panel.prompt_tokens, 10);
         assert_eq!(state.status_panel.completion_tokens, 5);
-        assert_eq!(state.status_panel.context_tokens, 42);
+        assert_eq!(state.status_panel.input_context_tokens, 18);
+    }
+
+    #[test]
+    fn completion_falls_back_to_prompt_tokens_when_estimate_is_missing() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+        runtime.request_start = Some(Instant::now());
+
+        runtime.finish_stream_done(
+            &mut state,
+            PendingStreamDone {
+                prompt_tokens: 24,
+                completion_tokens: 6,
+                total_tokens: 30,
+                estimated_input_tokens: 0,
+                messages: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.status_panel.input_context_tokens, 24);
     }
 }

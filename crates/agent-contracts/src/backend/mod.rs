@@ -11,6 +11,6 @@ pub use config::OperationBackendConfig;
 pub use contract::{OperationBackend, OperationBackendCapabilities};
 pub use error::OperationError;
 pub use types::{
-    BackendPath, ExportedFileHandle, ExportedFileMeta, ExportedFileReader,
-    SharedExportedFileHandle, PathKind, PathStat,
+    BackendPath, ExportedFileHandle, ExportedFileMeta, ExportedFileReader, PathKind, PathStat,
+    SharedExportedFileHandle,
 };

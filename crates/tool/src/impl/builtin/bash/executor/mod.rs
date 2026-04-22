@@ -1,5 +1,5 @@
-pub(super) use super::{constants, input, output, spec};
 pub(super) use super::validation::legacy as validation;
+pub(super) use super::{constants, input, output, spec};
 
 pub(crate) mod legacy;
 

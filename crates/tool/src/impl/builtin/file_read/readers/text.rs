@@ -54,6 +54,7 @@ pub async fn read_text_file<P: AsRef<Path>>(
     })
 }
 
+#[allow(dead_code)]
 pub fn read_text_from_bytes(
     file_path: &str,
     bytes: &[u8],

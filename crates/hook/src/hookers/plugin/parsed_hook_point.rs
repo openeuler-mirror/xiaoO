@@ -10,6 +10,7 @@ pub(crate) struct ParsedPluginHookPoint {
 
 pub(crate) struct PluginHookAction(pub(crate) String);
 
+#[allow(dead_code)]
 pub(crate) struct PluginHookDetail(pub(crate) String);
 
 pub(crate) struct PluginHookStage(pub(crate) String);

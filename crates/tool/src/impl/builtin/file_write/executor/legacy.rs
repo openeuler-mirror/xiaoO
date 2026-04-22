@@ -16,20 +16,25 @@ use super::output::{CreateOutput, FileWriteOutput, Hunk, StructuredPatch, Update
 use super::spec::FileWriteToolSpec;
 use super::validation;
 use super::validation::expand_path;
+use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::path_resolver::runtime_workspace_root;
+use crate::r#impl::ToolRuntimeServices;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::executor::ToolExecutor;
 use agent_contracts::tool::spec::ToolSpecView;
 
+const LSP_DIAG_TIMEOUT_SECS: u64 = 15;
+
 /// Executor for FileWriteTool.
 pub struct FileWriteExecutor {
     spec: Arc<FileWriteToolSpec>,
+    services: ToolRuntimeServices,
 }
 
 impl FileWriteExecutor {
     /// Creates a new FileWriteExecutor.
-    pub fn new(spec: Arc<FileWriteToolSpec>) -> Self {
-        Self { spec }
+    pub fn new(spec: Arc<FileWriteToolSpec>, services: ToolRuntimeServices) -> Self {
+        Self { spec, services }
     }
 
     /// Normalizes a file path (trims whitespace).
@@ -190,6 +195,18 @@ impl ToolExecutor for FileWriteExecutor {
             });
         }
 
+        // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
+        if let Some(lsp) = &self.services.lsp_service {
+            spawn_touch_file(lsp, path);
+        }
+
+        // Run LSP diagnostics on the written file (best-effort, bounded by timeout).
+        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+            fetch_diagnostics(lsp, path, LSP_DIAG_TIMEOUT_SECS).await
+        } else {
+            None
+        };
+
         // Build output
         let output: FileWriteOutput = match original_content {
             Some(old_content) => FileWriteOutput::Update(UpdateOutput {
@@ -198,6 +215,7 @@ impl ToolExecutor for FileWriteExecutor {
                 structured_patch,
                 original_file: old_content,
                 git_diff: None,
+                lsp_diagnostics,
             }),
             None => FileWriteOutput::Create(CreateOutput {
                 file_path: input.file_path.clone(),
@@ -205,6 +223,7 @@ impl ToolExecutor for FileWriteExecutor {
                 structured_patch,
                 original_file: serde_json::Value::Null,
                 git_diff: None,
+                lsp_diagnostics,
             }),
         };
 
