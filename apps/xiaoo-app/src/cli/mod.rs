@@ -10,7 +10,10 @@ use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
     RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
 };
-use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
+use llm_client::{
+    create_llm_provider, resolve_config, resolve_model_context_length, LlmProviderConfig,
+    LlmProviderWrapper, ResolveInput,
+};
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
@@ -71,7 +74,7 @@ pub struct CliConfig {
     pub system_prompt: String,
     pub max_turns: u32,
     pub enable_tools: bool,
-    pub context_window: usize,
+    pub context_window: Option<usize>,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
@@ -146,4 +149,140 @@ pub fn build_compression_pipeline(
         .map_err(|e| format!("context manager: {e}"))?,
     );
     Ok(compression_pipeline)
+}
+
+pub async fn resolve_effective_context_window(
+    config: &CliConfig,
+    llm_provider: &Arc<LlmProviderWrapper>,
+) -> usize {
+    if let Some(configured) = config.context_window.filter(|value| *value > 0) {
+        return configured;
+    }
+
+    let resolved = resolve_config(ResolveInput {
+        provider: Some(config.provider.clone()),
+        protocol: None,
+        api_key: config.api_key.clone(),
+        api_key_env: None,
+        base_url: config.api_base.clone(),
+    });
+
+    match resolved {
+        Ok(resolved) => match resolve_model_context_length(&resolved, &config.model).await {
+            Ok(Some(context_window)) => match usize::try_from(context_window) {
+                Ok(value) if value > 0 => return value,
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        provider = %config.provider,
+                        model = %config.model,
+                        context_window,
+                        "dynamic CLI context window does not fit usize; falling back"
+                    );
+                }
+            },
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    provider = %config.provider,
+                    model = %config.model,
+                    error = %error,
+                    "failed to dynamically resolve CLI context window; falling back"
+                );
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                provider = %config.provider,
+                model = %config.model,
+                error = %error,
+                "failed to resolve CLI provider config for dynamic context window lookup; falling back"
+            );
+        }
+    }
+
+    llm_provider.capabilities().max_context_window.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_effective_context_window, CliConfig};
+    use agent_contracts::{LlmProvider, ProviderCapabilities};
+    use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::Arc;
+
+    struct DummyProvider {
+        capabilities: ProviderCapabilities,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DummyProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            unimplemented!("not needed for cli context window tests")
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            unimplemented!("not needed for cli context window tests")
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    fn test_config() -> CliConfig {
+        CliConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4.1".to_string(),
+            api_key: None,
+            api_base: None,
+            trace: Value::Object(serde_json::Map::new()),
+            system_prompt: "test".to_string(),
+            max_turns: 1,
+            enable_tools: false,
+            context_window: None,
+            compact: crate::cli::config::CompactSection::default(),
+            hooker: Default::default(),
+        }
+    }
+
+    fn test_provider(max_context_window: usize) -> Arc<super::LlmProviderWrapper> {
+        Arc::new(super::LlmProviderWrapper::new(
+            Arc::new(DummyProvider {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window,
+                    model_name: "dummy".to_string(),
+                },
+            }),
+            None,
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn cli_context_window_prefers_explicit_config() {
+        let mut config = test_config();
+        config.context_window = Some(54321);
+
+        let resolved = resolve_effective_context_window(&config, &test_provider(12345)).await;
+        assert_eq!(resolved, 54321);
+    }
+
+    #[tokio::test]
+    async fn cli_context_window_falls_back_to_provider_capability() {
+        let mut config = test_config();
+        config.provider = "unknown-provider".to_string();
+
+        let resolved = resolve_effective_context_window(&config, &test_provider(12345)).await;
+        assert_eq!(resolved, 12345);
+    }
 }

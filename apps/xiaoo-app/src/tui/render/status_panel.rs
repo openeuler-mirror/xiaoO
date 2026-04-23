@@ -13,6 +13,7 @@ pub struct StatusPanel {
     pub last_latency_ms: u64,
     pub is_connected: bool,
     pub input_context_tokens: u64,
+    pub input_context_tokens_estimated: bool,
     pub context_window_tokens: u64,
 }
 
@@ -28,6 +29,7 @@ impl Default for StatusPanel {
             last_latency_ms: 0,
             is_connected: false,
             input_context_tokens: 0,
+            input_context_tokens_estimated: false,
             context_window_tokens: 0,
         }
     }
@@ -59,14 +61,15 @@ impl StatusPanel {
         completion_tokens: u64,
         latency_ms: u64,
         input_context_tokens: u64,
+        input_context_tokens_estimated: bool,
     ) {
         self.input_context_tokens = input_context_tokens;
+        self.input_context_tokens_estimated = input_context_tokens_estimated;
         self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
         self.completion_tokens = self.completion_tokens.saturating_add(completion_tokens);
         self.total_tokens = self
             .total_tokens
             .saturating_add(prompt_tokens.saturating_add(completion_tokens));
-
         self.last_latency_ms = latency_ms;
     }
 
@@ -80,16 +83,23 @@ impl StatusPanel {
         }
     }
 
-    pub(crate) fn format_context_usage(input_tokens: u64, context_window_tokens: u64) -> String {
-        if context_window_tokens == 0 {
-            return Self::format_token_count(input_tokens);
-        }
+    pub(crate) fn format_context_usage(
+        input_tokens: u64,
+        context_window_tokens: u64,
+        input_tokens_estimated: bool,
+    ) -> String {
+        let prefix = if input_tokens_estimated { "~" } else { "" };
+        let usage = if context_window_tokens == 0 {
+            Self::format_token_count(input_tokens)
+        } else {
+            format!(
+                "{}/{}",
+                Self::format_token_count(input_tokens),
+                Self::format_token_count(context_window_tokens)
+            )
+        };
 
-        format!(
-            "{}/{}",
-            Self::format_token_count(input_tokens),
-            Self::format_token_count(context_window_tokens)
-        )
+        format!("{prefix}{usage}")
     }
 }
 
@@ -103,4 +113,25 @@ fn shorten_path_display(path: &Path, max_chars: usize) -> String {
     let keep = max_chars.saturating_sub(prefix.chars().count());
     let skip = count.saturating_sub(keep);
     format!("{prefix}{}", s.chars().skip(skip).collect::<String>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatusPanel;
+
+    #[test]
+    fn format_context_usage_marks_estimated_values() {
+        assert_eq!(
+            StatusPanel::format_context_usage(24_000, 128_000, true),
+            "~24.0K/128.0K"
+        );
+    }
+
+    #[test]
+    fn format_context_usage_leaves_reported_values_unmarked() {
+        assert_eq!(
+            StatusPanel::format_context_usage(24_000, 128_000, false),
+            "24.0K/128.0K"
+        );
+    }
 }

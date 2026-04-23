@@ -187,6 +187,7 @@ impl App {
                 StatusPanel::format_context_usage(
                     self.state.status_panel.input_context_tokens,
                     self.state.status_panel.context_window_tokens,
+                    self.state.status_panel.input_context_tokens_estimated,
                 ),
                 Style::default()
                     .fg(self.state.theme.gradient_yellow)

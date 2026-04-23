@@ -8,6 +8,13 @@ pub enum ToolExecutionStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChangeDelta {
+    pub file_path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolExecutionUpdate {
     pub call_id: String,
@@ -20,6 +27,7 @@ pub struct ToolExecutionUpdate {
     pub status: ToolExecutionStatus,
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
+    pub file_change: Option<FileChangeDelta>,
 }
 
 #[allow(dead_code)]
@@ -98,6 +106,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Error,
     Tool,
 }
 
@@ -133,6 +142,20 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::System,
+            content: content.into(),
+            thinking_content: String::new(),
+            timestamp: chrono::Local::now(),
+            is_streaming: false,
+            tool_state: None,
+            todo_state: None,
+            completion_check_state: None,
+            render_revision: 0,
+        }
+    }
+
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Error,
             content: content.into(),
             thinking_content: String::new(),
             timestamp: chrono::Local::now(),

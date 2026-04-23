@@ -665,6 +665,14 @@ fn render_standard_message_lines(
             Style::default().fg(theme.success),
             Style::default().fg(theme.foreground),
         ),
+        MessageRole::Error => (
+            theme.error,
+            "Error",
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.error),
+        ),
         MessageRole::Tool => (
             theme.muted,
             "Tool",

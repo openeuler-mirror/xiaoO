@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use crate::app_state::{AppState, InputMode};
-use crate::chat::{Message, ToolExecutionUpdate};
+use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::debug_log;
 use crate::session_gateway::SessionTurnUpdate;
 
@@ -122,7 +122,7 @@ impl GatewayRuntime {
                 message.set_content("[Cancelled]");
             }
         }
-        state.status_panel.update_metrics(0, 0, 0, 0);
+        state.status_panel.update_metrics(0, 0, 0, 0, false);
     }
 
     fn stream_message_mut<'a>(
@@ -211,7 +211,7 @@ impl GatewayRuntime {
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
-        state.status_panel.update_metrics(0, 0, 0, 0);
+        state.status_panel.update_metrics(0, 0, 0, 0, false);
     }
 
     fn insert_aux_message(&mut self, state: &mut AppState, message: Message) {
@@ -257,6 +257,25 @@ impl GatewayRuntime {
 
     fn apply_tool_update(&mut self, state: &mut AppState, update: ToolExecutionUpdate) {
         self.finalize_stream_message_before_aux(state);
+        match update.status {
+            ToolExecutionStatus::Running => {
+                state.capture_tool_file_baseline(
+                    &update.call_id,
+                    &update.tool,
+                    &update.args_preview,
+                );
+            }
+            ToolExecutionStatus::Completed => {
+                state.reconcile_tool_file_change_from_baseline(
+                    &update.call_id,
+                    update.file_change.clone(),
+                );
+            }
+            ToolExecutionStatus::Failed => {
+                state.discard_tool_file_baseline(&update.call_id);
+                state.reconcile_tool_file_change(&update.call_id, update.file_change.clone());
+            }
+        }
 
         if let Some(existing) = state.chat_state.messages.iter_mut().find(|message| {
             message
@@ -337,16 +356,19 @@ impl GatewayRuntime {
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
         if self.request_start.take().is_some() {
-            let input_context_tokens = if done.estimated_input_tokens > 0 {
-                done.estimated_input_tokens
+            let (input_context_tokens, input_context_tokens_estimated) = if done.prompt_tokens > 0 {
+                (done.prompt_tokens, false)
+            } else if done.estimated_input_tokens > 0 {
+                (done.estimated_input_tokens, true)
             } else {
-                done.prompt_tokens
+                (0, false)
             };
             state.status_panel.update_metrics(
                 done.prompt_tokens,
                 done.completion_tokens,
                 state.status_panel.last_latency_ms,
                 input_context_tokens,
+                input_context_tokens_estimated,
             );
         }
     }
@@ -354,6 +376,7 @@ impl GatewayRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -381,6 +404,7 @@ mod tests {
             status: ToolExecutionStatus::Running,
             exit_code: None,
             duration_ms: None,
+            file_change: None,
         }
     }
 
@@ -434,7 +458,64 @@ mod tests {
     }
 
     #[test]
-    fn first_token_latency_is_recorded_once_and_survives_completion() {
+    fn tool_update_tracks_session_file_changes_by_call_id() {
+        let mut runtime = GatewayRuntime::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace.clone())
+            .expect("test app state should initialize");
+        state.chat_state.messages.clear();
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "call-1".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Running,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            },
+        );
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "call-1".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: Some(crate::chat::FileChangeDelta {
+                    file_path: "src/main.rs".to_string(),
+                    additions: 2,
+                    deletions: 1,
+                }),
+            },
+        );
+
+        let stats = state
+            .session_file_changes
+            .get("src/main.rs")
+            .expect("file stats should be tracked");
+        assert_eq!(stats.additions, 2);
+        assert_eq!(stats.deletions, 1);
+    }
+
+    #[test]
+    fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_tokens() {
         let mut runtime = GatewayRuntime::new();
         let mut state = test_state();
 
@@ -469,11 +550,12 @@ mod tests {
         assert_eq!(state.status_panel.last_latency_ms, first_token_latency_ms);
         assert_eq!(state.status_panel.prompt_tokens, 10);
         assert_eq!(state.status_panel.completion_tokens, 5);
-        assert_eq!(state.status_panel.input_context_tokens, 18);
+        assert_eq!(state.status_panel.input_context_tokens, 10);
+        assert!(!state.status_panel.input_context_tokens_estimated);
     }
 
     #[test]
-    fn completion_falls_back_to_prompt_tokens_when_estimate_is_missing() {
+    fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semantics() {
         let mut runtime = GatewayRuntime::new();
         let mut state = test_state();
 
@@ -487,14 +569,66 @@ mod tests {
         runtime.finish_stream_done(
             &mut state,
             PendingStreamDone {
-                prompt_tokens: 24,
-                completion_tokens: 6,
-                total_tokens: 30,
-                estimated_input_tokens: 0,
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                estimated_input_tokens: 18,
                 messages: Vec::new(),
             },
         );
 
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(1);
+        runtime.request_start = Some(Instant::now());
+
+        runtime.finish_stream_done(
+            &mut state,
+            PendingStreamDone {
+                prompt_tokens: 25,
+                completion_tokens: 7,
+                total_tokens: 32,
+                estimated_input_tokens: 31,
+                messages: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.status_panel.prompt_tokens, 35);
+        assert_eq!(state.status_panel.completion_tokens, 12);
+        assert_eq!(state.status_panel.total_tokens, 47);
+        assert_eq!(state.status_panel.input_context_tokens, 25);
+        assert!(!state.status_panel.input_context_tokens_estimated);
+    }
+
+    #[test]
+    fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        state
+            .chat_state
+            .messages
+            .push(Message::assistant_streaming());
+        runtime.stream_message_index = Some(0);
+        runtime.request_start = Some(Instant::now());
+
+        runtime.finish_stream_done(
+            &mut state,
+            PendingStreamDone {
+                prompt_tokens: 0,
+                completion_tokens: 6,
+                total_tokens: 30,
+                estimated_input_tokens: 24,
+                messages: Vec::new(),
+            },
+        );
+
+        assert_eq!(state.status_panel.prompt_tokens, 0);
+        assert_eq!(state.status_panel.completion_tokens, 6);
+        assert_eq!(state.status_panel.total_tokens, 6);
         assert_eq!(state.status_panel.input_context_tokens, 24);
+        assert!(state.status_panel.input_context_tokens_estimated);
     }
 }

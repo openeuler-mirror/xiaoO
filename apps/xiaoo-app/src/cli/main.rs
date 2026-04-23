@@ -8,7 +8,10 @@ use skill::audit::{audit_skill_directory, SkillAuditOptions};
 use skill::registry::FileSkillRegistry;
 use skill::types::config::SkillsConfig;
 use xiaoo_app::cli::config::FileConfig;
-use xiaoo_app::cli::{build_compression_pipeline, build_llm_provider, CliConfig, CliEventSink};
+use xiaoo_app::cli::{
+    build_compression_pipeline, build_llm_provider, resolve_effective_context_window, CliConfig,
+    CliEventSink,
+};
 use xiaoo_app::gateway::{
     AppBootstrap, AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig,
     HostedSessionRuntimeResolver, InMemorySessionStore, SessionRuntimeBindings,
@@ -129,7 +132,7 @@ async fn main() {
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
             let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
-            let context_window = llm.and_then(|l| l.context_window).unwrap_or(200_000);
+            let context_window = llm.and_then(|l| l.context_window);
 
             let config = CliConfig {
                 provider,
@@ -394,7 +397,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
     };
 
     // 3. Session runtime config
-    let total_budget = config.context_window;
+    let total_budget = resolve_effective_context_window(&config, &llm_provider).await;
     let reserved_for_output = total_budget / 10;
     let reserved_for_system = total_budget / 20;
 

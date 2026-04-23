@@ -704,9 +704,9 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
         })
         .await?;
 
-    ctx.state.token_usage.prompt_tokens += response.message.usage.prompt_tokens;
-    ctx.state.token_usage.completion_tokens += response.message.usage.completion_tokens;
-    ctx.state.token_usage.total_tokens += response.message.usage.total_tokens;
+    ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
+    ctx.state.token_usage.completion_tokens = response.message.usage.completion_tokens;
+    ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
 
     let streamed_text = streamed_text
         .into_inner()
@@ -1377,6 +1377,86 @@ mod tests {
         }
     }
 
+    struct SequentialUsageProvider {
+        capabilities: ProviderCapabilities,
+        call_count: Arc<StdMutex<usize>>,
+    }
+
+    impl SequentialUsageProvider {
+        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "sequential-usage-test".to_string(),
+                },
+                call_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequentialUsageProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut count = self
+                    .call_count
+                    .lock()
+                    .expect("provider call count mutex should not be poisoned");
+                *count += 1;
+                *count
+            };
+
+            let (text, usage) = if call_number == 1 {
+                (
+                    "first turn".to_string(),
+                    Usage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                    },
+                )
+            } else {
+                (
+                    "second turn".to_string(),
+                    Usage {
+                        prompt_tokens: 7,
+                        completion_tokens: 1,
+                        total_tokens: 8,
+                    },
+                )
+            };
+
+            on_chunk(StreamChunk {
+                delta_text: Some(text.clone()),
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some(text),
+                    tool_calls: Vec::new(),
+                    usage,
+                    stop_reason: StopReason::EndTurn,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
     struct ContextLimitThenSuccessProvider {
         capabilities: ProviderCapabilities,
         call_count: Arc<StdMutex<usize>>,
@@ -1723,6 +1803,42 @@ mod tests {
                 .and_then(ChatMessage::text_content),
             Some("Hello world")
         );
+    }
+
+    #[tokio::test]
+    async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
+        let call_count = Arc::new(StdMutex::new(0));
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(SequentialUsageProvider::new(call_count)),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("first"))
+            .await
+            .expect("first loop run should succeed");
+        assert_eq!(loop_state.token_usage.prompt_tokens, 3);
+        assert_eq!(loop_state.token_usage.completion_tokens, 2);
+        assert_eq!(loop_state.token_usage.total_tokens, 5);
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("second"))
+            .await
+            .expect("second loop run should succeed");
+
+        assert_eq!(loop_state.token_usage.prompt_tokens, 7);
+        assert_eq!(loop_state.token_usage.completion_tokens, 1);
+        assert_eq!(loop_state.token_usage.total_tokens, 8);
+
+        match outcome {
+            LoopRunResult::Complete(AgentOutcome::Complete { token_usage, .. }) => {
+                assert_eq!(token_usage.prompt_tokens, 7);
+                assert_eq!(token_usage.completion_tokens, 1);
+                assert_eq!(token_usage.total_tokens, 8);
+            }
+            _ => panic!("unexpected outcome"),
+        }
     }
 
     struct EmptyCallIdToolCallProvider {
