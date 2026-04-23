@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
 from ..config import Config
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 # 从环境变量获取日志路径（与 audit.py 保持一致）
 _AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "")
+
+# LLM 调用超时配置（默认 5 分钟，可通过环境变量 AUDIT_LLM_TIMEOUT 设置）
+_DEFAULT_LLM_TIMEOUT = 300  # 5 分钟
+_AUDIT_LLM_TIMEOUT = int(os.environ.get("AUDIT_LLM_TIMEOUT", _DEFAULT_LLM_TIMEOUT))
 
 
 class LLMAnalysisFailure(Exception):
@@ -83,31 +88,53 @@ class LLMAnalyzer:
         if _AUDIT_LOG_PATH:
             self._log_prompt(judge_prompt, a_next)
 
-        # 5. 调用 LLM（带重试）
+        # 5. 调用 LLM（带超时和重试）
         max_retries = config.retry.max_retries
         retry_interval = config.retry.retry_interval
 
         for attempt in range(1, max_retries + 1):
             try:
-                llm_response = call_llm(
-                    prompt=judge_prompt,
-                    timeout=config.timeout.prompt2_timeout,  # 复用 prompt2 超时配置
-                    config=config.llm,
-                )
+                # 使用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        call_llm,
+                        prompt=judge_prompt,
+                        timeout=config.timeout.prompt2_timeout,
+                        config=config.llm,
+                    )
+                    llm_response = future.result(timeout=_AUDIT_LLM_TIMEOUT)
+
                 judgment = self._parse_llm_response(llm_response)
                 judgment.source = "llm"
                 return judgment
 
+            except FuturesTimeoutError:
+                logger.warning(
+                    "LLM 安全分析超时（超时设置：%ds），第 %d/%d 次尝试",
+                    _AUDIT_LLM_TIMEOUT,
+                    attempt,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+                else:
+                    raise LLMAnalysisFailure(
+                        f"LLM 安全分析超时（{_AUDIT_LLM_TIMEOUT}s，已重试 {max_retries} 次）"
+                    )
+
             except (TimeoutError, ValueError, Exception) as e:
                 logger.warning(
-                    "LLM 安全分析第 %d 次调用失败: %s", attempt, e
+                    "LLM 安全分析第 %d/%d 次调用失败: %s",
+                    attempt,
+                    max_retries,
+                    e,
                 )
                 if attempt < max_retries:
                     time.sleep(retry_interval)
                 else:
                     # LLM 分析全部失败
                     raise LLMAnalysisFailure(
-                        f"LLM 安全分析全部失败（{max_retries} 次）"
+                        f"LLM 安全分析全部失败（{max_retries} 次）: {e}"
                     )
 
     def _parse_llm_response(self, response: str) -> SecurityJudgment:
