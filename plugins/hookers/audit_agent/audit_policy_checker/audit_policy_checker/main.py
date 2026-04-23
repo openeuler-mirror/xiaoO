@@ -14,6 +14,7 @@ Step 2: Allow → 查缓存 / 生成 policy
 优化：白名单只读工具（whitelist_bypass）跳过 Step 2 LLM 调用，使用预定义的最小权限 Policy。
 """
 
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -126,14 +127,35 @@ def audit_action(
         # ==================== Step 2: Allow → 查缓存 / 生成 policy ====================
         policy_cache = cache or get_default_cache()
 
+        # 检查是否启用 LLM Policy 生成（默认关闭，通过环境变量开启）
+        enable_policy_gen = os.environ.get("AUDIT_ENABLE_POLICY_GEN", "") == "1"
+
         audit_log.start_step("step2_cache_lookup")
         cached_policy = policy_cache.get(session_id, prompt_session)
+
+        # 使用缓存或生成 policy
         if cached_policy is not None:
             audit_log.end_step("step2_cache_lookup", detail="缓存命中")
             policy_a_next = cached_policy
             _ = _save_policy_to_file(session_id, policy_a_next)
+        elif not enable_policy_gen:
+            # Policy 生成已禁用，使用默认 Policy
+            audit_log.end_step("step2_cache_lookup", detail="缓存未命中，Policy 生成已禁用")
+            audit_log.start_step("step2_default_policy")
+            policy_a_next = DEFAULT_READONLY_POLICY
+            policy_cache.put(session_id, prompt_session, policy_a_next)
+            _ = _save_policy_to_file(session_id, policy_a_next)
+            audit_log.end_step("step2_default_policy", detail="使用默认最小权限 Policy")
+            result = {
+                "decision": "Allow",
+                "policy": policy_a_next,
+                "reason": judgment.reason,
+                "violated_policy": "",
+            }
+            audit_log.log_result("Allow", result["reason"], policy_a_next)
+            return result
         else:
-            audit_log.end_step("step2_cache_lookup", detail="缓存未命中")
+            audit_log.end_step("step2_cache_lookup", detail="缓存未命中，启用 LLM 生成")
 
             # 白名单只读工具：跳过 LLM 调用，使用预定义的最小权限 Policy
             if judgment.source == "whitelist_bypass":
