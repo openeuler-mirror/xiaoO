@@ -6,7 +6,9 @@
 
 import json
 import logging
+import os
 import time
+from datetime import datetime
 
 from ..config import Config
 from ..llm_client import call_llm
@@ -14,6 +16,9 @@ from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
+
+# 从环境变量获取日志路径（与 audit.py 保持一致）
+_AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "")
 
 
 class LLMAnalysisFailure(Exception):
@@ -73,6 +78,10 @@ class LLMAnalyzer:
             skills_text=skills_text,
             hints_text=hints_text,
         )
+
+        # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）
+        if _AUDIT_LOG_PATH:
+            self._log_prompt(judge_prompt, a_next)
 
         # 5. 调用 LLM（带重试）
         max_retries = config.retry.max_retries
@@ -154,3 +163,23 @@ class LLMAnalyzer:
             return "启发式检测和逻辑规则检测均未发现风险。"
 
         return "\n\n".join(hints)
+
+    @staticmethod
+    def _log_prompt(prompt: str, a_next: dict[str, str]) -> None:
+        """将 LLM prompt 写入日志文件（如果配置了 AUDIT_LOG_PATH）。"""
+        if not _AUDIT_LOG_PATH:
+            return
+        try:
+            action_type = a_next.get("action_type", "unknown")
+            action_detail = a_next.get("action_detail", "")[:100]
+            log_line = (
+                f"[{datetime.now().isoformat(timespec='milliseconds')}] "
+                f"[LLM_PROMPT] action_type={action_type}, action_detail={action_detail}... "
+                f"prompt_length={len(prompt)}\n"
+                f"{prompt}\n"
+                f"--- END PROMPT ---\n"
+            )
+            with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(log_line)
+        except Exception as e:
+            logger.warning("Failed to write LLM prompt to log: %s", e)
