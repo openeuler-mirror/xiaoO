@@ -1114,6 +1114,41 @@ In direct messages, plain text is usually enough.
 | Feishu says callback configured successfully but real messages still do not arrive | draft config not published | publish a new app version in Feishu Open Platform |
 | challenge succeeds but browser access works while Feishu still fails | firewall/security group issue | check public ingress on port 80/443 |
 
+## 16.1 Common Feishu Console Feedback and How to Fix It
+
+When configuring Feishu for the first time, the console error message is often too short to directly tell you which layer is broken.
+
+Use the table below as a practical decoding guide.
+
+| Feishu console feedback | What it usually means | Most likely layers to check first | Recommended fix order |
+|---|---|---|---|
+| `请求超时` / timeout while verifying callback URL | Feishu could not reach your public callback endpoint at all within the allowed time | public ingress, nginx route, daemon health, firewall, cloud security group | 1. `curl http://127.0.0.1:18080/api/v1/health` on the server 2. `curl http://<your-domain-or-ip>/api/v1/health` from another machine 3. `nginx -t` and reload 4. verify inbound `80/443` is open 5. retry in Feishu console |
+| `challenge 校验失败` / challenge verification failed | Feishu reached your service, but xiaoO did not return the expected challenge payload | callback route, verification token, wrong public/internal path mapping | 1. confirm Feishu uses `/api/v1/channels/xiaoo/events` 2. run manual challenge curl 3. verify `channels.feishu.verification_token` matches the app config |
+| `verification token` invalid | The token in Feishu console and the token in xiaoO config do not match | `config.toml`, deployment config consistency | 1. compare Feishu Verification Token with `channels.feishu.verification_token` 2. restart service after config change 3. retest challenge |
+| callback URL configured successfully but real messages do not arrive | URL challenge worked, but real event delivery is still not active | Feishu event subscription, app publish status, wrong subscription mode | 1. confirm `im.message.receive_v1` is enabled 2. publish a new app version 3. verify webhook vs websocket mode matches daemon config |
+| persistent connection mode enabled but the bot receives no messages | The daemon did not establish or maintain the Feishu long connection, or Feishu app is still on webhook mode | daemon logs, outbound network, Feishu subscription mode, app publish status | 1. check daemon logs for websocket connection 2. verify outbound access to `open.feishu.cn` 3. confirm Feishu app is set to persistent connection 4. publish the app changes |
+| bot receives messages but cannot reply | Message ingress worked, but reply path failed when calling Feishu OpenAPI | App Secret, bot permissions, outbound network | 1. verify `FEISHU_APP_SECRET` 2. verify bot send/reply permissions 3. confirm outbound access to Feishu OpenAPI |
+
+### 16.1.1 The single most useful rule for webhook debugging
+
+If this request still fails from outside the server:
+
+```bash
+curl http://<your-domain-or-ip>/api/v1/health
+```
+
+then Feishu webhook configuration is not ready yet.
+
+Do not continue debugging the Feishu console until public health is reachable.
+
+### 16.1.2 The single most useful rule for websocket debugging
+
+If Feishu is configured for persistent connection, but xiaoO logs never show websocket session activity, the first three places to check are:
+
+1. Feishu app subscription mode is really set to persistent connection
+2. the app version has been published
+3. the daemon can reach `https://open.feishu.cn` outbound
+
 ## 17. Recommended Production Layout
 
 For a clean production deployment, use this structure:
