@@ -704,9 +704,9 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
         })
         .await?;
 
-    ctx.state.token_usage.prompt_tokens += response.message.usage.prompt_tokens;
-    ctx.state.token_usage.completion_tokens += response.message.usage.completion_tokens;
-    ctx.state.token_usage.total_tokens += response.message.usage.total_tokens;
+    ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
+    ctx.state.token_usage.completion_tokens = response.message.usage.completion_tokens;
+    ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
 
     let streamed_text = streamed_text
         .into_inner()
@@ -801,9 +801,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Partition tool calls into valid (non-empty call_id + tool_name) and invalid.
-    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
-        .into_iter()
-        .partition(is_valid_tool_call);
+    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) =
+        tool_calls.into_iter().partition(is_valid_tool_call);
 
     // Handle the case where ALL tool calls are invalid and there is exactly one:
     // retry the LLM request once, but only if we can safely synthesize a tool_result.
@@ -1312,8 +1311,8 @@ mod tests {
     use agent_types::events::LoopEndSummary;
     use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
     use agent_types::{
-        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk,
-        ToolUseBlock, Usage,
+        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
+        Usage,
     };
     use async_trait::async_trait;
     use llm_client::LlmProviderWrapper;
@@ -1368,6 +1367,86 @@ mod tests {
                         completion_tokens: 2,
                         total_tokens: 5,
                     },
+                    stop_reason: StopReason::EndTurn,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    struct SequentialUsageProvider {
+        capabilities: ProviderCapabilities,
+        call_count: Arc<StdMutex<usize>>,
+    }
+
+    impl SequentialUsageProvider {
+        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "sequential-usage-test".to_string(),
+                },
+                call_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequentialUsageProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut count = self
+                    .call_count
+                    .lock()
+                    .expect("provider call count mutex should not be poisoned");
+                *count += 1;
+                *count
+            };
+
+            let (text, usage) = if call_number == 1 {
+                (
+                    "first turn".to_string(),
+                    Usage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                    },
+                )
+            } else {
+                (
+                    "second turn".to_string(),
+                    Usage {
+                        prompt_tokens: 7,
+                        completion_tokens: 1,
+                        total_tokens: 8,
+                    },
+                )
+            };
+
+            on_chunk(StreamChunk {
+                delta_text: Some(text.clone()),
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some(text),
+                    tool_calls: Vec::new(),
+                    usage,
                     stop_reason: StopReason::EndTurn,
                 },
             })
@@ -1726,6 +1805,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
+        let call_count = Arc::new(StdMutex::new(0));
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(SequentialUsageProvider::new(call_count)),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("first"))
+            .await
+            .expect("first loop run should succeed");
+        assert_eq!(loop_state.token_usage.prompt_tokens, 3);
+        assert_eq!(loop_state.token_usage.completion_tokens, 2);
+        assert_eq!(loop_state.token_usage.total_tokens, 5);
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("second"))
+            .await
+            .expect("second loop run should succeed");
+
+        assert_eq!(loop_state.token_usage.prompt_tokens, 7);
+        assert_eq!(loop_state.token_usage.completion_tokens, 1);
+        assert_eq!(loop_state.token_usage.total_tokens, 8);
+
+        match outcome {
+            LoopRunResult::Complete(AgentOutcome::Complete { token_usage, .. }) => {
+                assert_eq!(token_usage.prompt_tokens, 7);
+                assert_eq!(token_usage.completion_tokens, 1);
+                assert_eq!(token_usage.total_tokens, 8);
+            }
+            _ => panic!("unexpected outcome"),
+        }
+    }
+
     struct EmptyCallIdToolCallProvider {
         capabilities: ProviderCapabilities,
     }
@@ -1811,17 +1926,14 @@ mod tests {
             loop_state.messages[1].text_content(),
             Some("trying to use a tool")
         );
-        assert!(
-            !loop_state.messages[1]
-                .blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-        );
-        assert!(
-            !loop_state.messages
-                .iter()
-                .any(|message| matches!(message.role, MessageRole::Tool))
-        );
+        assert!(!loop_state.messages[1]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
+        assert!(!loop_state
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool)));
     }
 
     /// LLM provider that returns a single empty-name tool call on every invocation.

@@ -57,6 +57,12 @@ impl ModelCatalog for AnthropicModelCatalog {
                     if let Some(display_name) = model["display_name"].as_str() {
                         summary = summary.with_display_name(display_name);
                     }
+                    if let Some(limit) = model["max_input_tokens"].as_u64() {
+                        summary = summary.with_context_length(limit);
+                    }
+                    if let Some(limit) = model["max_output_tokens"].as_u64() {
+                        summary = summary.with_max_output_tokens(limit);
+                    }
                     summary
                 })
             })

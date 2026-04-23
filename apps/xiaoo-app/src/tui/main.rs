@@ -148,7 +148,9 @@ fn default_config_path() -> Result<PathBuf> {
     }
 }
 
-async fn run_tui(config: config::Config, config_path: PathBuf) -> Result<()> {
+async fn run_tui(mut config: config::Config, config_path: PathBuf) -> Result<()> {
+    populate_effective_context_window(&mut config).await;
+
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     execute!(io::stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -171,4 +173,71 @@ async fn run_tui(config: config::Config, config_path: PathBuf) -> Result<()> {
     let _ = disable_raw_mode();
 
     result
+}
+
+async fn populate_effective_context_window(config: &mut config::Config) {
+    if config
+        .llm
+        .context_window
+        .filter(|value| *value > 0)
+        .is_some()
+    {
+        return;
+    }
+
+    let resolved = llm_client::resolve_config(llm_client::ResolveInput {
+        provider: Some(config.llm.provider.clone()),
+        protocol: None,
+        api_key: None,
+        api_key_env: config.llm.api_key_env.clone(),
+        base_url: if config.llm.api_base.trim().is_empty() {
+            None
+        } else {
+            Some(config.llm.api_base.clone())
+        },
+    });
+
+    match resolved {
+        Ok(resolved) => {
+            match llm_client::resolve_model_context_length(&resolved, &config.llm.model).await {
+                Ok(Some(context_window)) => match u32::try_from(context_window) {
+                    Ok(value) => {
+                        config.llm.context_window = Some(value);
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            provider = %config.llm.provider,
+                            model = %config.llm.model,
+                            context_window,
+                            "dynamic context window does not fit into TUI config type; falling back"
+                        );
+                    }
+                },
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        provider = %config.llm.provider,
+                        model = %config.llm.model,
+                        error = %error,
+                        "failed to dynamically resolve model context window; falling back"
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                provider = %config.llm.provider,
+                model = %config.llm.model,
+                error = %error,
+                "failed to resolve provider config for dynamic context window lookup; falling back"
+            );
+        }
+    }
+
+    if let Some(context_window) =
+        config::resolve_context_window(config).and_then(|value| u32::try_from(value).ok())
+    {
+        config.llm.context_window = Some(context_window);
+    }
 }

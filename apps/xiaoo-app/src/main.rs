@@ -29,7 +29,7 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
     let rate_limit = config.app.http.rate_limit.clone();
-    let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config)?);
+    let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let app =
         AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
