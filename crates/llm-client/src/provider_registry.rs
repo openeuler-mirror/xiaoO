@@ -250,6 +250,16 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
+        "other" => Some(ProviderProfile {
+            provider_name: "other",
+            display_name: "Other",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://openrouter.ai/api/v1"),
+            default_api_key_env: Some("OPENROUTER_API_KEY"),
+            api_key_required: true,
+            api_base_style: ApiBaseStyle::ExpectV1,
+            supports_model_catalog: true,
+        }),
         _ => None,
     }
 }
@@ -264,6 +274,7 @@ pub fn resolve_protocol_family(name: &str) -> Option<ProtocolFamily> {
 pub fn supported_providers() -> &'static [&'static str] {
     &[
         "openai",
+        "other",
         "anthropic",
         "claude",
         "gemini",
