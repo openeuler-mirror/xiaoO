@@ -1,4 +1,5 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::lsp::LspProvider;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
@@ -44,6 +45,7 @@ pub struct ConfiguredRuntimeResolver {
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
     lsp_service: Option<Arc<dyn LspProvider>>,
+    operation_backend: Option<OperationBackendConfig>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -98,6 +100,7 @@ impl ConfiguredRuntimeResolver {
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
+            operation_backend: config.app.operation_backend.clone(),
             lsp_service,
         })
     }
@@ -207,6 +210,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             compression_pipeline: self.compression_pipeline.clone(),
             trace: self.trace.clone(),
             hooker: self.hooker.clone(),
+            operation_backend: self.operation_backend.clone(),
         })
     }
 }

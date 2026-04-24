@@ -14,6 +14,7 @@ agent-types = { path = "../agent-types" }
 subagent = { path = "../subagent" }
 lsp = { path = "../lsp" }
 trace = { path = "../trace" }
+operation_backend = { path = "../operation_backend" }
 async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -28,6 +29,7 @@ similar = "2.7"
 html2text = "0.16.7"
 htmd = "0.5.4"
 reqwest = { workspace = true, features = ["stream"] }
+tempfile.workspace = true
 
 [[bin]]
 name = "tool-cli"

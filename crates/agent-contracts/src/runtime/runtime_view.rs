@@ -1,3 +1,4 @@
+use crate::backend::OperationBackend;
 use crate::events::tool_events::ToolEventSink;
 use crate::hook::registry::HookerRegistry;
 use crate::interaction::InteractionHandle;
@@ -20,6 +21,10 @@ pub trait RuntimeView: Send + Sync {
     }
     /// Channel file sender for sending files to the user. None = not a channel session.
     fn channel_file_sender(&self) -> Option<&dyn ChannelFileSender> {
+        None
+    }
+    /// Operation backend for delegating operations to a remote service.
+    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
         None
     }
 }

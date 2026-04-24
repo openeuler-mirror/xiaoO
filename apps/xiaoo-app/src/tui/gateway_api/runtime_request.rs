@@ -124,6 +124,7 @@ impl GatewayRuntime {
                 .clone()
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             hooker: state.agent_config.hooker.clone(),
+            operation_backend: state.agent_config.operation_backend.clone(),
             lsp_service: state.agent_config.resolve_lsp_service(),
         })
     }

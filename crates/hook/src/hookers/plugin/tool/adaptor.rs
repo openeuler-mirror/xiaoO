@@ -40,6 +40,7 @@ struct AskUserDirective {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum PluginAskUserRequest {
     Confirm {
         prompt: String,
@@ -75,10 +76,12 @@ impl PluginToolHookerAdaptor {
         }
     }
 
+    #[allow(dead_code)]
     pub fn command(&self) -> &str {
         &self.command
     }
 
+    #[allow(dead_code)]
     pub fn definition(&self) -> &serde_json::Value {
         &self.definition
     }

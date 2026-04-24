@@ -1,3 +1,6 @@
+use agent_contracts::backend::{
+    OperationBackend, OperationBackendBuildInput, OperationBackendBuilder,
+};
 use agent_contracts::trace::TraceRecorderBuilder;
 use agent_contracts::{
     HookerRegistry, HookerRegistryBuilder, RuntimeView, ToolEventSink, ToolStateStore,
@@ -7,6 +10,8 @@ use agent_types::common::BuildError;
 use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
 use agent_types::tool::ToolStateStoreConfig;
 use hook::framework::HookerRegistryBuilderImpl;
+use operation_backend::OperationBackendBuilderImpl;
+use std::sync::Arc;
 use tool::ToolStateStoreBuilderImpl;
 use trace::TraceRecorderBuilderImpl;
 
@@ -36,6 +41,7 @@ pub struct ToolCliRuntime {
     agent_context: MockAgentContext,
     interaction: CliInteractionHandle,
     hookers: Box<dyn HookerRegistry>,
+    operation_backend: Arc<dyn OperationBackend>,
 }
 
 impl ToolCliRuntime {
@@ -62,6 +68,20 @@ impl ToolCliRuntime {
             }))?
             .build()
             .await?;
+        let workspace_root =
+            std::env::current_dir().map_err(|error| BuildError::DependencyError {
+                message: format!("failed to resolve current directory: {error}"),
+            })?;
+        let operation_backend = OperationBackendBuilderImpl::new()
+            .build(&OperationBackendBuildInput {
+                workspace_root: Some(workspace_root),
+                agent_id: Some("tool_cli".to_string()),
+                ..OperationBackendBuildInput::default()
+            })
+            .await
+            .map_err(|error| BuildError::InvalidConfig {
+                message: format!("failed to build operation backend: {error}"),
+            })?;
 
         Ok(Self {
             state_store,
@@ -70,6 +90,7 @@ impl ToolCliRuntime {
             agent_context: MockAgentContext::new(),
             interaction: CliInteractionHandle,
             hookers,
+            operation_backend,
         })
     }
 }
@@ -97,5 +118,9 @@ impl RuntimeView for ToolCliRuntime {
 
     fn hookers(&self) -> &dyn HookerRegistry {
         self.hookers.as_ref()
+    }
+
+    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
+        Some(self.operation_backend.as_ref())
     }
 }

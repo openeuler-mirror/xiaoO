@@ -28,6 +28,7 @@ impl WireResponseFormat {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn text() -> Self {
         Self {
             format_type: "text".to_string(),

@@ -152,6 +152,7 @@ async fn main() {
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
+                operation_backend: file_cfg.operation_backend.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -433,6 +434,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
         lsp_service: None,
+        operation_backend: config.operation_backend.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

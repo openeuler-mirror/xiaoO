@@ -121,7 +121,11 @@ impl LspServerInstance {
                     Some(u) => u.to_string(),
                     None => continue,
                 };
-                let raw_diags = match notif.params.get("diagnostics").and_then(|v: &Value| v.as_array()) {
+                let raw_diags = match notif
+                    .params
+                    .get("diagnostics")
+                    .and_then(|v: &Value| v.as_array())
+                {
                     Some(d) => d.clone(),
                     None => continue,
                 };
@@ -598,8 +602,7 @@ fn parse_locations(v: &Value) -> Vec<LspLocation> {
                 .or_else(|| item.get("targetRange"))?;
             let start = range.get("start")?;
             let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-            let col =
-                start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+            let col = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
             Some(LspLocation {
                 file: uri_to_path(uri),
                 line,
@@ -723,11 +726,14 @@ fn parse_incoming_calls(v: &Value) -> Vec<LspIncomingCall> {
                 .iter()
                 .filter_map(|range| {
                     let start = range.get("start")?;
-                    let line =
-                        start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+                    let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
                     let col =
                         start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-                    Some(LspLocation { file: uri_to_path(caller_uri), line, col })
+                    Some(LspLocation {
+                        file: uri_to_path(caller_uri),
+                        line,
+                        col,
+                    })
                 })
                 .collect();
             Some(LspIncomingCall { caller, call_sites })
@@ -755,11 +761,14 @@ fn parse_outgoing_calls(v: &Value, caller_uri: &str) -> Vec<LspOutgoingCall> {
                 .iter()
                 .filter_map(|range| {
                     let start = range.get("start")?;
-                    let line =
-                        start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+                    let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
                     let col =
                         start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-                    Some(LspLocation { file: uri_to_path(caller_uri), line, col })
+                    Some(LspLocation {
+                        file: uri_to_path(caller_uri),
+                        line,
+                        col,
+                    })
                 })
                 .collect();
             Some(LspOutgoingCall { callee, call_sites })
@@ -790,7 +799,12 @@ fn parse_workspace_symbols(v: &Value) -> Vec<LspSymbol> {
                 .get("containerName")
                 .and_then(|c| c.as_str())
                 .map(|s| s.to_string());
-            Some(LspSymbol { name, kind, location, container })
+            Some(LspSymbol {
+                name,
+                kind,
+                location,
+                container,
+            })
         })
         .collect()
 }

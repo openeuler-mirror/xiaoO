@@ -3,6 +3,7 @@ use crate::gateway::{
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::lsp::LspProvider;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
@@ -32,6 +33,7 @@ pub struct HostedSessionRuntimeConfig {
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
     pub lsp_service: Option<Arc<dyn LspProvider>>,
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -202,6 +204,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             trace: self.config.trace.clone(),
             compression_pipeline: self.config.compression_pipeline.clone(),
             hooker: self.config.hooker.clone(),
+            operation_backend: self.config.operation_backend.clone(),
         })
     }
 }

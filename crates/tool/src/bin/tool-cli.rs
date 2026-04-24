@@ -1,5 +1,6 @@
 mod tool_cli_runtime;
 
+use agent_contracts::lsp::LspProvider;
 use agent_contracts::trace::TraceOutcome;
 use agent_contracts::{
     RuntimeView, ToolCallBuilder, ToolRegistry, ToolRegistryBuilder, ToolSpecView,
@@ -8,11 +9,13 @@ use agent_types::common::BuildError;
 use agent_types::common::{AgentId, ToolName};
 use agent_types::tool::ToolRegistryConfig;
 use agent_types::tool::{RawToolCall, RawToolOutcome, ToolExecutionError, ToolVisibilityConfig};
-use tokio::runtime::{Builder, Runtime};
-use agent_contracts::lsp::LspProvider;
 use lsp::LspService;
 use std::sync::Arc;
-use tool::{load_tool_sources_with_services, ToolCallBuilderImpl, ToolRegistryBuilderImpl, ToolRuntimeServices};
+use tokio::runtime::{Builder, Runtime};
+use tool::{
+    load_tool_sources_with_services, ToolCallBuilderImpl, ToolRegistryBuilderImpl,
+    ToolRuntimeServices,
+};
 
 use tool_cli_runtime::{ToolCliRuntime, ToolCliTraceConfig};
 

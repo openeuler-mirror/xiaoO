@@ -1,3 +1,4 @@
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
@@ -50,6 +51,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
+    #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
 }
