@@ -7,15 +7,14 @@
 
 优化：白名单只读工具（grep/read/glob等）在启发式检测未命中 high/critical 时，跳过后续检测。
 
-环境变量控制：
+配置控制（优先级：环境变量 > audit_settings.json > 默认值）：
 - AUDIT_DISABLE_LLM_LAYER3=1: 禁用第三层 LLM 分析，只执行前两层静态分析
 """
 
 import logging
-import os
 from pathlib import Path
 
-from ..config import Config
+from ..config import Config, is_llm_layer3_enabled
 from .heuristic_detector import HeuristicDetector, SAFE_ACTION_TYPES, is_safe_bash_command
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
@@ -182,9 +181,8 @@ class xiaoOSecBot:
             logic_result = LogicRuleResult(hit=False)
 
         # ========== 层3: LLM + Skill 深度分析 ==========
-        # 环境变量控制：默认为开启，设置为 1 时禁用第三层
-        disable_llm_layer3 = os.environ.get("AUDIT_DISABLE_LLM_LAYER3", "") == "1"
-        llm_analysis_enabled = security_cfg.llm_analysis_enabled and not disable_llm_layer3
+        # 配置控制：环境变量 > audit_settings.json > 默认值
+        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled()
 
         if llm_analysis_enabled:
             try:

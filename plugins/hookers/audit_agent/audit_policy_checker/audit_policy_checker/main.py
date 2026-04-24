@@ -14,12 +14,11 @@ Step 2: Allow → 查缓存 / 生成 policy
 优化：白名单只读工具（whitelist_bypass）跳过 Step 2 LLM 调用，使用预定义的最小权限 Policy。
 """
 
-import os
 import tempfile
 import time
 from pathlib import Path
 
-from .config import Config, get_default_config
+from .config import Config, get_default_config, is_policy_gen_enabled
 from .llm_client import call_llm
 from .parsers import parse_policy_from_llm
 from .policy_cache import PolicyCache, get_default_cache
@@ -127,8 +126,8 @@ def audit_action(
         # ==================== Step 2: Allow → 查缓存 / 生成 policy ====================
         policy_cache = cache or get_default_cache()
 
-        # 检查是否启用 LLM Policy 生成（默认关闭，通过环境变量开启）
-        enable_policy_gen = os.environ.get("AUDIT_ENABLE_POLICY_GEN", "") == "1"
+        # 检查是否启用 LLM Policy 生成（默认关闭，通过配置或环境变量开启）
+        enable_policy_gen = is_policy_gen_enabled()
 
         audit_log.start_step("step2_cache_lookup")
         cached_policy = policy_cache.get(session_id, prompt_session)

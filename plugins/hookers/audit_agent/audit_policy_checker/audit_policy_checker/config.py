@@ -287,3 +287,101 @@ def load_config_with_xiaoo_fallback() -> Config:
             pass
 
     return cfg
+
+
+# ========== audit_settings.json 加载逻辑 ==========
+# 优先级：环境变量 > audit_settings.json > 默认值
+
+# audit_settings.json 默认路径：与 config.py 同级目录
+DEFAULT_AUDIT_SETTINGS_PATH = Path(__file__).parent / "audit_settings.json"
+
+
+def load_audit_settings(settings_path: str | Path | None = None) -> dict:
+    """
+    从 audit_settings.json 加载审计配置。
+
+    Args:
+        settings_path: 配置文件路径，为 None 时使用默认路径
+
+    Returns:
+        dict: 审计配置字典
+
+    Raises:
+        FileNotFoundError: 配置文件不存在
+        json.JSONDecodeError: 配置文件 JSON 格式错误
+    """
+    if settings_path is not None:
+        path = Path(settings_path)
+    else:
+        path = DEFAULT_AUDIT_SETTINGS_PATH
+
+    if not path.exists():
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        # 过滤掉 _comment 键
+        data = json.load(f)
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+# 全局审计设置缓存（延迟加载）
+_audit_settings: dict | None = None
+
+
+def get_audit_settings() -> dict:
+    """获取全局审计设置（延迟加载）"""
+    global _audit_settings
+    if _audit_settings is None:
+        _audit_settings = load_audit_settings()
+    return _audit_settings
+
+
+def get_audit_setting(key: str, default: str | int | bool = "") -> str:
+    """
+    获取审计配置值，优先级：环境变量 > audit_settings.json > 默认值
+
+    Args:
+        key: 配置键名（如 AUDIT_DISABLE_LLM_LAYER3）
+        default: 默认值
+
+    Returns:
+        str: 配置值（环境变量优先，否则从 audit_settings.json 读取，否则返回默认值）
+    """
+    # 1. 环境变量优先
+    env_value = os.environ.get(key)
+    if env_value is not None:
+        return env_value
+
+    # 2. 从 audit_settings.json 读取
+    settings = get_audit_settings()
+    if key in settings:
+        return str(settings[key])
+
+    # 3. 返回默认值
+    return str(default)
+
+
+def is_llm_layer3_enabled() -> bool:
+    """判断是否启用层3 LLM 深度分析"""
+    disable_value = get_audit_setting("AUDIT_DISABLE_LLM_LAYER3", "")
+    return disable_value != "1"
+
+
+def get_llm_timeout() -> int:
+    """获取 LLM 超时时间（秒）"""
+    timeout = get_audit_setting("AUDIT_LLM_TIMEOUT", 300)
+    try:
+        return int(timeout)
+    except ValueError:
+        return 300
+
+
+def get_log_path() -> str:
+    """获取 LLM prompt 日志路径"""
+    return get_audit_setting("AUDIT_LOG_PATH", "")
+
+
+def is_policy_gen_enabled() -> bool:
+    """判断是否启用策略生成"""
+    enable_value = get_audit_setting("AUDIT_ENABLE_POLICY_GEN", "")
+    return enable_value == "1"

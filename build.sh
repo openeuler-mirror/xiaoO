@@ -34,12 +34,38 @@ echo "║                                                             ║"
 echo "║  Install now?                                               ║"
 echo "╚═════════════════════════════════════════════════════════════╝"
 echo ""
-read -p "Install audit_agent? [y/N]: " choice
+read -p "Install audit_agent? [Y/n]: " choice
 
 INSTALL_AUDIT=false
-if [[ "$choice" =~ ^[Yy]$ ]]; then
-    INSTALL_AUDIT=true
+ENABLE_LLM_ENV=""  # 环境变量值：1=启用，0=禁用
+if [[ "$choice" =~ ^[Nn]$ ]]; then
+    # 用户明确选择不安装
+    :
 else
+    # 默认安装（空输入或 Y/y）
+    INSTALL_AUDIT=true
+    # 追问是否启用 LLM 分析
+    echo ""
+    echo "╔═════════════════════════════════════════════════════════════╗"
+    echo "║  LLM Analysis (Layer 3)                                     ║"
+    echo "║  - Uses LLM to detect complex security threats              ║"
+    echo "║  - More comprehensive but increases latency (~5-30s)        ║"
+    echo "║  - Can intercept attacks that heuristic rules miss          ║"
+    echo "║                                                             ║"
+    echo "║  Enable LLM analysis?                                       ║"
+    echo "╚═════════════════════════════════════════════════════════════╝"
+    echo ""
+    read -p "Enable LLM analysis? [y/N]: " llm_choice
+    if [[ "$llm_choice" =~ ^[Yy]$ ]]; then
+        ENABLE_LLM_ENV="1"
+        echo "LLM analysis will be enabled."
+    else
+        ENABLE_LLM_ENV="0"
+        echo "LLM analysis will be disabled."
+    fi
+fi
+
+if [ "$INSTALL_AUDIT" = false ]; then
     echo ""
     echo "⚠️  Security Notice:"
     echo "   Without audit_agent, tool execution lacks security audit."
@@ -70,8 +96,9 @@ if [ "$INSTALL_AUDIT" = true ]; then
     echo "  Installing audit_agent..."
     echo "═══════════════════════════════════════════════════════════════"
 
+    # 先通过 hookers/install.sh 注册插件（会自动调用 audit_agent/install.sh）
     cd "$SCRIPT_DIR/plugins/hookers"
-    bash install.sh --non-interactive audit_agent
+    AUDIT_ENABLE_LLM="$ENABLE_LLM_ENV" bash install.sh --non-interactive audit_agent
     INSTALL_EXIT_CODE=$?
 
     cd "$SCRIPT_DIR"
@@ -80,6 +107,21 @@ if [ "$INSTALL_AUDIT" = true ]; then
         echo ""
         echo "✅ audit_agent installed successfully."
         echo ""
+        if [ "$ENABLE_LLM_ENV" = "1" ]; then
+            echo "LLM analysis is enabled."
+            echo ""
+            echo "To disable LLM analysis later:"
+            echo "  - Set environment variable: export AUDIT_DISABLE_LLM_LAYER3=1"
+            echo "  - Or edit: plugins/hookers/audit_agent/audit_settings.json"
+            echo ""
+        elif [ "$ENABLE_LLM_ENV" = "0" ]; then
+            echo "LLM analysis is disabled."
+            echo ""
+            echo "To enable LLM analysis later:"
+            echo "  - Remove AUDIT_DISABLE_LLM_LAYER3 from environment"
+            echo "  - Or edit: plugins/hookers/audit_agent/audit_settings.json"
+            echo ""
+        fi
         echo "To uninstall later, run:"
         echo "  ./plugins/hookers/uninstall.sh"
         echo ""

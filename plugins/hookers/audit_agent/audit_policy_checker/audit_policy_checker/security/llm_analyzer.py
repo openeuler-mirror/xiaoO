@@ -6,24 +6,16 @@
 
 import json
 import logging
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 
-from ..config import Config
+from ..config import Config, get_log_path, get_llm_timeout
 from ..llm_client import call_llm
 from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
-
-# 从环境变量获取日志路径（与 audit.py 保持一致）
-_AUDIT_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "")
-
-# LLM 调用超时配置（默认 5 分钟，可通过环境变量 AUDIT_LLM_TIMEOUT 设置）
-_DEFAULT_LLM_TIMEOUT = 300  # 5 分钟
-_AUDIT_LLM_TIMEOUT = int(os.environ.get("AUDIT_LLM_TIMEOUT", _DEFAULT_LLM_TIMEOUT))
 
 
 class LLMAnalysisFailure(Exception):
@@ -85,19 +77,21 @@ class LLMAnalyzer:
         )
 
         # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）
-        if _AUDIT_LOG_PATH:
-            self._log_prompt(judge_prompt, a_next)
+        log_path = get_log_path()
+        if log_path:
+            self._log_prompt(judge_prompt, a_next, log_path)
 
         # 5. 调用 LLM（带超时和重试）
         max_retries = config.retry.max_retries
         retry_interval = config.retry.retry_interval
         _call_start = time.monotonic()  # 记录调用开始时间，用于精确计算耗时
+        llm_timeout = get_llm_timeout()
 
-        # 根据 AUDIT_LLM_TIMEOUT 自动计算单次 call_llm 超时时间
+        # 根据 LLM 超时时间自动计算单次 call_llm 超时时间
         # 公式：总超时 = N 次调用 + (N-1) 次重试间隔
         # 所以：单次超时 = (总超时 - 重试间隔 * (max_retries - 1)) / max_retries
         single_call_timeout = (
-            _AUDIT_LLM_TIMEOUT - retry_interval * (max_retries - 1)
+            llm_timeout - retry_interval * (max_retries - 1)
         ) / max_retries
         # 确保单次超时至少 10 秒
         single_call_timeout = max(single_call_timeout, 10.0)
@@ -112,19 +106,19 @@ class LLMAnalyzer:
                         timeout=single_call_timeout,
                         config=config.llm,
                     )
-                    llm_response = future.result(timeout=_AUDIT_LLM_TIMEOUT)
+                    llm_response = future.result(timeout=llm_timeout)
 
                 judgment = self._parse_llm_response(llm_response)
                 judgment.source = "llm"
                 return judgment
 
             except FuturesTimeoutError:
-                # ThreadPoolExecutor 超时：LLM 调用在 _AUDIT_LLM_TIMEOUT 内未返回
+                # ThreadPoolExecutor 超时：LLM 调用在 llm_timeout 内未返回
                 elapsed = time.monotonic() - _call_start
                 logger.warning(
                     "LLM 安全分析超时（耗时 %.1fs，上限 %ds），第 %d/%d 次尝试",
                     elapsed,
-                    _AUDIT_LLM_TIMEOUT,
+                    llm_timeout,
                     attempt,
                     max_retries,
                 )
@@ -132,7 +126,7 @@ class LLMAnalyzer:
                     time.sleep(retry_interval)
                 else:
                     raise LLMAnalysisFailure(
-                        f"LLM 安全分析超时（耗时 {elapsed:.1f}s，上限 {_AUDIT_LLM_TIMEOUT}s，已重试 {max_retries} 次）"
+                        f"LLM 安全分析超时（耗时 {elapsed:.1f}s，上限 {llm_timeout}s，已重试 {max_retries} 次）"
                     )
 
             except TimeoutError as e:
@@ -222,9 +216,9 @@ class LLMAnalyzer:
         return "\n\n".join(hints)
 
     @staticmethod
-    def _log_prompt(prompt: str, a_next: dict[str, str]) -> None:
-        """将 LLM prompt 写入日志文件（如果配置了 AUDIT_LOG_PATH）。"""
-        if not _AUDIT_LOG_PATH:
+    def _log_prompt(prompt: str, a_next: dict[str, str], log_path: str) -> None:
+        """将 LLM prompt 写入日志文件。"""
+        if not log_path:
             return
         try:
             action_type = a_next.get("action_type", "unknown")
@@ -236,7 +230,7 @@ class LLMAnalyzer:
                 f"{prompt}\n"
                 f"--- END PROMPT ---\n"
             )
-            with open(_AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            with open(log_path, "a", encoding="utf-8") as f:
                 f.write(log_line)
         except Exception as e:
             logger.warning("Failed to write LLM prompt to log: %s", e)
