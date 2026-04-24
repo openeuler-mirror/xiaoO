@@ -170,6 +170,65 @@ cp audit_policy_checker/config.json.example audit_policy_checker/config.json
 export OPENROUTER_API_KEY="your-api-key"
 ```
 
+### 环境变量配置
+
+AuditAgent 支持以下环境变量进行运行时配置：
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|--------|
+| `AUDIT_DISABLE_LLM_LAYER3` | 设为 `1` 时禁用层3 LLM 深度分析，仅运行层1（启发式）+ 层2（逻辑规则）检测 | 未设置（启用层3） |
+| `AUDIT_LLM_TIMEOUT` | 层3 LLM 调用的超时时间（秒） | `300`（5分钟） |
+| `AUDIT_LOG_PATH` | LLM prompt 日志文件路径，调用前会将完整 prompt 写入该文件用于调试 | 未设置（不记录） |
+| `AUDIT_ENABLE_POLICY_GEN` | 设为 `1` 时启用策略生成（Step 2），否则使用默认只读策略 | 未设置（禁用生成） |
+| `AUDIT_CONFIG_PATH` | 自定义配置文件路径，优先级高于默认 `config.json` | 未设置 |
+| `OPENROUTER_API_KEY` | OpenRouter API Key，优先级高于 config.json 中的配置 | 未设置 |
+
+**使用示例**：
+
+```bash
+# 禁用层3 LLM 分析（仅使用启发式 + 逻辑规则检测）
+export AUDIT_DISABLE_LLM_LAYER3=1
+
+# 调整 LLM 超时为 60 秒
+export AUDIT_LLM_TIMEOUT=60
+
+# 记录 LLM prompt 到文件（调试用）
+export AUDIT_LOG_PATH=/tmp/audit_llm_prompt.log
+
+# 启用策略生成（默认禁用，使用只读策略）
+export AUDIT_ENABLE_POLICY_GEN=1
+```
+
+### Provider Headers 适配
+
+AuditAgent 自动根据配置的 Provider 注入特殊 HTTP Headers，解决部分 Provider 的请求路由和并发限制问题：
+
+| Provider | 注入 Headers | 说明 |
+|----------|-------------|------|
+| OpenRouter | `HTTP-Referer`, `X-OpenRouter-Title` | 用于优先级路由和应用标识，缺失会导致低优先级路由和并发超限 |
+| xAI | `HTTP-Referer` | 来源标识 |
+
+**配置方式**：
+
+在 `config.json` 或 xiaoo 共享配置（`~/.config/xiaoo/config.toml`）中指定 `provider` 字段：
+
+```json
+// config.json
+{
+  "llm": {
+    "provider": "openrouter",
+    "base_url": "https://openrouter.ai/api/v1"
+  }
+}
+```
+
+```toml
+# ~/.config/xiaoo/config.toml
+[llm]
+provider = "openrouter"
+model = "minimax/minimax-m2.5"
+```
+
 详细配置说明见 [CONFIG.md](audit_policy_checker/CONFIG.md)。
 
 ## 使用

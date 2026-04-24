@@ -11,12 +11,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.json"
 
 @dataclass
 class LLMConfig:
-    """LLM 调用配置（通过 OpenRouter 调用多种大模型）"""
+    """LLM 调用配置（支持多种 Provider）"""
 
-    api_key: str = ""  # OpenRouter API Key
-    model: str = "anthropic/claude-3.5-sonnet"  # 模型名称（OpenRouter 格式）
+    api_key: str = ""  # API Key
+    model: str = "anthropic/claude-3.5-sonnet"  # 模型名称
     temperature: float = 0.1  # 低温度以确保输出稳定
-    base_url: str = "https://openrouter.ai/api/v1"  # OpenRouter API 地址
+    base_url: str = "https://openrouter.ai/api/v1"  # API 地址
+    provider: str = ""  # Provider 名称（如 openrouter, openai, deepseek 等），用于 Headers 适配
 
 
 @dataclass
@@ -111,6 +112,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         model=llm_data.get("model", "anthropic/claude-3.5-sonnet"),
         temperature=llm_data.get("temperature", 0.1),
         base_url=llm_data.get("base_url", "https://openrouter.ai/api/v1"),
+        provider=llm_data.get("provider", ""),
     )
 
     # 环境变量覆盖 api_key（优先级最高）
@@ -255,8 +257,10 @@ def load_config_with_xiaoo_fallback() -> Config:
                 if model := llm.get("model"):
                     cfg.llm.model = model
 
-                # 获取 provider（用于确定默认 base_url）
+                # 获取 provider（用于确定默认 base_url 和 Headers 适配）
                 provider = llm.get("provider", "").lower()
+                if provider:
+                    cfg.llm.provider = provider
 
                 # 覆盖 base_url：优先使用 api_base，否则用 provider 默认值
                 if api_base := llm.get("api_base"):

@@ -91,6 +91,7 @@ class LLMAnalyzer:
         # 5. 调用 LLM（带超时和重试）
         max_retries = config.retry.max_retries
         retry_interval = config.retry.retry_interval
+        _call_start = time.monotonic()  # 记录调用开始时间，用于精确计算耗时
 
         for attempt in range(1, max_retries + 1):
             try:
@@ -109,8 +110,11 @@ class LLMAnalyzer:
                 return judgment
 
             except FuturesTimeoutError:
+                # ThreadPoolExecutor 超时：LLM 调用在 _AUDIT_LLM_TIMEOUT 内未返回
+                elapsed = time.monotonic() - _call_start
                 logger.warning(
-                    "LLM 安全分析超时（超时设置：%ds），第 %d/%d 次尝试",
+                    "LLM 安全分析超时（耗时 %.1fs，上限 %ds），第 %d/%d 次尝试",
+                    elapsed,
                     _AUDIT_LLM_TIMEOUT,
                     attempt,
                     max_retries,
@@ -119,22 +123,39 @@ class LLMAnalyzer:
                     time.sleep(retry_interval)
                 else:
                     raise LLMAnalysisFailure(
-                        f"LLM 安全分析超时（{_AUDIT_LLM_TIMEOUT}s，已重试 {max_retries} 次）"
+                        f"LLM 安全分析超时（耗时 {elapsed:.1f}s，上限 {_AUDIT_LLM_TIMEOUT}s，已重试 {max_retries} 次）"
                     )
 
-            except (TimeoutError, ValueError, Exception) as e:
+            except TimeoutError as e:
+                # call_llm 抛出的真正超时（网络/读取超时）
                 logger.warning(
-                    "LLM 安全分析第 %d/%d 次调用失败: %s",
+                    "LLM 调用网络超时: %s，第 %d/%d 次尝试",
+                    e,
                     attempt,
                     max_retries,
+                )
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+                else:
+                    raise LLMAnalysisFailure(
+                        f"LLM 调用网络超时（已重试 {max_retries} 次）: {e}"
+                    )
+
+            except Exception as e:
+                # API 错误（如并发限制 500006、400/500 错误等），非超时
+                error_type = type(e).__name__
+                logger.warning(
+                    "LLM 安全分析第 %d/%d 次调用失败 [%s]: %s",
+                    attempt,
+                    max_retries,
+                    error_type,
                     e,
                 )
                 if attempt < max_retries:
                     time.sleep(retry_interval)
                 else:
-                    # LLM 分析全部失败
                     raise LLMAnalysisFailure(
-                        f"LLM 安全分析全部失败（{max_retries} 次）: {e}"
+                        f"LLM 安全分析失败（{max_retries} 次）[{error_type}]: {e}"
                     )
 
     def _parse_llm_response(self, response: str) -> SecurityJudgment:
