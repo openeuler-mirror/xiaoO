@@ -7,6 +7,7 @@
 4. 危险操作模式检测 — 批量删除/修改、通配符滥用
 """
 
+import json
 import os
 import re
 from pathlib import Path
@@ -147,7 +148,12 @@ class LogicRulesChecker:
         # 检查历史动作中是否有对这些路径的读取操作
         history_read_paths = set()
         for action in action_history:
-            hist_detail = action.get("action_detail", "").lower() if isinstance(action, dict) else str(action).lower()
+            # action_detail 可能是 dict 或 string，需要统一处理
+            hist_detail_raw = action.get("action_detail", "") if isinstance(action, dict) else ""
+            if isinstance(hist_detail_raw, dict):
+                hist_detail = json.dumps(hist_detail_raw, ensure_ascii=False).lower()
+            else:
+                hist_detail = str(hist_detail_raw).lower()
             hist_name = action.get("name", action.get("action_type", "")).lower() if isinstance(action, dict) else ""
             is_read = any(kw in hist_name or kw in hist_detail for kw in READ_KEYWORDS)
             if is_read:
