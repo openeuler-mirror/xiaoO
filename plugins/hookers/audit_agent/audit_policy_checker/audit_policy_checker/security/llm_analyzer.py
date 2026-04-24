@@ -93,6 +93,15 @@ class LLMAnalyzer:
         retry_interval = config.retry.retry_interval
         _call_start = time.monotonic()  # 记录调用开始时间，用于精确计算耗时
 
+        # 根据 AUDIT_LLM_TIMEOUT 自动计算单次 call_llm 超时时间
+        # 公式：总超时 = N 次调用 + (N-1) 次重试间隔
+        # 所以：单次超时 = (总超时 - 重试间隔 * (max_retries - 1)) / max_retries
+        single_call_timeout = (
+            _AUDIT_LLM_TIMEOUT - retry_interval * (max_retries - 1)
+        ) / max_retries
+        # 确保单次超时至少 10 秒
+        single_call_timeout = max(single_call_timeout, 10.0)
+
         for attempt in range(1, max_retries + 1):
             try:
                 # 使用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制
@@ -100,7 +109,7 @@ class LLMAnalyzer:
                     future = executor.submit(
                         call_llm,
                         prompt=judge_prompt,
-                        timeout=config.timeout.prompt2_timeout,
+                        timeout=single_call_timeout,
                         config=config.llm,
                     )
                     llm_response = future.result(timeout=_AUDIT_LLM_TIMEOUT)
