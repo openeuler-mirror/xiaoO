@@ -12,6 +12,11 @@ from datetime import datetime
 
 from ..config import Config, get_log_path, get_llm_timeout
 from ..llm_client import call_llm
+from .script_content_analyzer import (
+    ScriptAnalysisResult,
+    analyze_script_content,
+    format_script_analysis_for_prompt,
+)
 from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
@@ -66,6 +71,14 @@ class LLMAnalyzer:
         # 3. 格式化启发式/逻辑规则提示
         hints_text = self._format_hints(heuristic_result, logic_result)
 
+        # 3.5 脚本内容分析（方案3: 关键词预筛选）
+        # 当检测到脚本执行时，预扫描脚本内容中的可疑关键词
+        # 如果命中可疑关键词，将脚本内容注入 LLM prompt 进行深度分析
+        action_type = a_next.get("action_type", "")
+        action_detail = a_next.get("action_detail", "")
+        script_analysis = analyze_script_content(action_type, action_detail)
+        script_analysis_text = format_script_analysis_for_prompt(script_analysis)
+
         # 4. 生成安全判断 prompt
         judge_prompt = get_security_judge_prompt(
             prompt_session=prompt_session,
@@ -74,6 +87,7 @@ class LLMAnalyzer:
             reason=reason,
             skills_text=skills_text,
             hints_text=hints_text,
+            script_analysis_text=script_analysis_text,
         )
 
         # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）

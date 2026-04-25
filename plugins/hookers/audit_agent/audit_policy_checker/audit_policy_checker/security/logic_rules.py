@@ -97,7 +97,7 @@ class LogicRulesChecker:
             LogicRuleResult: 检测结果
         """
         # 1. read_before_write 原则
-        rbw_result = self._check_read_before_write(action_history, a_next)
+        rbw_result = self._check_read_before_write(action_history, a_next, reason)
         if rbw_result.hit:
             return rbw_result
 
@@ -119,7 +119,7 @@ class LogicRulesChecker:
         return LogicRuleResult(hit=False)
 
     def _check_read_before_write(
-        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+        self, action_history: list[dict[str, object]], a_next: dict[str, str], reason: str = ""
     ) -> LogicRuleResult:
         """
         read_before_write 原则：
@@ -269,10 +269,16 @@ class LogicRulesChecker:
         检测通配符滥用、批量操作等危险模式。
         """
         action_detail = a_next.get("action_detail", "").lower()
+        action_type = a_next.get("action_type", "").lower()
+
+        # 排除 file_write/file_edit，因为 action_detail 包含文件内容
+        # 对文件内容进行"通配符+删除"检测会产生大量误报
+        if action_type in ("file_write", "file_edit"):
+            return LogicRuleResult(hit=False)
 
         # 通配符 + 删除/修改
         if ("*" in action_detail or "?" in action_detail) and any(
-            kw in action_detail for kw in ["rm", "del", "delete", "remove", "删除", "移除"]
+            kw in action_detail for kw in ["rm ", "rm\t", "del ", "del\t", "delete", "remove ", "remove\t", "删除", "移除"]
         ):
             return LogicRuleResult(
                 hit=True,
