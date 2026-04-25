@@ -65,6 +65,8 @@ class ScriptAnalysisResult:
     line_count: int = 0  # 脚本行数
     is_suspicious: bool = False  # 是否可疑
     error: str = ""  # 读取错误信息
+    risk_level: str = ""  # 预判风险等级: critical, high, medium, low
+    risk_reason: str = ""  # 预判风险原因
 
 
 def extract_script_path(command: str) -> str | None:
@@ -99,6 +101,116 @@ def scan_script_for_keywords(script_content: str) -> list[str]:
         if pattern.search(script_content):
             matched.append(name)
     return matched
+
+
+# 关键词组合风险评估规则
+# (关键词集合, 风险等级, 风险原因)
+KEYWORD_COMBINATION_RISKS: list[tuple[set[str], str, str]] = [
+    # Critical: 数据外传 - 凭证/密钥
+    (
+        {"curl POST", "curl --data", "curl -d", "wget --post-data", "wget --post-file"},
+        {"$(base64", "`base64", "base64 decode pipe"},
+        "critical",
+        "检测到网络数据发送 + Base64编码组合，构成 Critical 级别数据外传风险。攻击者可能将敏感数据编码后外传。",
+    ),
+    (
+        {"curl POST", "curl --data", "curl -d", "wget --post-data", "wget --post-file"},
+        {"/etc/shadow", "id_rsa", "id_ed25519"},
+        "critical",
+        "检测到网络数据发送 + 敏感文件访问组合，构成 Critical 级别凭证外传风险。",
+    ),
+    # High: 反弹 Shell
+    (
+        {"nc -e", "ncat -e", "/dev/tcp", "/dev/udp"},
+        set(),  # 单独出现即为 High
+        "high",
+        "检测到反弹 Shell 特征，攻击者可能建立远程控制通道。",
+    ),
+    # High: 持久化后门
+    (
+        {"crontab install", "authorized_keys", "ssh no host key check"},
+        set(),
+        "high",
+        "检测到持久化后门特征，攻击者可能在系统中植入后门。",
+    ),
+]
+
+
+def assess_keyword_combination_risk(
+    matched_keywords: list[str], script_content: str
+) -> tuple[str, str]:
+    """
+    根据命中的关键词组合评估风险等级。
+
+    Args:
+        matched_keywords: 命中的关键词列表
+        script_content: 脚本内容（用于额外检测）
+
+    Returns:
+        tuple[str, str]: (风险等级, 风险原因)
+    """
+    if not matched_keywords:
+        return "", ""
+
+    keyword_set = set(matched_keywords)
+
+    # 检查关键词组合规则
+    for group1, group2, level, reason in KEYWORD_COMBINATION_RISKS:
+        hit_group1 = bool(keyword_set & group1)
+        hit_group2 = bool(keyword_set & group2) if group2 else True
+
+        if hit_group1 and hit_group2:
+            return level, reason
+
+    # 额外检测：curl POST + env 变量外传
+    # 这是一个常见的数据外传模式，即使没有匹配到 base64 关键词
+    has_network_post = bool(keyword_set & {"curl POST", "curl --data", "curl -d", "wget --post-data", "wget --post-file"})
+    if has_network_post:
+        # 检查脚本中是否包含 env、$USER、$(hostname) 等系统信息收集
+        env_patterns = ["$env", "$(env)", "$USER", "$(hostname)", "$(pwd)", "$HOME"]
+        content_lower = script_content.lower()
+        for pattern in env_patterns:
+            if pattern.lower() in content_lower:
+                return "critical", (
+                    "检测到网络数据发送 + 系统环境变量收集组合，构成 Critical 级别数据外传风险。"
+                    "脚本可能将用户环境变量（可能包含 API Key、密钥等敏感信息）发送到远程服务器。"
+                )
+
+    # 单独关键词的默认风险等级
+    single_keyword_risks = {
+        "curl POST": ("high", "检测到 curl POST 请求，可能向外部服务器发送数据。"),
+        "curl --data": ("high", "检测到 curl --data 参数，可能向外部服务器发送数据。"),
+        "curl -d": ("high", "检测到 curl -d 参数，可能向外部服务器发送数据。"),
+        "wget --post-data": ("high", "检测到 wget POST 请求，可能向外部服务器发送数据。"),
+        "wget --post-file": ("high", "检测到 wget 文件上传，可能向外部服务器发送文件。"),
+        "nc -e": ("critical", "检测到 nc -e 反弹 Shell 特征。"),
+        "ncat -e": ("critical", "检测到 ncat -e 反弹 Shell 特征。"),
+        "/dev/tcp": ("critical", "检测到 /dev/tcp 反弹 Shell 特征。"),
+        "/dev/udp": ("critical", "检测到 /dev/udp 反弹 Shell 特征。"),
+        "$(base64": ("high", "检测到 Base64 编码执行，可能是混淆逃逸。"),
+        "`base64": ("high", "检测到 Base64 编码执行，可能是混淆逃逸。"),
+        "base64 decode pipe": ("high", "检测到 Base64 解码后管道执行，可能是混淆逃逸。"),
+        "/etc/shadow": ("critical", "检测到访问系统密码文件。"),
+        "id_rsa": ("critical", "检测到访问 SSH 私钥。"),
+        "id_ed25519": ("critical", "检测到访问 SSH 私钥。"),
+        "crontab install": ("high", "检测到修改定时任务，可能是持久化后门。"),
+        "authorized_keys": ("high", "检测到修改 SSH 授权密钥，可能是持久化后门。"),
+        "ssh no host key check": ("high", "检测到 SSH 跳过主机密钥验证，可能是横向移动。"),
+    }
+
+    # 取最高风险等级
+    best_level = ""
+    best_reason = ""
+    level_order = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+    for kw in matched_keywords:
+        if kw in single_keyword_risks:
+            level, reason = single_keyword_risks[kw]
+            if level_order.get(level, 0) > level_order.get(best_level, 0):
+                best_level = level
+                best_reason = reason
+
+    return best_level, best_reason
 
 
 def read_script_content(script_path: str, max_lines: int = 500) -> tuple[str, int, str]:
@@ -172,11 +284,15 @@ def analyze_script_content(
     matched_keywords = scan_script_for_keywords(content)
     is_suspicious = len(matched_keywords) > 0
 
+    # 评估关键词组合风险
+    risk_level, risk_reason = "", ""
     if is_suspicious:
+        risk_level, risk_reason = assess_keyword_combination_risk(matched_keywords, content)
         logger.info(
-            "脚本内容检测到可疑关键词: path=%s, keywords=%s",
+            "脚本内容检测到可疑关键词: path=%s, keywords=%s, risk_level=%s",
             script_path,
             matched_keywords,
+            risk_level,
         )
 
     return ScriptAnalysisResult(
@@ -185,6 +301,8 @@ def analyze_script_content(
         matched_keywords=matched_keywords,
         line_count=line_count,
         is_suspicious=is_suspicious,
+        risk_level=risk_level,
+        risk_reason=risk_reason,
     )
 
 
@@ -208,10 +326,22 @@ def format_script_analysis_for_prompt(result: ScriptAnalysisResult) -> str:
         return ""
 
     keywords_str = ", ".join(result.matched_keywords)
+
+    # 构建风险提示
+    risk_hint = ""
+    if result.risk_level and result.risk_reason:
+        risk_level_upper = result.risk_level.upper()
+        risk_hint = (
+            f"\n\n🔴 **风险评估**: {risk_level_upper} 级别\n"
+            f"**风险原因**: {result.risk_reason}\n"
+            f"**建议**: 此脚本应被拒绝（Deny），除非有明确的业务需求且已确认目标服务器可信。"
+        )
+
     return (
         f"⚠️ 检测到脚本执行，且脚本内容包含可疑关键词:\n"
         f"   脚本路径: {result.script_path}\n"
         f"   可疑关键词: {keywords_str}\n"
-        f"   脚本行数: {result.line_count}\n\n"
+        f"   脚本行数: {result.line_count}"
+        f"{risk_hint}\n\n"
         f"### 脚本内容 ###\n```\n{result.script_content}\n```\n"
     )
