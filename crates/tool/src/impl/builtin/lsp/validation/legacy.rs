@@ -1,3 +1,4 @@
+#![allow(unused)]
 use super::input::LspInput;
 
 pub mod error_code {

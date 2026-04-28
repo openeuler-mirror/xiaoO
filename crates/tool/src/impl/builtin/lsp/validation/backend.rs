@@ -5,6 +5,7 @@ pub mod error_code {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationResult {
     pub result: bool,
     pub message: Option<String>,

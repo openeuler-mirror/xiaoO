@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! GlobTool executor implementation.
 
 use async_trait::async_trait;

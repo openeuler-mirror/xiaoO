@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! FileReadTool executor implementation.
 
 use std::path::Path;

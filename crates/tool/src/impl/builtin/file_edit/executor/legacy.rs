@@ -1,5 +1,5 @@
 //! FileEditTool executor implementation.
-#![allow(unused_imports)]
+#![allow(unused)]
 
 use similar::{ChangeTag, TextDiff};
 use std::sync::Arc;

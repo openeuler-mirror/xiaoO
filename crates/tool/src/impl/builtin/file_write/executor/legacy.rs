@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! FileWriteTool executor implementation.
 
 use std::path::Path;
