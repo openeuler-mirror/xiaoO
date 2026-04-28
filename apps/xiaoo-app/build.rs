@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::path::Path;
 
 fn main() {
@@ -10,42 +11,44 @@ fn main() {
         .parent()
         .unwrap()
         .join("plugins/skills/xiaoo-guardian");
+    println!("cargo:rerun-if-changed={}", src.display());
 
-    let home = env::var("HOME").expect("HOME not set");
+    let Ok(home) = env::var("HOME") else {
+        return;
+    };
     let dst = Path::new(&home).join(".xiaoo/skills/xiaoo-guardian");
 
     if !src.exists() {
-        println!(
-            "cargo:warning=Source skill directory not found: {}",
-            src.display()
-        );
         return;
     }
 
-    fs::create_dir_all(dst.parent().unwrap()).expect("Failed to create skills directory");
-    copy_dir_recursive(&src, &dst);
-    println!(
-        "cargo:warning=Installed xiaoo-guardian skill to {}",
-        dst.display()
-    );
+    let Some(skills_dir) = dst.parent() else {
+        return;
+    };
+
+    if fs::create_dir_all(skills_dir).is_ok() {
+        let _ = copy_dir_recursive(&src, &dst);
+    }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     if !dst.exists() {
-        fs::create_dir_all(dst).expect("Failed to create directory");
+        fs::create_dir_all(dst)?;
     }
 
-    for entry in fs::read_dir(src).expect("Failed to read directory") {
-        let entry = entry.expect("Failed to read entry");
-        let ty = entry.file_type().expect("Failed to get file type");
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
         let file_name = entry.file_name();
         let src_path = src.join(&file_name);
         let dst_path = dst.join(&file_name);
 
         if ty.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path);
+            copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            fs::copy(&src_path, &dst_path).expect("Failed to copy file");
+            fs::copy(&src_path, &dst_path)?;
         }
     }
+
+    Ok(())
 }
