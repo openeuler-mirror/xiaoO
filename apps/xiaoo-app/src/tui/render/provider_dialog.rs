@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(dialog.selected_model, 0);
         assert_eq!(
             dialog.selected(),
-            Some(("deepseek".to_string(), "deepseek-chat".to_string()))
+            Some(("deepseek".to_string(), "deepseek-v4-flash".to_string()))
         );
     }
 }

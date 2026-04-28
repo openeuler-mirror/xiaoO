@@ -1,7 +1,6 @@
-use crate::channels::feishu::{FeishuAdapter, FeishuConfig};
 use crate::channels::{
-    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError,
-    ChannelOutboundAttachment, ChannelOutboundAttachmentKind, ChannelResult, ChannelRuntime,
+    build_feishu_runtime, AdapterResponse, ChannelAdapter, ChannelError, ChannelOutboundAttachment,
+    ChannelOutboundAttachmentKind, ChannelResult, ChannelRuntime, FeishuConfig,
 };
 use crate::gateway::channel_interaction::{
     resolve_interaction_from_text, ChannelInteractionHandle,
@@ -20,7 +19,7 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, Request, StatusCode,
@@ -45,7 +44,7 @@ pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
     session_service: Arc<dyn SessionService>,
     session_control_plane: Option<Arc<dyn crate::gateway::SessionControlPlane>>,
-    feishu_runtime: Option<ChannelRuntime>,
+    channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
     pending_interactions: Arc<PendingInteractionStore>,
     remote_interactions: Arc<RemoteInteractionStore>,
     interaction_timeout_secs: u64,
@@ -58,7 +57,7 @@ impl GatewayAppState {
             gateway_service: Arc::new(GatewayService::new(session_service.clone())),
             session_service,
             session_control_plane: None,
-            feishu_runtime: None,
+            channel_runtimes: Arc::new(HashMap::new()),
             pending_interactions,
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             interaction_timeout_secs: 600,
@@ -78,16 +77,9 @@ impl GatewayAppState {
         session_service: Arc<dyn SessionService>,
         feishu_config: FeishuConfig,
     ) -> ChannelResult<Self> {
-        let adapter: Arc<dyn ChannelAdapter> = Arc::new(FeishuAdapter::new(feishu_config)?);
         Ok(Self::with_channel_runtime(
             session_service,
-            ChannelRuntime {
-                instance_id: "feishu".to_string(),
-                channel_id: "feishu".to_string(),
-                meta: feishu_meta(),
-                capabilities: feishu_capabilities(),
-                adapter,
-            },
+            build_feishu_runtime(feishu_config)?,
         ))
     }
 
@@ -105,15 +97,53 @@ impl GatewayAppState {
         session_service: Arc<dyn SessionService>,
         runtime: ChannelRuntime,
     ) -> Self {
+        let mut runtimes = HashMap::new();
+        runtimes.insert(runtime.channel_id.clone(), runtime);
         Self {
             gateway_service: Arc::new(GatewayService::new(session_service.clone())),
             session_service,
             session_control_plane: None,
-            feishu_runtime: Some(runtime),
+            channel_runtimes: Arc::new(runtimes),
             pending_interactions: Arc::new(PendingInteractionStore::new()),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             interaction_timeout_secs: 600,
         }
+    }
+
+    pub fn with_channel_runtimes(
+        session_service: Arc<dyn SessionService>,
+        runtimes: Vec<ChannelRuntime>,
+    ) -> ChannelResult<Self> {
+        let mut runtime_map = HashMap::new();
+        for runtime in runtimes {
+            if runtime_map
+                .insert(runtime.channel_id.clone(), runtime)
+                .is_some()
+            {
+                return Err(ChannelError::Config {
+                    message: "duplicate channel runtime id".to_string(),
+                });
+            }
+        }
+        Ok(Self {
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            session_service,
+            session_control_plane: None,
+            channel_runtimes: Arc::new(runtime_map),
+            pending_interactions: Arc::new(PendingInteractionStore::new()),
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
+            interaction_timeout_secs: 600,
+        })
+    }
+
+    pub fn with_channel_runtimes_and_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        runtimes: Vec<ChannelRuntime>,
+    ) -> ChannelResult<Self> {
+        let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
+        state.session_control_plane = Some(session_control_plane);
+        Ok(state)
     }
 }
 
@@ -323,6 +353,23 @@ pub fn create_router_with_feishu_control_plane_and_timeout_and_auth(
     Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
 
+pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    runtimes: Vec<ChannelRuntime>,
+    interaction_timeout_secs: u64,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
+        session_service,
+        session_control_plane,
+        runtimes,
+    )?;
+    state.interaction_timeout_secs = interaction_timeout_secs;
+    Ok(create_router_from_state(state, bearer_auth, rate_limit))
+}
+
 fn create_router_from_state(
     state: GatewayAppState,
     bearer_auth: Option<HttpBearerAuthConfig>,
@@ -358,7 +405,10 @@ fn create_router_from_state(
 
     let router = Router::new()
         .route("/api/v1/health", get(health_check))
-        .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
+        .route(
+            "/api/v1/channels/:channel_id/events",
+            post(handle_channel_events),
+        )
         .merge(protected_routes)
         .merge(protected_session_routes)
         .with_state(Arc::new(state));
@@ -712,16 +762,18 @@ async fn handle_chat_stream(
         .into_response()
 }
 
-async fn handle_feishu_events(
+async fn handle_channel_events(
     State(state): State<Arc<GatewayAppState>>,
+    Path(channel_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(runtime) = state.feishu_runtime.clone() else {
+    let Some(runtime) = state.channel_runtimes.get(&channel_id).cloned() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(GatewayErrorResponse {
-                error: "feishu webhook is not configured".to_string(),
+                error: format!("{channel_id} webhook is not configured"),
             }),
         )
             .into_response();
@@ -729,7 +781,7 @@ async fn handle_feishu_events(
 
     let adapter = runtime.adapter.clone();
 
-    match adapter.handle_event(&headers, body.as_ref()).await {
+    match adapter.handle_event(&headers, &query, body.as_ref()).await {
         Ok((AdapterResponse::Challenge { challenge }, _)) => {
             Json(serde_json::json!({ "challenge": challenge })).into_response()
         }
@@ -809,7 +861,7 @@ async fn process_channel_message(
     let mut gateway_message = build_gateway_channel_message(message)?;
     gateway_message.channel_identity_prompt = channel_identity_prompt;
 
-    // Create a ChannelInteractionHandle so ask_user_question works in Feishu.
+    // Create a ChannelInteractionHandle so ask_user_question works through channel adapters.
     let interaction_handle: Option<Arc<dyn agent_contracts::InteractionHandle>> =
         Some(Arc::new(ChannelInteractionHandle::new(
             state.interaction_timeout_secs,
@@ -1134,8 +1186,9 @@ impl ChannelFileSender for AdapterFileSender {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, handle_feishu_events, validate_test_chat_request, GatewayAppState,
-        GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention, TestChatRequest,
+        create_router_with_auth, handle_channel_events, validate_test_chat_request,
+        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention,
+        TestChatRequest,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -1146,9 +1199,10 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{to_bytes, Body, Bytes},
-        extract::State,
+        extract::{Path, Query, State},
         http::{HeaderMap, Request, StatusCode},
     };
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
@@ -1384,6 +1438,7 @@ mod tests {
         async fn handle_event(
             &self,
             _headers: &HeaderMap,
+            _query: &HashMap<String, String>,
             _body: &[u8],
         ) -> ChannelResult<(AdapterResponse, Option<ChannelMessage>)> {
             self.event_result.clone()
@@ -1484,8 +1539,14 @@ mod tests {
             runtime,
         ));
 
-        let response =
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        let response = handle_channel_events(
+            State(state),
+            Path("feishu".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let requests = session_service
@@ -1531,8 +1592,14 @@ mod tests {
             build_fake_runtime(adapter, false),
         ));
 
-        let response =
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        let response = handle_channel_events(
+            State(state),
+            Path("feishu".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(session_service
@@ -1577,7 +1644,13 @@ mod tests {
 
         let response = timeout(
             Duration::from_millis(50),
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")),
+            handle_channel_events(
+                State(state),
+                Path("feishu".to_string()),
+                Query(HashMap::new()),
+                HeaderMap::new(),
+                Bytes::from_static(b"{}"),
+            ),
         )
         .await
         .expect("async webhook route should acknowledge immediately");
