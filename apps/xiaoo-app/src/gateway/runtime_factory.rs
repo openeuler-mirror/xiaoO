@@ -375,7 +375,7 @@ impl RuntimeView for SkillAwareRuntimeView {
     fn channel_file_sender(&self) -> Option<&dyn agent_contracts::ChannelFileSender> {
         self.channel_file_sender.as_deref()
     }
-    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
         self.inner.operation_backend()
     }
 }

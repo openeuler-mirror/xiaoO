@@ -6,8 +6,8 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError, PathKind,
-    PathStat,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind, OperationError,
+    PathKind, PathStat,
 };
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
@@ -35,6 +35,42 @@ pub struct LocalOperationBackend {
 }
 
 impl LocalOperationBackend {
+    /// Build a backend rooted at the process home directory.
+    /// Falls back to the temp directory when HOME is unset.
+    pub fn new_with_home() -> Self {
+        let home_dir_host: Option<std::path::PathBuf> = std::env::var("HOME")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                #[cfg(windows)]
+                {
+                    std::env::var("USERPROFILE")
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                }
+                #[cfg(not(windows))]
+                {
+                    None
+                }
+            });
+
+        let workspace_root_host = home_dir_host.clone().unwrap_or_else(std::env::temp_dir);
+        let workspace_root = BackendPath(workspace_root_host.to_string_lossy().into_owned());
+        let home_dir = home_dir_host
+            .as_ref()
+            .map(|p| BackendPath(p.to_string_lossy().into_owned()));
+
+        Self::new(Arc::new(LocalBackendState {
+            backend_id: "lsp-local".to_string(),
+            workspace_root,
+            workspace_root_host,
+            home_dir,
+            home_dir_host,
+            temp_root_host: std::env::temp_dir(),
+            default_shell: None,
+        }))
+    }
+
     pub(crate) fn new(state: Arc<LocalBackendState>) -> Self {
         Self {
             backend_id: state.backend_id.clone(),
@@ -209,6 +245,10 @@ fn path_kind_from_metadata(metadata: &std::fs::Metadata) -> PathKind {
 impl OperationBackend for LocalOperationBackend {
     fn backend_id(&self) -> &str {
         self.backend_id.as_str()
+    }
+
+    fn backend_kind(&self) -> OperationBackendKind {
+        OperationBackendKind::Local
     }
 
     fn capabilities(&self) -> OperationBackendCapabilities {

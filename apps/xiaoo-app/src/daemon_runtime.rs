@@ -1,6 +1,6 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
 use agent_contracts::backend::OperationBackendConfig;
-use agent_contracts::lsp::LspProvider;
+use lsp::LspServiceRegistry;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -44,7 +44,7 @@ pub struct ConfiguredRuntimeResolver {
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
-    lsp_service: Option<Arc<dyn LspProvider>>,
+    lsp_registry: Option<Arc<LspServiceRegistry>>,
     operation_backend: Option<OperationBackendConfig>,
 }
 
@@ -88,7 +88,7 @@ impl ConfiguredRuntimeResolver {
         let skill_registry: Arc<dyn SkillRegistry> =
             Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
 
-        let lsp_service = config.resolve_lsp_service();
+        let lsp_registry = config.build_lsp_registry();
 
         Ok(Self {
             agent,
@@ -101,7 +101,7 @@ impl ConfiguredRuntimeResolver {
             hooker: config.app.hooker.clone(),
             skill_registry,
             operation_backend: config.app.operation_backend.clone(),
-            lsp_service,
+            lsp_registry,
         })
     }
 
@@ -110,7 +110,7 @@ impl ConfiguredRuntimeResolver {
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let services = ToolRuntimeServices {
-            lsp_service: self.lsp_service.clone(),
+            lsp_registry: self.lsp_registry.clone(),
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);

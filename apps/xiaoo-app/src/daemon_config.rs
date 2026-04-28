@@ -1,8 +1,7 @@
 use agent_contracts::backend::OperationBackendConfig;
-use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
-use lsp::{AutoInstall, LspService, ServerConfig};
+use lsp::LspServiceRegistry;
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -415,63 +414,22 @@ impl DaemonConfig {
         self.app.compact.as_ref()
     }
 
-    /// Build an `LspProvider` if `[lsp] enabled = true`, otherwise return `None`.
-    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+    /// Build a [`LspServiceRegistry`] if `[lsp] enabled = true`, otherwise return `None`.
+    ///
+    /// The registry constructs one [`LspService`] per operation backend on demand,
+    /// so each session uses the LSP servers bound to its own backend.
+    pub fn build_lsp_registry(&self) -> Option<Arc<LspServiceRegistry>> {
         let lsp = self.app.lsp.as_ref()?;
         if !lsp.enabled {
             return None;
         }
 
-        // Convert user-defined extra servers to the lsp crate's ServerConfig.
-        // Built-in servers are added by LspService itself; we only pass extras here.
-        let extra: Vec<ServerConfig> = lsp
-            .extra_servers
-            .iter()
-            .map(|c| {
-                // ServerConfig uses &'static str fields for the built-in table, but for
-                // user-supplied configs we leak the strings so they live for 'static.
-                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
-                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
-
-                let extensions: &'static [&'static str] = Box::leak(
-                    c.extensions
-                        .iter()
-                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let args: &'static [&'static str] = Box::leak(
-                    c.args
-                        .iter()
-                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let root_markers: &'static [&'static str] = Box::leak(
-                    c.root_markers
-                        .iter()
-                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-
-                ServerConfig {
-                    id,
-                    extensions,
-                    command,
-                    args,
-                    root_markers,
-                    language_id,
-                    initialization_options: None,
-                    auto_install: AutoInstall::None,
-                }
-            })
-            .collect();
-
-        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
+        let extra = crate::lsp_support::build_extra_server_configs(&lsp.extra_servers);
+        Some(Arc::new(LspServiceRegistry::new(extra)))
     }
 }
+
+
 
 pub fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {

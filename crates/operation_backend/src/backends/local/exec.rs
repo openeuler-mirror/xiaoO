@@ -25,6 +25,12 @@ impl OperationExec for LocalExec {
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
         let mut command = build_command(self._state.default_shell.as_deref(), &request)?;
 
+        if let Some(env_vars) = &request.env {
+            for (k, v) in env_vars {
+                command.env(k, v);
+            }
+        }
+
         if let Some(cwd) = request.cwd.as_ref() {
             let cwd = self._state.backend_path_to_host(cwd)?;
             self._state.ensure_directory(cwd.as_path())?;

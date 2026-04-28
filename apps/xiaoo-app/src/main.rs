@@ -1,5 +1,6 @@
 mod daemon_config;
 mod daemon_runtime;
+mod lsp_support;
 
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;

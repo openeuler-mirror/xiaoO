@@ -189,6 +189,7 @@ impl GrepExecutor {
                 shell: None,
                 cwd: Some(cwd),
                 timeout_ms: None,
+                env: None,
             })
             .await
             .map_err(|e| format!("Failed to execute rg via backend exec: {}", e))?;
@@ -417,11 +418,11 @@ impl ToolExecutor for GrepExecutor {
             }
         };
 
-        let resolved_target = Self::resolve_search_target(input.path.as_deref(), backend)
+        let resolved_target = Self::resolve_search_target(input.path.as_deref(), &*backend)
             .await
             .map_err(|e| ToolExecutionError::ExecutionFailed { message: e })?;
 
-        match self.call_inner(&input, &resolved_target, backend).await {
+        match self.call_inner(&input, &resolved_target, &*backend).await {
             Ok(output) => {
                 let json = serde_json::to_string(&output).map_err(|e| {
                     ToolExecutionError::ExecutionFailed {

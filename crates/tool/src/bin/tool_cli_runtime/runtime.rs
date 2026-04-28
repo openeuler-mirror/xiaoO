@@ -120,7 +120,7 @@ impl RuntimeView for ToolCliRuntime {
         self.hookers.as_ref()
     }
 
-    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
-        Some(self.operation_backend.as_ref())
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        Some(Arc::clone(&self.operation_backend))
     }
 }

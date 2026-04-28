@@ -218,6 +218,12 @@ impl ToolExecutor for FileReadExecutor {
             }
         })?;
 
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(operation_backend::local_lsp_backend()));
+
         let workspace_root = runtime_workspace_root(runtime);
         let validation_result = validation::validate_input_with_base(&input, workspace_root);
         if !validation_result.result {
@@ -288,7 +294,7 @@ impl ToolExecutor for FileReadExecutor {
             Ok(FileReadOutput::Text(text_output)) => {
                 // Fire-and-forget: warm the LSP server so subsequent hover/definition/diagnostics
                 // calls return faster. Mirrors opencode's `LSP.touchFile(filepath, false)`.
-                if let Some(lsp) = &self.services.lsp_service {
+                if let Some(ref lsp) = lsp {
                     spawn_touch_file(lsp, Path::new(&resolved_file_path));
                 }
                 let json_output = serde_json::to_string(&FileReadOutput::Text(text_output))

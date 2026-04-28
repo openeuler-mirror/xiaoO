@@ -188,8 +188,8 @@ impl RuntimeView for BasicRuntimeView {
         self.hookers.as_ref()
     }
 
-    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
-        self.operation_backend.as_deref()
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        self.operation_backend.clone()
     }
 }
 

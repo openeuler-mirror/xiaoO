@@ -1,8 +1,9 @@
-mod backend;
+pub(crate) mod backend;
 mod exec;
 mod export;
 mod factory;
 mod filesystem;
+pub mod lsp_backend;
 mod path;
 mod search;
 

@@ -1,9 +1,8 @@
 use agent_contracts::backend::OperationBackendConfig;
-use agent_contracts::lsp::LspProvider;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use llm_client::ProtocolFamily;
-use lsp::{AutoInstall, LspService, ServerConfig};
+use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
@@ -221,54 +220,13 @@ impl Config {
         }
     }
 
-    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+    pub fn build_lsp_registry(&self) -> Option<Arc<LspServiceRegistry>> {
         let lsp = self.lsp.as_ref()?;
         if !lsp.enabled {
             return None;
         }
-
-        let extra: Vec<ServerConfig> = lsp
-            .extra_servers
-            .iter()
-            .map(|c| {
-                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
-                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
-                let extensions: &'static [&'static str] = Box::leak(
-                    c.extensions
-                        .iter()
-                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let args: &'static [&'static str] = Box::leak(
-                    c.args
-                        .iter()
-                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let root_markers: &'static [&'static str] = Box::leak(
-                    c.root_markers
-                        .iter()
-                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                ServerConfig {
-                    id,
-                    extensions,
-                    command,
-                    args,
-                    root_markers,
-                    language_id,
-                    initialization_options: None,
-                    auto_install: AutoInstall::None,
-                }
-            })
-            .collect();
-
-        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
+        let extra = build_extra_server_configs(&lsp.extra_servers);
+        Some(Arc::new(LspServiceRegistry::new(extra)))
     }
 }
 
@@ -362,6 +320,48 @@ fn llm_secrets_path(config_path: &Path) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(LLM_SECRETS_FILE)
+}
+
+fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
+    extra_servers
+        .iter()
+        .map(|c| {
+            let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
+            let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
+            let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
+            let extensions: &'static [&'static str] = Box::leak(
+                c.extensions
+                    .iter()
+                    .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let args: &'static [&'static str] = Box::leak(
+                c.args
+                    .iter()
+                    .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let root_markers: &'static [&'static str] = Box::leak(
+                c.root_markers
+                    .iter()
+                    .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            ServerConfig {
+                id,
+                extensions,
+                command,
+                args,
+                root_markers,
+                language_id,
+                initialization_options: None,
+                auto_install: AutoInstall::None,
+            }
+        })
+        .collect()
 }
 
 fn default_agent_id() -> String {

@@ -115,7 +115,7 @@ impl ToolExecutor for GlobToolExecutor {
         }
         let backend = backend.unwrap();
 
-        let base_dir = Self::resolve_and_validate_base_dir(input.path.as_deref(), backend)
+        let base_dir = Self::resolve_and_validate_base_dir(input.path.as_deref(), &*backend)
             .await
             .map_err(|message| ToolExecutionError::ExecutionFailed { message })?;
 
