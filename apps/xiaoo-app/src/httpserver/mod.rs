@@ -9,9 +9,10 @@ pub use channel_ingress::{
     GatewayChannelMention, GatewayChannelMessage,
 };
 pub use router::{
-    create_router, create_router_with_auth, create_router_with_feishu_and_timeout,
-    create_router_with_feishu_and_timeout_and_auth, GatewayAppState, GatewayErrorResponse,
-    GatewayHealthResponse, HttpBearerAuthConfig, TestChatRequest, TestChatResponse,
-    TestChatTurnRequest,
+    create_router, create_router_with_auth, create_router_with_control_plane_and_auth,
+    create_router_with_feishu_and_timeout, create_router_with_feishu_and_timeout_and_auth,
+    create_router_with_feishu_control_plane_and_timeout_and_auth, GatewayAppState,
+    GatewayErrorResponse, GatewayHealthResponse, HttpBearerAuthConfig, TestChatRequest,
+    TestChatResponse, TestChatTurnRequest,
 };
 pub use service::{GatewayService, GatewayServiceError, GatewayTurnResponse};

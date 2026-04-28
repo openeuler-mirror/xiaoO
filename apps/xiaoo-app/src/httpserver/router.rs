@@ -15,10 +15,12 @@ use crate::httpserver::channel_ingress::{
 use crate::httpserver::rate_limit::RateLimitConfig;
 use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use agent_contracts::{ChannelFileSender, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, Request, StatusCode,
@@ -32,16 +34,20 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 
 #[derive(Clone)]
 pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Option<Arc<dyn crate::gateway::SessionControlPlane>>,
     feishu_runtime: Option<ChannelRuntime>,
     pending_interactions: Arc<PendingInteractionStore>,
+    remote_interactions: Arc<RemoteInteractionStore>,
     interaction_timeout_secs: u64,
 }
 
@@ -49,11 +55,23 @@ impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
         let pending_interactions = Arc::new(PendingInteractionStore::new());
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service)),
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            session_service,
+            session_control_plane: None,
             feishu_runtime: None,
             pending_interactions,
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
             interaction_timeout_secs: 600,
         }
+    }
+
+    pub fn with_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    ) -> Self {
+        let mut state = Self::new(session_service);
+        state.session_control_plane = Some(session_control_plane);
+        state
     }
 
     pub fn with_feishu(
@@ -73,16 +91,80 @@ impl GatewayAppState {
         ))
     }
 
+    pub fn with_feishu_and_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        feishu_config: FeishuConfig,
+    ) -> ChannelResult<Self> {
+        let mut state = Self::with_feishu(session_service, feishu_config)?;
+        state.session_control_plane = Some(session_control_plane);
+        Ok(state)
+    }
+
     pub(crate) fn with_channel_runtime(
         session_service: Arc<dyn SessionService>,
         runtime: ChannelRuntime,
     ) -> Self {
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service)),
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            session_service,
+            session_control_plane: None,
             feishu_runtime: Some(runtime),
             pending_interactions: Arc::new(PendingInteractionStore::new()),
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
             interaction_timeout_secs: 600,
         }
+    }
+}
+
+#[derive(Default)]
+struct RemoteInteractionStore {
+    pending: Mutex<HashMap<String, oneshot::Sender<InteractionResponse>>>,
+}
+
+impl RemoteInteractionStore {
+    async fn register(&self, session_id: String) -> oneshot::Receiver<InteractionResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(session_id, tx);
+        rx
+    }
+
+    async fn answer(&self, session_id: &str, response: InteractionResponse) -> bool {
+        self.pending
+            .lock()
+            .await
+            .remove(session_id)
+            .map(|tx| tx.send(response).is_ok())
+            .unwrap_or(false)
+    }
+}
+
+struct RemoteSseInteractionHandle {
+    session_id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<SseStreamEvent>,
+    store: Arc<RemoteInteractionStore>,
+}
+
+#[async_trait]
+impl InteractionHandle for RemoteSseInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        let rx = self.store.register(self.session_id.clone()).await;
+        let _ = self.tx.send(SseStreamEvent::InteractionRequested {
+            request: request.clone(),
+        });
+
+        match rx.await {
+            Ok(response) => response,
+            Err(_) => default_interaction_response(request),
+        }
+    }
+}
+
+fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
+    match request {
+        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+        InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
     }
 }
 
@@ -224,6 +306,23 @@ pub fn create_router_with_feishu_and_timeout_and_auth(
     Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
 
+pub fn create_router_with_feishu_control_plane_and_timeout_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    feishu_config: FeishuConfig,
+    interaction_timeout_secs: u64,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_feishu_and_control_plane(
+        session_service,
+        session_control_plane,
+        feishu_config,
+    )?;
+    state.interaction_timeout_secs = interaction_timeout_secs;
+    Ok(create_router_from_state(state, bearer_auth, rate_limit))
+}
+
 fn create_router_from_state(
     state: GatewayAppState,
     bearer_auth: Option<HttpBearerAuthConfig>,
@@ -233,6 +332,27 @@ fn create_router_from_state(
         Router::new()
             .route("/api/v1/chat", post(handle_chat))
             .route("/api/v1/chat/stream", post(handle_chat_stream)),
+        bearer_auth.clone(),
+    );
+    let protected_session_routes = apply_http_bearer_auth(
+        Router::new()
+            .route("/api/v1/sessions/open", post(handle_session_open))
+            .route(
+                "/api/v1/sessions/:session_id/turn/stream",
+                post(handle_session_turn_stream),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/interaction",
+                post(handle_session_interaction),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/cancel",
+                post(handle_session_cancel),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/close",
+                post(handle_session_close),
+            ),
         bearer_auth,
     );
 
@@ -240,12 +360,26 @@ fn create_router_from_state(
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
         .merge(protected_routes)
+        .merge(protected_session_routes)
         .with_state(Arc::new(state));
 
     match rate_limit.and_then(|c| c.governor_layer()) {
         Some(layer) => router.layer(layer),
         None => router,
     }
+}
+
+pub fn create_router_with_control_plane_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> Router {
+    create_router_from_state(
+        GatewayAppState::with_control_plane(session_service, session_control_plane),
+        bearer_auth,
+        rate_limit,
+    )
 }
 
 fn apply_http_bearer_auth<S>(
@@ -318,6 +452,137 @@ async fn health_check() -> Json<GatewayHealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn handle_session_open(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<crate::gateway::SessionOpenRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.open_session(payload).await {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_turn_stream(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<crate::gateway::AppTurnRequest>,
+) -> Response {
+    if payload.session_id != session_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GatewayErrorResponse {
+                error: "path session_id does not match request session_id".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
+    let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
+    let interaction_handle = Arc::new(RemoteSseInteractionHandle {
+        session_id: session_id.clone(),
+        tx: tx.clone(),
+        store: state.remote_interactions.clone(),
+    });
+    let session_service = state.session_service.clone();
+    let conversation_id = payload.conversation_id.clone();
+
+    tokio::spawn(async move {
+        match session_service
+            .run_turn_with_interaction(payload, Some(sink.clone()), Some(interaction_handle), None)
+            .await
+        {
+            Ok(result) => {
+                let summary = sink.take_loop_summary();
+                let _ = tx.send(SseStreamEvent::Done {
+                    reply: result.visible_reply.clone(),
+                    raw_reply: result.raw_reply,
+                    conversation_id,
+                    session_id,
+                    turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
+                    total_tokens: result.total_tokens as usize,
+                    prompt_tokens: result.prompt_tokens,
+                    completion_tokens: result.completion_tokens,
+                    estimated_input_tokens: result.estimated_input_tokens,
+                    messages: result.messages,
+                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(SseStreamEvent::Error {
+                    error: error.to_string(),
+                });
+            }
+        }
+    });
+
+    Sse::new(sse_stream_from_receiver(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+async fn handle_session_interaction(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<InteractionResponse>,
+) -> Response {
+    if state.remote_interactions.answer(&session_id, payload).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse {
+                error: "no pending interaction for session".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+async fn handle_session_cancel(Path(session_id): Path<String>) -> Response {
+    Json(SseStreamEvent::Cancelled { session_id }).into_response()
+}
+
+async fn handle_session_close(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.force_close_session(&session_id).await {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+fn map_session_error(error: crate::gateway::SessionServiceError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(GatewayErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 async fn handle_chat(
@@ -427,6 +692,10 @@ async fn handle_chat_stream(
                     session_id: response.session_id,
                     turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
                     total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    estimated_input_tokens: 0,
+                    messages: Vec::new(),
                     stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
                 });
             }

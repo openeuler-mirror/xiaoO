@@ -157,6 +157,13 @@ impl App {
         };
         let summary = Line::from(vec![
             Span::styled(
+                self.state.status_panel.backend_display.clone(),
+                Style::default()
+                    .fg(self.state.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
                 provider_name,
                 Style::default().fg(self.state.theme.foreground),
             ),

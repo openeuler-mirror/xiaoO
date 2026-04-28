@@ -22,6 +22,10 @@ const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_syst
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
+        if self.remote.is_some() {
+            return self.start_remote_turn(state, prompt).await;
+        }
+
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
             let trimmed = env_name.trim();
             if !trimmed.is_empty() {

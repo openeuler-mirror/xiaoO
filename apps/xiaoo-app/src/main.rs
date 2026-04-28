@@ -12,7 +12,8 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
 use xiaoo_app::httpserver::{
-    create_router_with_auth, create_router_with_feishu_and_timeout_and_auth, HttpBearerAuthConfig,
+    create_router_with_control_plane_and_auth,
+    create_router_with_feishu_control_plane_and_timeout_and_auth, HttpBearerAuthConfig,
 };
 
 #[tokio::main]
@@ -35,8 +36,9 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let app =
         AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
     let router = match config.feishu_config()? {
-        Some(feishu) => create_router_with_feishu_and_timeout_and_auth(
+        Some(feishu) => create_router_with_feishu_control_plane_and_timeout_and_auth(
             app.session_service,
+            app.session_control_plane,
             feishu,
             config.interaction_timeout_secs(),
             bearer_auth,
@@ -44,7 +46,12 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
         )
         .map_err(anyhow::Error::new)
         .context("failed to create router with feishu")?,
-        None => create_router_with_auth(app.session_service, bearer_auth, rate_limit),
+        None => create_router_with_control_plane_and_auth(
+            app.session_service,
+            app.session_control_plane,
+            bearer_auth,
+            rate_limit,
+        ),
     };
 
     let addr: SocketAddr = format!("{host}:{port}")

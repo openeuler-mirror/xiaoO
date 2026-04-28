@@ -327,8 +327,17 @@ impl App {
         let trimmed = user_input.trim();
 
         if trimmed.eq_ignore_ascii_case("/new") {
+            self.gateway
+                .close_remote_session(&self.state.session_id)
+                .await;
             self.gateway.reset_for_new_session(&mut self.state);
             self.state.reset_for_new_session();
+            if let Some(base_url) = self.gateway.remote_base_url() {
+                self.state
+                    .status_panel
+                    .set_backend(format!("Remote: {}", base_url));
+                self.state.status_panel.set_remote_workspace(base_url);
+            }
             return Ok(());
         }
 
@@ -420,6 +429,11 @@ impl App {
             return Ok(());
         }
 
+        if is_named_slash_command(trimmed, "/remote") {
+            self.handle_remote_command(trimmed).await;
+            return Ok(());
+        }
+
         if trimmed.eq_ignore_ascii_case("/skills") {
             self.state.chat_state.input.reset();
             self.state
@@ -492,6 +506,46 @@ impl App {
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())
+    }
+
+    async fn handle_remote_command(&mut self, trimmed: &str) {
+        self.state.chat_state.input.reset();
+        let arg = slash_command_argument(trimmed, "/remote")
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let message = match arg {
+            None | Some("status") => {
+                crate::chat::Message::system(self.gateway.remote_status().await)
+            }
+            Some("off") => match self.gateway.disconnect_remote(&mut self.state).await {
+                Ok(()) => crate::chat::Message::system("Remote backend disabled. Backend: Local."),
+                Err(error) => {
+                    crate::chat::Message::error(format!("Remote disconnect failed: {error}"))
+                }
+            },
+            Some(base_url) => {
+                let token_env = self
+                    .state
+                    .agent_config
+                    .tui
+                    .remote
+                    .as_ref()
+                    .and_then(|remote| remote.bearer_token_env.clone());
+                match self
+                    .gateway
+                    .connect_remote(&mut self.state, base_url.to_string(), token_env)
+                    .await
+                {
+                    Ok(message) => crate::chat::Message::system(message),
+                    Err(error) => {
+                        crate::chat::Message::error(format!("Remote connect failed: {error}"))
+                    }
+                }
+            }
+        };
+        self.state.chat_state.messages.push(message);
+        self.state.chat_state.stick_to_bottom = true;
     }
 
     fn handle_provider_selection_key(&mut self, key: KeyEvent) -> Result<()> {
