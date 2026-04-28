@@ -15,7 +15,8 @@ pub use feishu::{
 };
 pub use telegram::{
     capabilities as telegram_capabilities, meta as telegram_meta, TelegramAdapter, TelegramClient,
-    TelegramConfig, TelegramConfigError,
+    TelegramConfig, TelegramConfigError, TelegramEventTransport, TelegramPollingMessageHandler,
+    TelegramPollingService,
 };
 
 pub fn build_feishu_runtime(config: FeishuConfig) -> ChannelResult<ChannelRuntime> {

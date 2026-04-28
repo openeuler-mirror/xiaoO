@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_app::channels::{
     build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig, TelegramConfig,
+    TelegramEventTransport,
 };
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
@@ -91,6 +92,8 @@ pub struct TelegramChannelConfig {
     pub enabled: bool,
     #[serde(default)]
     pub channel_instance_id: Option<String>,
+    #[serde(default, rename = "transport")]
+    pub event_transport: TelegramEventTransport,
     #[serde(default)]
     pub bot_token_env: Option<String>,
     #[serde(default)]
@@ -99,6 +102,10 @@ pub struct TelegramChannelConfig {
     pub bot_username: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub polling_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub polling_limit: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -391,6 +398,7 @@ impl DaemonConfig {
 
         Ok(Some(TelegramConfig {
             channel_instance_id: normalize_optional_string(telegram.channel_instance_id.clone()),
+            event_transport: telegram.event_transport,
             bot_token_env,
             webhook_secret_token: normalize_optional_string(telegram.webhook_secret_token.clone()),
             bot_username: normalize_optional_string(telegram.bot_username.clone()),
@@ -398,7 +406,20 @@ impl DaemonConfig {
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.telegram.org".to_string()),
+            polling_timeout_secs: telegram.polling_timeout_secs.unwrap_or(50),
+            polling_limit: telegram.polling_limit.unwrap_or(100),
         }))
+    }
+
+    pub fn telegram_polling_config(&self) -> Result<Option<TelegramConfig>> {
+        let Some(telegram) = self.telegram_config()? else {
+            return Ok(None);
+        };
+        if telegram.event_transport == TelegramEventTransport::Polling {
+            Ok(Some(telegram))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn channel_runtimes(&self) -> Result<Vec<ChannelRuntime>> {
@@ -407,7 +428,9 @@ impl DaemonConfig {
             runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
         }
         if let Some(telegram) = self.telegram_config()? {
-            runtimes.push(build_telegram_runtime(telegram).map_err(anyhow::Error::new)?);
+            if telegram.event_transport == TelegramEventTransport::Webhook {
+                runtimes.push(build_telegram_runtime(telegram).map_err(anyhow::Error::new)?);
+            }
         }
         Ok(runtimes)
     }
@@ -601,7 +624,50 @@ mod tests {
             Some("ops-telegram")
         );
         assert_eq!(telegram.bot_token_env, "TELEGRAM_BOT_TOKEN");
+        assert_eq!(
+            telegram.event_transport,
+            super::TelegramEventTransport::Webhook
+        );
         assert_eq!(telegram.base_url, "https://api.telegram.org");
+        assert_eq!(telegram.polling_timeout_secs, 50);
+        assert_eq!(telegram.polling_limit, 100);
+    }
+
+    #[test]
+    fn parses_telegram_polling_channel_config() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [channels.telegram]
+            enabled = true
+            transport = "polling"
+            bot_token_env = "TELEGRAM_BOT_TOKEN"
+            polling_timeout_secs = 30
+            polling_limit = 25
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let telegram = daemon
+            .telegram_polling_config()
+            .expect("telegram polling config should validate")
+            .expect("telegram polling should be enabled");
+
+        assert_eq!(
+            telegram.event_transport,
+            super::TelegramEventTransport::Polling
+        );
+        assert_eq!(telegram.polling_timeout_secs, 30);
+        assert_eq!(telegram.polling_limit, 25);
+        assert!(daemon
+            .channel_runtimes()
+            .expect("channel runtimes should resolve")
+            .is_empty());
     }
 
     #[test]

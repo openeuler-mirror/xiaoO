@@ -1,6 +1,6 @@
 use crate::channels::telegram::types::{
-    TelegramApiResponse, TelegramConfig, TelegramReplyParameters, TelegramSendMessageRequest,
-    TelegramSentMessage,
+    TelegramApiResponse, TelegramConfig, TelegramGetUpdatesRequest, TelegramReplyParameters,
+    TelegramSendMessageRequest, TelegramSentMessage, TelegramUpdate,
 };
 use crate::channels::{ChannelError, ChannelResult};
 use reqwest::Client;
@@ -52,6 +52,31 @@ impl TelegramClient {
         let sent_message =
             validate_api_response::<TelegramSentMessage>(response, "telegram sendMessage").await?;
         Ok(Some(sent_message.message_id.to_string()))
+    }
+
+    pub(crate) async fn get_updates(
+        &self,
+        offset: Option<i64>,
+        timeout_secs: u64,
+        limit: u16,
+    ) -> ChannelResult<Vec<TelegramUpdate>> {
+        let url = self.bot_api_url("getUpdates")?;
+        let response = self
+            .client
+            .post(url)
+            .json(&TelegramGetUpdatesRequest {
+                offset,
+                limit,
+                timeout: timeout_secs,
+                allowed_updates: &["message", "channel_post"],
+            })
+            .send()
+            .await
+            .map_err(|error| ChannelError::Transport {
+                message: format!("telegram getUpdates request failed: {error}"),
+            })?;
+
+        validate_api_response::<Vec<TelegramUpdate>>(response, "telegram getUpdates").await
     }
 
     fn bot_api_url(&self, method: &str) -> ChannelResult<String> {

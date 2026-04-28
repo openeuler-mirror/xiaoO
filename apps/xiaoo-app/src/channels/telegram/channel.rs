@@ -49,14 +49,7 @@ impl ChannelAdapter for TelegramAdapter {
                 message: format!("invalid telegram update payload: {error}"),
             }
         })?;
-        let update_id = update.update_id;
-        let Some(message) = update.supported_message() else {
-            return Ok((AdapterResponse::Accepted, None));
-        };
-        let Some(channel_message) = self.to_channel_message(update_id, message)? else {
-            return Ok((AdapterResponse::Accepted, None));
-        };
-        Ok((AdapterResponse::Accepted, Some(channel_message)))
+        Ok((AdapterResponse::Accepted, self.handle_update(update)?))
     }
 
     async fn send_text(
@@ -72,9 +65,18 @@ impl ChannelAdapter for TelegramAdapter {
 }
 
 impl TelegramAdapter {
+    pub(crate) fn handle_update(
+        &self,
+        update: TelegramUpdate,
+    ) -> ChannelResult<Option<ChannelMessage>> {
+        let Some(message) = update.supported_message() else {
+            return Ok(None);
+        };
+        self.to_channel_message(message)
+    }
+
     fn to_channel_message(
         &self,
-        _update_id: i64,
         message: TelegramMessage,
     ) -> ChannelResult<Option<ChannelMessage>> {
         let Some(raw_text) = message
@@ -125,7 +127,7 @@ pub fn meta() -> ChannelMeta {
         selection_label: "Telegram".to_string(),
         docs_path: "/channels/telegram".to_string(),
         docs_label: "telegram".to_string(),
-        blurb: "Telegram Bot API webhook adapter.".to_string(),
+        blurb: "Telegram Bot API adapter.".to_string(),
         aliases: vec!["tg".to_string()],
         order: 90,
     }
@@ -276,10 +278,13 @@ mod tests {
     fn config() -> TelegramConfig {
         TelegramConfig {
             channel_instance_id: Some("ops-telegram".to_string()),
+            event_transport: crate::channels::telegram::types::TelegramEventTransport::Webhook,
             bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
             webhook_secret_token: Some("secret_token-1".to_string()),
             bot_username: Some("xiaoO_bot".to_string()),
             base_url: "https://api.telegram.org".to_string(),
+            polling_timeout_secs: 50,
+            polling_limit: 100,
         }
     }
 

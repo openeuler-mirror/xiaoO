@@ -5,10 +5,13 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TelegramConfig {
     pub channel_instance_id: Option<String>,
+    pub event_transport: TelegramEventTransport,
     pub bot_token_env: String,
     pub webhook_secret_token: Option<String>,
     pub bot_username: Option<String>,
     pub base_url: String,
+    pub polling_timeout_secs: u64,
+    pub polling_limit: u16,
 }
 
 impl TelegramConfig {
@@ -51,6 +54,18 @@ impl TelegramConfig {
                 });
             }
         }
+        if self.polling_timeout_secs == 0 {
+            return Err(TelegramConfigError::InvalidField {
+                field: "polling_timeout_secs",
+                message: "must be greater than zero".to_string(),
+            });
+        }
+        if !(1..=100).contains(&self.polling_limit) {
+            return Err(TelegramConfigError::InvalidField {
+                field: "polling_limit",
+                message: "must be between 1 and 100".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -61,6 +76,19 @@ impl TelegramConfig {
             .map(|value| value.trim_start_matches('@'))
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramEventTransport {
+    Webhook,
+    Polling,
+}
+
+impl Default for TelegramEventTransport {
+    fn default() -> Self {
+        Self::Webhook
     }
 }
 
@@ -151,6 +179,20 @@ pub(crate) struct TelegramMessageEntity {
     pub length: usize,
     #[serde(default)]
     pub user: Option<TelegramUser>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TelegramGetUpdatesRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+    pub limit: u16,
+    pub timeout: u64,
+    #[serde(skip_serializing_if = "is_empty_allowed_updates")]
+    pub allowed_updates: &'a [&'a str],
+}
+
+fn is_empty_allowed_updates(value: &[&str]) -> bool {
+    value.is_empty()
 }
 
 #[derive(Debug, Serialize)]

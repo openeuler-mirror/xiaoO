@@ -28,10 +28,13 @@ base_url = "https://open.feishu.cn"  # Optional, default value
 [channels.telegram]                 # Optional, enable Telegram channel integration
 enabled = true
 channel_instance_id = "ops-telegram" # Optional, defaults to "telegram"
+transport = "webhook"               # webhook (default) | polling
 bot_token_env = "TELEGRAM_BOT_TOKEN" # Required, Telegram Bot API token env var
-webhook_secret_token = "your-token"  # Optional, must match X-Telegram-Bot-Api-Secret-Token
+webhook_secret_token = "your-token"  # Webhook only; must match X-Telegram-Bot-Api-Secret-Token
 bot_username = "@xiaoO_bot"          # Optional, strips leading @bot or /cmd@bot invocations
 base_url = "https://api.telegram.org" # Optional, default value
+polling_timeout_secs = 50           # Polling only; Bot API getUpdates timeout
+polling_limit = 100                 # Polling only; 1-100 updates per request
 
 [http]                               # Optional, enable Bearer auth for chat APIs
 bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
@@ -245,6 +248,7 @@ Channel event callback endpoint. Only available when the matching channel config
 - **Message Event Handling**: Upon receiving Feishu message events, Gateway processes asynchronously (returns ack immediately when `requires_async_processing=true`), and sends replies back to the original conversation via Feishu API.
 - **Member Directory Injection**: Automatically loads group member list before processing and injects `<participant_directory>` into system prompt, enabling AI to perceive conversation participant identities.
 - **Telegram Message Handling**: Telegram `message` and `channel_post` text updates are converted into the same internal `ChannelMessage` shape and replied to with Bot API `sendMessage`.
+- **Telegram Polling Mode**: When `[channels.telegram].transport = "polling"`, Telegram events are received through Bot API `getUpdates` from an outbound daemon task instead of this HTTP callback endpoint. Telegram Bot API provides webhook and `getUpdates`; it does not provide a Bot API WebSocket transport.
 
 **Request:**
 

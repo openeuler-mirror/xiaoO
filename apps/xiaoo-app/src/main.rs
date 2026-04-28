@@ -5,15 +5,19 @@ mod lsp_support;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use anyhow::{bail, Context, Result};
+use futures_util::future::BoxFuture;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
+use xiaoo_app::channels::{
+    build_telegram_runtime, TelegramPollingMessageHandler, TelegramPollingService,
+};
 use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
 use xiaoo_app::httpserver::{
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
-    create_router_with_control_plane_and_auth, HttpBearerAuthConfig,
+    create_router_with_control_plane_and_auth, ChannelRuntimeProcessor, HttpBearerAuthConfig,
 };
 
 #[tokio::main]
@@ -35,6 +39,15 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let app =
         AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
+    let interaction_timeout_secs = config.interaction_timeout_secs();
+    if let Some(telegram_config) = config.telegram_polling_config()? {
+        spawn_telegram_polling_service(
+            telegram_config,
+            app.session_service.clone(),
+            interaction_timeout_secs,
+        )
+        .context("failed to start telegram polling service")?;
+    }
     let channel_runtimes = config.channel_runtimes()?;
     let router = if channel_runtimes.is_empty() {
         create_router_with_control_plane_and_auth(
@@ -48,7 +61,7 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
             app.session_service,
             app.session_control_plane,
             channel_runtimes,
-            config.interaction_timeout_secs(),
+            interaction_timeout_secs,
             bearer_auth,
             rate_limit,
         )
@@ -66,6 +79,31 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     axum::serve(listener, router)
         .await
         .context("axum server exited unexpectedly")
+}
+
+fn spawn_telegram_polling_service(
+    telegram_config: xiaoo_app::channels::TelegramConfig,
+    session_service: Arc<dyn xiaoo_app::gateway::SessionService>,
+    interaction_timeout_secs: u64,
+) -> Result<()> {
+    let runtime = build_telegram_runtime(telegram_config.clone()).map_err(anyhow::Error::new)?;
+    let processor =
+        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let service = TelegramPollingService::new(telegram_config).map_err(anyhow::Error::new)?;
+    let handler: TelegramPollingMessageHandler = Arc::new(move |message| {
+        let processor = processor.clone();
+        let runtime = runtime.clone();
+        Box::pin(async move {
+            if let Err(error) = processor.process_message(runtime, message).await {
+                tracing::warn!("failed to process telegram polling message: {error}");
+            }
+        }) as BoxFuture<'static, ()>
+    });
+    tracing::info!("starting telegram polling transport");
+    tokio::spawn(async move {
+        service.run_forever(handler).await;
+    });
+    Ok(())
 }
 
 fn init_tracing() {
