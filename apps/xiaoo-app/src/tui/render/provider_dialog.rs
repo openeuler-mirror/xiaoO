@@ -131,10 +131,20 @@ mod tests {
             },
             ProviderInfo {
                 name: "deepseek".to_string(),
-                models: vec![ModelInfo {
-                    id: "deepseek-chat".to_string(),
-                    name: "DeepSeek Chat".to_string(),
-                }],
+                models: vec![
+                    ModelInfo {
+                        id: "deepseek-v4-flash".to_string(),
+                        name: "DeepSeek V4 Flash".to_string(),
+                    },
+                    ModelInfo {
+                        id: "deepseek-v4-pro".to_string(),
+                        name: "DeepSeek V4 Pro".to_string(),
+                    },
+                    ModelInfo {
+                        id: "deepseek-chat".to_string(),
+                        name: "DeepSeek Chat V3".to_string(),
+                    },
+                ],
             },
         ]
     }

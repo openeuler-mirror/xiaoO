@@ -26,6 +26,8 @@ pub enum StopReason {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolUseBlock>,
     pub usage: Usage,
     pub stop_reason: StopReason,

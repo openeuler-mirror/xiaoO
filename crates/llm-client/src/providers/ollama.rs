@@ -113,6 +113,7 @@ impl LlmProvider for OllamaProvider {
         Ok(LlmResponse {
             message: AssistantMessage {
                 text: Some(content),
+                reasoning_content: None,
                 tool_calls: vec![],
                 usage,
                 stop_reason,
@@ -196,6 +197,7 @@ impl LlmProvider for OllamaProvider {
                 } else {
                     Some(full_text)
                 },
+                reasoning_content: None,
                 tool_calls: vec![],
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,

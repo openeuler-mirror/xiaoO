@@ -155,6 +155,7 @@ impl LlmProvider for OpenAiFamilyProvider {
         }
 
         let mut full_text = String::new();
+        let mut full_reasoning = String::new();
         let mut full_tool_calls = Vec::new();
         let mut final_usage = None;
         let mut final_finish_reason = None;
@@ -180,6 +181,9 @@ impl LlmProvider for OpenAiFamilyProvider {
                 if let Some(parsed) = parse_openai_family_stream_line(&line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
+                    }
+                    if let Some(ref reasoning) = parsed.reasoning {
+                        full_reasoning.push_str(reasoning);
                     }
                     if let Some(ref usage) = parsed.usage {
                         final_usage = Some(usage.clone());
@@ -222,6 +226,11 @@ impl LlmProvider for OpenAiFamilyProvider {
                     None
                 } else {
                     Some(full_text)
+                },
+                reasoning_content: if full_reasoning.is_empty() {
+                    None
+                } else {
+                    Some(full_reasoning)
                 },
                 tool_calls: tool_use_blocks,
                 usage,

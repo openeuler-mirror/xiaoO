@@ -71,6 +71,7 @@ impl ChatMessageExt for ChatMessage {
             message_id,
             timestamp_ms,
             api_usage_tokens,
+            reasoning_content: None,
         }
     }
 

@@ -76,6 +76,7 @@ mod wrapper_tests {
                 message_id: None,
                 timestamp_ms: 0,
                 api_usage_tokens: None,
+                reasoning_content: None,
             }],
             tools: vec![],
             tool_choice: Default::default(),
@@ -89,6 +90,7 @@ mod wrapper_tests {
         LlmResponse {
             message: AssistantMessage {
                 text: Some(text.to_string()),
+                reasoning_content: None,
                 tool_calls: vec![],
                 usage: Usage {
                     prompt_tokens: 10,
@@ -380,6 +382,7 @@ mod wrapper_tests {
                         message_id: None,
                         timestamp_ms: 0,
                         api_usage_tokens: None,
+                        reasoning_content: None,
                     }];
                     Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                         modified_request: req,
@@ -746,6 +749,7 @@ mod wrapper_tests {
                             message_id: None,
                             timestamp_ms: 0,
                             api_usage_tokens: None,
+                            reasoning_content: None,
                         }];
                         Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                             modified_request: req,

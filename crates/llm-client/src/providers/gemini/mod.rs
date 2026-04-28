@@ -132,6 +132,7 @@ impl LlmProvider for GeminiProvider {
                 } else {
                     None
                 },
+                reasoning_content: None,
                 tool_calls: tool_use_blocks,
                 usage: Usage {
                     prompt_tokens,
@@ -279,6 +280,7 @@ impl LlmProvider for GeminiProvider {
                 } else {
                     Some(full_text)
                 },
+                reasoning_content: None,
                 tool_calls: tool_use_blocks,
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,

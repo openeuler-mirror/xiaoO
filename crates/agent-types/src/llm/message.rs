@@ -41,4 +41,6 @@ pub struct ChatMessage {
     pub message_id: Option<String>,
     pub timestamp_ms: u64,
     pub api_usage_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }

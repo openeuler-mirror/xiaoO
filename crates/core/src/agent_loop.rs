@@ -1106,6 +1106,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         message_id: None,
         timestamp_ms: now_ms(),
         api_usage_tokens: Some(msg.usage.total_tokens),
+        reasoning_content: msg.reasoning_content.clone(),
     });
 }
 
@@ -1171,6 +1172,7 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
         message_id: None,
         timestamp_ms: now_ms(),
         api_usage_tokens: None,
+        reasoning_content: None,
     }
 }
 
@@ -1361,6 +1363,7 @@ mod tests {
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("Hello world".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
                         prompt_tokens: 3,
@@ -1445,6 +1448,7 @@ mod tests {
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some(text),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage,
                     stop_reason: StopReason::EndTurn,
@@ -1511,6 +1515,7 @@ mod tests {
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("Recovered".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
                         prompt_tokens: 5,
@@ -1878,6 +1883,7 @@ mod tests {
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("trying to use a tool".to_string()),
+                    reasoning_content: None,
                     tool_calls: vec![ToolUseBlock {
                         call_id: String::new(),
                         tool_name: "bash".to_string(),
@@ -1976,6 +1982,7 @@ mod tests {
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("trying to use a tool".to_string()),
+                    reasoning_content: None,
                     tool_calls: vec![ToolUseBlock {
                         call_id: "call_empty_1".to_string(),
                         tool_name: String::new(), // ← empty name: the trigger
