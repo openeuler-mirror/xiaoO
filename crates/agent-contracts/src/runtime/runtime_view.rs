@@ -1,4 +1,5 @@
 use crate::backend::OperationBackend;
+use std::sync::Arc;
 use crate::events::tool_events::ToolEventSink;
 use crate::hook::registry::HookerRegistry;
 use crate::interaction::InteractionHandle;
@@ -24,7 +25,7 @@ pub trait RuntimeView: Send + Sync {
         None
     }
     /// Operation backend for delegating operations to a remote service.
-    fn operation_backend(&self) -> Option<&dyn OperationBackend> {
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
         None
     }
 }

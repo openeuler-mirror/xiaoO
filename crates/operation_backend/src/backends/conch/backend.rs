@@ -5,7 +5,7 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind, OperationError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -210,6 +210,10 @@ pub(crate) fn shell_quote(value: &str) -> String {
 impl OperationBackend for ConchOperationBackend {
     fn backend_id(&self) -> &str {
         self.backend_id.as_str()
+    }
+
+    fn backend_kind(&self) -> OperationBackendKind {
+        OperationBackendKind::Conch
     }
 
     fn capabilities(&self) -> OperationBackendCapabilities {

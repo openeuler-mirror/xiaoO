@@ -2,6 +2,7 @@ use super::input::GrepInput;
 
 pub mod error_code {
     pub const PATTERN_EMPTY: u32 = 1;
+    #[allow(dead_code)]
     pub const PATH_NOT_FOUND: u32 = 2;
     pub const UNC_PATH_BLOCKED: u32 = 3;
 }

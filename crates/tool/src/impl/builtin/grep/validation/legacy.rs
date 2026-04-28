@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::path::Path;
 
 use crate::r#impl::path_resolver::expand_path_from_base;

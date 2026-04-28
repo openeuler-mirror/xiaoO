@@ -279,6 +279,11 @@ impl ToolExecutor for FileReadExecutor {
             });
         }
         let backend = backend.unwrap();
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(Arc::clone(&backend)));
 
         let file_path = Self::normalize_path(&input.file_path);
 
@@ -371,7 +376,7 @@ impl ToolExecutor for FileReadExecutor {
         } else if Self::is_image_extension(&ext) {
             Self::process_image(&resolved_str, &ext, &bytes, DEFAULT_MAX_TOKENS)
         } else if Self::is_pdf_extension(&ext) {
-            self.process_pdf(&resolved_str, &ext, &bytes, &input, backend)
+            self.process_pdf(&resolved_str, &ext, &bytes, &input, &*backend)
                 .await
         } else {
             self.process_text(
@@ -388,7 +393,7 @@ impl ToolExecutor for FileReadExecutor {
         match result {
             Ok(output) => {
                 if let FileReadOutput::Text(_) = &output {
-                    if let Some(lsp) = &self.services.lsp_service {
+                    if let Some(ref lsp) = lsp {
                         spawn_touch_file(lsp, Path::new(&resolved_str));
                     }
                 }

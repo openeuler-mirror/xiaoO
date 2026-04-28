@@ -1,6 +1,5 @@
 mod tool_cli_runtime;
 
-use agent_contracts::lsp::LspProvider;
 use agent_contracts::trace::TraceOutcome;
 use agent_contracts::{
     RuntimeView, ToolCallBuilder, ToolRegistry, ToolRegistryBuilder, ToolSpecView,
@@ -9,7 +8,6 @@ use agent_types::common::BuildError;
 use agent_types::common::{AgentId, ToolName};
 use agent_types::tool::ToolRegistryConfig;
 use agent_types::tool::{RawToolCall, RawToolOutcome, ToolExecutionError, ToolVisibilityConfig};
-use lsp::LspService;
 use std::sync::Arc;
 use tokio::runtime::{Builder, Runtime};
 use tool::{
@@ -58,14 +56,13 @@ impl ToolCli {
         let agent_id = AgentId("tool_cli".to_string());
 
         // Honour XIAOO_LSP=1 to enable LSP service for tool-cli testing
-        let lsp_service: Option<Arc<dyn LspProvider>> =
-            if std::env::var("XIAOO_LSP").as_deref() == Ok("1") {
-                Some(Arc::new(LspService::new(vec![])))
-            } else {
-                None
-            };
+        let lsp_registry = if std::env::var("XIAOO_LSP").as_deref() == Ok("1") {
+            Some(Arc::new(lsp::LspServiceRegistry::new(vec![])))
+        } else {
+            None
+        };
         let services = ToolRuntimeServices {
-            lsp_service,
+            lsp_registry,
             ..ToolRuntimeServices::default()
         };
         let sources = load_tool_sources_with_services(services);

@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::sync::Arc;
 
 use agent_contracts::runtime::runtime_view::RuntimeView;

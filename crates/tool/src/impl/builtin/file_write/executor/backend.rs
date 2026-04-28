@@ -115,6 +115,11 @@ impl ToolExecutor for FileWriteExecutor {
             });
         }
         let backend = backend.unwrap();
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(Arc::clone(&backend)));
 
         let file_path = Self::normalize_path(&input.file_path);
 
@@ -207,11 +212,11 @@ impl ToolExecutor for FileWriteExecutor {
             })?;
 
         let resolved_path = Path::new(resolved.0.as_str());
-        if let Some(lsp) = &self.services.lsp_service {
+        if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, resolved_path);
         }
 
-        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+        let lsp_diagnostics = if let Some(ref lsp) = lsp {
             fetch_diagnostics(lsp, resolved_path, LSP_DIAG_TIMEOUT_SECS).await
         } else {
             None

@@ -113,6 +113,11 @@ impl OperationExec for ConchExec {
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
         self.state.ensure_active()?;
         let timeout_ms = request.timeout_ms;
+        let extra_env: HashMap<String, String> = request
+            .env
+            .as_ref()
+            .map(|pairs| pairs.iter().cloned().collect())
+            .unwrap_or_default();
         let output = if let Some(shell) = request.shell.clone() {
             if !request.args.is_empty() {
                 return Err(OperationError::Unsupported {
@@ -124,7 +129,7 @@ impl OperationExec for ConchExec {
                 None => ConchStartProcess {
                     cmd: shell,
                     args: Vec::new(),
-                    env: HashMap::new(),
+                    env: extra_env,
                     cwd: request.cwd.map(|path| path.0),
                     content: Some(request.command),
                 },
@@ -136,7 +141,7 @@ impl OperationExec for ConchExec {
                 None => ConchStartProcess {
                     cmd: request.command,
                     args: request.args,
-                    env: HashMap::new(),
+                    env: extra_env,
                     cwd: request.cwd.map(|path| path.0),
                     content: None,
                 },

@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Input validation for FileEditTool.
 //!
 //! Validates FileEditInput before processing to ensure:

@@ -142,7 +142,7 @@ impl ToolExecutor for BashExecutor {
             });
         }
 
-        let cwd = Self::resolve_and_stat_cwd(input.cwd.as_deref(), backend)
+        let cwd = Self::resolve_and_stat_cwd(input.cwd.as_deref(), &*backend)
             .await
             .map_err(|message| ToolExecutionError::ExecutionFailed { message })?;
 
@@ -171,6 +171,7 @@ impl ToolExecutor for BashExecutor {
             shell: Some("bash".to_string()),
             cwd: cwd_path,
             timeout_ms: Some(input.timeout.unwrap_or_else(default_timeout_ms)),
+            env: None,
         };
 
         let result = backend.exec().exec(request).await.map_err(|e| {

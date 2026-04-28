@@ -82,6 +82,11 @@ impl ToolExecutor for FileEditExecutor {
             });
         }
         let backend = backend.unwrap();
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(Arc::clone(&backend)));
 
         let dedup_store = self.get_dedup_store().await;
 
@@ -169,11 +174,11 @@ impl ToolExecutor for FileEditExecutor {
                     message: format!("Failed to write file: {}", e),
                 })?;
 
-            if let Some(lsp) = &self.services.lsp_service {
+            if let Some(ref lsp) = lsp {
                 spawn_touch_file(lsp, std::path::Path::new(&resolved_str));
             }
 
-            let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+            let lsp_diagnostics = if let Some(ref lsp) = lsp {
                 fetch_diagnostics(
                     lsp,
                     std::path::Path::new(&resolved_str),
@@ -261,11 +266,11 @@ impl ToolExecutor for FileEditExecutor {
                 message: format!("Failed to write file: {}", e),
             })?;
 
-        if let Some(lsp) = &self.services.lsp_service {
+        if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, std::path::Path::new(&resolved_str));
         }
 
-        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+        let lsp_diagnostics = if let Some(ref lsp) = lsp {
             fetch_diagnostics(
                 lsp,
                 std::path::Path::new(&resolved_str),
