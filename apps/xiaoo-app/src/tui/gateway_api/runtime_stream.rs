@@ -92,6 +92,9 @@ impl GatewayRuntime {
     }
 
     pub fn cancel_streaming(&mut self, state: &mut AppState) {
+        if self.remote.is_some() {
+            self.cancel_remote_turn(state.session_id.clone());
+        }
         if let Some(flag) = self.cancel_flag.take() {
             flag.store(true, Ordering::Relaxed);
         }

@@ -126,6 +126,7 @@ mod tests {
             message_id: None,
             timestamp_ms: 0,
             api_usage_tokens: None,
+            reasoning_content: None,
         }];
 
         let decision = decide_prompt(&messages, true).unwrap();

@@ -8,6 +8,8 @@ pub(crate) struct WireMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<WireToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -19,6 +21,7 @@ impl WireMessage {
         Self {
             role: "user".to_string(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -28,6 +31,7 @@ impl WireMessage {
         Self {
             role: "assistant".to_string(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -37,6 +41,7 @@ impl WireMessage {
         Self {
             role: "assistant".to_string(),
             content: None,
+            reasoning_content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
         }
@@ -46,6 +51,7 @@ impl WireMessage {
         Self {
             role: "system".to_string(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -55,6 +61,7 @@ impl WireMessage {
         Self {
             role: "tool".to_string(),
             content: Some(content.into()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
         }

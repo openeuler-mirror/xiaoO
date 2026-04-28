@@ -164,6 +164,27 @@ async fn run_tui(mut config: config::Config, config_path: PathBuf) -> Result<()>
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut app = app::App::new_with_config(&config, config_path.clone(), workspace)
         .context("failed to initialize TUI app state")?;
+    if let Some(remote) = config
+        .tui
+        .remote
+        .as_ref()
+        .filter(|remote| remote.auto_connect)
+    {
+        if !remote.url.trim().is_empty() {
+            app.gateway.configure_remote(
+                &mut app.state,
+                remote.url.clone(),
+                remote.bearer_token_env.clone(),
+            );
+            app.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(format!(
+                    "Remote backend configured: {}",
+                    remote.url.trim()
+                )));
+        }
+    }
 
     let result = app.run(&mut terminal).await;
 

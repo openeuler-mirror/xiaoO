@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use agent_contracts::LoopEventSink;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::interaction::InteractionRequest;
 use axum::response::sse;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -27,6 +28,9 @@ pub enum SseStreamEvent {
         output_preview: String,
         is_error: bool,
     },
+    InteractionRequested {
+        request: InteractionRequest,
+    },
     Done {
         reply: String,
         raw_reply: String,
@@ -34,10 +38,17 @@ pub enum SseStreamEvent {
         session_id: String,
         turn_count: u32,
         total_tokens: usize,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        estimated_input_tokens: u64,
+        messages: Vec<llm_client::ChatMessage>,
         stop_reason: String,
     },
     Error {
         error: String,
+    },
+    Cancelled {
+        session_id: String,
     },
 }
 
@@ -47,8 +58,10 @@ impl SseStreamEvent {
             SseStreamEvent::TurnStart { .. } => "turn_start",
             SseStreamEvent::TextDelta { .. } => "text_delta",
             SseStreamEvent::ToolResult { .. } => "tool_result",
+            SseStreamEvent::InteractionRequested { .. } => "interaction_requested",
             SseStreamEvent::Done { .. } => "done",
             SseStreamEvent::Error { .. } => "error",
+            SseStreamEvent::Cancelled { .. } => "cancelled",
         }
     }
 }

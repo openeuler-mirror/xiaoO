@@ -7,6 +7,7 @@ pub struct StatusPanel {
     pub provider_name: String,
     /// Shortened display string for current agent workspace (tools cwd).
     pub workspace_display: String,
+    pub backend_display: String,
     pub total_tokens: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
@@ -23,6 +24,7 @@ impl Default for StatusPanel {
             model_name: String::new(),
             provider_name: String::new(),
             workspace_display: String::new(),
+            backend_display: "Local".to_string(),
             total_tokens: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -53,6 +55,14 @@ impl StatusPanel {
     /// Update the workspace line from an absolute path (caller should pass canonical path when possible).
     pub fn set_workspace(&mut self, path: &Path) {
         self.workspace_display = shorten_path_display(path, 26);
+    }
+
+    pub fn set_remote_workspace(&mut self, base_url: &str) {
+        self.workspace_display = format!("remote:{base_url}");
+    }
+
+    pub fn set_backend(&mut self, backend: impl Into<String>) {
+        self.backend_display = backend.into();
     }
 
     pub fn update_metrics(

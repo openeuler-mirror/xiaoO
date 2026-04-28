@@ -54,6 +54,24 @@ pub struct Config {
     pub operation_backend: Option<OperationBackendConfig>,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+    #[serde(default)]
+    pub auto_connect: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -163,6 +163,7 @@ impl LlmProvider for AnthropicProvider {
                 } else {
                     None
                 },
+                reasoning_content: None,
                 tool_calls: tool_use_blocks,
                 usage,
                 stop_reason,
@@ -267,6 +268,7 @@ impl LlmProvider for AnthropicProvider {
                 } else {
                     Some(full_text)
                 },
+                reasoning_content: None,
                 tool_calls: tool_use_blocks,
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,
