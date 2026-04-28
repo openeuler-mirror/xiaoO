@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +21,8 @@ const DEFAULT_SNAPSHOT_NAME: &str = "latest";
 pub struct SessionSnapshotListEntry {
     pub name: String,
     pub saved_at_ms: u64,
+    pub parent_name: Option<String>,
+    pub depth: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,8 @@ impl SessionSnapshotDialog {
 pub struct TuiSessionSnapshot {
     pub version: u32,
     pub saved_at_ms: u64,
+    #[serde(default)]
+    pub parent_snapshot: Option<String>,
     pub session_id: String,
     pub workspace: PathBuf,
     #[serde(default)]
@@ -159,10 +163,12 @@ pub fn snapshot_path(name: &str) -> Result<PathBuf> {
 pub fn build_snapshot(
     state: &AppState,
     session_record: Option<SessionRecord>,
+    parent_snapshot: Option<String>,
 ) -> TuiSessionSnapshot {
     TuiSessionSnapshot {
         version: SNAPSHOT_VERSION,
         saved_at_ms: current_time_ms(),
+        parent_snapshot,
         session_id: state.session_id.clone(),
         workspace: state.workspace.clone(),
         active_agent_role: state.active_agent_role.clone(),
@@ -232,20 +238,20 @@ pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
         if validate_snapshot_name(&name).is_err() {
             continue;
         }
-        let saved_at_ms = snapshot_saved_at_ms(&path).or_else(|| file_timestamp_ms(&path));
+        let header = snapshot_header(&path);
+        let saved_at_ms = header
+            .as_ref()
+            .and_then(|header| header.saved_at_ms)
+            .or_else(|| file_timestamp_ms(&path));
         snapshots.push(SessionSnapshotListEntry {
             name,
             saved_at_ms: saved_at_ms.unwrap_or(0),
+            parent_name: header.and_then(|header| header.parent_snapshot),
+            depth: 0,
         });
     }
 
-    snapshots.sort_by(|left, right| {
-        right
-            .saved_at_ms
-            .cmp(&left.saved_at_ms)
-            .then(left.name.cmp(&right.name))
-    });
-    Ok(snapshots)
+    Ok(order_snapshots_by_parent(snapshots))
 }
 
 pub fn format_snapshot_time(saved_at_ms: u64) -> String {
@@ -265,6 +271,7 @@ pub fn apply_snapshot(
     state.workspace = snapshot.workspace;
     state.status_panel.set_workspace(&state.workspace);
     state.session_id = snapshot.session_id;
+    state.current_snapshot_name = None;
     state.active_agent_role = snapshot.active_agent_role;
     state.session_messages = snapshot.session_messages;
     state.session_file_changes = snapshot.session_file_changes;
@@ -324,13 +331,12 @@ fn snapshot_dir() -> Result<PathBuf> {
 #[derive(Deserialize)]
 struct SnapshotHeader {
     saved_at_ms: Option<u64>,
+    parent_snapshot: Option<String>,
 }
 
-fn snapshot_saved_at_ms(path: &Path) -> Option<u64> {
+fn snapshot_header(path: &Path) -> Option<SnapshotHeader> {
     let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<SnapshotHeader>(&content)
-        .ok()?
-        .saved_at_ms
+    serde_json::from_str::<SnapshotHeader>(&content).ok()
 }
 
 fn file_timestamp_ms(path: &Path) -> Option<u64> {
@@ -339,6 +345,56 @@ fn file_timestamp_ms(path: &Path) -> Option<u64> {
     time.duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_millis() as u64)
+}
+
+fn order_snapshots_by_parent(
+    entries: Vec<SessionSnapshotListEntry>,
+) -> Vec<SessionSnapshotListEntry> {
+    let names: HashSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+    let mut by_parent: HashMap<Option<String>, Vec<SessionSnapshotListEntry>> = HashMap::new();
+
+    for mut entry in entries {
+        let parent = entry
+            .parent_name
+            .as_ref()
+            .filter(|parent| names.contains(*parent))
+            .cloned();
+        entry.parent_name = parent.clone();
+        by_parent.entry(parent).or_default().push(entry);
+    }
+
+    for children in by_parent.values_mut() {
+        children.sort_by(|left, right| {
+            right
+                .saved_at_ms
+                .cmp(&left.saved_at_ms)
+                .then(left.name.cmp(&right.name))
+        });
+    }
+
+    let mut ordered = Vec::new();
+    append_snapshot_children(None, 0, &mut by_parent, &mut ordered);
+    while let Some(parent) = by_parent.keys().next().cloned() {
+        append_snapshot_children(parent, 0, &mut by_parent, &mut ordered);
+    }
+    ordered
+}
+
+fn append_snapshot_children(
+    parent: Option<String>,
+    depth: usize,
+    by_parent: &mut HashMap<Option<String>, Vec<SessionSnapshotListEntry>>,
+    ordered: &mut Vec<SessionSnapshotListEntry>,
+) {
+    let Some(children) = by_parent.remove(&parent) else {
+        return;
+    };
+    for mut child in children {
+        let child_name = child.name.clone();
+        child.depth = depth;
+        ordered.push(child);
+        append_snapshot_children(Some(child_name), depth + 1, by_parent, ordered);
+    }
 }
 
 fn current_time_ms() -> u64 {

@@ -402,13 +402,29 @@ impl App {
                 } else {
                     Style::default().fg(self.state.theme.foreground)
                 };
-                let name = truncate_chars(&entry.name, name_width);
+                let prefix = if entry.depth == 0 {
+                    String::new()
+                } else {
+                    format!("{}└ ", "  ".repeat(entry.depth.saturating_sub(1)))
+                };
+                let name = truncate_chars(&format!("{prefix}{}", entry.name), name_width);
                 let time = format_snapshot_time(entry.saved_at_ms);
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("{name:<name_width$}"), style),
                     Span::styled("  ", style),
                     Span::styled(time, style),
-                ]))
+                ];
+                if let Some(parent) = entry.parent_name.as_ref() {
+                    spans.push(Span::styled(
+                        "  fork: ",
+                        Style::default().fg(self.state.theme.muted),
+                    ));
+                    spans.push(Span::styled(
+                        parent.clone(),
+                        Style::default().fg(self.state.theme.muted),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             })
             .collect();
 
