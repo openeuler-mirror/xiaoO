@@ -348,9 +348,16 @@ impl App {
             match snapshot_name_from_command(trimmed, "/save") {
                 Ok(name) => {
                     let record = self.gateway.session_snapshot(&self.state.session_id).await;
-                    let snapshot = build_snapshot(&self.state, record);
+                    let parent_snapshot = self
+                        .state
+                        .current_snapshot_name
+                        .as_ref()
+                        .filter(|parent| !parent.eq_ignore_ascii_case(&name))
+                        .cloned();
+                    let snapshot = build_snapshot(&self.state, record, parent_snapshot);
                     match save_snapshot(&name, &snapshot) {
                         Ok(path) => {
+                            self.state.current_snapshot_name = Some(name.clone());
                             self.state
                                 .chat_state
                                 .messages
@@ -657,6 +664,7 @@ impl App {
     ) {
         self.gateway.reset_for_new_session(&mut self.state);
         let record = apply_snapshot(&mut self.state, snapshot);
+        self.state.current_snapshot_name = Some(name.to_string());
         if let Some(record) = record {
             self.gateway.import_session_snapshot(record).await;
         }

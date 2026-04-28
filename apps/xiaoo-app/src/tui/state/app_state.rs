@@ -135,6 +135,7 @@ pub struct AppState {
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub session_id: String,
+    pub current_snapshot_name: Option<String>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
@@ -167,6 +168,7 @@ impl AppState {
             workspace,
             session_messages: Vec::new(),
             session_id: uuid::Uuid::new_v4().to_string(),
+            current_snapshot_name: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -200,6 +202,7 @@ impl AppState {
             workspace,
             session_messages: Vec::new(),
             session_id: uuid::Uuid::new_v4().to_string(),
+            current_snapshot_name: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -223,6 +226,7 @@ impl AppState {
         self.loading_tick = 0;
         self.session_messages.clear();
         self.session_id = uuid::Uuid::new_v4().to_string();
+        self.current_snapshot_name = None;
         self.slash = SlashState::default();
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
