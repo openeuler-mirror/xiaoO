@@ -21,6 +21,7 @@ use crate::theme::Theme;
 pub enum InputMode {
     Editing,
     ProviderSelection,
+    SessionSnapshotSelection,
     InteractionPrompt,
 }
 
@@ -99,7 +100,7 @@ pub struct SlashState {
     pub dismissed_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionFileChangeStats {
     pub additions: u32,
     pub deletions: u32,
@@ -125,6 +126,7 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
+    pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
@@ -156,6 +158,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            session_snapshot_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
@@ -188,6 +191,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            session_snapshot_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
@@ -214,6 +218,7 @@ impl AppState {
         self.status_panel.set_workspace(&self.workspace);
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
+        self.session_snapshot_dialog = None;
         self.api_key_dialog = None;
         self.loading_tick = 0;
         self.session_messages.clear();
@@ -325,6 +330,10 @@ impl AppState {
 
     pub fn discard_tool_file_baseline(&mut self, call_id: &str) {
         self.tool_file_baselines.remove(call_id);
+    }
+
+    pub fn clear_tool_file_baselines(&mut self) {
+        self.tool_file_baselines.clear();
     }
 
     pub fn sorted_session_file_changes(&self) -> Vec<SessionFileChangeEntry> {
@@ -704,7 +713,7 @@ fn parse_numstat_count(value: &str) -> Option<u32> {
     }
 }
 
-fn build_chat_state(config: &Config) -> ChatState {
+pub(crate) fn build_chat_state(config: &Config) -> ChatState {
     let provider_name = config.llm.provider.clone();
     let model = config.llm.model.clone();
     let mut chat_state = ChatState::new();

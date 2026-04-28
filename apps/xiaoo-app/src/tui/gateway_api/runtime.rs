@@ -67,6 +67,17 @@ impl GatewayRuntime {
             || self.pending_stream_done.is_some()
     }
 
+    pub async fn session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::gateway::SessionRecord> {
+        self.session_gateway.session_snapshot(session_id).await
+    }
+
+    pub async fn import_session_snapshot(&self, record: crate::gateway::SessionRecord) {
+        self.session_gateway.import_session_snapshot(record).await;
+    }
+
     /// Closes all active sessions, firing the SessionClosed hook for each.
     /// Should be called before the application exits.
     pub async fn close_sessions(&self) {
