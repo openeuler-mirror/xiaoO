@@ -10,6 +10,10 @@ use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
     validate_and_connect_api_key,
 };
+use crate::session_snapshot_service::{
+    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, save_snapshot,
+    snapshot_name_from_command, SessionSnapshotDialog,
+};
 use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
 
@@ -74,9 +78,14 @@ impl App {
             return self.handle_interaction_prompt_key(key);
         }
 
+        if self.state.input_mode == InputMode::SessionSnapshotSelection {
+            return self.handle_session_snapshot_selection_key(key).await;
+        }
+
         match self.state.input_mode {
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
+            InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
         }
     }
@@ -247,6 +256,7 @@ impl App {
                     );
                 }
                 self.state.note_input_changed();
+                self.maybe_open_load_snapshot_dialog();
             } else {
                 self.state.cycle_agent_role(false);
             }
@@ -282,6 +292,7 @@ impl App {
                 KeyCode::Enter => {
                     self.state.apply_slash_selection();
                     self.state.dismiss_current_slash_menu();
+                    self.maybe_open_load_snapshot_dialog();
                     return Ok(());
                 }
                 KeyCode::Esc => {
@@ -301,6 +312,7 @@ impl App {
             _ => {
                 self.state.chat_state.input.handle_event(&Event::Key(key));
                 self.state.note_input_changed();
+                self.maybe_open_load_snapshot_dialog();
             }
         }
         Ok(())
@@ -327,6 +339,70 @@ impl App {
                 .push(crate::chat::Message::system(
                     "当前任务仍在运行。请等待它结束，或先按 Esc 取消，再发送新消息。".to_string(),
                 ));
+            self.state.chat_state.stick_to_bottom = true;
+            return Ok(());
+        }
+
+        if is_named_slash_command(trimmed, "/save") {
+            self.state.chat_state.input.reset();
+            match snapshot_name_from_command(trimmed, "/save") {
+                Ok(name) => {
+                    let record = self.gateway.session_snapshot(&self.state.session_id).await;
+                    let snapshot = build_snapshot(&self.state, record);
+                    match save_snapshot(&name, &snapshot) {
+                        Ok(path) => {
+                            self.state
+                                .chat_state
+                                .messages
+                                .push(crate::chat::Message::system(format!(
+                                    "Session snapshot saved: {} ({})",
+                                    name,
+                                    path.display()
+                                )))
+                        }
+                        Err(error) => {
+                            self.state
+                                .chat_state
+                                .messages
+                                .push(crate::chat::Message::error(format!(
+                                    "Save snapshot failed: {error:#}"
+                                )))
+                        }
+                    }
+                }
+                Err(error) => self
+                    .state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(format!(
+                        "Save snapshot failed: {error:#}"
+                    ))),
+            }
+            self.state.chat_state.stick_to_bottom = true;
+            return Ok(());
+        }
+
+        if is_named_slash_command(trimmed, "/load") {
+            self.state.chat_state.input.reset();
+            if slash_command_argument(trimmed, "/load").is_none() {
+                self.open_load_snapshot_dialog();
+            } else {
+                match snapshot_name_from_command(trimmed, "/load").and_then(|name| {
+                    let snapshot = load_snapshot(&name)?;
+                    Ok((name, snapshot))
+                }) {
+                    Ok((name, snapshot)) => {
+                        self.load_snapshot_into_state(&name, snapshot).await;
+                    }
+                    Err(error) => self
+                        .state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::error(format!(
+                            "Load snapshot failed: {error:#}"
+                        ))),
+                }
+            }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
         }
@@ -480,6 +556,118 @@ impl App {
         Ok(())
     }
 
+    fn maybe_open_load_snapshot_dialog(&mut self) {
+        if self.state.input_mode != InputMode::Editing
+            || self.state.chat_state.is_loading
+            || self.state.provider_dialog.is_some()
+            || self.state.api_key_dialog.is_some()
+            || self.state.interaction_prompt.is_some()
+            || self.state.session_snapshot_dialog.is_some()
+        {
+            return;
+        }
+        if !self
+            .state
+            .chat_state
+            .input
+            .value()
+            .trim()
+            .eq_ignore_ascii_case("/load")
+        {
+            return;
+        }
+        self.state.chat_state.input.reset();
+        self.open_load_snapshot_dialog();
+    }
+
+    fn open_load_snapshot_dialog(&mut self) {
+        match list_session_snapshots() {
+            Ok(entries) if entries.is_empty() => {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        "No session snapshots found in ~/.xiaoo/session/.".to_string(),
+                    ));
+            }
+            Ok(entries) => {
+                self.state.input_mode = InputMode::SessionSnapshotSelection;
+                self.state.session_snapshot_dialog = Some(SessionSnapshotDialog::new(entries));
+            }
+            Err(error) => self
+                .state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::error(format!(
+                    "Load snapshot failed: {error:#}"
+                ))),
+        }
+        self.state.chat_state.stick_to_bottom = true;
+    }
+
+    async fn handle_session_snapshot_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Editing;
+                self.state.session_snapshot_dialog = None;
+            }
+            KeyCode::Up => {
+                if let Some(dialog) = self.state.session_snapshot_dialog.as_mut() {
+                    dialog.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = self.state.session_snapshot_dialog.as_mut() {
+                    dialog.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let selected_name = self
+                    .state
+                    .session_snapshot_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.selected_entry())
+                    .map(|entry| entry.name.clone());
+                self.state.input_mode = InputMode::Editing;
+                self.state.session_snapshot_dialog = None;
+                if let Some(name) = selected_name {
+                    match load_snapshot(&name) {
+                        Ok(snapshot) => self.load_snapshot_into_state(&name, snapshot).await,
+                        Err(error) => {
+                            self.state
+                                .chat_state
+                                .messages
+                                .push(crate::chat::Message::error(format!(
+                                    "Load snapshot failed: {error:#}"
+                                )))
+                        }
+                    }
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn load_snapshot_into_state(
+        &mut self,
+        name: &str,
+        snapshot: crate::session_snapshot_service::TuiSessionSnapshot,
+    ) {
+        self.gateway.reset_for_new_session(&mut self.state);
+        let record = apply_snapshot(&mut self.state, snapshot);
+        if let Some(record) = record {
+            self.gateway.import_session_snapshot(record).await;
+        }
+        self.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(format!(
+                "Session snapshot loaded: {name}"
+            )));
+    }
+
     fn open_provider_selection_dialog(&mut self) {
         self.state.input_mode = InputMode::ProviderSelection;
         self.state.provider_dialog = Some(ProviderDialog::new_with_selection(
@@ -487,5 +675,25 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
+    }
+}
+
+fn is_named_slash_command(trimmed: &str, command: &str) -> bool {
+    let Some(first) = trimmed.split_whitespace().next() else {
+        return false;
+    };
+    first.eq_ignore_ascii_case(command)
+}
+
+fn slash_command_argument<'a>(trimmed: &'a str, command: &str) -> Option<&'a str> {
+    let first = trimmed.split_whitespace().next()?;
+    if !first.eq_ignore_ascii_case(command) {
+        return None;
+    }
+    let rest = trimmed[first.len()..].trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest)
     }
 }

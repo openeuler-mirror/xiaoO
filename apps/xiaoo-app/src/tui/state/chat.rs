@@ -81,7 +81,7 @@ pub struct TodoMessageState {
     pub items: Vec<(TodoDisplayStatus, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompletionCheckMessageState {
     pub reason: String,
     pub missing_information: String,

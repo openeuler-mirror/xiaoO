@@ -249,6 +249,7 @@ mod tests {
             context_window: None,
             compact: crate::cli::config::CompactSection::default(),
             hooker: Default::default(),
+            operation_backend: None,
         }
     }
 
