@@ -10,6 +10,7 @@ use crate::channels::{
 };
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct FeishuAdapter {
@@ -44,6 +45,7 @@ impl ChannelAdapter for FeishuAdapter {
     async fn handle_event(
         &self,
         _headers: &HeaderMap,
+        _query: &HashMap<String, String>,
         body: &[u8],
     ) -> ChannelResult<(AdapterResponse, Option<ChannelMessage>)> {
         handle_feishu_event(&self.config, body)
@@ -191,7 +193,7 @@ mod tests {
         .to_string();
 
         let (response, message) = adapter
-            .handle_event(&HeaderMap::new(), body.as_bytes())
+            .handle_event(&HeaderMap::new(), &HashMap::new(), body.as_bytes())
             .await
             .expect("challenge should succeed");
 
@@ -238,7 +240,7 @@ mod tests {
         .to_string();
 
         let (response, message) = adapter
-            .handle_event(&HeaderMap::new(), body.as_bytes())
+            .handle_event(&HeaderMap::new(), &HashMap::new(), body.as_bytes())
             .await
             .expect("message should succeed");
 
@@ -279,7 +281,7 @@ mod tests {
         .to_string();
 
         let (response, message) = adapter
-            .handle_event(&HeaderMap::new(), body.as_bytes())
+            .handle_event(&HeaderMap::new(), &HashMap::new(), body.as_bytes())
             .await
             .expect("message should succeed");
 
@@ -323,7 +325,7 @@ mod tests {
         .to_string();
 
         let (_response, message) = adapter
-            .handle_event(&HeaderMap::new(), body.as_bytes())
+            .handle_event(&HeaderMap::new(), &HashMap::new(), body.as_bytes())
             .await
             .expect("message should succeed");
 
@@ -359,7 +361,7 @@ mod tests {
         .to_string();
 
         let error = adapter
-            .handle_event(&HeaderMap::new(), body.as_bytes())
+            .handle_event(&HeaderMap::new(), &HashMap::new(), body.as_bytes())
             .await
             .expect_err("message should fail");
 

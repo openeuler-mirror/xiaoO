@@ -19,10 +19,22 @@ max_tokens = 128000                   # Optional, max tokens per response
 
 [channels.feishu]                   # Optional, enable Feishu channel integration
 enabled = true
+channel_instance_id = "ops-feishu"   # Optional, defaults to "feishu"
 app_id = "cli_..."
 app_secret_env = "FEISHU_APP_SECRET"
 verification_token = "your-token"
 base_url = "https://open.feishu.cn"  # Optional, default value
+
+[channels.telegram]                 # Optional, enable Telegram channel integration
+enabled = true
+channel_instance_id = "ops-telegram" # Optional, defaults to "telegram"
+transport = "webhook"               # webhook (default) | polling
+bot_token_env = "TELEGRAM_BOT_TOKEN" # Required, Telegram Bot API token env var
+webhook_secret_token = "your-token"  # Webhook only; must match X-Telegram-Bot-Api-Secret-Token
+bot_username = "@xiaoO_bot"          # Optional, strips leading @bot or /cmd@bot invocations
+base_url = "https://api.telegram.org" # Optional, default value
+polling_timeout_secs = 50           # Polling only; Bot API getUpdates timeout
+polling_limit = 100                 # Polling only; 1-100 updates per request
 
 [http]                               # Optional, enable Bearer auth for chat APIs
 bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
@@ -91,7 +103,7 @@ Chat endpoint. Send messages to the Gateway and receive responses.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `text` | string | ✅ | Message text (must not be empty) |
-| `channel` | string | *Either `channel` or `channel_instance_id`* | Channel identifier (e.g., `feishu`, `dingtalk`) |
+| `channel` | string | *Either `channel` or `channel_instance_id`* | Channel identifier (e.g., `feishu`, `telegram`) |
 | `channel_instance_id` | string | *Either `channel` or `channel_instance_id`* | Channel instance ID (for multi-instance session isolation) |
 | `sender_id` | string | ✅ | Sender ID |
 | `conversation_id` | string | ✅ | Conversation/group ID (same value reuses the same session) |
@@ -155,7 +167,7 @@ curl -X POST http://localhost:18080/api/v1/chat \
 - `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
 - `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
 
-> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/channels/feishu/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
+> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
 
 ---
 
@@ -226,28 +238,43 @@ data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! Ho
 
 ---
 
-#### `POST /api/v1/channels/feishu/events`
+#### `POST /api/v1/channels/{channel_id}/events`
 
-Feishu event callback endpoint. Only available when `[channels.feishu]` is enabled in Daemon configuration.
+Channel event callback endpoint. Only available when the matching channel configuration is enabled in Daemon configuration.
 
 **Behavior:**
 
 - **URL Verification**: When Feishu platform first configures Webhook, it sends a challenge request; Gateway returns `{ "challenge": "..." }` as-is to complete verification.
 - **Message Event Handling**: Upon receiving Feishu message events, Gateway processes asynchronously (returns ack immediately when `requires_async_processing=true`), and sends replies back to the original conversation via Feishu API.
 - **Member Directory Injection**: Automatically loads group member list before processing and injects `<participant_directory>` into system prompt, enabling AI to perceive conversation participant identities.
+- **Telegram Message Handling**: Telegram `message` and `channel_post` text updates are converted into the same internal `ChannelMessage` shape and replied to with Bot API `sendMessage`.
+- **Telegram Polling Mode**: When `[channels.telegram].transport = "polling"`, Telegram events are received through Bot API `getUpdates` from an outbound daemon task instead of this HTTP callback endpoint. Telegram Bot API provides webhook and `getUpdates`; it does not provide a Bot API WebSocket transport.
 
 **Request:**
 
-Called by Feishu platform via POST, Body is raw JSON event payload, Headers contain Feishu signature information.
+Called by the channel platform via POST. Body is the raw JSON event payload. Headers contain the channel's own verification material.
 
 **Response:**
 
 - **Challenge verification**: `200 OK` → `{ "challenge": "<token>" }`
 - **Message received**: `200 OK` → `{ "code": 0, "message": "ok" }`
-- **Feishu not configured**: `503 Service Unavailable` → `{ "error": "feishu webhook is not configured" }`
+- **Channel not configured**: `503 Service Unavailable` → `{ "error": "<channel_id> webhook is not configured" }`
 
-> ⚠️ This endpoint requires Feishu Open Platform Event Subscription configuration, pointing the callback URL to `http://<your-host>:<port>/api/v1/channels/feishu/events`.
-> It is intentionally **not** wrapped by the HTTP Bearer middleware; Feishu requests continue to use Feishu's own verification flow.
+Feishu callback URL:
+
+```text
+http://<your-host>:<port>/api/v1/channels/feishu/events
+```
+
+Telegram callback URL:
+
+```text
+https://<your-host>/api/v1/channels/telegram/events
+```
+
+When `webhook_secret_token` is configured, set the same value in Telegram `setWebhook.secret_token`; Telegram will send it in `X-Telegram-Bot-Api-Secret-Token`.
+
+> This endpoint is intentionally **not** wrapped by the HTTP Bearer middleware; channel requests use each platform's own verification flow.
 
 ### Session Isolation Mechanism
 
@@ -259,11 +286,11 @@ session_id = "{channel_instance_id or channel}:{conversation_id}"
 
 - Same `(channel, conversation_id)` combination shares the same session (retains context history).
 - Different `conversation_id` creates independent sessions.
-- When `channel_instance_id` is configured, it is used as prefix (supports multi-instance deployment of same channel type, e.g., multiple Feishu apps).
+- When `channel_instance_id` is configured, it is used as prefix (supports multi-instance deployment of same channel type, e.g., multiple Feishu or Telegram bots).
 
 ### Channel Interaction Timeout
 
-When the agent needs to ask the user a question (via `ask_user_question` tool), it sends the question to the channel (e.g., Feishu) and waits for the user's reply. If the user does not reply within the configured timeout, the interaction is cancelled.
+When the agent needs to ask the user a question (via `ask_user_question` tool), it sends the question to the channel (e.g., Feishu or Telegram) and waits for the user's reply. If the user does not reply within the configured timeout, the interaction is cancelled.
 
 ```toml
 [channels]
