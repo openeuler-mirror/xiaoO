@@ -50,7 +50,7 @@ base_url = "https://api.telegram.org"
 Run the daemon after adding the transport-specific fields below:
 
 ```bash
-cargo run -p xiaoo-app --bin xiaoo -- daemon \
+cargo run -p xiaoo-app --bin xiaoo-app -- daemon \
   --config /opt/xiaoo/config/config.toml \
   --host 127.0.0.1 \
   --port 18080
