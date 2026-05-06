@@ -53,6 +53,7 @@ model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment variable
 max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
 context_window = 128000 # Optional: explicit total context budget override
+reasoning_effort = "off" # Optional: off/high/max, defaults to off
 
 [trace]
 storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
@@ -69,6 +70,18 @@ db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-
    Anthropic defaults to `200000`
    Gemini defaults to `1000000`
 
+`[llm].reasoning_effort` controls the provider-side thinking/reasoning level:
+
+| Value | Meaning | TUI color |
+| --- | --- | --- |
+| `off` | Disable extra reasoning controls where supported | Gray |
+| `high` | Use a stronger reasoning/thinking setting | Yellow |
+| `max` | Use the strongest reasoning/thinking setting | Red |
+
+The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use `xiaoo run --reasoning-effort high -p "..."` to override the config for one run.
+
+Provider mapping is best-effort: OpenAI-compatible providers receive `reasoning_effort`, Anthropic receives `thinking.budget_tokens`, Gemini receives `thinkingConfig.thinkingBudget`, and unsupported providers ignore the setting.
+
 Set environment variables
 
 ```bash
@@ -83,7 +96,7 @@ xiaoo-tui
 xiaoo run -p "Your Command"
 ```
 
-In TUI, press `Tab` / `Shift+Tab` to switch agent role presets. When the current line starts with a slash command, `Tab` still performs slash completion.
+In TUI, press `Tab` to switch agent role presets. Press `Shift+Tab` to switch think level. When the current line starts with a slash command, `Tab` still performs slash completion.
 
 HTTP requests can also select an agent role preset by passing `agent` in the JSON body:
 

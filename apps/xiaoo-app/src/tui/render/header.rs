@@ -1,6 +1,7 @@
+use agent_types::ReasoningEffort;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -36,7 +37,7 @@ impl App {
                 Constraint::Length(14),
                 Constraint::Min(1),
                 Constraint::Length(theme_button_width),
-                Constraint::Length(32),
+                Constraint::Length(20),
             ])
             .split(inner);
 
@@ -117,10 +118,6 @@ impl App {
                 Style::default().fg(status_light_color),
             ),
             Span::styled(format!("{status_label} "), status_label_style),
-            Span::styled(
-                format!("think:{} ", self.state.reasoning_effort),
-                Style::default().fg(self.state.theme.primary),
-            ),
             Span::styled(now, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);
@@ -211,8 +208,23 @@ impl App {
                     .fg(self.state.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  Think ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                self.state.reasoning_effort.to_string(),
+                Style::default()
+                    .fg(reasoning_effort_color(self.state.reasoning_effort))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         let summary_bar = Paragraph::new(summary);
         frame.render_widget(summary_bar, inner);
+    }
+}
+
+fn reasoning_effort_color(effort: ReasoningEffort) -> Color {
+    match effort {
+        ReasoningEffort::Off => Color::Gray,
+        ReasoningEffort::High => Color::Yellow,
+        ReasoningEffort::Max => Color::Red,
     }
 }
