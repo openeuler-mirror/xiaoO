@@ -5,7 +5,8 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind, OperationError,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind,
+    OperationError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;

@@ -1,6 +1,6 @@
+use crate::backends::local::backend::LocalOperationBackend;
 use agent_contracts::backend::OperationBackend;
 use std::sync::Arc;
-use crate::backends::local::backend::LocalOperationBackend;
 
 /// Build a minimal local backend for the LSP subsystem.
 ///

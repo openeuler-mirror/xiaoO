@@ -47,7 +47,11 @@ impl LspServerManager {
             .to_string();
 
         let mut keys: Vec<InstanceKey> = Vec::new();
-        for c in self.configs.iter().filter(|c| c.extensions.contains(&ext.as_str())) {
+        for c in self
+            .configs
+            .iter()
+            .filter(|c| c.extensions.contains(&ext.as_str()))
+        {
             let root = find_root(file, c.root_markers, self.env.as_ref()).await;
             keys.push((c.id.to_string(), root));
         }
@@ -112,7 +116,11 @@ impl LspServerManager {
             .to_string();
 
         let mut keys: Vec<InstanceKey> = Vec::new();
-        for c in self.configs.iter().filter(|c| c.extensions.contains(&ext.as_str())) {
+        for c in self
+            .configs
+            .iter()
+            .filter(|c| c.extensions.contains(&ext.as_str()))
+        {
             let root = find_root(file, c.root_markers, self.env.as_ref()).await;
             keys.push((c.id.to_string(), root));
         }

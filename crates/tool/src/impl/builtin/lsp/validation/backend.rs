@@ -32,10 +32,7 @@ impl ValidationResult {
 
 pub fn validate_input(input: &LspInput) -> ValidationResult {
     if input.file_path.trim().is_empty() {
-        return ValidationResult::error(
-            "file_path cannot be empty",
-            error_code::FILE_PATH_EMPTY,
-        );
+        return ValidationResult::error("file_path cannot be empty", error_code::FILE_PATH_EMPTY);
     }
     ValidationResult::ok()
 }
