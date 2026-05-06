@@ -244,6 +244,11 @@ impl Message {
         self.mark_render_dirty();
     }
 
+    pub fn set_thinking_content(&mut self, content: impl Into<String>) {
+        self.thinking_content = content.into();
+        self.mark_render_dirty();
+    }
+
     pub fn set_streaming(&mut self, streaming: bool) {
         if self.is_streaming != streaming {
             self.is_streaming = streaming;

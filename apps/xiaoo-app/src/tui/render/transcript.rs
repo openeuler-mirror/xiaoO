@@ -698,9 +698,9 @@ fn render_standard_message_lines(
     if !message.thinking_content.is_empty() {
         let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
         let thinking_header = if is_thinking {
-            format!("  {} {loading_animation}", sanitize_terminal_text("⟡"))
+            format!("  {} {loading_animation}", sanitize_terminal_text("⭕️"))
         } else {
-            format!("  {} Thought", sanitize_terminal_text("⟡"))
+            format!("  {} Thought", sanitize_terminal_text("⭕️"))
         };
         lines.push(Line::styled(
             thinking_header,

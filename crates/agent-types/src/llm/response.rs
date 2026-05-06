@@ -41,5 +41,6 @@ pub struct LlmResponse {
 #[derive(Clone, Debug)]
 pub struct StreamChunk {
     pub delta_text: Option<String>,
+    pub delta_reasoning: Option<String>,
     pub delta_tool_call: Option<ToolUseBlock>,
 }

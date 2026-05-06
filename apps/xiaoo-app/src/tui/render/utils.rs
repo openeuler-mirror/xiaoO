@@ -69,6 +69,7 @@ fn sanitize_terminal_text_for_mode(text: &str, ascii_mode: bool) -> String {
             '▾' => output.push('v'),
             '▸' => output.push('>'),
             '⟡' => output.push('*'),
+            '⭕' => output.push('o'),
             '◔' => output.push_str("[-]"),
             '•' => output.push('*'),
             '●' => output.push('o'),

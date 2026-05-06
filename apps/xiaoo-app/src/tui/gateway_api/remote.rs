@@ -33,6 +33,11 @@ enum RemoteSseEvent {
         delta: String,
         snapshot: String,
     },
+    ThinkingDelta {
+        #[allow(dead_code)]
+        delta: String,
+        snapshot: String,
+    },
     ToolResult {
         call_id: String,
         tool_name: String,
@@ -357,6 +362,12 @@ async fn handle_remote_event(
         RemoteSseEvent::TurnStart { .. } => {}
         RemoteSseEvent::TextDelta { snapshot, .. } => {
             let _ = updates_tx.send(SessionTurnUpdate::SetAssistantContent {
+                agent_id: AgentId("cli-agent".to_string()),
+                text: snapshot,
+            });
+        }
+        RemoteSseEvent::ThinkingDelta { snapshot, .. } => {
+            let _ = updates_tx.send(SessionTurnUpdate::SetAssistantThinking {
                 agent_id: AgentId("cli-agent".to_string()),
                 text: snapshot,
             });

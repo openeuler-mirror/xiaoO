@@ -314,6 +314,7 @@ pub(crate) fn parsed_chunk_to_stream_chunk(chunk: &ParsedChunk) -> StreamChunk {
 
     StreamChunk {
         delta_text: chunk.content.clone(),
+        delta_reasoning: chunk.reasoning.clone(),
         delta_tool_call,
     }
 }

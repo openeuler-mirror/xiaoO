@@ -160,6 +160,12 @@ impl LoopEventSink for FanoutLoopEventSink {
         }
     }
 
+    fn on_assistant_reasoning(&self, agent_id: &AgentId, text: &str) {
+        for sink in &self.sinks {
+            sink.on_assistant_reasoning(agent_id, text);
+        }
+    }
+
     fn on_tool_result(&self, agent_id: &AgentId, event: &ToolResultEvent) {
         for sink in &self.sinks {
             sink.on_tool_result(agent_id, event);

@@ -691,6 +691,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
 
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
+    let streamed_reasoning = Mutex::new(String::new());
     let response = ctx
         .snapshot
         .llm_provider
@@ -702,7 +703,13 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                 .as_ref()
                 .unwrap_or(&default_agent_id)
                 .clone();
-            stream_assistant_text(event_sink.as_deref(), &agent_id, &streamed_text, chunk);
+            stream_assistant_chunk(
+                event_sink.as_deref(),
+                &agent_id,
+                &streamed_text,
+                &streamed_reasoning,
+                chunk,
+            );
         })
         .await?;
 
@@ -746,26 +753,38 @@ async fn llm_call_with_context_limit_recovery(ctx: &mut LoopContext<'_>) -> Resu
     }
 }
 
-fn stream_assistant_text(
+fn stream_assistant_chunk(
     sink: Option<&dyn LoopEventSink>,
     agent_id: &agent_types::common::ids::AgentId,
     streamed_text: &Mutex<String>,
+    streamed_reasoning: &Mutex<String>,
     chunk: StreamChunk,
 ) {
-    let Some(delta_text) = chunk.delta_text else {
-        return;
-    };
+    if let Some(delta_reasoning) = chunk.delta_reasoning {
+        let snapshot = {
+            let mut full_reasoning = streamed_reasoning
+                .lock()
+                .expect("assistant stream reasoning mutex should not be poisoned");
+            full_reasoning.push_str(&delta_reasoning);
+            full_reasoning.clone()
+        };
+        if let Some(sink) = sink {
+            sink.on_assistant_reasoning(agent_id, &snapshot);
+        }
+    }
 
-    let snapshot = {
-        let mut full_text = streamed_text
-            .lock()
-            .expect("assistant stream text mutex should not be poisoned");
-        full_text.push_str(&delta_text);
-        full_text.clone()
-    };
+    if let Some(delta_text) = chunk.delta_text {
+        let snapshot = {
+            let mut full_text = streamed_text
+                .lock()
+                .expect("assistant stream text mutex should not be poisoned");
+            full_text.push_str(&delta_text);
+            full_text.clone()
+        };
 
-    if let Some(sink) = sink {
-        sink.on_assistant_message(agent_id, &snapshot);
+        if let Some(sink) = sink {
+            sink.on_assistant_message(agent_id, &snapshot);
+        }
     }
 }
 
@@ -1355,10 +1374,12 @@ mod tests {
         ) -> Result<LlmResponse, LlmError> {
             on_chunk(StreamChunk {
                 delta_text: Some("Hello".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
             on_chunk(StreamChunk {
                 delta_text: Some(" world".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
@@ -1444,6 +1465,7 @@ mod tests {
 
             on_chunk(StreamChunk {
                 delta_text: Some(text.clone()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
@@ -1511,6 +1533,7 @@ mod tests {
 
             on_chunk(StreamChunk {
                 delta_text: Some("Recovered".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
@@ -1879,6 +1902,7 @@ mod tests {
         ) -> Result<LlmResponse, LlmError> {
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
@@ -1978,6 +2002,7 @@ mod tests {
             // Emit a text delta so the assistant message is non-empty.
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
