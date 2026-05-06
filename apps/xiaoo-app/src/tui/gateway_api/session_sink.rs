@@ -31,6 +31,15 @@ impl LoopEventSink for ChannelLoopEventSink {
             });
     }
 
+    fn on_assistant_reasoning(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
+        let _ = self
+            .updates_tx
+            .send(SessionTurnUpdate::SetAssistantThinking {
+                agent_id: agent_id.clone(),
+                text: text.to_string(),
+            });
+    }
+
     fn on_tool_result(
         &self,
         agent_id: &agent_types::common::ids::AgentId,

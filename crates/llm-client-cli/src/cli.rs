@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 
 use llm_client::{
     create_llm_provider_from_resolved, create_model_catalog, provider_registry, resolve_config,
-    ChatMessage, LlmRequest, ResolveInput, ResponseFormat, Tool, ToolChoice,
+    ChatMessage, LlmRequest, ReasoningEffort, ResolveInput, ResponseFormat, Tool, ToolChoice,
 };
 
 #[derive(Debug, Parser)]
@@ -64,6 +64,9 @@ enum Commands {
 
         #[arg(long)]
         max_tokens: Option<usize>,
+
+        #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
+        reasoning_effort: Option<ReasoningEffort>,
 
         prompt: String,
     },
@@ -145,6 +148,7 @@ pub async fn run() -> Result<(), CliError> {
             tool_choice,
             temperature,
             max_tokens,
+            reasoning_effort,
             prompt,
         } => {
             run_query(QueryArgs {
@@ -162,6 +166,7 @@ pub async fn run() -> Result<(), CliError> {
                 tool_choice,
                 temperature,
                 max_tokens,
+                reasoning_effort,
                 prompt,
             })
             .await
@@ -203,6 +208,7 @@ struct QueryArgs {
     tool_choice: Option<String>,
     temperature: Option<f64>,
     max_tokens: Option<usize>,
+    reasoning_effort: Option<ReasoningEffort>,
     prompt: String,
 }
 
@@ -274,6 +280,10 @@ async fn run_query(args: QueryArgs) -> Result<(), CliError> {
 
     if let Some(tokens) = args.max_tokens {
         request = request.with_max_tokens(tokens);
+    }
+
+    if let Some(effort) = args.reasoning_effort {
+        request = request.with_reasoning_effort(effort);
     }
 
     let provider = create_llm_provider_from_resolved(&config, model, None, None)

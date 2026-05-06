@@ -1,6 +1,5 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
 use agent_contracts::backend::OperationBackendConfig;
-use lsp::LspServiceRegistry;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -16,6 +15,7 @@ use llm_client::{
     create_llm_provider_from_resolved, resolve_config, resolve_model_context_length,
     LlmProviderWrapper, ResolveInput,
 };
+use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;

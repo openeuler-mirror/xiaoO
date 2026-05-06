@@ -3,7 +3,6 @@ mod builder;
 
 pub use builder::OperationBackendBuilderImpl;
 
-
 /// Build a minimal local backend for the LSP subsystem.
 ///
 /// Uses the process home directory as workspace root. Suitable for

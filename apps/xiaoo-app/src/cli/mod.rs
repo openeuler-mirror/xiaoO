@@ -5,7 +5,7 @@ use std::sync::Arc;
 use agent_contracts::CompressionPipeline;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
 use agent_types::hook::HookerRegistryConfig;
-use agent_types::CompletionConfig;
+use agent_types::{CompletionConfig, ReasoningEffort};
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
     RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
@@ -75,6 +75,7 @@ pub struct CliConfig {
     pub max_turns: u32,
     pub enable_tools: bool,
     pub context_window: Option<usize>,
+    pub reasoning_effort: ReasoningEffort,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
@@ -247,6 +248,7 @@ mod tests {
             max_turns: 1,
             enable_tools: false,
             context_window: None,
+            reasoning_effort: Default::default(),
             compact: crate::cli::config::CompactSection::default(),
             hooker: Default::default(),
             operation_backend: None,

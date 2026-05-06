@@ -1,3 +1,4 @@
+use agent_types::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,4 +71,6 @@ pub struct AppTurnRequest {
     pub reply_to_message_id: Option<String>,
     pub root_message_id: Option<String>,
     pub mentions: Vec<TurnMention>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }

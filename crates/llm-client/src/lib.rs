@@ -14,7 +14,9 @@ pub use agent_types::{
     AssistantMessage, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage,
 };
 pub use agent_types::{ChatMessage, ContentBlock, MessageRole};
-pub use agent_types::{CompletionConfig, LlmRequest, ResponseFormat, Tool, ToolChoice};
+pub use agent_types::{
+    CompletionConfig, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+};
 pub use error::LlmError;
 
 pub use auth::{AuthCredential, AuthPool, AuthState, InMemoryAuthPool};

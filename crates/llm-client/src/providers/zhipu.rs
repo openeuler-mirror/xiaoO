@@ -88,6 +88,7 @@ impl ZhipuProvider {
                     max_tokens: request.max_tokens,
                     temperature: request.temperature,
                     response_format: ResponseFormat::JsonObject,
+                    reasoning_effort: request.reasoning_effort,
                 }
             }
             _ => request.clone(),

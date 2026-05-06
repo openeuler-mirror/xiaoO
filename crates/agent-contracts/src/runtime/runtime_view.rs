@@ -1,5 +1,4 @@
 use crate::backend::OperationBackend;
-use std::sync::Arc;
 use crate::events::tool_events::ToolEventSink;
 use crate::hook::registry::HookerRegistry;
 use crate::interaction::InteractionHandle;
@@ -8,6 +7,7 @@ use crate::runtime::channel_file_sender::ChannelFileSender;
 use crate::skill::registry::SkillRegistry;
 use crate::tool::state::ToolStateStore;
 use crate::trace::TraceRecorder;
+use std::sync::Arc;
 
 pub trait RuntimeView: Send + Sync {
     fn state_store(&self) -> &dyn ToolStateStore;

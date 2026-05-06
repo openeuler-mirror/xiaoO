@@ -1,5 +1,5 @@
-use lsp::{AutoInstall, ServerConfig};
 use crate::daemon_config::ExtraServerConfig;
+use lsp::{AutoInstall, ServerConfig};
 
 /// Convert user-supplied [`ExtraServerConfig`] entries to the lsp crate's
 /// [`ServerConfig`] format. Strings are leaked to produce `'static` slices,

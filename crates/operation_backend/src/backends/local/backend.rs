@@ -6,8 +6,8 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind, OperationError,
-    PathKind, PathStat,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind,
+    OperationError, PathKind, PathStat,
 };
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};

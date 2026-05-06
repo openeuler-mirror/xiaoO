@@ -1,3 +1,4 @@
+use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
 use std::collections::{BTreeMap, HashMap};
@@ -131,6 +132,7 @@ pub struct AppState {
     pub loading_tick: usize,
     pub agent_config: Config,
     pub active_agent_role: Option<String>,
+    pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
@@ -164,6 +166,7 @@ impl AppState {
             loading_tick: 0,
             agent_config: Config::default(),
             active_agent_role: None,
+            reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -198,6 +201,7 @@ impl AppState {
             loading_tick: 0,
             agent_config: config.clone(),
             active_agent_role: None,
+            reasoning_effort: config.llm.reasoning_effort,
             config_path,
             workspace,
             session_messages: Vec::new(),
@@ -228,6 +232,7 @@ impl AppState {
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.current_snapshot_name = None;
         self.slash = SlashState::default();
+        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;
@@ -577,6 +582,10 @@ impl AppState {
         true
     }
 
+    pub fn cycle_reasoning_effort(&mut self) {
+        self.reasoning_effort = self.reasoning_effort.next();
+    }
+
     pub fn runtime_status_light(&self) -> RuntimeStatusLight {
         if self.interaction_prompt.is_some() {
             RuntimeStatusLight::AwaitingInteraction
@@ -750,6 +759,7 @@ mod tests {
     use super::{current_git_diff_delta_for_file, ApiKeyDialogState, AppState, RuntimeStatusLight};
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
+    use agent_types::ReasoningEffort;
     use std::fs;
     use std::path::PathBuf;
 
@@ -793,6 +803,20 @@ mod tests {
 
         state.toggle_theme();
         assert_eq!(state.theme.is_light(), initial_is_light);
+    }
+
+    #[test]
+    fn cycle_reasoning_effort_rotates_off_high_max() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::High);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Max);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
     }
 
     #[test]

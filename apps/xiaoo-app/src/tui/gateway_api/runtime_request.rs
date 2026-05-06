@@ -160,6 +160,7 @@ impl GatewayRuntime {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
+            reasoning_effort: state.reasoning_effort,
         })
     }
 }

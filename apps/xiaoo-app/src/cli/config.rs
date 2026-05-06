@@ -1,5 +1,6 @@
 use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
+use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -33,6 +34,7 @@ pub struct LlmSection {
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
     pub context_window: Option<usize>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Deserialize, Default)]

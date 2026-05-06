@@ -100,7 +100,8 @@ impl LspServerInstance {
 
         let process = tokio::time::timeout(
             std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            self.env.spawn_process(&binary_str, self.config.args, &self.root),
+            self.env
+                .spawn_process(&binary_str, self.config.args, &self.root),
         )
         .await
         .map_err(|_| LspError::StartupFailed("process spawn timed out".into()))??;

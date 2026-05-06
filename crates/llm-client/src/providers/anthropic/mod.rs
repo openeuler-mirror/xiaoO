@@ -9,7 +9,8 @@ use crate::error::{map_api_status_error, map_reqwest_error, map_serde_error, Llm
 use crate::wire_types::{ParsedChunk, WireToolCallDelta, WireToolCallFunctionDelta, WireUsage};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
-    AssistantMessage, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage,
+    AssistantMessage, LlmRequest, LlmResponse, ReasoningEffort, StopReason, StreamChunk,
+    ToolUseBlock, Usage,
 };
 
 mod convert;
@@ -51,10 +52,14 @@ impl AnthropicProvider {
         let system_message = anthropic_system_message(&request.messages);
         let other_messages = anthropic_messages(&request.messages);
 
+        let max_tokens = request.max_tokens.unwrap_or(16384);
+        let (max_tokens, thinking_budget) =
+            anthropic_reasoning_budget(request.reasoning_effort, max_tokens);
+
         let mut body = serde_json::json!({
             "model": self.capabilities.model_name,
             "messages": other_messages,
-            "max_tokens": request.max_tokens.unwrap_or(16384),
+            "max_tokens": max_tokens,
         });
 
         if stream {
@@ -83,7 +88,38 @@ impl AnthropicProvider {
             }
         }
 
+        if let Some(budget_tokens) = thinking_budget {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget_tokens,
+            });
+        }
+
         body
+    }
+}
+
+fn anthropic_reasoning_budget(
+    effort: ReasoningEffort,
+    requested_max_tokens: usize,
+) -> (usize, Option<usize>) {
+    match effort {
+        ReasoningEffort::Off => (requested_max_tokens, None),
+        ReasoningEffort::High | ReasoningEffort::Max => {
+            let max_tokens = requested_max_tokens.max(2048);
+            let divisor = if effort == ReasoningEffort::High {
+                4
+            } else {
+                2
+            };
+            let cap = if effort == ReasoningEffort::High {
+                8192
+            } else {
+                32768
+            };
+            let budget = (max_tokens / divisor).clamp(1024, cap).min(max_tokens - 1);
+            (max_tokens, Some(budget))
+        }
     }
 }
 
@@ -123,10 +159,17 @@ impl LlmProvider for AnthropicProvider {
 
         let content = anthropic_response["content"]
             .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|c| c["text"].as_str())
+            .and_then(|arr| arr.iter().find_map(|c| c["text"].as_str()))
             .unwrap_or("")
             .to_string();
+        let reasoning_content = anthropic_response["content"].as_array().and_then(|arr| {
+            let thinking = arr
+                .iter()
+                .filter_map(|c| c["thinking"].as_str())
+                .collect::<Vec<_>>()
+                .join("");
+            (!thinking.is_empty()).then_some(thinking)
+        });
         let tool_calls = extract_anthropic_tool_calls(&anthropic_response["content"]);
 
         let usage_val = &anthropic_response["usage"];
@@ -163,7 +206,7 @@ impl LlmProvider for AnthropicProvider {
                 } else {
                     None
                 },
-                reasoning_content: None,
+                reasoning_content,
                 tool_calls: tool_use_blocks,
                 usage,
                 stop_reason,
@@ -204,6 +247,7 @@ impl LlmProvider for AnthropicProvider {
         }
 
         let mut full_text = String::new();
+        let mut full_reasoning = String::new();
         let mut full_tool_calls: Vec<crate::wire_types::WireToolCall> = Vec::new();
         let mut final_usage = None;
         let mut final_stop_reason = StopReason::EndTurn;
@@ -229,6 +273,9 @@ impl LlmProvider for AnthropicProvider {
                 if let Some(parsed) = self.parse_anthropic_stream_line(&line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
+                    }
+                    if let Some(ref reasoning) = parsed.reasoning {
+                        full_reasoning.push_str(reasoning);
                     }
                     if let Some(ref usage) = parsed.usage {
                         final_usage =
@@ -268,7 +315,11 @@ impl LlmProvider for AnthropicProvider {
                 } else {
                     Some(full_text)
                 },
-                reasoning_content: None,
+                reasoning_content: if full_reasoning.is_empty() {
+                    None
+                } else {
+                    Some(full_reasoning)
+                },
                 tool_calls: tool_use_blocks,
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,
@@ -322,6 +373,7 @@ impl AnthropicProvider {
             Some("content_block_delta") => {
                 let delta_type = json["delta"]["type"].as_str();
                 let text = json["delta"]["text"].as_str().map(|s| s.to_string());
+                let reasoning = json["delta"]["thinking"].as_str().map(|s| s.to_string());
                 let tool_calls = if delta_type == Some("input_json_delta") {
                     Some(vec![WireToolCallDelta {
                         index: json["index"].as_u64().unwrap_or(0) as u32,
@@ -339,7 +391,7 @@ impl AnthropicProvider {
                 };
                 Ok(Some(ParsedChunk {
                     content: text,
-                    reasoning: None,
+                    reasoning,
                     finish_reason: None,
                     usage: None,
                     tool_calls,
@@ -402,7 +454,7 @@ fn merge_usage(existing: Option<Usage>, incoming: Usage) -> Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_llm::ChatMessageExt;
+    use agent_llm::{ChatMessageExt, LlmRequestExt};
     use agent_types::LlmRequest;
 
     fn make_provider() -> AnthropicProvider {
@@ -538,12 +590,37 @@ mod tests {
             max_tokens: None,
             temperature: None,
             response_format: agent_types::ResponseFormat::Text,
+            reasoning_effort: agent_types::ReasoningEffort::Off,
         };
 
         let body = provider.build_body(&request, false);
 
         assert_eq!(body["system"], "base system\n\nworkspace rules");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_body_sets_thinking_budget_for_reasoning_effort() {
+        let provider = make_provider();
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.max_tokens = Some(4096);
+        request.reasoning_effort = agent_types::ReasoningEffort::Max;
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 2048);
+    }
+
+    #[test]
+    fn build_body_omits_thinking_when_reasoning_effort_is_off() {
+        let provider = make_provider();
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

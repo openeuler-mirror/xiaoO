@@ -53,6 +53,14 @@ pub(crate) struct GeminiGenerationConfig {
     pub response_mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "responseJsonSchema")]
     pub response_json_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingConfig")]
+    pub thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct GeminiThinkingConfig {
+    #[serde(rename = "thinkingBudget")]
+    pub thinking_budget: i32,
 }
 
 #[derive(Debug, Serialize)]
