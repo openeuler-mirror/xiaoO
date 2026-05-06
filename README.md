@@ -11,21 +11,26 @@ At the runtime core, xiaoO ships a layered memory system and an adaptive context
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 <a href="https://gitcode.com/openeuler/xiaoO"><img src="https://img.shields.io/badge/version-v0.0.1-red" alt="Version v0.0.1" /></a>
----
 
-## Memory & Context
 
-The highlights below focus specifically on xiaoO's memory system and context compression architecture:
-
-- **Layered Memory System**: xiaoO separates live working memory, structured session memory, durable memory, and semantic recall instead of treating context as one flat transcript.
-- **Adaptive Context Compression**: the runtime analyzes token pressure before each turn and can microcompact tool noise, trim stale history, collapse old context into summaries, and auto-recover from context-window overflow.
-- **Memory Self-Evolution**: memory is continuously refreshed, deduplicated, summary-merged, correction-aware, and able to rebuild semantic indexes when the embedding stack changes.
-- **Hybrid Semantic Memory**: the architecture supports lightweight JSON persistence as well as SQLite + FTS5 + embedding-based hybrid retrieval.
-- **Multi-Agent Memory Isolation**: each execution lane keeps its own loop state and memory snapshot, preventing context pollution across collaborating agents.
-- **Traceable Runtime**: compression, prompt building, and execution can be traced end-to-end with Moirai-backed observability.
-
-Read the full architecture, configuration, and integration guide in [Memory & Context Compression](./docs/memory_context_system.md).
-
+## Key Features
+- Auto mode — --model auto / /model auto chooses both the model and thinking level for each turn
+- Thinking-mode streaming — see DeepSeek reasoning blocks as the model works
+- Full tool suite — file ops, shell execution, git, web search/browse, apply-patch, sub-agents, MCP servers
+- Context managemant — context tracking, manual or configured compaction, and prefix-cache telemetry
+- Reasoning-effort tiers — cycle through off → high → max with Shift + Tab
+- Session save/resume managemant — checkpoint and resume long-running sessions
+<!-- - Workspace rollback — side-git pre/post-turn snapshots with /restore and revert_turn, without touching your repo's .git -->
+<!-- - Durable task queue — background tasks can survive restarts -->
+- HTTP/SSE runtime API -http for headless agent workflows
+<!-- - MCP protocol — connect to Model Context Protocol servers for extended tooling; please see docs/MCP.md -->
+- LSP diagnostics — inline error/warning surfacing after every edit via rust-analyzer, pyright, typescript-language-server, gopls, clangd
+- User memory — optional persistent note file injected into the system prompt for cross-session preferences. See in [Memory & Context Compression](./docs/memory_context_system.md).
+- Localized UI — A clean, elegant, and user-friendly interface
+- Live cost tracking — per-turn and session-level token usage and cost estimates; cache hit/miss breakdown
+- Skills system — composable, installable instruction packs from GitHub with no backend service required
+- Full-stack traceability: Hook points have been added at locations such as agent creation, before/after LLM calls, and before/after tool calls, enabling full-stack observability and allowing custom plugins to be inserted.
+- Scheduled/triggered task: Supports long-term, scheduled/triggered tasks.
 
 ## Prerequisites
 - Cargo >= 1.7 installed
