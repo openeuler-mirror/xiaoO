@@ -178,20 +178,19 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
             temperature: request.temperature.map(|t| t as f32),
             response_mime_type,
             response_json_schema,
-            thinking_config: Some(GeminiThinkingConfig {
-                thinking_budget: gemini_thinking_budget(request.reasoning_effort),
-            }),
+            thinking_config: gemini_thinking_budget(request.reasoning_effort)
+                .map(|thinking_budget| GeminiThinkingConfig { thinking_budget }),
         },
         tools,
         tool_config,
     }
 }
 
-fn gemini_thinking_budget(effort: ReasoningEffort) -> i32 {
+fn gemini_thinking_budget(effort: ReasoningEffort) -> Option<i32> {
     match effort {
-        ReasoningEffort::Off => 0,
-        ReasoningEffort::High => 8192,
-        ReasoningEffort::Max => 24576,
+        ReasoningEffort::Off => None,
+        ReasoningEffort::High => Some(8192),
+        ReasoningEffort::Max => Some(24576),
     }
 }
 
@@ -343,5 +342,15 @@ mod tests {
                 .thinking_budget,
             8192
         );
+    }
+
+    #[test]
+    fn build_gemini_request_body_omits_thinking_config_when_off() {
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = agent_types::ReasoningEffort::Off;
+
+        let body = build_gemini_request_body(&request, "gemini-pro");
+
+        assert!(body.generation_config.thinking_config.is_none());
     }
 }

@@ -614,6 +614,16 @@ mod tests {
     }
 
     #[test]
+    fn build_body_omits_thinking_when_reasoning_effort_is_off() {
+        let provider = make_provider();
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
     fn test_parse_unknown_event() {
         let provider = make_provider();
         provider

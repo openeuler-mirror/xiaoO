@@ -80,7 +80,7 @@ db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-
 
 The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use `xiaoo run --reasoning-effort high -p "..."` to override the config for one run.
 
-Provider mapping is best-effort: OpenAI-compatible providers receive `reasoning_effort`, Anthropic receives `thinking.budget_tokens`, Gemini receives `thinkingConfig.thinkingBudget`, and unsupported providers ignore the setting.
+Provider mapping is best-effort: OpenAI-compatible providers receive `reasoning_effort` only for `high`/`max`, Anthropic receives `thinking.budget_tokens`, Gemini receives `thinkingConfig.thinkingBudget`, and unsupported providers ignore the setting. `off` omits provider-specific reasoning fields so default requests keep each provider's native behavior.
 
 Set environment variables
 

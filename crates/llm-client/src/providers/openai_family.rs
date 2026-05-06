@@ -68,8 +68,9 @@ impl OpenAiFamilyProvider {
     ) -> Result<serde_json::Value, LlmError> {
         let wire = llm_request_to_wire(request, &self.capabilities.model_name);
         let mut body = serde_json::to_value(&wire).map_err(map_serde_error)?;
-        body["reasoning_effort"] =
-            serde_json::json!(openai_reasoning_effort(request.reasoning_effort));
+        if let Some(reasoning_effort) = openai_reasoning_effort(request.reasoning_effort) {
+            body["reasoning_effort"] = serde_json::json!(reasoning_effort);
+        }
         if force_stream {
             body["stream"] = serde_json::json!(true);
             body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -95,11 +96,11 @@ impl OpenAiFamilyProvider {
     }
 }
 
-fn openai_reasoning_effort(effort: ReasoningEffort) -> &'static str {
+fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
     match effort {
-        ReasoningEffort::Off => "none",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Max => "xhigh",
+        ReasoningEffort::Off => None,
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Max => Some("xhigh"),
     }
 }
 
@@ -338,6 +339,17 @@ mod tests {
         let body = provider.build_body(&request, false).unwrap();
 
         assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn build_body_omits_reasoning_effort_when_off() {
+        let provider = make_provider();
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
+            .with_reasoning_effort(ReasoningEffort::Off);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert!(body.get("reasoning_effort").is_none());
     }
 }
 
