@@ -641,7 +641,8 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         .map_err(|e| AgentError::PromptBuild(e.to_string()));
 
     match result {
-        Ok(result) => {
+        Ok(mut result) => {
+            result.request.reasoning_effort = ctx.input.reasoning_effort;
             // end span — 成功，记录估算 token 数等输出信息
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
@@ -651,6 +652,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                         json!({
                             "estimated_input_tokens": result.estimated_input_tokens,
                             "request_message_count": result.request.messages.len(),
+                            "reasoning_effort": result.request.reasoning_effort.to_string(),
                         }),
                     )
                     .await;

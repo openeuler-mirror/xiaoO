@@ -18,8 +18,8 @@ pub use context::{
 pub use hook::{HookPointId, HookerDescriptor, HookerRegistryConfig};
 pub use llm::{
     AssistantMessage, ChatMessage, CompletionConfig, ContentBlock, LlmError, LlmRequest,
-    LlmResponse, MessageRole, ResponseFormat, StopReason, StreamChunk, Tool, ToolChoice,
-    ToolUseBlock, Usage,
+    LlmResponse, MessageRole, ReasoningEffort, ResponseFormat, StopReason, StreamChunk, Tool,
+    ToolChoice, ToolUseBlock, Usage,
 };
 pub use lsp::{LspDiagnostic, LspError, LspLocation, LspPosition, LspSymbol, Severity};
 pub use outcome::{AgentError, AgentOutcome, TokenUsage};

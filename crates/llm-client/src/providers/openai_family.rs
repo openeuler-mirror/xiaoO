@@ -13,7 +13,8 @@ use crate::error::{
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
-    AssistantMessage, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
+    AssistantMessage, LlmRequest, LlmResponse, ReasoningEffort, StopReason, StreamChunk,
+    ToolUseBlock,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,8 @@ impl OpenAiFamilyProvider {
     ) -> Result<serde_json::Value, LlmError> {
         let wire = llm_request_to_wire(request, &self.capabilities.model_name);
         let mut body = serde_json::to_value(&wire).map_err(map_serde_error)?;
+        body["reasoning_effort"] =
+            serde_json::json!(openai_reasoning_effort(request.reasoning_effort));
         if force_stream {
             body["stream"] = serde_json::json!(true);
             body["stream_options"] = serde_json::json!({ "include_usage": true });
@@ -89,6 +92,14 @@ impl OpenAiFamilyProvider {
 
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.api_base.trim_end_matches('/'))
+    }
+}
+
+fn openai_reasoning_effort(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Off => "none",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Max => "xhigh",
     }
 }
 
@@ -301,6 +312,33 @@ pub(crate) fn accumulate_tool_call_deltas_pub(
     parsed: &ParsedChunk,
 ) {
     accumulate_tool_call_deltas(full_tool_calls, parsed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_llm::{ChatMessageExt, LlmRequestExt};
+
+    fn make_provider() -> OpenAiFamilyProvider {
+        OpenAiFamilyProvider::new(
+            "test-key".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.4".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn build_body_sets_reasoning_effort() {
+        let provider = make_provider();
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
+            .with_reasoning_effort(ReasoningEffort::Max);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["reasoning_effort"], "xhigh");
+    }
 }
 
 /// Configuration for creating an OpenAI-compatible provider directly.

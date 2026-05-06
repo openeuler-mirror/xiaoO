@@ -1,4 +1,6 @@
-use agent_types::{ChatMessage, CompletionConfig, LlmRequest, ResponseFormat, Tool, ToolChoice};
+use agent_types::{
+    ChatMessage, CompletionConfig, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+};
 
 pub trait ResponseFormatExt {
     fn json_schema(name: &str, schema: serde_json::Value) -> Self
@@ -55,6 +57,10 @@ pub trait LlmRequestExt {
     fn with_response_format(self, format: ResponseFormat) -> Self
     where
         Self: Sized;
+
+    fn with_reasoning_effort(self, effort: ReasoningEffort) -> Self
+    where
+        Self: Sized;
 }
 
 impl LlmRequestExt for LlmRequest {
@@ -66,6 +72,7 @@ impl LlmRequestExt for LlmRequest {
             max_tokens: None,
             temperature: None,
             response_format: ResponseFormat::Text,
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 
@@ -91,6 +98,11 @@ impl LlmRequestExt for LlmRequest {
 
     fn with_response_format(mut self, format: ResponseFormat) -> Self {
         self.response_format = format;
+        self
+    }
+
+    fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 }

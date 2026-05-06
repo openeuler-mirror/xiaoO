@@ -98,6 +98,7 @@ pub fn build_channel_turn_request(message: &GatewayChannelMessage) -> AppTurnReq
                 display_name: mention.display_name.clone(),
             })
             .collect(),
+        reasoning_effort: Default::default(),
     }
 }
 

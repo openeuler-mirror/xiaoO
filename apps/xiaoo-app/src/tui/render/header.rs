@@ -36,7 +36,7 @@ impl App {
                 Constraint::Length(14),
                 Constraint::Min(1),
                 Constraint::Length(theme_button_width),
-                Constraint::Length(20),
+                Constraint::Length(32),
             ])
             .split(inner);
 
@@ -117,6 +117,10 @@ impl App {
                 Style::default().fg(status_light_color),
             ),
             Span::styled(format!("{status_label} "), status_label_style),
+            Span::styled(
+                format!("think:{} ", self.state.reasoning_effort),
+                Style::default().fg(self.state.theme.primary),
+            ),
             Span::styled(now, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);

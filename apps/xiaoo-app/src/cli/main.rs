@@ -21,6 +21,7 @@ use xiaoo_app::gateway::{
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::ReasoningEffort;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
 
@@ -77,6 +78,10 @@ enum Command {
         /// Disable tool execution
         #[arg(long)]
         no_tools: bool,
+
+        /// Reasoning effort: off, high, or max
+        #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
+        reasoning_effort: Option<ReasoningEffort>,
     },
     /// Manage skills
     Skill {
@@ -121,6 +126,7 @@ async fn main() {
             system,
             max_turns,
             no_tools,
+            reasoning_effort,
         } => {
             let llm = file_cfg.llm.as_ref();
 
@@ -133,6 +139,9 @@ async fn main() {
             let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let context_window = llm.and_then(|l| l.context_window);
+            let reasoning_effort = reasoning_effort
+                .or_else(|| llm.and_then(|l| l.reasoning_effort))
+                .unwrap_or_default();
 
             let config = CliConfig {
                 provider,
@@ -147,6 +156,7 @@ async fn main() {
                 max_turns,
                 enable_tools: !no_tools,
                 context_window,
+                reasoning_effort,
                 compact: file_cfg.compact.unwrap_or_default(),
                 hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
                     default: HookerDefaultMode::None,
@@ -476,6 +486,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         reply_to_message_id: None,
         root_message_id: None,
         mentions: Vec::new(),
+        reasoning_effort: config.reasoning_effort,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

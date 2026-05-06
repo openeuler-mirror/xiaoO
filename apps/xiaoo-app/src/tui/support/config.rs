@@ -1,5 +1,6 @@
 use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
+use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
 use llm_client::ProtocolFamily;
 use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
@@ -88,6 +89,8 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl Default for LlmConfig {
@@ -99,6 +102,7 @@ impl Default for LlmConfig {
             api_base: String::new(),
             max_tokens: default_llm_max_tokens(),
             context_window: None,
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 }

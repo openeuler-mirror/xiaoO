@@ -65,6 +65,8 @@ pub struct TuiSessionSnapshot {
     #[serde(default)]
     pub active_agent_role: Option<String>,
     #[serde(default)]
+    pub reasoning_effort: agent_types::ReasoningEffort,
+    #[serde(default)]
     pub session_messages: Vec<llm_client::ChatMessage>,
     #[serde(default)]
     pub chat_messages: Vec<SavedMessage>,
@@ -172,6 +174,7 @@ pub fn build_snapshot(
         session_id: state.session_id.clone(),
         workspace: state.workspace.clone(),
         active_agent_role: state.active_agent_role.clone(),
+        reasoning_effort: state.reasoning_effort,
         session_messages: state.session_messages.clone(),
         chat_messages: state
             .chat_state
@@ -273,6 +276,7 @@ pub fn apply_snapshot(
     state.session_id = snapshot.session_id;
     state.current_snapshot_name = None;
     state.active_agent_role = snapshot.active_agent_role;
+    state.reasoning_effort = snapshot.reasoning_effort;
     state.session_messages = snapshot.session_messages;
     state.session_file_changes = snapshot.session_file_changes;
     state.tool_file_changes.clear();

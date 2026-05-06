@@ -57,8 +57,8 @@ mod wrapper_tests {
     use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeOutput, HookPointId};
     use agent_types::llm::{
         AssistantMessage, ChatMessage, ContentBlock, ErrorLlmHookResult, LlmError, LlmRequest,
-        LlmResponse, MessageRole, PostLlmHookResult, PreLlmHookResult, StopReason, StreamChunk,
-        Usage,
+        LlmResponse, MessageRole, PostLlmHookResult, PreLlmHookResult, ReasoningEffort, StopReason,
+        StreamChunk, Usage,
     };
     use async_trait::async_trait;
 
@@ -83,6 +83,7 @@ mod wrapper_tests {
             max_tokens: None,
             temperature: None,
             response_format: Default::default(),
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 
@@ -268,11 +269,60 @@ mod wrapper_tests {
 
     struct TestRuntimeView {
         registry: MockHookerRegistry,
+        trace_recorder: TestTraceRecorder,
+        agent_context: TestAgentContext,
     }
 
     impl TestRuntimeView {
         fn new(registry: MockHookerRegistry) -> Arc<Self> {
-            Arc::new(Self { registry })
+            Arc::new(Self {
+                registry,
+                trace_recorder: TestTraceRecorder,
+                agent_context: TestAgentContext::default(),
+            })
+        }
+    }
+
+    struct TestTraceRecorder;
+
+    #[async_trait]
+    impl agent_contracts::TraceRecorder for TestTraceRecorder {
+        async fn begin_span(
+            &self,
+            _kind: agent_contracts::TraceSpanKind,
+            _name: std::borrow::Cow<'static, str>,
+            _fields: serde_json::Value,
+        ) -> agent_contracts::TraceSpanHandle {
+            agent_contracts::TraceSpanHandle::new("", "", None)
+        }
+
+        async fn update_span(
+            &self,
+            _span: &agent_contracts::TraceSpanHandle,
+            _fields: serde_json::Value,
+        ) {
+        }
+
+        async fn end_span(
+            &self,
+            _span: agent_contracts::TraceSpanHandle,
+            _outcome: agent_contracts::TraceOutcome,
+            _fields: serde_json::Value,
+        ) {
+        }
+
+        async fn finalize_trace(
+            &self,
+            _outcome: agent_contracts::TraceOutcome,
+            _fields: serde_json::Value,
+        ) {
+        }
+
+        async fn force_finalize_trace(
+            &self,
+            _outcome: agent_contracts::TraceOutcome,
+            _fields: serde_json::Value,
+        ) {
         }
     }
 
@@ -284,16 +334,67 @@ mod wrapper_tests {
             panic!("not used in llm hook tests")
         }
         fn trace_recorder(&self) -> &dyn agent_contracts::TraceRecorder {
-            panic!("not used in llm hook tests")
+            &self.trace_recorder
         }
         fn agent_context(&self) -> &dyn agent_contracts::AgentContext {
-            panic!("not used in llm hook tests")
+            &self.agent_context
         }
         fn interaction(&self) -> &dyn agent_contracts::InteractionHandle {
             panic!("not used in llm hook tests")
         }
         fn hookers(&self) -> &dyn HookerRegistry {
             &self.registry
+        }
+    }
+
+    #[derive(Default)]
+    struct TestConversationView {
+        messages: Vec<ChatMessage>,
+    }
+
+    impl agent_contracts::ConversationView for TestConversationView {
+        fn recent_messages(&self, _limit: usize) -> &[ChatMessage] {
+            &self.messages
+        }
+
+        fn message_count(&self) -> usize {
+            self.messages.len()
+        }
+    }
+
+    struct TestAgentContext {
+        conversation: TestConversationView,
+        workspace: agent_types::common::WorkspaceRef,
+        metadata: agent_types::common::AgentMetadata,
+    }
+
+    impl Default for TestAgentContext {
+        fn default() -> Self {
+            Self {
+                conversation: TestConversationView::default(),
+                workspace: agent_types::common::WorkspaceRef {
+                    root: std::path::PathBuf::from("."),
+                },
+                metadata: agent_types::common::AgentMetadata {
+                    agent_id: "test-agent".to_string(),
+                    model: "test-model".to_string(),
+                    session_id: Some("test-session".to_string()),
+                },
+            }
+        }
+    }
+
+    impl agent_contracts::AgentContext for TestAgentContext {
+        fn conversation(&self) -> &dyn agent_contracts::ConversationView {
+            &self.conversation
+        }
+
+        fn workspace(&self) -> &agent_types::common::WorkspaceRef {
+            &self.workspace
+        }
+
+        fn metadata(&self) -> &agent_types::common::AgentMetadata {
+            &self.metadata
         }
     }
 

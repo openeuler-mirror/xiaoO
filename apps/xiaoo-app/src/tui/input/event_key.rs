@@ -270,7 +270,7 @@ impl App {
             )
             .is_none()
             {
-                self.state.cycle_agent_role(true);
+                self.state.cycle_reasoning_effort();
                 return Ok(());
             }
         }

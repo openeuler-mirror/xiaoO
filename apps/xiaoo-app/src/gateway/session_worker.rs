@@ -5,6 +5,7 @@ use crate::gateway::{
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +17,7 @@ pub struct SessionWorkerInput {
     pub agent_id: AgentId,
     pub user_message: String,
     pub append_user_message: bool,
+    pub reasoning_effort: ReasoningEffort,
     pub loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     pub interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
     pub channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
@@ -92,7 +94,8 @@ impl SessionWorker {
 
         let mut loop_input = AgentLoopInput::new(input.user_message)
             .with_agent_id(input.agent_id.clone())
-            .with_visible_tools(assembly.visible_tools.clone());
+            .with_visible_tools(assembly.visible_tools.clone())
+            .with_reasoning_effort(input.reasoning_effort);
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
         }
