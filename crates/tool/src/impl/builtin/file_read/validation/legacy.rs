@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Input validation for FileReadTool.
 //!
 //! Validates FileReadInput before processing to ensure:

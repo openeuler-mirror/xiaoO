@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::{
     AgentContext, ConversationView, Hooker, HookerRegistry, InteractionHandle, RuntimeView,
     SkillRegistry, ToolEventSink, ToolSpecView, ToolStateStore, TraceOutcome, TraceRecorder,
@@ -136,6 +138,7 @@ pub struct BasicRuntimeView {
     agent_context: Box<dyn AgentContext>,
     interaction: Box<dyn InteractionHandle>,
     hookers: Box<dyn HookerRegistry>,
+    operation_backend: Option<Arc<dyn OperationBackend>>,
 }
 
 impl BasicRuntimeView {
@@ -146,6 +149,7 @@ impl BasicRuntimeView {
         agent_context: Box<dyn AgentContext>,
         interaction: Box<dyn InteractionHandle>,
         hookers: Box<dyn HookerRegistry>,
+        operation_backend: Option<Arc<dyn OperationBackend>>,
     ) -> Self {
         Self {
             state_store,
@@ -154,6 +158,7 @@ impl BasicRuntimeView {
             agent_context,
             interaction,
             hookers,
+            operation_backend,
         }
     }
 }
@@ -181,6 +186,10 @@ impl RuntimeView for BasicRuntimeView {
 
     fn hookers(&self) -> &dyn HookerRegistry {
         self.hookers.as_ref()
+    }
+
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        self.operation_backend.clone()
     }
 }
 

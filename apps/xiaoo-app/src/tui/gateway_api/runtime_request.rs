@@ -22,6 +22,23 @@ const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_syst
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
+        if self.remote.is_some() {
+            return self.start_remote_turn(state, prompt).await;
+        }
+
+        if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
+            let trimmed = env_name.trim();
+            if !trimmed.is_empty() {
+                let env_value = std::env::var(trimmed).unwrap_or_default();
+                if env_value.trim().is_empty() {
+                    return Err(format!(
+                        "env var {} is not set. Please configure your API key with /connect or set the environment variable.",
+                        trimmed
+                    ));
+                }
+            }
+        }
+
         let runtime_config = self.build_runtime_config(state)?;
         let open_request = self.session_open_request(state)?;
         let turn_request = self.turn_request(state, prompt.clone())?;
@@ -71,13 +88,10 @@ impl GatewayRuntime {
                     .trim_end_matches(['\r', '\n'])
                     .to_string()
             });
-        let total_budget = state
-            .agent_config
-            .llm
-            .context_window
-            .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| *value > 0)
-            .ok_or_else(|| "invalid TUI runtime state: missing [llm].context_window".to_string())?;
+        let total_budget =
+            crate::config::resolve_context_window(&state.agent_config).ok_or_else(|| {
+                "invalid TUI runtime state: unable to resolve context window".to_string()
+            })?;
         let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
             .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
 
@@ -114,7 +128,8 @@ impl GatewayRuntime {
                 .clone()
                 .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             hooker: state.agent_config.hooker.clone(),
-            lsp_service: state.agent_config.resolve_lsp_service(),
+            operation_backend: state.agent_config.operation_backend.clone(),
+            lsp_registry: state.agent_config.build_lsp_registry(),
         })
     }
 
@@ -145,6 +160,7 @@ impl GatewayRuntime {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
+            reasoning_effort: state.reasoning_effort,
         })
     }
 }

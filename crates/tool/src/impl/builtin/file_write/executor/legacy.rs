@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! FileWriteTool executor implementation.
 
 use std::path::Path;
@@ -163,6 +164,12 @@ impl ToolExecutor for FileWriteExecutor {
             });
         }
 
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(operation_backend::local_lsp_backend()));
+
         let file_path = Self::normalize_path(&input.file_path);
         let expanded_path = expand_path(&file_path, workspace_root);
         let path = Path::new(&expanded_path);
@@ -196,12 +203,12 @@ impl ToolExecutor for FileWriteExecutor {
         }
 
         // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
-        if let Some(lsp) = &self.services.lsp_service {
+        if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, path);
         }
 
         // Run LSP diagnostics on the written file (best-effort, bounded by timeout).
-        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
+        let lsp_diagnostics = if let Some(ref lsp) = lsp {
             fetch_diagnostics(lsp, path, LSP_DIAG_TIMEOUT_SECS).await
         } else {
             None

@@ -6,6 +6,7 @@ use agent_llm::MessageRoleExt;
 use agent_types::{AssistantMessage, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage};
 use agent_types::{ChatMessage, ContentBlock};
 use agent_types::{LlmRequest, ResponseFormat, Tool, ToolChoice};
+use serde_json::{Map, Value};
 
 pub(crate) fn chat_messages_to_wire(messages: &[ChatMessage]) -> Vec<WireMessage> {
     messages.iter().map(chat_message_to_wire).collect()
@@ -17,6 +18,11 @@ pub(crate) fn chat_message_to_wire(msg: &ChatMessage) -> WireMessage {
     let mut content: Option<String> = None;
     let mut tool_calls: Option<Vec<WireToolCall>> = None;
     let mut tool_call_id: Option<String> = None;
+    let reasoning_content = if msg.role == agent_types::MessageRole::Assistant {
+        msg.reasoning_content.clone()
+    } else {
+        None
+    };
 
     for block in &msg.blocks {
         match block {
@@ -53,6 +59,7 @@ pub(crate) fn chat_message_to_wire(msg: &ChatMessage) -> WireMessage {
     WireMessage {
         role,
         content,
+        reasoning_content,
         tool_calls,
         tool_call_id,
     }
@@ -96,9 +103,33 @@ pub(crate) fn tool_to_wire(tool: &Tool) -> WireTool {
         function: WireToolFunction {
             name: tool.name.clone(),
             description: Some(tool.description.clone()),
-            parameters: Some(tool.parameters.clone()),
+            parameters: Some(normalize_tool_parameters_schema(&tool.parameters)),
         },
     }
+}
+
+fn normalize_tool_parameters_schema(schema: &Value) -> Value {
+    let Some(object) = schema.as_object() else {
+        return empty_object_schema();
+    };
+
+    if object.get("type").and_then(Value::as_str) == Some("object") {
+        return schema.clone();
+    }
+
+    let mut normalized = object.clone();
+    normalized.insert("type".to_string(), Value::String("object".to_string()));
+    normalized
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    Value::Object(normalized)
+}
+
+fn empty_object_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {}
+    })
 }
 
 pub(crate) fn tool_choice_to_wire(choice: &ToolChoice) -> WireToolChoice {
@@ -204,6 +235,7 @@ pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse 
         Some(c) => wire_choice_to_assistant_message(c),
         None => AssistantMessage {
             text: None,
+            reasoning_content: None,
             tool_calls: vec![],
             usage: Usage {
                 prompt_tokens: 0,
@@ -219,6 +251,7 @@ pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse 
 
 pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> AssistantMessage {
     let text = choice.message.content.clone();
+    let reasoning_content = choice.message.reasoning_content.clone();
 
     let tool_calls: Vec<ToolUseBlock> = choice
         .tool_calls
@@ -245,6 +278,7 @@ pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> Assistant
 
     AssistantMessage {
         text,
+        reasoning_content,
         tool_calls,
         usage: Usage {
             prompt_tokens: 0,
@@ -280,6 +314,7 @@ pub(crate) fn parsed_chunk_to_stream_chunk(chunk: &ParsedChunk) -> StreamChunk {
 
     StreamChunk {
         delta_text: chunk.content.clone(),
+        delta_reasoning: chunk.reasoning.clone(),
         delta_tool_call,
     }
 }
@@ -331,6 +366,57 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_message_to_wire_preserves_reasoning_content() {
+        let mut msg = ChatMessage::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolUse {
+                call_id: "call_123".to_string(),
+                tool_name: "get_weather".to_string(),
+                input: serde_json::json!({"location": "Tokyo"}),
+            }],
+            None,
+            0,
+            None,
+        );
+        msg.reasoning_content = Some("thinking trace".to_string());
+
+        let wire = chat_message_to_wire(&msg);
+
+        assert_eq!(wire.role, "assistant");
+        assert_eq!(wire.reasoning_content, Some("thinking trace".to_string()));
+    }
+
+    #[test]
+    fn test_wire_choice_preserves_reasoning_content() {
+        let choice = WireChoice {
+            message: WireMessage {
+                role: "assistant".to_string(),
+                content: None,
+                reasoning_content: Some("thinking trace".to_string()),
+                tool_calls: Some(vec![WireToolCall {
+                    id: "call_123".to_string(),
+                    call_type: "function".to_string(),
+                    function: WireToolCallFunction {
+                        name: "get_weather".to_string(),
+                        arguments: r#"{"location":"Tokyo"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+            },
+            finish_reason: Some("tool_calls".to_string()),
+            tool_calls: None,
+        };
+
+        let message = wire_choice_to_assistant_message(&choice);
+
+        assert_eq!(
+            message.reasoning_content,
+            Some("thinking trace".to_string())
+        );
+        assert_eq!(message.tool_calls.len(), 1);
+    }
+
+    #[test]
     fn test_wire_response_to_llm_response() {
         let wire = WireResponse {
             id: "resp-1".to_string(),
@@ -365,6 +451,41 @@ mod tests {
         assert!(
             matches!(tool_choice_to_wire(&ToolChoice::None), WireToolChoice::String(s) if s == "none")
         );
+    }
+
+    #[test]
+    fn tool_to_wire_normalizes_empty_parameters_to_object_schema() {
+        let tool = Tool {
+            name: "print_hello_world".to_string(),
+            description: "prints hello".to_string(),
+            parameters: serde_json::json!({}),
+        };
+
+        let wire = tool_to_wire(&tool);
+        let parameters = wire.function.parameters.expect("parameters should exist");
+
+        assert_eq!(parameters["type"], "object");
+        assert!(parameters["properties"].is_object());
+    }
+
+    #[test]
+    fn tool_to_wire_preserves_existing_object_schema() {
+        let tool = Tool {
+            name: "search".to_string(),
+            description: "search docs".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+        };
+
+        let wire = tool_to_wire(&tool);
+        let parameters = wire.function.parameters.expect("parameters should exist");
+
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(parameters["properties"]["query"]["type"], "string");
+        assert_eq!(parameters["required"][0], "query");
     }
 
     #[test]

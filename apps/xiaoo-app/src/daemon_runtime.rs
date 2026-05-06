@@ -1,4 +1,5 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -6,22 +7,23 @@ use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use agent_contracts::lsp::LspProvider;
 use compact::{
     ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
     RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
 };
 use llm_client::{
-    create_llm_provider_from_resolved, resolve_config, LlmProviderWrapper, ResolveInput,
+    create_llm_provider_from_resolved, resolve_config, resolve_model_context_length,
+    LlmProviderWrapper, ResolveInput,
 };
+use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
 use tool::ToolRuntimeServices;
+use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
 use xiaoo_app::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -42,11 +44,12 @@ pub struct ConfiguredRuntimeResolver {
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
-    lsp_service: Option<Arc<dyn LspProvider>>,
+    lsp_registry: Option<Arc<LspServiceRegistry>>,
+    operation_backend: Option<OperationBackendConfig>,
 }
 
 impl ConfiguredRuntimeResolver {
-    pub fn from_config(config: &DaemonConfig) -> Result<Self> {
+    pub async fn from_config(config: &DaemonConfig) -> Result<Self> {
         let agent = config.resolve_agent()?;
         ensure_workspace_exists(&agent.workspace_root)?;
 
@@ -67,8 +70,15 @@ impl ConfiguredRuntimeResolver {
             )
             .context("failed to create llm provider")?,
         );
-        let token_budget = build_token_budget(
+        let effective_context_window = resolve_effective_context_window(
             config.app.llm.context_window,
+            &resolved_provider,
+            &agent.model,
+            llm_provider.capabilities().max_context_window,
+        )
+        .await;
+        let token_budget = build_token_budget(
+            Some(effective_context_window),
             config.max_output_tokens(),
             llm_provider.capabilities().max_context_window,
         );
@@ -78,7 +88,7 @@ impl ConfiguredRuntimeResolver {
         let skill_registry: Arc<dyn SkillRegistry> =
             Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
 
-        let lsp_service = config.resolve_lsp_service();
+        let lsp_registry = config.build_lsp_registry();
 
         Ok(Self {
             agent,
@@ -90,7 +100,8 @@ impl ConfiguredRuntimeResolver {
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
-            lsp_service,
+            operation_backend: config.app.operation_backend.clone(),
+            lsp_registry,
         })
     }
 
@@ -99,7 +110,7 @@ impl ConfiguredRuntimeResolver {
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let services = ToolRuntimeServices {
-            lsp_service: self.lsp_service.clone(),
+            lsp_registry: self.lsp_registry.clone(),
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
@@ -126,6 +137,41 @@ impl ConfiguredRuntimeResolver {
 
         Ok(Some(Arc::from(registry)))
     }
+}
+
+async fn resolve_effective_context_window(
+    configured_context_window: Option<usize>,
+    resolved_provider: &llm_client::ResolvedConfig,
+    model: &str,
+    static_fallback: usize,
+) -> usize {
+    if let Some(configured) = configured_context_window.filter(|value| *value > 0) {
+        return configured;
+    }
+
+    match resolve_model_context_length(resolved_provider, model).await {
+        Ok(Some(context_window)) => match usize::try_from(context_window) {
+            Ok(value) if value > 0 => return value,
+            Ok(_) => {}
+            Err(_) => {
+                tracing::warn!(
+                    model = %model,
+                    context_window,
+                    "dynamic context window does not fit usize; falling back"
+                );
+            }
+        },
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                model = %model,
+                error = %error,
+                "failed to dynamically resolve model context window; falling back"
+            );
+        }
+    }
+
+    static_fallback.max(1)
 }
 
 #[async_trait]
@@ -164,6 +210,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             compression_pipeline: self.compression_pipeline.clone(),
             trace: self.trace.clone(),
             hooker: self.hooker.clone(),
+            operation_backend: self.operation_backend.clone(),
         })
     }
 }

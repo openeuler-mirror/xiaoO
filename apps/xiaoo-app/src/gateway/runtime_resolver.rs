@@ -2,6 +2,7 @@ use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionOpenRequest, SessionRecord,
     SessionRuntimeBindings,
 };
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -37,6 +38,7 @@ pub struct ResolvedSessionRuntime {
     pub compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

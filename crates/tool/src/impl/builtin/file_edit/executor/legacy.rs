@@ -1,5 +1,5 @@
 //! FileEditTool executor implementation.
-#![allow(unused_imports)]
+#![allow(unused)]
 
 use similar::{ChangeTag, TextDiff};
 use std::sync::Arc;
@@ -64,7 +64,10 @@ impl FileEditExecutor {
 
 impl Default for FileEditExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileEditToolSpec::new()), ToolRuntimeServices::default())
+        Self::new(
+            Arc::new(FileEditToolSpec::new()),
+            ToolRuntimeServices::default(),
+        )
     }
 }
 
@@ -84,6 +87,12 @@ impl ToolExecutor for FileEditExecutor {
                 message: format!("Failed to parse input: {}", e),
             }
         })?;
+
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(operation_backend::local_lsp_backend()));
 
         let dedup_store = self.get_dedup_store().await;
         let workspace_root = runtime_workspace_root(runtime);
@@ -119,12 +128,17 @@ impl ToolExecutor for FileEditExecutor {
             Self::write_file_content(&expanded_path, new_content)?;
 
             // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
-            if let Some(lsp) = &self.services.lsp_service {
+            if let Some(ref lsp) = lsp {
                 spawn_touch_file(lsp, std::path::Path::new(&expanded_path));
             }
 
-            let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
-                fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+            let lsp_diagnostics = if let Some(ref lsp) = lsp {
+                fetch_diagnostics(
+                    lsp,
+                    std::path::Path::new(&expanded_path),
+                    LSP_DIAG_TIMEOUT_SECS,
+                )
+                .await
             } else {
                 None
             };
@@ -184,12 +198,17 @@ impl ToolExecutor for FileEditExecutor {
         Self::write_file_content(&expanded_path, &updated_content)?;
 
         // Notify LSP immediately (fire-and-forget) so it starts indexing the new content.
-        if let Some(lsp) = &self.services.lsp_service {
+        if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, std::path::Path::new(&expanded_path));
         }
 
-        let lsp_diagnostics = if let Some(lsp) = &self.services.lsp_service {
-            fetch_diagnostics(lsp, std::path::Path::new(&expanded_path), LSP_DIAG_TIMEOUT_SECS).await
+        let lsp_diagnostics = if let Some(ref lsp) = lsp {
+            fetch_diagnostics(
+                lsp,
+                std::path::Path::new(&expanded_path),
+                LSP_DIAG_TIMEOUT_SECS,
+            )
+            .await
         } else {
             None
         };

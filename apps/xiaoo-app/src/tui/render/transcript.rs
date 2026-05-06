@@ -665,6 +665,14 @@ fn render_standard_message_lines(
             Style::default().fg(theme.success),
             Style::default().fg(theme.foreground),
         ),
+        MessageRole::Error => (
+            theme.error,
+            "Error",
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.error),
+        ),
         MessageRole::Tool => (
             theme.muted,
             "Tool",
@@ -690,9 +698,9 @@ fn render_standard_message_lines(
     if !message.thinking_content.is_empty() {
         let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
         let thinking_header = if is_thinking {
-            format!("  {} {loading_animation}", sanitize_terminal_text("⟡"))
+            format!("  {} {loading_animation}", sanitize_terminal_text("⭕️"))
         } else {
-            format!("  {} Thought", sanitize_terminal_text("⟡"))
+            format!("  {} Thought", sanitize_terminal_text("⭕️"))
         };
         lines.push(Line::styled(
             thinking_header,

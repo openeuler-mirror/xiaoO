@@ -3,6 +3,7 @@ pub const MAX_TIMEOUT_ENV_VAR: &str = "BASH_MAX_TIMEOUT_MS";
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_OUTPUT_BYTES_PER_STREAM: usize = 1024 * 1024;
 
 fn read_positive_env_u64(name: &str) -> Option<u64> {
     std::env::var(name)

@@ -3,13 +3,14 @@ use crate::gateway::{
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
-use agent_contracts::lsp::LspProvider;
+use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
 use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
+use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
 use std::collections::HashMap;
@@ -31,7 +32,8 @@ pub struct HostedSessionRuntimeConfig {
     pub llm_provider: Option<Arc<LlmProviderWrapper>>,
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
-    pub lsp_service: Option<Arc<dyn LspProvider>>,
+    pub lsp_registry: Option<Arc<LspServiceRegistry>>,
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -43,7 +45,7 @@ pub struct HostedSessionRuntimeResolver {
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
         let initial_services = ToolRuntimeServices {
-            lsp_service: config.lsp_service.clone(),
+            lsp_registry: config.lsp_registry.clone(),
             ..ToolRuntimeServices::default()
         };
         Self {
@@ -202,6 +204,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             trace: self.config.trace.clone(),
             compression_pipeline: self.config.compression_pipeline.clone(),
             hooker: self.config.hooker.clone(),
+            operation_backend: self.config.operation_backend.clone(),
         })
     }
 }

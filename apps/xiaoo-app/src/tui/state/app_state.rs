@@ -1,6 +1,10 @@
+use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState};
@@ -18,6 +22,7 @@ use crate::theme::Theme;
 pub enum InputMode {
     Editing,
     ProviderSelection,
+    SessionSnapshotSelection,
     InteractionPrompt,
 }
 
@@ -96,6 +101,25 @@ pub struct SlashState {
     pub dismissed_prefix: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionFileChangeStats {
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFileChangeEntry {
+    pub file_path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolFileBaseline {
+    file_path: String,
+    absolute_path: PathBuf,
+}
+
 pub struct AppState {
     pub theme: Theme,
     pub chat_state: ChatState,
@@ -103,14 +127,17 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
+    pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
     pub active_agent_role: Option<String>,
+    pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub session_id: String,
+    pub current_snapshot_name: Option<String>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
@@ -119,6 +146,9 @@ pub struct AppState {
     /// Set when text is copied to clipboard; drives the toast notification.
     pub copy_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
+    pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
+    pub tool_file_changes: HashMap<String, crate::chat::FileChangeDelta>,
+    tool_file_baselines: HashMap<String, ToolFileBaseline>,
 }
 
 impl AppState {
@@ -131,20 +161,26 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            session_snapshot_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
             active_agent_role: None,
+            reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
             workspace,
             session_messages: Vec::new(),
             session_id: uuid::Uuid::new_v4().to_string(),
+            current_snapshot_name: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
             transcript_selection: None,
             copy_notice: None,
             external_commands: load_external_commands(),
+            session_file_changes: BTreeMap::new(),
+            tool_file_changes: HashMap::new(),
+            tool_file_baselines: HashMap::new(),
         })
     }
 
@@ -160,20 +196,26 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            session_snapshot_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
             active_agent_role: None,
+            reasoning_effort: config.llm.reasoning_effort,
             config_path,
             workspace,
             session_messages: Vec::new(),
             session_id: uuid::Uuid::new_v4().to_string(),
+            current_snapshot_name: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
             external_commands: load_external_commands(),
             transcript_selection: None,
             copy_notice: None,
+            session_file_changes: BTreeMap::new(),
+            tool_file_changes: HashMap::new(),
+            tool_file_baselines: HashMap::new(),
         })
     }
 
@@ -183,16 +225,22 @@ impl AppState {
         self.status_panel.set_workspace(&self.workspace);
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
+        self.session_snapshot_dialog = None;
         self.api_key_dialog = None;
         self.loading_tick = 0;
         self.session_messages.clear();
         self.session_id = uuid::Uuid::new_v4().to_string();
+        self.current_snapshot_name = None;
         self.slash = SlashState::default();
+        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;
         self.copy_notice = None;
         self.external_commands = load_external_commands();
+        self.session_file_changes.clear();
+        self.tool_file_changes.clear();
+        self.tool_file_baselines.clear();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -214,6 +262,142 @@ impl AppState {
     pub fn toggle_api_key_visibility(&mut self) {
         if let Some(dialog) = self.api_key_dialog.as_mut() {
             dialog.show_plaintext = !dialog.show_plaintext;
+        }
+    }
+
+    pub fn reconcile_tool_file_change(
+        &mut self,
+        call_id: &str,
+        next: Option<crate::chat::FileChangeDelta>,
+    ) {
+        if let Some(previous) = self.tool_file_changes.remove(call_id) {
+            self.adjust_session_file_change(
+                &previous.file_path,
+                previous.additions,
+                previous.deletions,
+                false,
+            );
+        }
+
+        let Some(next) = next.filter(|change| change.additions > 0 || change.deletions > 0) else {
+            return;
+        };
+
+        self.adjust_session_file_change(&next.file_path, next.additions, next.deletions, true);
+        self.tool_file_changes.insert(call_id.to_string(), next);
+    }
+
+    pub fn capture_tool_file_baseline(&mut self, call_id: &str, tool: &str, args_preview: &str) {
+        if self.tool_file_baselines.contains_key(call_id) {
+            return;
+        }
+        let Some(file_path) = parse_tool_target_file_path(tool, args_preview) else {
+            return;
+        };
+        let absolute_path = resolve_workspace_file_path(&self.workspace, &file_path);
+        self.tool_file_baselines.insert(
+            call_id.to_string(),
+            ToolFileBaseline {
+                file_path,
+                absolute_path,
+            },
+        );
+    }
+
+    pub fn reconcile_tool_file_change_from_baseline(
+        &mut self,
+        call_id: &str,
+        fallback: Option<crate::chat::FileChangeDelta>,
+    ) {
+        let Some(baseline) = self.tool_file_baselines.remove(call_id) else {
+            if !self.tool_file_changes.contains_key(call_id) {
+                self.reconcile_tool_file_change(call_id, fallback);
+            }
+            return;
+        };
+
+        let computed = current_git_diff_delta_for_file(
+            &self.workspace,
+            &baseline.file_path,
+            &baseline.absolute_path,
+        );
+        if let Some(delta) = computed.or(fallback) {
+            self.session_file_changes.insert(
+                delta.file_path.clone(),
+                SessionFileChangeStats {
+                    additions: delta.additions,
+                    deletions: delta.deletions,
+                },
+            );
+            if delta.additions == 0 && delta.deletions == 0 {
+                self.session_file_changes.remove(&delta.file_path);
+            }
+        } else {
+            self.reconcile_tool_file_change(call_id, None);
+        }
+    }
+
+    pub fn discard_tool_file_baseline(&mut self, call_id: &str) {
+        self.tool_file_baselines.remove(call_id);
+    }
+
+    pub fn clear_tool_file_baselines(&mut self) {
+        self.tool_file_baselines.clear();
+    }
+
+    pub fn sorted_session_file_changes(&self) -> Vec<SessionFileChangeEntry> {
+        let mut entries = self
+            .session_file_changes
+            .iter()
+            .map(|(file_path, stats)| SessionFileChangeEntry {
+                file_path: file_path.clone(),
+                additions: stats.additions,
+                deletions: stats.deletions,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            let left_total = left.additions + left.deletions;
+            let right_total = right.additions + right.deletions;
+            right_total
+                .cmp(&left_total)
+                .then(right.additions.cmp(&left.additions))
+                .then(left.file_path.cmp(&right.file_path))
+        });
+        entries
+    }
+
+    pub fn display_file_path(&self, file_path: &str) -> String {
+        let path = Path::new(file_path);
+        if let Ok(relative) = path.strip_prefix(&self.workspace) {
+            let display = relative.display().to_string();
+            if !display.is_empty() {
+                return display;
+            }
+        }
+        file_path.to_string()
+    }
+
+    fn adjust_session_file_change(
+        &mut self,
+        file_path: &str,
+        additions: u32,
+        deletions: u32,
+        add: bool,
+    ) {
+        let entry = self
+            .session_file_changes
+            .entry(file_path.to_string())
+            .or_default();
+        if add {
+            entry.additions = entry.additions.saturating_add(additions);
+            entry.deletions = entry.deletions.saturating_add(deletions);
+        } else {
+            entry.additions = entry.additions.saturating_sub(additions);
+            entry.deletions = entry.deletions.saturating_sub(deletions);
+        }
+
+        if entry.additions == 0 && entry.deletions == 0 {
+            self.session_file_changes.remove(file_path);
         }
     }
 
@@ -398,6 +582,10 @@ impl AppState {
         true
     }
 
+    pub fn cycle_reasoning_effort(&mut self) {
+        self.reasoning_effort = self.reasoning_effort.next();
+    }
+
     pub fn runtime_status_light(&self) -> RuntimeStatusLight {
         if self.interaction_prompt.is_some() {
             RuntimeStatusLight::AwaitingInteraction
@@ -409,7 +597,136 @@ impl AppState {
     }
 }
 
-fn build_chat_state(config: &Config) -> ChatState {
+fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
+    match tool {
+        "file_edit" | "file_write" => {
+            let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
+            value.get("file_path")?.as_str().map(ToOwned::to_owned)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
+    let path = Path::new(file_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    }
+}
+
+fn read_file_if_exists(path: &Path) -> Option<String> {
+    match fs::read_to_string(path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => None,
+    }
+}
+
+fn current_git_diff_delta_for_file(
+    workspace: &Path,
+    file_path: &str,
+    absolute_path: &Path,
+) -> Option<crate::chat::FileChangeDelta> {
+    let repo_root = git_repo_root(workspace)?;
+    let normalized_path = absolute_path
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_path.to_path_buf());
+    let relative_path = normalized_path.strip_prefix(&repo_root).ok()?.to_path_buf();
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["diff", "--numstat", "--"])
+        .arg(&relative_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    if let Some((_, stats)) = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(parse_git_numstat_line)
+    {
+        return Some(crate::chat::FileChangeDelta {
+            file_path: file_path.to_string(),
+            additions: stats.additions,
+            deletions: stats.deletions,
+        });
+    }
+
+    let untracked = Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["ls-files", "--others", "--exclude-standard", "--"])
+        .arg(&relative_path)
+        .output()
+        .ok()?;
+    if !untracked.status.success() {
+        return None;
+    }
+
+    let is_untracked = String::from_utf8_lossy(&untracked.stdout)
+        .lines()
+        .any(|line| !line.trim().is_empty());
+    let additions = if is_untracked {
+        read_file_if_exists(absolute_path)
+            .map(|content| content.lines().count() as u32)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    Some(crate::chat::FileChangeDelta {
+        file_path: file_path.to_string(),
+        additions,
+        deletions: 0,
+    })
+}
+
+fn git_repo_root(workspace: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        let root_path = PathBuf::from(root);
+        Some(root_path.canonicalize().unwrap_or(root_path))
+    }
+}
+
+fn parse_git_numstat_line(line: &str) -> Option<(String, SessionFileChangeStats)> {
+    let mut parts = line.split('\t');
+    let additions = parse_numstat_count(parts.next()?)?;
+    let deletions = parse_numstat_count(parts.next()?)?;
+    let path = parts.next()?.to_string();
+    Some((
+        path,
+        SessionFileChangeStats {
+            additions,
+            deletions,
+        },
+    ))
+}
+
+fn parse_numstat_count(value: &str) -> Option<u32> {
+    match value {
+        "-" => Some(0),
+        other => other.parse().ok(),
+    }
+}
+
+pub(crate) fn build_chat_state(config: &Config) -> ChatState {
     let provider_name = config.llm.provider.clone();
     let model = config.llm.model.clone();
     let mut chat_state = ChatState::new();
@@ -428,8 +745,8 @@ fn build_chat_state(config: &Config) -> ChatState {
 
 fn build_status_panel(config: &Config) -> StatusPanel {
     let mut status_panel = StatusPanel::new();
-    if let Some(context_window) = config.llm.context_window {
-        status_panel.set_context_window(u64::from(context_window));
+    if let Some(context_window) = crate::config::resolve_context_window(config) {
+        status_panel.set_context_window(context_window as u64);
     }
     if !config.llm.provider.trim().is_empty() && !config.llm.model.trim().is_empty() {
         status_panel.set_provider(&config.llm.provider, &config.llm.model);
@@ -439,9 +756,11 @@ fn build_status_panel(config: &Config) -> StatusPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiKeyDialogState, AppState, RuntimeStatusLight};
+    use super::{current_git_diff_delta_for_file, ApiKeyDialogState, AppState, RuntimeStatusLight};
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
+    use agent_types::ReasoningEffort;
+    use std::fs;
     use std::path::PathBuf;
 
     #[test]
@@ -484,6 +803,20 @@ mod tests {
 
         state.toggle_theme();
         assert_eq!(state.theme.is_light(), initial_is_light);
+    }
+
+    #[test]
+    fn cycle_reasoning_effort_rotates_off_high_max() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::High);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Max);
+        state.cycle_reasoning_effort();
+        assert_eq!(state.reasoning_effort, ReasoningEffort::Off);
     }
 
     #[test]
@@ -541,6 +874,60 @@ mod tests {
         state.chat_state.input = "/co".into();
         state.note_input_changed();
         assert!(state.slash_menu_visible());
+    }
+
+    #[test]
+    fn current_git_diff_delta_for_file_reads_real_numstat() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("workspace");
+
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["init"])
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let file = workspace.join("src/main.rs");
+        fs::write(&file, "fn main() {\n    println!(\"before\");\n}\n").expect("baseline");
+
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["add", "src/main.rs"])
+            .output()
+            .expect("git add");
+        assert!(add.status.success());
+
+        let commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args([
+                "-c",
+                "user.name=Codex",
+                "-c",
+                "user.email=codex@example.com",
+                "commit",
+                "-m",
+                "baseline",
+            ])
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success());
+
+        fs::write(
+            &file,
+            "fn main() {\n    println!(\"after\");\n    println!(\"more\");\n}\n",
+        )
+        .expect("modified");
+
+        let delta = current_git_diff_delta_for_file(&workspace, "src/main.rs", &file)
+            .expect("current git diff");
+        assert_eq!(delta.file_path, "src/main.rs");
+        assert_eq!(delta.additions, 2);
+        assert_eq!(delta.deletions, 1);
     }
 
     fn sample_prompt_request() -> PromptRequest {

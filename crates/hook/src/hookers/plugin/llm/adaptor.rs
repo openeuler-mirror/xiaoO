@@ -41,6 +41,7 @@ struct AskUserDirective {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum PluginAskUserRequest {
     Confirm {
         prompt: String,
@@ -565,6 +566,10 @@ impl PluginLlmHookerAdaptor {
         Ok(LlmResponse {
             message: AssistantMessage {
                 text,
+                reasoning_content: message_value
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .map(String::from),
                 tool_calls,
                 usage,
                 stop_reason,

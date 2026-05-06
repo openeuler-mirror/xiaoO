@@ -12,12 +12,13 @@ use agent_types::lsp::{
 };
 
 use crate::client::LspClient;
+use crate::host::LspEnv;
 use crate::servers::{path_to_uri, resolve_binary, uri_to_path, ServerConfig};
 use crate::types::{symbol_kind_name, LspPos};
 
 const MAX_CRASHES: u32 = 3;
 const DIAG_TIMEOUT_SECS: u64 = 30;
-const DIAG_SETTLE_MS: u64 = 2500; // quiet-window: return when no new notification for this long
+const DIAG_SETTLE_MS: u64 = 2500;
 const STARTUP_TIMEOUT_SECS: u64 = 45;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,9 +31,10 @@ enum State {
 pub struct LspServerInstance {
     config: ServerConfig,
     root: PathBuf,
+    env: Arc<dyn LspEnv>,
     state: State,
     client: Option<LspClient>,
-    open_files: HashMap<String, i32>, // uri → version
+    open_files: HashMap<String, i32>,
     diagnostics: Arc<Mutex<HashMap<String, Vec<LspDiagnostic>>>>,
     diag_updated: Arc<Notify>,
     crash_count: u32,
@@ -40,10 +42,11 @@ pub struct LspServerInstance {
 }
 
 impl LspServerInstance {
-    pub fn new(config: ServerConfig, root: PathBuf) -> Self {
+    pub fn new(config: ServerConfig, root: PathBuf, env: Arc<dyn LspEnv>) -> Self {
         Self {
             config,
             root,
+            env,
             state: State::Stopped,
             client: None,
             open_files: HashMap::new(),
@@ -89,26 +92,26 @@ impl LspServerInstance {
     async fn start_server(&mut self) -> Result<(), LspError> {
         let root_uri = path_to_uri(&self.root);
 
-        // Resolve binary (checks PATH + global bin dir, auto-installs if configured).
-        let binary = resolve_binary(&self.config).await?;
+        let binary = resolve_binary(&self.config, self.env.as_ref()).await?;
         let binary_str = binary
             .to_str()
             .ok_or_else(|| LspError::StartupFailed("binary path contains invalid UTF-8".into()))?
             .to_string();
 
-        let client = tokio::time::timeout(
+        let process = tokio::time::timeout(
             std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS),
-            LspClient::start(&binary_str, self.config.args, &self.root),
+            self.env
+                .spawn_process(&binary_str, self.config.args, &self.root),
         )
         .await
         .map_err(|_| LspError::StartupFailed("process spawn timed out".into()))??;
 
+        let client = LspClient::from_process(process);
         client
             .initialize(&root_uri, self.config.initialization_options.clone())
             .await
             .map_err(|e| LspError::StartupFailed(e.to_string()))?;
 
-        // Spawn background task to handle publishDiagnostics notifications
         let mut notif_rx = client.subscribe();
         let diag_store = Arc::clone(&self.diagnostics);
         let diag_updated = Arc::clone(&self.diag_updated);
@@ -121,14 +124,16 @@ impl LspServerInstance {
                     Some(u) => u.to_string(),
                     None => continue,
                 };
-                let raw_diags = match notif.params.get("diagnostics").and_then(|v: &Value| v.as_array()) {
+                let raw_diags = match notif
+                    .params
+                    .get("diagnostics")
+                    .and_then(|v: &Value| v.as_array())
+                {
                     Some(d) => d.clone(),
                     None => continue,
                 };
                 let diags: Vec<LspDiagnostic> = raw_diags.iter().map(parse_diagnostic).collect();
                 diag_store.lock().await.insert(uri, diags);
-                // notify_one stores one pending wakeup so it's delivered even if
-                // no waiter is registered yet (unlike notify_waiters which is lost).
                 diag_updated.notify_one();
             }
         });
@@ -143,8 +148,6 @@ impl LspServerInstance {
         let uri = path_to_uri(path);
 
         if let Some(version) = self.open_files.get_mut(&uri) {
-            // Already open: send didChange only if content differs from what we last sent.
-            // We don't cache the text, so always send didChange to keep the server in sync.
             *version += 1;
             let v = *version;
             self.client().notify(
@@ -203,23 +206,9 @@ impl LspServerInstance {
         Ok(())
     }
 
-    /// Returns cached diagnostics, waiting up to DIAG_TIMEOUT_SECS for results to stabilise.
-    ///
-    /// Language servers often send an initial empty publishDiagnostics before analysis
-    /// completes.  We handle this with a two-phase wait:
-    ///
-    /// Phase 1 – wait for any notification for this file.
-    ///   • Non-empty ⇒ return immediately.
-    ///   • Empty ⇒ fall through to Phase 2.
-    ///
-    /// Phase 2 – settle window.
-    ///   • Each new notification resets the DIAG_SETTLE_MS timer.
-    ///   • Non-empty notification ⇒ return immediately.
-    ///   • Timer expires (quiet for DIAG_SETTLE_MS) ⇒ return whatever we have.
     pub async fn diagnostics(&self, path: &Path) -> Result<Vec<LspDiagnostic>, LspError> {
         let uri = path_to_uri(path);
 
-        // Fast path: already have non-empty cached diagnostics
         {
             let store = self.diagnostics.lock().await;
             if let Some(diags) = store.get(&uri) {
@@ -237,20 +226,17 @@ impl LspServerInstance {
         let uri_clone = uri.clone();
 
         let result = tokio::time::timeout(timeout_dur, async move {
-            // Phase 1: wait for first notification for our file
             loop {
                 diag_updated.notified().await;
                 let store = diag_store.lock().await;
                 if let Some(diags) = store.get(&uri_clone) {
                     if !diags.is_empty() {
-                        return diags.clone(); // errors found — done
+                        return diags.clone();
                     }
-                    break; // got an entry (empty) — enter settle phase
+                    break;
                 }
-                // notification was for a different file — keep waiting
             }
 
-            // Phase 2: settle — return on quiet, or immediately on non-empty
             loop {
                 match tokio::time::timeout(settle, diag_updated.notified()).await {
                     Ok(_) => {
@@ -260,10 +246,8 @@ impl LspServerInstance {
                                 return diags.clone();
                             }
                         }
-                        // Still empty — reset settle timer (continue loop)
                     }
                     Err(_) => {
-                        // Quiet for DIAG_SETTLE_MS — analysis is stable
                         let store = diag_store.lock().await;
                         return store.get(&uri_clone).cloned().unwrap_or_default();
                     }
@@ -276,8 +260,6 @@ impl LspServerInstance {
         Ok(result)
     }
 
-    /// Wait until the LSP server has sent at least one publishDiagnostics for any file
-    /// (used for workspace-scope queries like workspace/symbol).
     async fn wait_for_any_file_indexed(&self) {
         let diag_store = Arc::clone(&self.diagnostics);
         let diag_updated = Arc::clone(&self.diag_updated);
@@ -295,9 +277,6 @@ impl LspServerInstance {
         .await;
     }
 
-    /// Wait until the LSP server has sent at least one publishDiagnostics notification
-    /// for `path` (even if empty). This signals that the server has parsed and indexed
-    /// the file, so hover/definition/call-hierarchy queries will return real results.
     async fn wait_for_file_ready(&self, path: &Path) {
         let uri = path_to_uri(path);
         let diag_store = Arc::clone(&self.diagnostics);
@@ -308,7 +287,7 @@ impl LspServerInstance {
                 loop {
                     diag_updated.notified().await;
                     if diag_store.lock().await.contains_key(&uri) {
-                        return; // server has processed this file (entry exists, even if empty)
+                        return;
                     }
                 }
             },
@@ -556,7 +535,6 @@ fn parse_diagnostic(v: &Value) -> LspDiagnostic {
 
 fn extract_hover_text(v: &Value) -> Option<String> {
     let contents = v.get("contents")?;
-    // MarkedString | MarkupContent | array
     if let Some(s) = contents.as_str() {
         return Some(s.to_string());
     }
@@ -598,8 +576,7 @@ fn parse_locations(v: &Value) -> Vec<LspLocation> {
                 .or_else(|| item.get("targetRange"))?;
             let start = range.get("start")?;
             let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-            let col =
-                start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+            let col = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
             Some(LspLocation {
                 file: uri_to_path(uri),
                 line,
@@ -638,7 +615,6 @@ fn collect_symbol(
         .map(|k| symbol_kind_name(k as u32).to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // DocumentSymbol has "selectionRange", SymbolInformation has "location"
     let location = if let Some(loc) = item.get("location") {
         let uri = loc
             .get("uri")
@@ -658,7 +634,6 @@ fn collect_symbol(
         container: container.map(|s| s.to_string()),
     });
 
-    // Recurse into children (DocumentSymbol hierarchy)
     if let Some(children) = item.get("children").and_then(|c| c.as_array()) {
         for child in children {
             collect_symbol(child, Some(&name), default_uri, out);
@@ -723,11 +698,14 @@ fn parse_incoming_calls(v: &Value) -> Vec<LspIncomingCall> {
                 .iter()
                 .filter_map(|range| {
                     let start = range.get("start")?;
-                    let line =
-                        start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+                    let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
                     let col =
                         start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-                    Some(LspLocation { file: uri_to_path(caller_uri), line, col })
+                    Some(LspLocation {
+                        file: uri_to_path(caller_uri),
+                        line,
+                        col,
+                    })
                 })
                 .collect();
             Some(LspIncomingCall { caller, call_sites })
@@ -735,7 +713,6 @@ fn parse_incoming_calls(v: &Value) -> Vec<LspIncomingCall> {
         .collect()
 }
 
-// `fromRanges` in outgoing calls are ranges inside the *queried* file (the caller).
 fn parse_outgoing_calls(v: &Value, caller_uri: &str) -> Vec<LspOutgoingCall> {
     let items = match v.as_array() {
         Some(a) => a,
@@ -755,11 +732,14 @@ fn parse_outgoing_calls(v: &Value, caller_uri: &str) -> Vec<LspOutgoingCall> {
                 .iter()
                 .filter_map(|range| {
                     let start = range.get("start")?;
-                    let line =
-                        start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
+                    let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
                     let col =
                         start.get("character").and_then(|v| v.as_u64()).unwrap_or(0) as u32 + 1;
-                    Some(LspLocation { file: uri_to_path(caller_uri), line, col })
+                    Some(LspLocation {
+                        file: uri_to_path(caller_uri),
+                        line,
+                        col,
+                    })
                 })
                 .collect();
             Some(LspOutgoingCall { callee, call_sites })
@@ -790,7 +770,12 @@ fn parse_workspace_symbols(v: &Value) -> Vec<LspSymbol> {
                 .get("containerName")
                 .and_then(|c| c.as_str())
                 .map(|s| s.to_string());
-            Some(LspSymbol { name, kind, location, container })
+            Some(LspSymbol {
+                name,
+                kind,
+                location,
+                container,
+            })
         })
         .collect()
 }

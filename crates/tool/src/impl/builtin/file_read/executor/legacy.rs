@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! FileReadTool executor implementation.
 
 use std::path::Path;
@@ -194,7 +195,10 @@ impl FileReadExecutor {
 
 impl Default for FileReadExecutor {
     fn default() -> Self {
-        Self::new(Arc::new(FileReadToolSpec::new()), ToolRuntimeServices::default())
+        Self::new(
+            Arc::new(FileReadToolSpec::new()),
+            ToolRuntimeServices::default(),
+        )
     }
 }
 
@@ -214,6 +218,12 @@ impl ToolExecutor for FileReadExecutor {
                 message: format!("Failed to parse input: {}", e),
             }
         })?;
+
+        let lsp = self
+            .services
+            .lsp_registry
+            .as_ref()
+            .and_then(|reg| reg.get_or_create(operation_backend::local_lsp_backend()));
 
         let workspace_root = runtime_workspace_root(runtime);
         let validation_result = validation::validate_input_with_base(&input, workspace_root);
@@ -285,14 +295,12 @@ impl ToolExecutor for FileReadExecutor {
             Ok(FileReadOutput::Text(text_output)) => {
                 // Fire-and-forget: warm the LSP server so subsequent hover/definition/diagnostics
                 // calls return faster. Mirrors opencode's `LSP.touchFile(filepath, false)`.
-                if let Some(lsp) = &self.services.lsp_service {
+                if let Some(ref lsp) = lsp {
                     spawn_touch_file(lsp, Path::new(&resolved_file_path));
                 }
-                let json_output =
-                    serde_json::to_string(&FileReadOutput::Text(text_output)).map_err(|e| {
-                        ToolExecutionError::ExecutionFailed {
-                            message: format!("Failed to serialize output: {}", e),
-                        }
+                let json_output = serde_json::to_string(&FileReadOutput::Text(text_output))
+                    .map_err(|e| ToolExecutionError::ExecutionFailed {
+                        message: format!("Failed to serialize output: {}", e),
                     })?;
                 Ok(ToolExecutorOutput::Completed {
                     raw_outcome: RawToolOutcome::Success {

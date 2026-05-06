@@ -1,7 +1,7 @@
+use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
-use agent_contracts::lsp::LspProvider;
-use lsp::{AutoInstall, LspService, ServerConfig};
+use lsp::LspServiceRegistry;
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -10,7 +10,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xiaoo_app::channels::feishu::FeishuConfig;
+use xiaoo_app::channels::{
+    build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig, TelegramConfig,
+    TelegramEventTransport,
+};
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 128000;
@@ -39,6 +42,8 @@ pub struct AppConfig {
     pub hooker: HookerRegistryConfig,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
+    #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,6 +65,8 @@ pub struct ChannelsConfig {
     #[serde(default)]
     pub feishu: Option<FeishuChannelConfig>,
     #[serde(default)]
+    pub telegram: Option<TelegramChannelConfig>,
+    #[serde(default)]
     pub interaction_timeout_secs: Option<u64>,
 }
 
@@ -68,6 +75,8 @@ pub struct FeishuChannelConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub channel_instance_id: Option<String>,
+    #[serde(default)]
     pub app_id: Option<String>,
     #[serde(default)]
     pub app_secret_env: Option<String>,
@@ -75,6 +84,28 @@ pub struct FeishuChannelConfig {
     pub verification_token: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramChannelConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub channel_instance_id: Option<String>,
+    #[serde(default, rename = "transport")]
+    pub event_transport: TelegramEventTransport,
+    #[serde(default)]
+    pub bot_token_env: Option<String>,
+    #[serde(default)]
+    pub webhook_secret_token: Option<String>,
+    #[serde(default)]
+    pub bot_username: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub polling_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub polling_limit: Option<u16>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -341,7 +372,7 @@ impl DaemonConfig {
             .unwrap_or_else(|| "https://open.feishu.cn".to_string());
 
         Ok(Some(FeishuConfig {
-            channel_instance_id: None,
+            channel_instance_id: normalize_optional_string(feishu.channel_instance_id.clone()),
             app_id,
             app_secret_env,
             verification_token,
@@ -350,6 +381,58 @@ impl DaemonConfig {
             max_file_download_bytes: 0,
             max_file_text_chars: 0,
         }))
+    }
+
+    pub fn telegram_config(&self) -> Result<Option<TelegramConfig>> {
+        let Some(telegram) = self.app.channels.telegram.as_ref() else {
+            return Ok(None);
+        };
+        if !telegram.enabled {
+            return Ok(None);
+        }
+
+        let bot_token_env = required_field(
+            "channels.telegram.bot_token_env",
+            telegram.bot_token_env.as_deref(),
+        )?;
+
+        Ok(Some(TelegramConfig {
+            channel_instance_id: normalize_optional_string(telegram.channel_instance_id.clone()),
+            event_transport: telegram.event_transport,
+            bot_token_env,
+            webhook_secret_token: normalize_optional_string(telegram.webhook_secret_token.clone()),
+            bot_username: normalize_optional_string(telegram.bot_username.clone()),
+            base_url: telegram
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.telegram.org".to_string()),
+            polling_timeout_secs: telegram.polling_timeout_secs.unwrap_or(50),
+            polling_limit: telegram.polling_limit.unwrap_or(100),
+        }))
+    }
+
+    pub fn telegram_polling_config(&self) -> Result<Option<TelegramConfig>> {
+        let Some(telegram) = self.telegram_config()? else {
+            return Ok(None);
+        };
+        if telegram.event_transport == TelegramEventTransport::Polling {
+            Ok(Some(telegram))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn channel_runtimes(&self) -> Result<Vec<ChannelRuntime>> {
+        let mut runtimes = Vec::new();
+        if let Some(feishu) = self.feishu_config()? {
+            runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
+        }
+        if let Some(telegram) = self.telegram_config()? {
+            if telegram.event_transport == TelegramEventTransport::Webhook {
+                runtimes.push(build_telegram_runtime(telegram).map_err(anyhow::Error::new)?);
+            }
+        }
+        Ok(runtimes)
     }
 
     pub fn resolve_skills_config(&self) -> SkillsConfig {
@@ -412,62 +495,18 @@ impl DaemonConfig {
         self.app.compact.as_ref()
     }
 
-    /// Build an `LspProvider` if `[lsp] enabled = true`, otherwise return `None`.
-    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+    /// Build a [`LspServiceRegistry`] if `[lsp] enabled = true`, otherwise return `None`.
+    ///
+    /// The registry constructs one [`LspService`] per operation backend on demand,
+    /// so each session uses the LSP servers bound to its own backend.
+    pub fn build_lsp_registry(&self) -> Option<Arc<LspServiceRegistry>> {
         let lsp = self.app.lsp.as_ref()?;
         if !lsp.enabled {
             return None;
         }
 
-        // Convert user-defined extra servers to the lsp crate's ServerConfig.
-        // Built-in servers are added by LspService itself; we only pass extras here.
-        let extra: Vec<ServerConfig> = lsp
-            .extra_servers
-            .iter()
-            .map(|c| {
-                // ServerConfig uses &'static str fields for the built-in table, but for
-                // user-supplied configs we leak the strings so they live for 'static.
-                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
-                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str =
-                    Box::leak(c.language_id.clone().into_boxed_str());
-
-                let extensions: &'static [&'static str] = Box::leak(
-                    c.extensions
-                        .iter()
-                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let args: &'static [&'static str] = Box::leak(
-                    c.args
-                        .iter()
-                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let root_markers: &'static [&'static str] = Box::leak(
-                    c.root_markers
-                        .iter()
-                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-
-                ServerConfig {
-                    id,
-                    extensions,
-                    command,
-                    args,
-                    root_markers,
-                    language_id,
-                    initialization_options: None,
-                    auto_install: AutoInstall::None,
-                }
-            })
-            .collect();
-
-        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
+        let extra = crate::lsp_support::build_extra_server_configs(&lsp.extra_servers);
+        Some(Arc::new(LspServiceRegistry::new(extra)))
     }
 }
 
@@ -498,6 +537,17 @@ fn required_field(field_name: &str, value: Option<&str>) -> Result<String> {
         bail!("{field_name} is required when the channel is enabled");
     };
     Ok(value.to_string())
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -542,6 +592,82 @@ mod tests {
             .expect("feishu should be enabled");
         assert_eq!(feishu.app_id, "cli_123");
         assert_eq!(feishu.base_url, "https://open.feishu.cn");
+    }
+
+    #[test]
+    fn parses_telegram_channel_config() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [channels.telegram]
+            enabled = true
+            channel_instance_id = "ops-telegram"
+            bot_token_env = "TELEGRAM_BOT_TOKEN"
+            webhook_secret_token = "secret_token-1"
+            bot_username = "@xiaoO_bot"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let telegram = daemon
+            .telegram_config()
+            .expect("telegram config should validate")
+            .expect("telegram should be enabled");
+
+        assert_eq!(
+            telegram.channel_instance_id.as_deref(),
+            Some("ops-telegram")
+        );
+        assert_eq!(telegram.bot_token_env, "TELEGRAM_BOT_TOKEN");
+        assert_eq!(
+            telegram.event_transport,
+            super::TelegramEventTransport::Webhook
+        );
+        assert_eq!(telegram.base_url, "https://api.telegram.org");
+        assert_eq!(telegram.polling_timeout_secs, 50);
+        assert_eq!(telegram.polling_limit, 100);
+    }
+
+    #[test]
+    fn parses_telegram_polling_channel_config() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [channels.telegram]
+            enabled = true
+            transport = "polling"
+            bot_token_env = "TELEGRAM_BOT_TOKEN"
+            polling_timeout_secs = 30
+            polling_limit = 25
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let telegram = daemon
+            .telegram_polling_config()
+            .expect("telegram polling config should validate")
+            .expect("telegram polling should be enabled");
+
+        assert_eq!(
+            telegram.event_transport,
+            super::TelegramEventTransport::Polling
+        );
+        assert_eq!(telegram.polling_timeout_secs, 30);
+        assert_eq!(telegram.polling_limit, 25);
+        assert!(daemon
+            .channel_runtimes()
+            .expect("channel runtimes should resolve")
+            .is_empty());
     }
 
     #[test]

@@ -1,14 +1,15 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 use agent_types::lsp::LspError;
+
+use crate::host::SpawnedProcess;
 
 #[derive(Clone)]
 pub struct Notification {
@@ -26,17 +27,13 @@ pub struct LspClient {
 }
 
 impl LspClient {
-    pub async fn start(cmd: &str, args: &[&str], cwd: &Path) -> Result<Self, LspError> {
-        let mut child = Command::new(cmd)
-            .args(args)
-            .current_dir(cwd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped");
+    /// Create a client from an already-spawned process (via [`LspEnv::spawn_process`]).
+    pub fn from_process(process: SpawnedProcess) -> Self {
+        let SpawnedProcess {
+            stdin,
+            stdout,
+            child,
+        } = process;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -48,14 +45,14 @@ impl LspClient {
             notification_tx.clone(),
         ));
 
-        Ok(Self {
+        Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending,
             notification_tx,
             next_id: Arc::new(AtomicU64::new(1)),
             _child: Arc::new(Mutex::new(child)),
             _reader_task: reader_task,
-        })
+        }
     }
 
     pub async fn initialize(
@@ -167,12 +164,11 @@ async fn reader_loop(
     let mut reader = BufReader::new(stdout);
 
     loop {
-        // Read headers until blank line
         let mut content_length: Option<usize> = None;
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => return, // EOF or error
+                Ok(0) | Err(_) => return,
                 _ => {}
             }
             let line = line.trim();
@@ -199,7 +195,6 @@ async fn reader_loop(
             Err(_) => continue,
         };
 
-        // Response (has "id" field with a number)
         if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
             let mut pending = pending.lock().await;
             if let Some(tx) = pending.remove(&id) {
@@ -208,7 +203,6 @@ async fn reader_loop(
             continue;
         }
 
-        // Notification (has "method" but no numeric "id")
         if let Some(method) = msg.get("method").and_then(|v| v.as_str()) {
             let params = msg.get("params").cloned().unwrap_or(Value::Null);
             let _ = notification_tx.send(Notification {

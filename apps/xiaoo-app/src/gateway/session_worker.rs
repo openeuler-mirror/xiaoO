@@ -5,6 +5,7 @@ use crate::gateway::{
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +17,7 @@ pub struct SessionWorkerInput {
     pub agent_id: AgentId,
     pub user_message: String,
     pub append_user_message: bool,
+    pub reasoning_effort: ReasoningEffort,
     pub loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     pub interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
     pub channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
@@ -91,8 +93,9 @@ impl SessionWorker {
         };
 
         let mut loop_input = AgentLoopInput::new(input.user_message)
-            .with_agent_id(input.agent_id)
-            .with_visible_tools(assembly.visible_tools.clone());
+            .with_agent_id(input.agent_id.clone())
+            .with_visible_tools(assembly.visible_tools.clone())
+            .with_reasoning_effort(input.reasoning_effort);
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
         }
@@ -103,11 +106,31 @@ impl SessionWorker {
             loop_input = loop_input.with_runtime_view(runtime_view);
         }
 
-        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input)
-            .await
-            .map_err(|error| SessionServiceError::CoreRun {
+        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input).await;
+        let shutdown_result = assembly.shutdown().await;
+
+        let loop_result = match loop_result {
+            Ok(loop_result) => loop_result,
+            Err(error) => {
+                if let Err(shutdown_error) = shutdown_result {
+                    tracing::warn!(
+                        session_id = %input.session.session_id,
+                        agent_id = %input.agent_id,
+                        shutdown_error = %shutdown_error,
+                        "runtime shutdown failed after loop error"
+                    );
+                }
+                return Err(SessionServiceError::CoreRun {
+                    message: error.to_string(),
+                });
+            }
+        };
+
+        if let Err(error) = shutdown_result {
+            return Err(SessionServiceError::RuntimeShutdown {
                 message: error.to_string(),
-            })?;
+            });
+        }
 
         memory_manager.sync_from_loop_state(&loop_state.messages, current_time_ms());
 
@@ -134,6 +157,12 @@ impl LoopEventSink for FanoutLoopEventSink {
     fn on_assistant_message(&self, agent_id: &AgentId, text: &str) {
         for sink in &self.sinks {
             sink.on_assistant_message(agent_id, text);
+        }
+    }
+
+    fn on_assistant_reasoning(&self, agent_id: &AgentId, text: &str) {
+        for sink in &self.sinks {
+            sink.on_assistant_reasoning(agent_id, text);
         }
     }
 

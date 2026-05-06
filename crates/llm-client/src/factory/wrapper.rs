@@ -53,6 +53,12 @@ impl LlmProviderWrapper {
         }
     }
 
+    pub fn clear_runtime_view(&self) {
+        if let Ok(mut guard) = self.runtime_view.write() {
+            *guard = None;
+        }
+    }
+
     /// Returns the raw inner provider that this wrapper delegates to.
     pub fn inner(&self) -> Arc<dyn LlmProvider> {
         self.inner.clone()

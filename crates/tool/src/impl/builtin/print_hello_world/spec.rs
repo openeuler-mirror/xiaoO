@@ -19,7 +19,11 @@ impl PrintHelloWorldToolSpec {
             name: ToolName("print_hello_world".to_string()),
             description: "A simple tool that prints 'Hello, World!'".to_string(),
             input_schema: InputSchemaRef {
-                schema: serde_json::json!({}),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
             },
             output_contract: OutputContract {
                 description: "A string containing 'Hello, World!'".to_string(),

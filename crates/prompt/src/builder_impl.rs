@@ -1,7 +1,9 @@
 use agent_contracts::{PromptBuildInput, PromptBuilder, ToolSpecView};
 use agent_llm::ChatMessageExt;
 use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
-use agent_types::{ChatMessage, ContentBlock, LlmRequest, ResponseFormat, Tool, ToolChoice};
+use agent_types::{
+    ChatMessage, ContentBlock, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+};
 use async_trait::async_trait;
 
 use crate::compose::compose_system_messages;
@@ -47,6 +49,7 @@ impl PromptBuilderImpl {
             max_tokens: Some(input.budget.reserved_for_output),
             temperature: None,
             response_format: decision.response_format,
+            reasoning_effort: ReasoningEffort::Off,
         };
 
         Ok(PromptBuildResult {

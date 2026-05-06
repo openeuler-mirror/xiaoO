@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use agent_contracts::LoopEventSink;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::interaction::InteractionRequest;
 use axum::response::sse;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -21,11 +22,18 @@ pub enum SseStreamEvent {
         delta: String,
         snapshot: String,
     },
+    ThinkingDelta {
+        delta: String,
+        snapshot: String,
+    },
     ToolResult {
         call_id: String,
         tool_name: String,
         output_preview: String,
         is_error: bool,
+    },
+    InteractionRequested {
+        request: InteractionRequest,
     },
     Done {
         reply: String,
@@ -34,10 +42,17 @@ pub enum SseStreamEvent {
         session_id: String,
         turn_count: u32,
         total_tokens: usize,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        estimated_input_tokens: u64,
+        messages: Vec<llm_client::ChatMessage>,
         stop_reason: String,
     },
     Error {
         error: String,
+    },
+    Cancelled {
+        session_id: String,
     },
 }
 
@@ -46,9 +61,12 @@ impl SseStreamEvent {
         match self {
             SseStreamEvent::TurnStart { .. } => "turn_start",
             SseStreamEvent::TextDelta { .. } => "text_delta",
+            SseStreamEvent::ThinkingDelta { .. } => "thinking_delta",
             SseStreamEvent::ToolResult { .. } => "tool_result",
+            SseStreamEvent::InteractionRequested { .. } => "interaction_requested",
             SseStreamEvent::Done { .. } => "done",
             SseStreamEvent::Error { .. } => "error",
+            SseStreamEvent::Cancelled { .. } => "cancelled",
         }
     }
 }
@@ -56,6 +74,7 @@ impl SseStreamEvent {
 pub struct SseLoopEventSink {
     tx: mpsc::UnboundedSender<SseStreamEvent>,
     last_snapshot_len: Mutex<usize>,
+    last_thinking_snapshot_len: Mutex<usize>,
     loop_summary: Mutex<Option<LoopEndSummary>>,
 }
 
@@ -64,6 +83,7 @@ impl SseLoopEventSink {
         Self {
             tx,
             last_snapshot_len: Mutex::new(0),
+            last_thinking_snapshot_len: Mutex::new(0),
             loop_summary: Mutex::new(None),
         }
     }
@@ -79,6 +99,9 @@ impl SseLoopEventSink {
 impl LoopEventSink for SseLoopEventSink {
     fn on_turn_start(&self, agent_id: &AgentId, turn: u32) {
         if let Ok(mut len) = self.last_snapshot_len.lock() {
+            *len = 0;
+        }
+        if let Ok(mut len) = self.last_thinking_snapshot_len.lock() {
             *len = 0;
         }
         let _ = self.tx.send(SseStreamEvent::TurnStart {
@@ -102,6 +125,26 @@ impl LoopEventSink for SseLoopEventSink {
             }
         };
         let _ = self.tx.send(SseStreamEvent::TextDelta {
+            delta,
+            snapshot: text.to_string(),
+        });
+    }
+
+    fn on_assistant_reasoning(&self, _agent_id: &AgentId, text: &str) {
+        let delta = {
+            let mut last_len = self
+                .last_thinking_snapshot_len
+                .lock()
+                .expect("sse sink last_thinking_snapshot_len mutex should not be poisoned");
+            let prev = *last_len;
+            *last_len = text.len();
+            if prev < text.len() {
+                text[prev..].to_string()
+            } else {
+                return;
+            }
+        };
+        let _ = self.tx.send(SseStreamEvent::ThinkingDelta {
             delta,
             snapshot: text.to_string(),
         });

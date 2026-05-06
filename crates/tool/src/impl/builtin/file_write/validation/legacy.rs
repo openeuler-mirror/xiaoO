@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Input validation for FileWriteTool.
 //!
 //! Validates FileWriteInput before processing to ensure:

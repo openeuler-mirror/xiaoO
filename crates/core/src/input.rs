@@ -5,6 +5,7 @@ use agent_contracts::interaction::InteractionHandle;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::AgentId;
+use agent_types::ReasoningEffort;
 
 pub struct AgentLoopInput {
     pub user_message: String,
@@ -16,6 +17,7 @@ pub struct AgentLoopInput {
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
     /// `None` = tool execution 跳过。
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl AgentLoopInput {
@@ -28,6 +30,7 @@ impl AgentLoopInput {
             agent_id: None,
             visible_tools: Vec::new(),
             runtime_view: None,
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 
@@ -53,6 +56,11 @@ impl AgentLoopInput {
 
     pub fn with_runtime_view(mut self, view: Arc<dyn RuntimeView>) -> Self {
         self.runtime_view = Some(view);
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = effort;
         self
     }
 

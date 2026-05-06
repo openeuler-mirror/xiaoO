@@ -1,6 +1,7 @@
+use agent_types::ReasoningEffort;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
@@ -157,6 +158,13 @@ impl App {
         };
         let summary = Line::from(vec![
             Span::styled(
+                self.state.status_panel.backend_display.clone(),
+                Style::default()
+                    .fg(self.state.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
                 provider_name,
                 Style::default().fg(self.state.theme.foreground),
             ),
@@ -187,6 +195,7 @@ impl App {
                 StatusPanel::format_context_usage(
                     self.state.status_panel.input_context_tokens,
                     self.state.status_panel.context_window_tokens,
+                    self.state.status_panel.input_context_tokens_estimated,
                 ),
                 Style::default()
                     .fg(self.state.theme.gradient_yellow)
@@ -199,8 +208,23 @@ impl App {
                     .fg(self.state.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  Think ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                self.state.reasoning_effort.to_string(),
+                Style::default()
+                    .fg(reasoning_effort_color(self.state.reasoning_effort))
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         let summary_bar = Paragraph::new(summary);
         frame.render_widget(summary_bar, inner);
+    }
+}
+
+fn reasoning_effort_color(effort: ReasoningEffort) -> Color {
+    match effort {
+        ReasoningEffort::Off => Color::Gray,
+        ReasoningEffort::High => Color::Yellow,
+        ReasoningEffort::Max => Color::Red,
     }
 }

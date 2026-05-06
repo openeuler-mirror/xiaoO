@@ -28,6 +28,7 @@ pub(crate) struct Delta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "reasoning_content")]
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<WireToolCallDelta>>,

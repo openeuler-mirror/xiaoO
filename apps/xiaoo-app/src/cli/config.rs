@@ -1,4 +1,6 @@
+use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
+use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,6 +15,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub trace: Option<Value>,
     pub hooker: Option<HookerRegistryConfig>,
+    #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -30,6 +34,7 @@ pub struct LlmSection {
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
     pub context_window: Option<usize>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -67,6 +72,12 @@ impl FileConfig {
                         trace: parse_optional_section(&root, "trace", &path, debug),
                         skills: parse_optional_section(&root, "skills", &path, debug),
                         hooker: parse_optional_section(&root, "hooker", &path, debug),
+                        operation_backend: parse_optional_section(
+                            &root,
+                            "operation_backend",
+                            &path,
+                            debug,
+                        ),
                     }
                 }
                 Err(e) => {

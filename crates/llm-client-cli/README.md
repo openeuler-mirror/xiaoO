@@ -127,6 +127,7 @@ llm-client-cli test --json
 | `--tool-choice` | Tool choice: auto, none, required, or function name | No |
 | `--temperature` | Temperature for response randomness | No |
 | `--max-tokens` | Maximum tokens in the response | No |
+| `--reasoning-effort` | Provider-side reasoning level: off, high, or max | No |
 
 \* Either `--provider` OR `--protocol` + `--base-url` must be provided.
 

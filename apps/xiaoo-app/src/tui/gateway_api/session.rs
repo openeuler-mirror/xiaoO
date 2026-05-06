@@ -15,6 +15,10 @@ pub enum SessionTurnUpdate {
         agent_id: AgentId,
         text: String,
     },
+    SetAssistantThinking {
+        agent_id: AgentId,
+        text: String,
+    },
     Tool {
         _agent_id: AgentId,
         update: ToolExecutionUpdate,

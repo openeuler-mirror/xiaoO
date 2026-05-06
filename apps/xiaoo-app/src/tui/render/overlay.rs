@@ -10,6 +10,7 @@ use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
+use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
 use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
 
@@ -187,6 +188,8 @@ impl App {
             " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
         } else if self.state.api_key_dialog.is_some() {
             " Enter 连接 | Esc 取消 "
+        } else if self.state.session_snapshot_dialog.is_some() {
+            " ↑↓ 选择快照 | Enter 读取 | Esc 取消 "
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if has_tool_cards {
@@ -244,9 +247,12 @@ impl App {
             && self.state.interaction_prompt.is_none()
             && self.state.api_key_dialog.is_none()
             && self.state.provider_dialog.is_none()
+            && self.state.session_snapshot_dialog.is_none()
             && matches!(
                 self.state.input_mode,
-                InputMode::Editing | InputMode::ProviderSelection
+                InputMode::Editing
+                    | InputMode::ProviderSelection
+                    | InputMode::SessionSnapshotSelection
             )
         {
             let y_on_screen = row - scroll_y;
@@ -345,6 +351,96 @@ impl App {
                 .padding(Padding::horizontal(1)),
         );
         frame.render_widget(model_list, right);
+    }
+
+    pub(crate) fn render_session_snapshot_dialog(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        dialog: &SessionSnapshotDialog,
+    ) {
+        let dialog_width = area.width.min(86).max(54);
+        let desired_height = (dialog.entries.len() as u16 + 4).clamp(8, 22);
+        let dialog_height = area.height.min(desired_height).max(8);
+        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+        let dialog_area = Rect {
+            x: dialog_x,
+            y: dialog_y,
+            width: dialog_width,
+            height: dialog_height,
+        };
+
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        let block = Block::default()
+            .title(" Load Session ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(self.state.theme.border_style(true))
+            .style(Style::default().bg(self.state.theme.background))
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(dialog_area);
+
+        let name_width = dialog
+            .entries
+            .iter()
+            .map(|entry| entry.name.chars().count())
+            .max()
+            .unwrap_or(4)
+            .clamp(8, 28);
+        let items: Vec<ListItem> = dialog
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let selected = index == dialog.selected;
+                let style = if selected {
+                    Style::default()
+                        .fg(self.state.theme.foreground)
+                        .bg(self.state.theme.selection)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.state.theme.foreground)
+                };
+                let prefix = if entry.depth == 0 {
+                    String::new()
+                } else {
+                    format!("{}└ ", "  ".repeat(entry.depth.saturating_sub(1)))
+                };
+                let name = truncate_chars(&format!("{prefix}{}", entry.name), name_width);
+                let time = format_snapshot_time(entry.saved_at_ms);
+                let mut spans = vec![
+                    Span::styled(format!("{name:<name_width$}"), style),
+                    Span::styled("  ", style),
+                    Span::styled(time, style),
+                ];
+                if let Some(parent) = entry.parent_name.as_ref() {
+                    spans.push(Span::styled(
+                        "  fork: ",
+                        Style::default().fg(self.state.theme.muted),
+                    ));
+                    spans.push(Span::styled(
+                        parent.clone(),
+                        Style::default().fg(self.state.theme.muted),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+
+        let list = List::new(items).block(block);
+        frame.render_widget(list, dialog_area);
+
+        let hint = Paragraph::new("Enter 读取  Esc 取消")
+            .style(Style::default().fg(self.state.theme.muted))
+            .wrap(Wrap { trim: true });
+        let hint_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(hint, hint_area);
     }
 
     pub(crate) fn render_api_key_dialog(
@@ -511,4 +607,17 @@ fn build_input_text_with_selection(
     }
 
     Text::from(lines)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let mut truncated: String = value.chars().take(max_chars - 1).collect();
+    truncated.push('…');
+    truncated
 }

@@ -1,24 +1,21 @@
-use crate::channels::feishu::{FeishuAdapter, FeishuConfig};
 use crate::channels::{
-    feishu_capabilities, feishu_meta, AdapterResponse, ChannelAdapter, ChannelError,
-    ChannelOutboundAttachment, ChannelOutboundAttachmentKind, ChannelResult, ChannelRuntime,
+    build_feishu_runtime, AdapterResponse, ChannelError, ChannelResult, ChannelRuntime,
+    FeishuConfig,
 };
-use crate::gateway::channel_interaction::{
-    resolve_interaction_from_text, ChannelInteractionHandle,
-};
-use crate::gateway::pending_interaction::PendingInteractionStore;
-use crate::gateway::{channel_session_id, ChannelProgressRelayHandle, SessionService};
+use crate::gateway::SessionService;
 use crate::httpserver::channel_ingress::{
-    build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
-    GatewayChannelMessage,
+    GatewayChannelIngressError, GatewayChannelMention, GatewayChannelMessage,
 };
+use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
+use crate::httpserver::rate_limit::RateLimitConfig;
 use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use crate::httpserver::rate_limit::RateLimitConfig;
-use agent_contracts::{ChannelFileSender, LoopEventSink};
+use agent_contracts::InteractionHandle;
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Path, Query, State},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, Request, StatusCode,
@@ -32,68 +29,170 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
-use thiserror::Error;
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 
 #[derive(Clone)]
 pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
-    feishu_runtime: Option<ChannelRuntime>,
-    pending_interactions: Arc<PendingInteractionStore>,
-    interaction_timeout_secs: u64,
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Option<Arc<dyn crate::gateway::SessionControlPlane>>,
+    channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
+    channel_processor: ChannelRuntimeProcessor,
+    remote_interactions: Arc<RemoteInteractionStore>,
 }
 
 impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
-        let pending_interactions = Arc::new(PendingInteractionStore::new());
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service)),
-            feishu_runtime: None,
-            pending_interactions,
-            interaction_timeout_secs: 600,
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
+            session_service,
+            session_control_plane: None,
+            channel_runtimes: Arc::new(HashMap::new()),
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
         }
+    }
+
+    pub fn with_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    ) -> Self {
+        let mut state = Self::new(session_service);
+        state.session_control_plane = Some(session_control_plane);
+        state
     }
 
     pub fn with_feishu(
         session_service: Arc<dyn SessionService>,
         feishu_config: FeishuConfig,
     ) -> ChannelResult<Self> {
-        let adapter: Arc<dyn ChannelAdapter> = Arc::new(FeishuAdapter::new(feishu_config)?);
         Ok(Self::with_channel_runtime(
             session_service,
-            ChannelRuntime {
-                instance_id: "feishu".to_string(),
-                channel_id: "feishu".to_string(),
-                meta: feishu_meta(),
-                capabilities: feishu_capabilities(),
-                adapter,
-            },
+            build_feishu_runtime(feishu_config)?,
         ))
+    }
+
+    pub fn with_feishu_and_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        feishu_config: FeishuConfig,
+    ) -> ChannelResult<Self> {
+        let mut state = Self::with_feishu(session_service, feishu_config)?;
+        state.session_control_plane = Some(session_control_plane);
+        Ok(state)
     }
 
     pub(crate) fn with_channel_runtime(
         session_service: Arc<dyn SessionService>,
         runtime: ChannelRuntime,
     ) -> Self {
+        let mut runtimes = HashMap::new();
+        runtimes.insert(runtime.channel_id.clone(), runtime);
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service)),
-            feishu_runtime: Some(runtime),
-            pending_interactions: Arc::new(PendingInteractionStore::new()),
-            interaction_timeout_secs: 600,
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
+            session_service,
+            session_control_plane: None,
+            channel_runtimes: Arc::new(runtimes),
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
+        }
+    }
+
+    pub fn with_channel_runtimes(
+        session_service: Arc<dyn SessionService>,
+        runtimes: Vec<ChannelRuntime>,
+    ) -> ChannelResult<Self> {
+        let mut runtime_map = HashMap::new();
+        for runtime in runtimes {
+            if runtime_map
+                .insert(runtime.channel_id.clone(), runtime)
+                .is_some()
+            {
+                return Err(ChannelError::Config {
+                    message: "duplicate channel runtime id".to_string(),
+                });
+            }
+        }
+        Ok(Self {
+            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
+            channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
+            session_service,
+            session_control_plane: None,
+            channel_runtimes: Arc::new(runtime_map),
+            remote_interactions: Arc::new(RemoteInteractionStore::default()),
+        })
+    }
+
+    pub fn with_channel_runtimes_and_control_plane(
+        session_service: Arc<dyn SessionService>,
+        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        runtimes: Vec<ChannelRuntime>,
+    ) -> ChannelResult<Self> {
+        let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
+        state.session_control_plane = Some(session_control_plane);
+        Ok(state)
+    }
+
+    fn set_channel_interaction_timeout(&mut self, interaction_timeout_secs: u64) {
+        self.channel_processor = ChannelRuntimeProcessor::with_timeout(
+            self.session_service.clone(),
+            interaction_timeout_secs,
+        );
+    }
+}
+
+#[derive(Default)]
+struct RemoteInteractionStore {
+    pending: Mutex<HashMap<String, oneshot::Sender<InteractionResponse>>>,
+}
+
+impl RemoteInteractionStore {
+    async fn register(&self, session_id: String) -> oneshot::Receiver<InteractionResponse> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(session_id, tx);
+        rx
+    }
+
+    async fn answer(&self, session_id: &str, response: InteractionResponse) -> bool {
+        self.pending
+            .lock()
+            .await
+            .remove(session_id)
+            .map(|tx| tx.send(response).is_ok())
+            .unwrap_or(false)
+    }
+}
+
+struct RemoteSseInteractionHandle {
+    session_id: String,
+    tx: tokio::sync::mpsc::UnboundedSender<SseStreamEvent>,
+    store: Arc<RemoteInteractionStore>,
+}
+
+#[async_trait]
+impl InteractionHandle for RemoteSseInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        let rx = self.store.register(self.session_id.clone()).await;
+        let _ = self.tx.send(SseStreamEvent::InteractionRequested {
+            request: request.clone(),
+        });
+
+        match rx.await {
+            Ok(response) => response,
+            Err(_) => default_interaction_response(request),
         }
     }
 }
 
-#[derive(Debug, Error)]
-enum ChannelMessageProcessingError {
-    #[error(transparent)]
-    ChannelIngress(#[from] GatewayChannelIngressError),
-    #[error(transparent)]
-    Gateway(#[from] GatewayServiceError),
-    #[error(transparent)]
-    Channel(#[from] ChannelError),
+fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
+    match request {
+        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+        InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -191,7 +290,11 @@ pub fn create_router_with_auth(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    create_router_from_state(GatewayAppState::new(session_service), bearer_auth, rate_limit)
+    create_router_from_state(
+        GatewayAppState::new(session_service),
+        bearer_auth,
+        rate_limit,
+    )
 }
 
 pub fn create_router_with_feishu_and_timeout(
@@ -216,7 +319,41 @@ pub fn create_router_with_feishu_and_timeout_and_auth(
     rate_limit: Option<RateLimitConfig>,
 ) -> ChannelResult<Router> {
     let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
-    state.interaction_timeout_secs = interaction_timeout_secs;
+    state.set_channel_interaction_timeout(interaction_timeout_secs);
+    Ok(create_router_from_state(state, bearer_auth, rate_limit))
+}
+
+pub fn create_router_with_feishu_control_plane_and_timeout_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    feishu_config: FeishuConfig,
+    interaction_timeout_secs: u64,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_feishu_and_control_plane(
+        session_service,
+        session_control_plane,
+        feishu_config,
+    )?;
+    state.set_channel_interaction_timeout(interaction_timeout_secs);
+    Ok(create_router_from_state(state, bearer_auth, rate_limit))
+}
+
+pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    runtimes: Vec<ChannelRuntime>,
+    interaction_timeout_secs: u64,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> ChannelResult<Router> {
+    let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
+        session_service,
+        session_control_plane,
+        runtimes,
+    )?;
+    state.set_channel_interaction_timeout(interaction_timeout_secs);
     Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
 
@@ -229,19 +366,57 @@ fn create_router_from_state(
         Router::new()
             .route("/api/v1/chat", post(handle_chat))
             .route("/api/v1/chat/stream", post(handle_chat_stream)),
+        bearer_auth.clone(),
+    );
+    let protected_session_routes = apply_http_bearer_auth(
+        Router::new()
+            .route("/api/v1/sessions/open", post(handle_session_open))
+            .route(
+                "/api/v1/sessions/:session_id/turn/stream",
+                post(handle_session_turn_stream),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/interaction",
+                post(handle_session_interaction),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/cancel",
+                post(handle_session_cancel),
+            )
+            .route(
+                "/api/v1/sessions/:session_id/close",
+                post(handle_session_close),
+            ),
         bearer_auth,
     );
 
     let router = Router::new()
         .route("/api/v1/health", get(health_check))
-        .route("/api/v1/channels/feishu/events", post(handle_feishu_events))
+        .route(
+            "/api/v1/channels/:channel_id/events",
+            post(handle_channel_events),
+        )
         .merge(protected_routes)
+        .merge(protected_session_routes)
         .with_state(Arc::new(state));
 
     match rate_limit.and_then(|c| c.governor_layer()) {
         Some(layer) => router.layer(layer),
         None => router,
     }
+}
+
+pub fn create_router_with_control_plane_and_auth(
+    session_service: Arc<dyn SessionService>,
+    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    bearer_auth: Option<HttpBearerAuthConfig>,
+    rate_limit: Option<RateLimitConfig>,
+) -> Router {
+    create_router_from_state(
+        GatewayAppState::with_control_plane(session_service, session_control_plane),
+        bearer_auth,
+        rate_limit,
+    )
 }
 
 fn apply_http_bearer_auth<S>(
@@ -314,6 +489,137 @@ async fn health_check() -> Json<GatewayHealthResponse> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
     })
+}
+
+async fn handle_session_open(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<crate::gateway::SessionOpenRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.open_session(payload).await {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_turn_stream(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<crate::gateway::AppTurnRequest>,
+) -> Response {
+    if payload.session_id != session_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GatewayErrorResponse {
+                error: "path session_id does not match request session_id".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
+    let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
+    let interaction_handle = Arc::new(RemoteSseInteractionHandle {
+        session_id: session_id.clone(),
+        tx: tx.clone(),
+        store: state.remote_interactions.clone(),
+    });
+    let session_service = state.session_service.clone();
+    let conversation_id = payload.conversation_id.clone();
+
+    tokio::spawn(async move {
+        match session_service
+            .run_turn_with_interaction(payload, Some(sink.clone()), Some(interaction_handle), None)
+            .await
+        {
+            Ok(result) => {
+                let summary = sink.take_loop_summary();
+                let _ = tx.send(SseStreamEvent::Done {
+                    reply: result.visible_reply.clone(),
+                    raw_reply: result.raw_reply,
+                    conversation_id,
+                    session_id,
+                    turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
+                    total_tokens: result.total_tokens as usize,
+                    prompt_tokens: result.prompt_tokens,
+                    completion_tokens: result.completion_tokens,
+                    estimated_input_tokens: result.estimated_input_tokens,
+                    messages: result.messages,
+                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
+                });
+            }
+            Err(error) => {
+                let _ = tx.send(SseStreamEvent::Error {
+                    error: error.to_string(),
+                });
+            }
+        }
+    });
+
+    Sse::new(sse_stream_from_receiver(rx))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+async fn handle_session_interaction(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<InteractionResponse>,
+) -> Response {
+    if state.remote_interactions.answer(&session_id, payload).await {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse {
+                error: "no pending interaction for session".to_string(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+async fn handle_session_cancel(Path(session_id): Path<String>) -> Response {
+    Json(SseStreamEvent::Cancelled { session_id }).into_response()
+}
+
+async fn handle_session_close(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.force_close_session(&session_id).await {
+        Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+fn map_session_error(error: crate::gateway::SessionServiceError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(GatewayErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 async fn handle_chat(
@@ -423,6 +729,10 @@ async fn handle_chat_stream(
                     session_id: response.session_id,
                     turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
                     total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    estimated_input_tokens: 0,
+                    messages: Vec::new(),
                     stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
                 });
             }
@@ -439,16 +749,18 @@ async fn handle_chat_stream(
         .into_response()
 }
 
-async fn handle_feishu_events(
+async fn handle_channel_events(
     State(state): State<Arc<GatewayAppState>>,
+    Path(channel_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(runtime) = state.feishu_runtime.clone() else {
+    let Some(runtime) = state.channel_runtimes.get(&channel_id).cloned() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(GatewayErrorResponse {
-                error: "feishu webhook is not configured".to_string(),
+                error: format!("{channel_id} webhook is not configured"),
             }),
         )
             .into_response();
@@ -456,7 +768,7 @@ async fn handle_feishu_events(
 
     let adapter = runtime.adapter.clone();
 
-    match adapter.handle_event(&headers, body.as_ref()).await {
+    match adapter.handle_event(&headers, &query, body.as_ref()).await {
         Ok((AdapterResponse::Challenge { challenge }, _)) => {
             Json(serde_json::json!({ "challenge": challenge })).into_response()
         }
@@ -478,15 +790,17 @@ async fn handle_feishu_events(
                     }
                 }
                 if runtime.capabilities.requires_async_processing {
-                    let state = state.clone();
+                    let processor = state.channel_processor.clone();
                     let runtime = runtime.clone();
                     tokio::spawn(async move {
-                        if let Err(error) = process_channel_message(state, runtime, message).await {
+                        if let Err(error) = processor.process_message(runtime, message).await {
                             warn!("failed to process async channel message: {error}");
                         }
                     });
-                } else if let Err(error) =
-                    process_channel_message(state.clone(), runtime.clone(), message).await
+                } else if let Err(error) = state
+                    .channel_processor
+                    .process_message(runtime.clone(), message)
+                    .await
                 {
                     return map_channel_message_processing_error(error);
                 }
@@ -495,233 +809,6 @@ async fn handle_feishu_events(
         }
         Err(error) => map_channel_error(error),
     }
-}
-
-async fn process_channel_message(
-    state: Arc<GatewayAppState>,
-    runtime: ChannelRuntime,
-    message: crate::channels::ChannelMessage,
-) -> Result<(), ChannelMessageProcessingError> {
-    let adapter = runtime.adapter.clone();
-    let conversation_id = message.conversation_id.clone();
-    let reply_to_message_id = message.reply_to_message_id.clone();
-
-    // --- Check for pending ask_user_question interaction ---
-    let session_id = channel_session_id(
-        &runtime.channel_id,
-        Some(&runtime.instance_id),
-        &conversation_id,
-    );
-    if let Some(pending) = state.pending_interactions.take(&session_id).await {
-        let response = resolve_interaction_from_text(&message.text, &pending.request);
-        let _ = pending.response_tx.send(response);
-        return Ok(());
-    }
-    let progress_relay = runtime.capabilities.supports_progress_updates.then(|| {
-        ChannelProgressRelayHandle::new(
-            adapter.clone(),
-            conversation_id.clone(),
-            reply_to_message_id.clone(),
-        )
-    });
-    if let Some(progress_relay) = progress_relay.as_ref() {
-        if let Err(error) = progress_relay.mark_received().await {
-            warn!("failed to publish initial progress update: {error}");
-        }
-    }
-    let channel_identity_prompt = build_channel_identity_prompt(&runtime, &message).await;
-    let event_sink = progress_relay
-        .as_ref()
-        .map(|relay| Arc::new(relay.clone()) as Arc<dyn LoopEventSink>);
-    let mut gateway_message = build_gateway_channel_message(message)?;
-    gateway_message.channel_identity_prompt = channel_identity_prompt;
-
-    // Create a ChannelInteractionHandle so ask_user_question works in Feishu.
-    let interaction_handle: Option<Arc<dyn agent_contracts::InteractionHandle>> =
-        Some(Arc::new(ChannelInteractionHandle::new(
-            state.interaction_timeout_secs,
-            session_id,
-            conversation_id.clone(),
-            reply_to_message_id.clone(),
-            state.pending_interactions.clone(),
-            adapter.clone(),
-        )));
-
-    let turn_response = match state
-        .gateway_service
-        .handle_channel_message_with_interaction(
-            gateway_message,
-            event_sink,
-            interaction_handle,
-            Some(Arc::new(AdapterFileSender {
-                adapter: adapter.clone(),
-                conversation_id: conversation_id.clone(),
-                reply_to_message_id: reply_to_message_id.clone(),
-            })),
-        )
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            if let Some(progress_relay) = progress_relay.as_ref() {
-                if let Err(progress_error) = progress_relay.mark_failed(&error.to_string()).await {
-                    warn!("failed to publish gateway failure progress update: {progress_error}");
-                }
-            }
-            return Err(error.into());
-        }
-    };
-
-    if let Err(error) = adapter
-        .send_text(
-            &conversation_id,
-            &turn_response.visible_reply,
-            reply_to_message_id.as_deref(),
-        )
-        .await
-    {
-        if let Some(progress_relay) = progress_relay.as_ref() {
-            if let Err(progress_error) = progress_relay.mark_failed(&error.to_string()).await {
-                warn!("failed to publish delivery failure progress update: {progress_error}");
-            }
-        }
-        return Err(error.into());
-    }
-
-    if let Some(progress_relay) = progress_relay.as_ref() {
-        if let Err(error) = progress_relay.mark_delivered().await {
-            warn!("failed to publish delivered progress update: {error}");
-        }
-    }
-
-    Ok(())
-}
-
-async fn build_channel_identity_prompt(
-    runtime: &ChannelRuntime,
-    message: &crate::channels::ChannelMessage,
-) -> Option<String> {
-    let mut participants = Vec::new();
-    let mut seen_ids = HashSet::new();
-
-    push_participant(
-        &mut participants,
-        &mut seen_ids,
-        message.sender_id.clone(),
-        None,
-    );
-
-    for mention in &message.mentions {
-        push_participant(
-            &mut participants,
-            &mut seen_ids,
-            mention.id.clone(),
-            mention.display_name.clone(),
-        );
-    }
-
-    if runtime.capabilities.supports_member_listing {
-        match runtime.adapter.list_members(&message.conversation_id).await {
-            Ok(members) => {
-                for member in members {
-                    push_participant(
-                        &mut participants,
-                        &mut seen_ids,
-                        member.id,
-                        member.display_name,
-                    );
-                }
-            }
-            Err(error) => {
-                warn!(
-                    "failed to load channel member directory: instance={} channel={} conversation={} error={}",
-                    runtime.instance_id,
-                    runtime.channel_id,
-                    message.conversation_id,
-                    error
-                );
-            }
-        }
-    }
-
-    if participants.is_empty() {
-        None
-    } else {
-        Some(render_participant_directory(&participants))
-    }
-}
-
-fn push_participant(
-    participants: &mut Vec<GatewayChannelMention>,
-    seen_ids: &mut HashSet<String>,
-    id: String,
-    display_name: Option<String>,
-) {
-    let normalized_id = id.trim();
-    if normalized_id.is_empty() {
-        return;
-    }
-
-    if let Some(existing) = participants
-        .iter_mut()
-        .find(|participant| participant.id == normalized_id)
-    {
-        if existing
-            .display_name
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            existing.display_name = normalize_display_name(display_name);
-        }
-        return;
-    }
-
-    if seen_ids.insert(normalized_id.to_string()) {
-        participants.push(GatewayChannelMention {
-            id: normalized_id.to_string(),
-            display_name: normalize_display_name(display_name),
-        });
-    }
-}
-
-fn normalize_display_name(display_name: Option<String>) -> Option<String> {
-    display_name.and_then(|display_name| {
-        let trimmed = display_name.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn render_participant_directory(participants: &[GatewayChannelMention]) -> String {
-    let mut rendered = String::from("<participant_directory>");
-    for participant in participants {
-        let label = participant
-            .display_name
-            .as_deref()
-            .filter(|display_name| !display_name.trim().is_empty())
-            .unwrap_or(participant.id.as_str());
-        rendered.push_str("\n<person uid=\"");
-        rendered.push_str(&escape_xml(participant.id.as_str()));
-        rendered.push_str("\">");
-        rendered.push_str(&escape_xml(label));
-        rendered.push_str("</person>");
-    }
-    rendered.push_str("\n</participant_directory>");
-    rendered
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 fn validate_test_chat_request(payload: TestChatRequest) -> Result<TestChatTurnRequest, String> {
@@ -821,48 +908,12 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
     }
 }
 
-// ---------------------------------------------------------------------------
-// AdapterFileSender — wraps a ChannelAdapter to implement ChannelFileSender
-// ---------------------------------------------------------------------------
-
-struct AdapterFileSender {
-    adapter: Arc<dyn ChannelAdapter>,
-    conversation_id: String,
-    reply_to_message_id: Option<String>,
-}
-
-#[async_trait::async_trait]
-impl ChannelFileSender for AdapterFileSender {
-    async fn send_file(
-        &self,
-        file_path: &str,
-        label: Option<&str>,
-    ) -> Result<Option<String>, String> {
-        let attachment = ChannelOutboundAttachment {
-            kind: ChannelOutboundAttachmentKind::File,
-            path: file_path.to_string(),
-            label: label.map(ToString::to_string),
-        };
-        self.adapter
-            .send_attachment(
-                &self.conversation_id,
-                &attachment,
-                self.reply_to_message_id.as_deref(),
-            )
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    fn conversation_id(&self) -> &str {
-        &self.conversation_id
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, handle_feishu_events, validate_test_chat_request, GatewayAppState,
-        GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention, TestChatRequest,
+        create_router_with_auth, handle_channel_events, validate_test_chat_request,
+        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention,
+        TestChatRequest,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -873,9 +924,10 @@ mod tests {
     use async_trait::async_trait;
     use axum::{
         body::{to_bytes, Body, Bytes},
-        extract::State,
+        extract::{Path, Query, State},
         http::{HeaderMap, Request, StatusCode},
     };
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
@@ -1111,6 +1163,7 @@ mod tests {
         async fn handle_event(
             &self,
             _headers: &HeaderMap,
+            _query: &HashMap<String, String>,
             _body: &[u8],
         ) -> ChannelResult<(AdapterResponse, Option<ChannelMessage>)> {
             self.event_result.clone()
@@ -1211,8 +1264,14 @@ mod tests {
             runtime,
         ));
 
-        let response =
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        let response = handle_channel_events(
+            State(state),
+            Path("feishu".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let requests = session_service
@@ -1258,8 +1317,14 @@ mod tests {
             build_fake_runtime(adapter, false),
         ));
 
-        let response =
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        let response = handle_channel_events(
+            State(state),
+            Path("feishu".to_string()),
+            Query(HashMap::new()),
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(session_service
@@ -1304,7 +1369,13 @@ mod tests {
 
         let response = timeout(
             Duration::from_millis(50),
-            handle_feishu_events(State(state), HeaderMap::new(), Bytes::from_static(b"{}")),
+            handle_channel_events(
+                State(state),
+                Path("feishu".to_string()),
+                Query(HashMap::new()),
+                HeaderMap::new(),
+                Bytes::from_static(b"{}"),
+            ),
         )
         .await
         .expect("async webhook route should acknowledge immediately");

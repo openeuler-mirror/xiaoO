@@ -26,6 +26,8 @@ pub enum StopReason {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantMessage {
     pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolUseBlock>,
     pub usage: Usage,
     pub stop_reason: StopReason,
@@ -39,5 +41,6 @@ pub struct LlmResponse {
 #[derive(Clone, Debug)]
 pub struct StreamChunk {
     pub delta_text: Option<String>,
+    pub delta_reasoning: Option<String>,
     pub delta_tool_call: Option<ToolUseBlock>,
 }

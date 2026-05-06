@@ -10,5 +10,7 @@ pub use hook_types::{
     PreLlmHookResult,
 };
 pub use message::{ChatMessage, ContentBlock, MessageRole};
-pub use request::{CompletionConfig, LlmRequest, ResponseFormat, Tool, ToolChoice};
+pub use request::{
+    CompletionConfig, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+};
 pub use response::{AssistantMessage, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage};

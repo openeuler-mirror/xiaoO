@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use super::remote::RemoteRuntimeConfig;
 use crate::interaction_prompt::UserPromptResult;
 use crate::session_gateway::{SessionGateway, SessionTurnUpdate};
 
@@ -27,6 +28,8 @@ pub struct GatewayRuntime {
     pub(super) request_start: Option<Instant>,
     pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
+    pub(super) remote: Option<RemoteRuntimeConfig>,
+    pub(super) remote_session_open: bool,
 }
 
 impl GatewayRuntime {
@@ -41,6 +44,8 @@ impl GatewayRuntime {
             request_start: None,
             first_token_latency_recorded: false,
             interaction_reply_tx: None,
+            remote: None,
+            remote_session_open: false,
         }
     }
 
@@ -59,6 +64,7 @@ impl GatewayRuntime {
         self.request_start = None;
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
+        self.remote_session_open = false;
     }
 
     pub fn needs_active_refresh(&self) -> bool {
@@ -67,9 +73,21 @@ impl GatewayRuntime {
             || self.pending_stream_done.is_some()
     }
 
+    pub async fn session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::gateway::SessionRecord> {
+        self.session_gateway.session_snapshot(session_id).await
+    }
+
+    pub async fn import_session_snapshot(&self, record: crate::gateway::SessionRecord) {
+        self.session_gateway.import_session_snapshot(record).await;
+    }
+
     /// Closes all active sessions, firing the SessionClosed hook for each.
     /// Should be called before the application exits.
-    pub async fn close_sessions(&self) {
+    pub async fn close_sessions(&mut self, session_id: &str) {
+        self.close_remote_session(session_id).await;
         self.session_gateway.close_all_sessions().await;
     }
 }

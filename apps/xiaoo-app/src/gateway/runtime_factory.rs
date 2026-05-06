@@ -1,3 +1,6 @@
+use agent_contracts::backend::{
+    OperationBackend, OperationBackendBuildInput, OperationBackendBuilder,
+};
 use agent_contracts::context::budget::TokenBudgetPolicy;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolSpecView, ToolStateStoreBuilder};
@@ -16,6 +19,7 @@ use async_trait::async_trait;
 use compact::{CompactionPolicy, PassthroughCompressionPipeline};
 use hook::framework::HookerRegistryBuilderImpl;
 use hook::HookerRegistryBuilder;
+use operation_backend::OperationBackendBuilderImpl;
 use prompt::PromptBuilderImpl;
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,12 +31,37 @@ use xiaoo_core::{
 };
 
 use crate::gateway::{GatewayEntryKind, ResolvedSessionRuntime, SessionRecord};
+use llm_client::LlmProviderWrapper;
 use xiaoo_core::LoopStateSnapshot;
 
 pub struct AppRuntimeAssembly {
     pub runtime: AgentRuntime,
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
+    operation_backend: Option<Arc<dyn OperationBackend>>,
+    llm_provider: Arc<LlmProviderWrapper>,
+}
+
+impl AppRuntimeAssembly {
+    pub async fn shutdown(self) -> Result<(), agent_contracts::backend::OperationError> {
+        let AppRuntimeAssembly {
+            runtime,
+            runtime_view,
+            visible_tools: _,
+            operation_backend,
+            llm_provider,
+        } = self;
+
+        llm_provider.clear_runtime_view();
+        drop(runtime_view);
+        drop(runtime);
+
+        if let Some(operation_backend) = operation_backend {
+            operation_backend.shutdown().await?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct AppRuntimeFactory;
@@ -85,6 +114,16 @@ impl AppRuntimeFactory {
             .map(|spec| Arc::new(DetachedToolSpec::from(spec)) as Arc<dyn ToolSpecView>)
             .collect::<Vec<_>>();
 
+        let operation_backend = build_operation_backend(
+            resolved.operation_backend.as_ref(),
+            &resolved.descriptor,
+            session,
+        )
+        .await
+        .map_err(|error| BuildError::DependencyError {
+            message: format!("failed to build operation backend: {error}"),
+        })?;
+
         let runtime_view = {
             let hookers = HookerRegistryBuilderImpl::new()
                 .with_config(resolved.hooker.clone())
@@ -133,6 +172,7 @@ impl AppRuntimeFactory {
                     resolved.bindings.interaction_handle.clone(),
                 )),
                 hookers,
+                Some(operation_backend.clone()),
             );
             let runtime_view: Arc<dyn RuntimeView> = Arc::new(SkillAwareRuntimeView {
                 inner,
@@ -168,6 +208,8 @@ impl AppRuntimeFactory {
             runtime,
             runtime_view,
             visible_tools,
+            operation_backend: Some(operation_backend),
+            llm_provider: Arc::clone(&resolved.llm_provider),
         })
     }
 }
@@ -184,6 +226,26 @@ fn tool_state_store_config_for_entry_kind(
         backend: Value::String(backend.to_string()),
         retention: Value::Null,
     }
+}
+
+async fn build_operation_backend(
+    config: Option<&agent_contracts::backend::OperationBackendConfig>,
+    descriptor: &crate::gateway::SessionRuntimeDescriptor,
+    session: &SessionRecord,
+) -> Result<Arc<dyn OperationBackend>, agent_contracts::backend::OperationBackendBuildError> {
+    let builder = OperationBackendBuilderImpl::new();
+    let input = OperationBackendBuildInput {
+        config: config.cloned(),
+        workspace_root: Some(descriptor.workspace_root.clone()),
+        agent_id: Some(descriptor.agent_id.0.clone()),
+        session_id: Some(session.session_id.clone()),
+        conversation_id: Some(session.conversation_id.clone()),
+        sender_id: Some(session.sender_id.clone()),
+        channel: session.channel.clone(),
+        channel_instance_id: session.channel_instance_id.clone(),
+    };
+
+    builder.build(&input).await
 }
 
 #[derive(Clone)]
@@ -312,5 +374,8 @@ impl RuntimeView for SkillAwareRuntimeView {
     }
     fn channel_file_sender(&self) -> Option<&dyn agent_contracts::ChannelFileSender> {
         self.channel_file_sender.as_deref()
+    }
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        self.inner.operation_backend()
     }
 }

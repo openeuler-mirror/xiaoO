@@ -8,7 +8,10 @@ use skill::audit::{audit_skill_directory, SkillAuditOptions};
 use skill::registry::FileSkillRegistry;
 use skill::types::config::SkillsConfig;
 use xiaoo_app::cli::config::FileConfig;
-use xiaoo_app::cli::{build_compression_pipeline, build_llm_provider, CliConfig, CliEventSink};
+use xiaoo_app::cli::{
+    build_compression_pipeline, build_llm_provider, resolve_effective_context_window, CliConfig,
+    CliEventSink,
+};
 use xiaoo_app::gateway::{
     AppBootstrap, AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig,
     HostedSessionRuntimeResolver, InMemorySessionStore, SessionRuntimeBindings,
@@ -18,6 +21,7 @@ use xiaoo_app::gateway::{
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::ReasoningEffort;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
 
@@ -74,6 +78,10 @@ enum Command {
         /// Disable tool execution
         #[arg(long)]
         no_tools: bool,
+
+        /// Reasoning effort: off, high, or max
+        #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
+        reasoning_effort: Option<ReasoningEffort>,
     },
     /// Manage skills
     Skill {
@@ -118,6 +126,7 @@ async fn main() {
             system,
             max_turns,
             no_tools,
+            reasoning_effort,
         } => {
             let llm = file_cfg.llm.as_ref();
 
@@ -129,7 +138,10 @@ async fn main() {
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
             let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
-            let context_window = llm.and_then(|l| l.context_window).unwrap_or(200_000);
+            let context_window = llm.and_then(|l| l.context_window);
+            let reasoning_effort = reasoning_effort
+                .or_else(|| llm.and_then(|l| l.reasoning_effort))
+                .unwrap_or_default();
 
             let config = CliConfig {
                 provider,
@@ -144,11 +156,13 @@ async fn main() {
                 max_turns,
                 enable_tools: !no_tools,
                 context_window,
+                reasoning_effort,
                 compact: file_cfg.compact.unwrap_or_default(),
                 hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
+                operation_backend: file_cfg.operation_backend.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -393,7 +407,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
     };
 
     // 3. Session runtime config
-    let total_budget = config.context_window;
+    let total_budget = resolve_effective_context_window(&config, &llm_provider).await;
     let reserved_for_output = total_budget / 10;
     let reserved_for_system = total_budget / 20;
 
@@ -429,7 +443,8 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         compression_pipeline: Some(compression_pipeline),
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
-        lsp_service: None,
+        lsp_registry: None,
+        operation_backend: config.operation_backend.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)
@@ -471,6 +486,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         reply_to_message_id: None,
         root_message_id: None,
         mentions: Vec::new(),
+        reasoning_effort: config.reasoning_effort,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

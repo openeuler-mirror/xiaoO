@@ -1,4 +1,4 @@
-use crate::backend::config::OperationBackendConfig;
+use crate::backend::config::OperationBackendBuildInput;
 use crate::backend::contract::OperationBackend;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -19,6 +19,6 @@ pub enum OperationBackendBuildError {
 pub trait OperationBackendBuilder: Send + Sync {
     async fn build(
         &self,
-        config: &OperationBackendConfig,
+        input: &OperationBackendBuildInput,
     ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError>;
 }

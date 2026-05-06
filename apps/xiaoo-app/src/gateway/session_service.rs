@@ -15,6 +15,8 @@ pub enum SessionServiceError {
     RuntimeResolve { message: String },
     #[error("runtime build failed: {message}")]
     RuntimeBuild { message: String },
+    #[error("runtime shutdown failed: {message}")]
+    RuntimeShutdown { message: String },
     #[error("core runtime execution failed: {message}")]
     CoreRun { message: String },
     #[error("memory handling failed: {message}")]

@@ -1,12 +1,11 @@
+use axum::response::IntoResponse;
+use governor::middleware::NoOpMiddleware;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use axum::response::IntoResponse;
 use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::PeerIpKeyExtractor,
-    GovernorError, GovernorLayer,
+    governor::GovernorConfigBuilder, key_extractor::PeerIpKeyExtractor, GovernorError,
+    GovernorLayer,
 };
-use governor::middleware::NoOpMiddleware;
 
 /// Convenience type alias hiding tower-governor generics.
 pub type RateLimitLayer = GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware>;
@@ -128,7 +127,10 @@ mod tests {
 
     #[test]
     fn disabled_config_yields_no_layer() {
-        let cfg = RateLimitConfig { enabled: false, ..Default::default() };
+        let cfg = RateLimitConfig {
+            enabled: false,
+            ..Default::default()
+        };
         assert!(cfg.governor_layer().is_none());
     }
 
@@ -139,13 +141,19 @@ mod tests {
 
     #[test]
     fn zero_rps_yields_no_layer() {
-        let cfg = RateLimitConfig { requests_per_second: 0, ..Default::default() };
+        let cfg = RateLimitConfig {
+            requests_per_second: 0,
+            ..Default::default()
+        };
         assert!(cfg.governor_layer().is_none());
     }
 
     #[test]
     fn zero_burst_yields_no_layer() {
-        let cfg = RateLimitConfig { burst: 0, ..Default::default() };
+        let cfg = RateLimitConfig {
+            burst: 0,
+            ..Default::default()
+        };
         assert!(cfg.governor_layer().is_none());
     }
 
@@ -177,11 +185,17 @@ mod tests {
         assert_eq!((cfg.requests_per_second, cfg.burst), (5, 20));
         assert_eq!(cfg.routes.len(), 2);
         assert_eq!(
-            (cfg.routes["health"].requests_per_second, cfg.routes["health"].burst),
+            (
+                cfg.routes["health"].requests_per_second,
+                cfg.routes["health"].burst
+            ),
             (10, 30)
         );
         assert_eq!(
-            (cfg.routes["chat"].requests_per_second, cfg.routes["chat"].burst),
+            (
+                cfg.routes["chat"].requests_per_second,
+                cfg.routes["chat"].burst
+            ),
             (1, 5)
         );
     }
@@ -203,7 +217,10 @@ mod tests {
                 burst: 200,
             },
         );
-        let cfg = RateLimitConfig { routes, ..Default::default() };
+        let cfg = RateLimitConfig {
+            routes,
+            ..Default::default()
+        };
         assert_eq!(cfg.effective_limit("health"), (100, 200));
         assert_eq!(cfg.effective_limit("chat"), (2, 10));
     }

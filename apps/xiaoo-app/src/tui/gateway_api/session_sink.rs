@@ -31,6 +31,15 @@ impl LoopEventSink for ChannelLoopEventSink {
             });
     }
 
+    fn on_assistant_reasoning(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
+        let _ = self
+            .updates_tx
+            .send(SessionTurnUpdate::SetAssistantThinking {
+                agent_id: agent_id.clone(),
+                text: text.to_string(),
+            });
+    }
+
     fn on_tool_result(
         &self,
         agent_id: &agent_types::common::ids::AgentId,
@@ -54,6 +63,7 @@ impl LoopEventSink for ChannelLoopEventSink {
                 status,
                 exit_code: None,
                 duration_ms: None,
+                file_change: None,
             },
         });
     }
@@ -94,6 +104,7 @@ impl ToolEventSink for ChannelToolEventSink {
                 status: ToolExecutionStatus::Running,
                 exit_code: None,
                 duration_ms: None,
+                file_change: None,
             },
             ToolLifecycleEvent::Completed {
                 call_id,
@@ -110,6 +121,7 @@ impl ToolEventSink for ChannelToolEventSink {
                 status: ToolExecutionStatus::Completed,
                 exit_code: None,
                 duration_ms: None,
+                file_change: None,
             },
             ToolLifecycleEvent::Denied {
                 call_id,
@@ -127,6 +139,7 @@ impl ToolEventSink for ChannelToolEventSink {
                 status: ToolExecutionStatus::Failed,
                 exit_code: None,
                 duration_ms: None,
+                file_change: None,
             },
             ToolLifecycleEvent::Failed {
                 call_id,
@@ -144,6 +157,7 @@ impl ToolEventSink for ChannelToolEventSink {
                 status: ToolExecutionStatus::Failed,
                 exit_code: None,
                 duration_ms: None,
+                file_change: None,
             },
         };
         let _ = self.updates_tx.send(SessionTurnUpdate::Tool {
@@ -187,6 +201,7 @@ mod tests {
             panic!("expected tool update");
         };
         assert_eq!(update.args_preview, "{\n  \"task_goal\": \"run\"\n}");
+        assert!(update.file_change.is_none());
     }
 
     #[test]
@@ -208,5 +223,6 @@ mod tests {
             update.args_preview,
             "{\n  \"target_agent_id\": \"child\"\n}"
         );
+        assert!(update.file_change.is_none());
     }
 }

@@ -4,6 +4,7 @@ pub(crate) mod markdown;
 mod overlay;
 pub(crate) mod provider_dialog;
 mod root;
+mod session_diff;
 pub(crate) mod status_panel;
 pub(crate) mod theme;
 mod transcript;

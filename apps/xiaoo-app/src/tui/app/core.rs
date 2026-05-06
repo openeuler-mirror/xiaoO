@@ -105,7 +105,7 @@ impl App {
                 break;
             }
         }
-        self.gateway.close_sessions().await;
+        self.gateway.close_sessions(&self.state.session_id).await;
         reset_cursor_color();
         terminal.show_cursor()?;
         Ok(())

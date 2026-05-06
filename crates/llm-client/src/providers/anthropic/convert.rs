@@ -76,12 +76,18 @@ fn anthropic_message_content(message: &ChatMessage) -> Vec<serde_json::Value> {
     let blocks: Vec<&ContentBlock> = match message.role {
         MessageRole::User | MessageRole::Tool => {
             let mut ordered = Vec::with_capacity(message.blocks.len());
-            ordered.extend(message.blocks.iter().filter(|block| {
-                matches!(block, ContentBlock::ToolResult { .. })
-            }));
-            ordered.extend(message.blocks.iter().filter(|block| {
-                !matches!(block, ContentBlock::ToolResult { .. })
-            }));
+            ordered.extend(
+                message
+                    .blocks
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::ToolResult { .. })),
+            );
+            ordered.extend(
+                message
+                    .blocks
+                    .iter()
+                    .filter(|block| !matches!(block, ContentBlock::ToolResult { .. })),
+            );
             ordered
         }
         _ => message.blocks.iter().collect(),

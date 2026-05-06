@@ -14,7 +14,9 @@ pub use agent_types::{
     AssistantMessage, LlmResponse, StopReason, StreamChunk, ToolUseBlock, Usage,
 };
 pub use agent_types::{ChatMessage, ContentBlock, MessageRole};
-pub use agent_types::{CompletionConfig, LlmRequest, ResponseFormat, Tool, ToolChoice};
+pub use agent_types::{
+    CompletionConfig, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+};
 pub use error::LlmError;
 
 pub use auth::{AuthCredential, AuthPool, AuthState, InMemoryAuthPool};
@@ -22,7 +24,7 @@ pub use auth::{AuthStore, AuthStoreError, FileAuthStore, InMemoryAuthStore};
 pub use factory::{
     create_llm_provider, create_llm_provider_from_resolved, LlmProviderConfig, LlmProviderWrapper,
 };
-pub use models::{create_model_catalog, ModelCatalog, ModelSummary};
+pub use models::{create_model_catalog, resolve_model_context_length, ModelCatalog, ModelSummary};
 pub use provider_registry::{
     normalize_api_base, resolve_protocol_family, resolve_provider_profile, supported_providers,
     ApiBaseStyle, ProtocolFamily, ProviderProfile,

@@ -7,6 +7,7 @@ use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::outcome::AgentOutcome;
 use agent_types::tool::{RawToolOutcome, ToolExecutionResult};
+use agent_types::ReasoningEffort;
 use memory::MemorySnapshot;
 use serde_json::json;
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ struct LaneRunInput {
     runtime_input: SessionRuntimeBuildInput,
     user_message: String,
     append_user_message: bool,
+    reasoning_effort: ReasoningEffort,
     loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
     channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
@@ -194,6 +196,7 @@ impl SessionSupervisor {
                 runtime_input,
                 user_message: request.text,
                 append_user_message: true,
+                reasoning_effort: request.reasoning_effort,
                 loop_event_sink_override,
                 interaction_handle_override,
                 channel_file_sender_override,
@@ -233,6 +236,7 @@ impl SessionSupervisor {
                     agent_id: input.agent_id.clone(),
                     user_message,
                     append_user_message,
+                    reasoning_effort: input.reasoning_effort,
                     loop_event_sink_override: input.loop_event_sink_override.clone(),
                     interaction_handle_override: input.interaction_handle_override.clone(),
                     channel_file_sender_override: input.channel_file_sender_override.clone(),
@@ -394,6 +398,7 @@ impl SessionSupervisor {
                     runtime_input,
                     user_message: prompt,
                     append_user_message: true,
+                    reasoning_effort: ReasoningEffort::Off,
                     loop_event_sink_override: None,
                     interaction_handle_override: None,
                     channel_file_sender_override: None,

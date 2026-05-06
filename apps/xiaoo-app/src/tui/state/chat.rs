@@ -8,6 +8,13 @@ pub enum ToolExecutionStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChangeDelta {
+    pub file_path: String,
+    pub additions: u32,
+    pub deletions: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolExecutionUpdate {
     pub call_id: String,
@@ -20,6 +27,7 @@ pub struct ToolExecutionUpdate {
     pub status: ToolExecutionStatus,
     pub exit_code: Option<i32>,
     pub duration_ms: Option<u64>,
+    pub file_change: Option<FileChangeDelta>,
 }
 
 #[allow(dead_code)]
@@ -73,7 +81,7 @@ pub struct TodoMessageState {
     pub items: Vec<(TodoDisplayStatus, String)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompletionCheckMessageState {
     pub reason: String,
     pub missing_information: String,
@@ -98,6 +106,7 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    Error,
     Tool,
 }
 
@@ -133,6 +142,20 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: MessageRole::System,
+            content: content.into(),
+            thinking_content: String::new(),
+            timestamp: chrono::Local::now(),
+            is_streaming: false,
+            tool_state: None,
+            todo_state: None,
+            completion_check_state: None,
+            render_revision: 0,
+        }
+    }
+
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            role: MessageRole::Error,
             content: content.into(),
             thinking_content: String::new(),
             timestamp: chrono::Local::now(),
@@ -221,6 +244,11 @@ impl Message {
         self.mark_render_dirty();
     }
 
+    pub fn set_thinking_content(&mut self, content: impl Into<String>) {
+        self.thinking_content = content.into();
+        self.mark_render_dirty();
+    }
+
     pub fn set_streaming(&mut self, streaming: bool) {
         if self.is_streaming != streaming {
             self.is_streaming = streaming;
@@ -300,12 +328,20 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
             name: "deepseek".to_string(),
             models: vec![
                 ModelInfo {
+                    id: "deepseek-v4-flash".to_string(),
+                    name: "DeepSeek V4 Flash".to_string(),
+                },
+                ModelInfo {
+                    id: "deepseek-v4-pro".to_string(),
+                    name: "DeepSeek V4 Pro".to_string(),
+                },
+                ModelInfo {
                     id: "deepseek-chat".to_string(),
-                    name: "DeepSeek Chat".to_string(),
+                    name: "DeepSeek Chat V3".to_string(),
                 },
                 ModelInfo {
                     id: "deepseek-reasoner".to_string(),
-                    name: "DeepSeek Reasoner".to_string(),
+                    name: "DeepSeek Reasoner V3".to_string(),
                 },
             ],
         },

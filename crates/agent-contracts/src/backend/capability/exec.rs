@@ -9,6 +9,8 @@ pub struct ExecRequest {
     pub shell: Option<String>,
     pub cwd: Option<BackendPath>,
     pub timeout_ms: Option<u64>,
+    /// Extra environment variables to inject into the process.
+    pub env: Option<Vec<(String, String)>>,
 }
 
 /// Result of command execution.

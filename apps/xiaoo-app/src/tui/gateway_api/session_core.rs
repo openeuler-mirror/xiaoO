@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
     AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, SessionControlPlane, SessionOpenRequest, SessionRuntimeBindings,
-    SessionStore,
+    HostedSessionRuntimeResolver, SessionControlPlane, SessionOpenRequest, SessionRecord,
+    SessionRuntimeBindings, SessionStore,
 };
 use crate::interaction_prompt::UserPromptResult;
 
@@ -59,6 +59,16 @@ impl SessionGateway {
             .await?;
         self.active_session_ids.lock().await.insert(session_id);
         Ok(())
+    }
+
+    pub async fn session_snapshot(&self, session_id: &str) -> Option<SessionRecord> {
+        self.session_store.load(session_id).await
+    }
+
+    pub async fn import_session_snapshot(&self, record: SessionRecord) {
+        let session_id = record.session_id.clone();
+        self.session_store.save(record).await;
+        self.active_session_ids.lock().await.insert(session_id);
     }
 
     pub fn spawn_turn(

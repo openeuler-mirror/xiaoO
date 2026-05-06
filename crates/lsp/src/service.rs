@@ -10,29 +10,25 @@ use agent_types::lsp::{
     LspSymbol,
 };
 
+use crate::host::LspEnv;
 use crate::manager::LspServerManager;
 use crate::servers::ServerConfig;
 
-/// Top-level LSP service, shared across all tool invocations via `Arc`.
-///
-/// Wraps [`LspServerManager`] behind a `Mutex` so it can be shared between
-/// concurrent tool calls without data races.
 pub struct LspService {
     manager: Arc<Mutex<LspServerManager>>,
 }
 
 impl LspService {
-    pub fn new(extra_configs: Vec<ServerConfig>) -> Self {
+    pub fn new(extra_configs: Vec<ServerConfig>, env: Arc<dyn LspEnv>) -> Self {
         Self {
-            manager: Arc::new(Mutex::new(LspServerManager::new(extra_configs))),
+            manager: Arc::new(Mutex::new(LspServerManager::new(extra_configs, env))),
         }
     }
 
     /// Use exactly the provided configs without adding built-in language servers.
-    /// Useful for testing or highly controlled deployments.
-    pub fn new_custom(configs: Vec<ServerConfig>) -> Self {
+    pub fn new_custom(configs: Vec<ServerConfig>, env: Arc<dyn LspEnv>) -> Self {
         Self {
-            manager: Arc::new(Mutex::new(LspServerManager::new_custom(configs))),
+            manager: Arc::new(Mutex::new(LspServerManager::new_custom(configs, env))),
         }
     }
 }
@@ -85,7 +81,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspLocation>, LspError> {
-        self.manager.lock().await.implementation(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .implementation(file, line, col)
+            .await
     }
 
     async fn prepare_call_hierarchy(
@@ -94,7 +94,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspCallHierarchyItem>, LspError> {
-        self.manager.lock().await.prepare_call_hierarchy(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .prepare_call_hierarchy(file, line, col)
+            .await
     }
 
     async fn incoming_calls(
@@ -103,7 +107,11 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspIncomingCall>, LspError> {
-        self.manager.lock().await.incoming_calls(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .incoming_calls(file, line, col)
+            .await
     }
 
     async fn outgoing_calls(
@@ -112,10 +120,22 @@ impl LspProvider for LspService {
         line: u32,
         col: u32,
     ) -> Result<Vec<LspOutgoingCall>, LspError> {
-        self.manager.lock().await.outgoing_calls(file, line, col).await
+        self.manager
+            .lock()
+            .await
+            .outgoing_calls(file, line, col)
+            .await
     }
 
     async fn touch_file(&self, file: &Path) {
         self.manager.lock().await.touch_file(file).await;
+    }
+
+    async fn open_file(&self, file: &Path, content: String) {
+        self.manager
+            .lock()
+            .await
+            .touch_file_with_content(file, content)
+            .await;
     }
 }

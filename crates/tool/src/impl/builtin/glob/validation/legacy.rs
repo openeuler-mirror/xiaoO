@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Input validation for GlobTool.
 //!
 //! Validates GlobInput before processing to ensure:

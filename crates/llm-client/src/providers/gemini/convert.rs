@@ -1,5 +1,5 @@
 use crate::wire_types::WireToolChoice;
-use agent_types::{LlmRequest, Tool};
+use agent_types::{LlmRequest, ReasoningEffort, Tool};
 
 use super::types::*;
 
@@ -178,9 +178,19 @@ pub(crate) fn build_gemini_request_body(request: &LlmRequest, _model: &str) -> G
             temperature: request.temperature.map(|t| t as f32),
             response_mime_type,
             response_json_schema,
+            thinking_config: gemini_thinking_budget(request.reasoning_effort)
+                .map(|thinking_budget| GeminiThinkingConfig { thinking_budget }),
         },
         tools,
         tool_config,
+    }
+}
+
+fn gemini_thinking_budget(effort: ReasoningEffort) -> Option<i32> {
+    match effort {
+        ReasoningEffort::Off => None,
+        ReasoningEffort::High => Some(8192),
+        ReasoningEffort::Max => Some(24576),
     }
 }
 
@@ -252,7 +262,7 @@ pub(crate) fn extract_gemini_tool_call_deltas(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_llm::ChatMessageExt;
+    use agent_llm::{ChatMessageExt, LlmRequestExt};
     use agent_types::LlmRequest;
 
     #[test]
@@ -304,6 +314,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             response_format: agent_types::ResponseFormat::Text,
+            reasoning_effort: agent_types::ReasoningEffort::Off,
         };
 
         let body = build_gemini_request_body(&request, "gemini-pro");
@@ -315,5 +326,31 @@ mod tests {
             Some("base system\n\nworkspace rules")
         );
         assert_eq!(body.contents.len(), 1);
+    }
+
+    #[test]
+    fn build_gemini_request_body_sets_thinking_budget() {
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = agent_types::ReasoningEffort::High;
+
+        let body = build_gemini_request_body(&request, "gemini-pro");
+
+        assert_eq!(
+            body.generation_config
+                .thinking_config
+                .unwrap()
+                .thinking_budget,
+            8192
+        );
+    }
+
+    #[test]
+    fn build_gemini_request_body_omits_thinking_config_when_off() {
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = agent_types::ReasoningEffort::Off;
+
+        let body = build_gemini_request_body(&request, "gemini-pro");
+
+        assert!(body.generation_config.thinking_config.is_none());
     }
 }

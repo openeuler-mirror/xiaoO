@@ -34,22 +34,46 @@ impl App {
             ])
             .split(size);
 
+        let body_area = chunks[1];
+        let show_sidebar = body_area.width >= 72;
+        let sidebar_width = (body_area.width / 3).clamp(28, 40);
+        let body_chunks = if show_sidebar {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(32), Constraint::Length(sidebar_width)])
+                .split(body_area)
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(32)])
+                .split(body_area)
+        };
+
         self.render_header(frame, chunks[0]);
-        self.render_chat(frame, chunks[1]);
+        self.render_chat(frame, body_chunks[0]);
         let input_chunk = chunks[2];
         self.state.render_state.interaction_prompt_list_area = None;
         self.state.render_state.interaction_prompt_supplement_area = None;
         self.state.render_state.slash_popup_inner = None;
         self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
+        if show_sidebar {
+            self.render_session_diff(frame, body_chunks[1]);
+        }
         self.render_status_bar(frame, chunks[3]);
 
-        if self.state.provider_dialog.is_none() && self.state.api_key_dialog.is_none() {
+        if self.state.provider_dialog.is_none()
+            && self.state.api_key_dialog.is_none()
+            && self.state.session_snapshot_dialog.is_none()
+        {
             self.render_interaction_prompt_dialog(frame, frame.area());
             self.render_slash_popup_dialog(frame, frame.area());
         }
         if let Some(dialog) = self.state.provider_dialog.as_ref() {
             self.render_provider_dialog(frame, frame.area(), dialog);
+        }
+        if let Some(dialog) = self.state.session_snapshot_dialog.as_ref() {
+            self.render_session_snapshot_dialog(frame, frame.area(), dialog);
         }
         if let Some(dialog) = self.state.api_key_dialog.clone() {
             self.render_api_key_dialog(frame, frame.area(), &dialog);

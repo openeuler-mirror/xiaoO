@@ -1,7 +1,9 @@
-use agent_contracts::lsp::LspProvider;
+use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
+use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
-use lsp::{AutoInstall, LspService, ServerConfig};
+use llm_client::ProtocolFamily;
+use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
@@ -50,7 +52,27 @@ pub struct Config {
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
     #[serde(default)]
+    pub operation_backend: Option<OperationBackendConfig>,
+    #[serde(default)]
     pub lsp: Option<LspConfig>,
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+    #[serde(default)]
+    pub auto_connect: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +89,8 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     #[serde(default)]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl Default for LlmConfig {
@@ -78,6 +102,7 @@ impl Default for LlmConfig {
             api_base: String::new(),
             max_tokens: default_llm_max_tokens(),
             context_window: None,
+            reasoning_effort: ReasoningEffort::Off,
         }
     }
 }
@@ -217,55 +242,13 @@ impl Config {
         }
     }
 
-    pub fn resolve_lsp_service(&self) -> Option<Arc<dyn LspProvider>> {
+    pub fn build_lsp_registry(&self) -> Option<Arc<LspServiceRegistry>> {
         let lsp = self.lsp.as_ref()?;
         if !lsp.enabled {
             return None;
         }
-
-        let extra: Vec<ServerConfig> = lsp
-            .extra_servers
-            .iter()
-            .map(|c| {
-                let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
-                let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
-                let language_id: &'static str =
-                    Box::leak(c.language_id.clone().into_boxed_str());
-                let extensions: &'static [&'static str] = Box::leak(
-                    c.extensions
-                        .iter()
-                        .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let args: &'static [&'static str] = Box::leak(
-                    c.args
-                        .iter()
-                        .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                let root_markers: &'static [&'static str] = Box::leak(
-                    c.root_markers
-                        .iter()
-                        .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                ServerConfig {
-                    id,
-                    extensions,
-                    command,
-                    args,
-                    root_markers,
-                    language_id,
-                    initialization_options: None,
-                    auto_install: AutoInstall::None,
-                }
-            })
-            .collect();
-
-        Some(Arc::new(LspService::new(extra)) as Arc<dyn LspProvider>)
+        let extra = build_extra_server_configs(&lsp.extra_servers);
+        Some(Arc::new(LspServiceRegistry::new(extra)))
     }
 }
 
@@ -286,46 +269,26 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
         );
     }
 
-    let context_window = config
-        .llm
-        .context_window
-        .filter(|value| *value > 0)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+    if let Some(context_window) = config.llm.context_window {
+        if context_window == 0 {
+            bail!(
                 "invalid TUI config {}: [llm].context_window must be > 0",
+                config_path.display()
+            );
+        }
+        let _ = usize::try_from(context_window).map_err(|_| {
+            anyhow::anyhow!(
+                "invalid TUI config {}: [llm].context_window does not fit platform usize",
                 config_path.display()
             )
         })?;
-    let _ = usize::try_from(context_window).map_err(|_| {
-        anyhow::anyhow!(
-            "invalid TUI config {}: [llm].context_window does not fit platform usize",
-            config_path.display()
-        )
-    })?;
+    }
 
     if config.llm.max_tokens == 0 {
         bail!(
             "invalid TUI config {}: [llm].max_tokens must be > 0",
             config_path.display()
         );
-    }
-
-    if let Some(env_name) = config.llm.api_key_env.as_deref() {
-        let trimmed = env_name.trim();
-        if trimmed.is_empty() {
-            bail!(
-                "invalid TUI config {}: [llm].api_key_env must not be empty when set",
-                config_path.display()
-            );
-        }
-        let env_value = std::env::var(trimmed).unwrap_or_default();
-        if env_value.trim().is_empty() {
-            bail!(
-                "invalid TUI config {}: env var {} is not set",
-                config_path.display(),
-                trimmed
-            );
-        }
     }
 
     config.validate_default_agent_id().with_context(|| {
@@ -381,6 +344,48 @@ fn llm_secrets_path(config_path: &Path) -> PathBuf {
         .join(LLM_SECRETS_FILE)
 }
 
+fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
+    extra_servers
+        .iter()
+        .map(|c| {
+            let id: &'static str = Box::leak(c.id.clone().into_boxed_str());
+            let command: &'static str = Box::leak(c.command.clone().into_boxed_str());
+            let language_id: &'static str = Box::leak(c.language_id.clone().into_boxed_str());
+            let extensions: &'static [&'static str] = Box::leak(
+                c.extensions
+                    .iter()
+                    .map(|e| -> &'static str { Box::leak(e.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let args: &'static [&'static str] = Box::leak(
+                c.args
+                    .iter()
+                    .map(|a| -> &'static str { Box::leak(a.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            let root_markers: &'static [&'static str] = Box::leak(
+                c.root_markers
+                    .iter()
+                    .map(|m| -> &'static str { Box::leak(m.clone().into_boxed_str()) })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
+            ServerConfig {
+                id,
+                extensions,
+                command,
+                args,
+                root_markers,
+                language_id,
+                initialization_options: None,
+                auto_install: AutoInstall::None,
+            }
+        })
+        .collect()
+}
+
 fn default_agent_id() -> String {
     DEFAULT_AGENT_ID.to_string()
 }
@@ -389,9 +394,23 @@ fn default_llm_max_tokens() -> u32 {
     DEFAULT_LLM_MAX_TOKENS
 }
 
+pub fn resolve_context_window(config: &Config) -> Option<usize> {
+    if let Some(configured) = config.llm.context_window.filter(|value| *value > 0) {
+        return usize::try_from(configured).ok();
+    }
+
+    match llm_client::resolve_protocol_family(&config.llm.provider)? {
+        ProtocolFamily::OpenAiCompatible | ProtocolFamily::Ollama | ProtocolFamily::Zhipu => {
+            Some(128_000)
+        }
+        ProtocolFamily::Anthropic => Some(200_000),
+        ProtocolFamily::Gemini => Some(1_000_000),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{require_tui_bootstrap_config, Config};
+    use super::{require_tui_bootstrap_config, resolve_context_window, Config};
     use std::path::Path;
 
     fn valid_config() -> Config {
@@ -414,18 +433,36 @@ mod tests {
     }
 
     #[test]
-    fn tui_bootstrap_requires_context_window() {
+    fn tui_bootstrap_allows_missing_context_window() {
         let mut config = valid_config();
         config.llm.context_window = None;
 
+        require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
+            .expect("missing context_window should fall back to provider defaults");
+    }
+
+    #[test]
+    fn tui_bootstrap_rejects_zero_context_window() {
+        let mut config = valid_config();
+        config.llm.context_window = Some(0);
+
         let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect_err("missing context_window should fail");
+            .expect_err("zero context_window should fail");
         assert!(
             error
                 .to_string()
                 .contains("[llm].context_window must be > 0"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn resolve_context_window_falls_back_to_provider_default() {
+        let mut config = valid_config();
+        config.llm.context_window = None;
+        config.llm.provider = "anthropic".to_string();
+
+        assert_eq!(resolve_context_window(&config), Some(200_000));
     }
 
     #[test]

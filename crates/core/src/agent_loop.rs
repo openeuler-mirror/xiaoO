@@ -641,7 +641,8 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         .map_err(|e| AgentError::PromptBuild(e.to_string()));
 
     match result {
-        Ok(result) => {
+        Ok(mut result) => {
+            result.request.reasoning_effort = ctx.input.reasoning_effort;
             // end span — 成功，记录估算 token 数等输出信息
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
@@ -651,6 +652,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
                         json!({
                             "estimated_input_tokens": result.estimated_input_tokens,
                             "request_message_count": result.request.messages.len(),
+                            "reasoning_effort": result.request.reasoning_effort.to_string(),
                         }),
                     )
                     .await;
@@ -689,6 +691,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
 
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
+    let streamed_reasoning = Mutex::new(String::new());
     let response = ctx
         .snapshot
         .llm_provider
@@ -700,13 +703,19 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                 .as_ref()
                 .unwrap_or(&default_agent_id)
                 .clone();
-            stream_assistant_text(event_sink.as_deref(), &agent_id, &streamed_text, chunk);
+            stream_assistant_chunk(
+                event_sink.as_deref(),
+                &agent_id,
+                &streamed_text,
+                &streamed_reasoning,
+                chunk,
+            );
         })
         .await?;
 
-    ctx.state.token_usage.prompt_tokens += response.message.usage.prompt_tokens;
-    ctx.state.token_usage.completion_tokens += response.message.usage.completion_tokens;
-    ctx.state.token_usage.total_tokens += response.message.usage.total_tokens;
+    ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
+    ctx.state.token_usage.completion_tokens = response.message.usage.completion_tokens;
+    ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
 
     let streamed_text = streamed_text
         .into_inner()
@@ -744,26 +753,38 @@ async fn llm_call_with_context_limit_recovery(ctx: &mut LoopContext<'_>) -> Resu
     }
 }
 
-fn stream_assistant_text(
+fn stream_assistant_chunk(
     sink: Option<&dyn LoopEventSink>,
     agent_id: &agent_types::common::ids::AgentId,
     streamed_text: &Mutex<String>,
+    streamed_reasoning: &Mutex<String>,
     chunk: StreamChunk,
 ) {
-    let Some(delta_text) = chunk.delta_text else {
-        return;
-    };
+    if let Some(delta_reasoning) = chunk.delta_reasoning {
+        let snapshot = {
+            let mut full_reasoning = streamed_reasoning
+                .lock()
+                .expect("assistant stream reasoning mutex should not be poisoned");
+            full_reasoning.push_str(&delta_reasoning);
+            full_reasoning.clone()
+        };
+        if let Some(sink) = sink {
+            sink.on_assistant_reasoning(agent_id, &snapshot);
+        }
+    }
 
-    let snapshot = {
-        let mut full_text = streamed_text
-            .lock()
-            .expect("assistant stream text mutex should not be poisoned");
-        full_text.push_str(&delta_text);
-        full_text.clone()
-    };
+    if let Some(delta_text) = chunk.delta_text {
+        let snapshot = {
+            let mut full_text = streamed_text
+                .lock()
+                .expect("assistant stream text mutex should not be poisoned");
+            full_text.push_str(&delta_text);
+            full_text.clone()
+        };
 
-    if let Some(sink) = sink {
-        sink.on_assistant_message(agent_id, &snapshot);
+        if let Some(sink) = sink {
+            sink.on_assistant_message(agent_id, &snapshot);
+        }
     }
 }
 
@@ -801,9 +822,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Partition tool calls into valid (non-empty call_id + tool_name) and invalid.
-    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) = tool_calls
-        .into_iter()
-        .partition(is_valid_tool_call);
+    let (valid_calls, invalid_calls): (Vec<_>, Vec<_>) =
+        tool_calls.into_iter().partition(is_valid_tool_call);
 
     // Handle the case where ALL tool calls are invalid and there is exactly one:
     // retry the LLM request once, but only if we can safely synthesize a tool_result.
@@ -1107,6 +1127,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         message_id: None,
         timestamp_ms: now_ms(),
         api_usage_tokens: Some(msg.usage.total_tokens),
+        reasoning_content: msg.reasoning_content.clone(),
     });
 }
 
@@ -1172,6 +1193,7 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
         message_id: None,
         timestamp_ms: now_ms(),
         api_usage_tokens: None,
+        reasoning_content: None,
     }
 }
 
@@ -1312,8 +1334,8 @@ mod tests {
     use agent_types::events::LoopEndSummary;
     use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
     use agent_types::{
-        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk,
-        ToolUseBlock, Usage,
+        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
+        Usage,
     };
     use async_trait::async_trait;
     use llm_client::LlmProviderWrapper;
@@ -1352,22 +1374,107 @@ mod tests {
         ) -> Result<LlmResponse, LlmError> {
             on_chunk(StreamChunk {
                 delta_text: Some("Hello".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
             on_chunk(StreamChunk {
                 delta_text: Some(" world".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("Hello world".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
                         prompt_tokens: 3,
                         completion_tokens: 2,
                         total_tokens: 5,
                     },
+                    stop_reason: StopReason::EndTurn,
+                },
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    struct SequentialUsageProvider {
+        capabilities: ProviderCapabilities,
+        call_count: Arc<StdMutex<usize>>,
+    }
+
+    impl SequentialUsageProvider {
+        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "sequential-usage-test".to_string(),
+                },
+                call_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequentialUsageProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut count = self
+                    .call_count
+                    .lock()
+                    .expect("provider call count mutex should not be poisoned");
+                *count += 1;
+                *count
+            };
+
+            let (text, usage) = if call_number == 1 {
+                (
+                    "first turn".to_string(),
+                    Usage {
+                        prompt_tokens: 3,
+                        completion_tokens: 2,
+                        total_tokens: 5,
+                    },
+                )
+            } else {
+                (
+                    "second turn".to_string(),
+                    Usage {
+                        prompt_tokens: 7,
+                        completion_tokens: 1,
+                        total_tokens: 8,
+                    },
+                )
+            };
+
+            on_chunk(StreamChunk {
+                delta_text: Some(text.clone()),
+                delta_reasoning: None,
+                delta_tool_call: None,
+            });
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some(text),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    usage,
                     stop_reason: StopReason::EndTurn,
                 },
             })
@@ -1426,12 +1533,14 @@ mod tests {
 
             on_chunk(StreamChunk {
                 delta_text: Some("Recovered".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("Recovered".to_string()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
                         prompt_tokens: 5,
@@ -1726,6 +1835,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
+        let call_count = Arc::new(StdMutex::new(0));
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(SequentialUsageProvider::new(call_count)),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("first"))
+            .await
+            .expect("first loop run should succeed");
+        assert_eq!(loop_state.token_usage.prompt_tokens, 3);
+        assert_eq!(loop_state.token_usage.completion_tokens, 2);
+        assert_eq!(loop_state.token_usage.total_tokens, 5);
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("second"))
+            .await
+            .expect("second loop run should succeed");
+
+        assert_eq!(loop_state.token_usage.prompt_tokens, 7);
+        assert_eq!(loop_state.token_usage.completion_tokens, 1);
+        assert_eq!(loop_state.token_usage.total_tokens, 8);
+
+        match outcome {
+            LoopRunResult::Complete(AgentOutcome::Complete { token_usage, .. }) => {
+                assert_eq!(token_usage.prompt_tokens, 7);
+                assert_eq!(token_usage.completion_tokens, 1);
+                assert_eq!(token_usage.total_tokens, 8);
+            }
+            _ => panic!("unexpected outcome"),
+        }
+    }
+
     struct EmptyCallIdToolCallProvider {
         capabilities: ProviderCapabilities,
     }
@@ -1757,12 +1902,14 @@ mod tests {
         ) -> Result<LlmResponse, LlmError> {
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("trying to use a tool".to_string()),
+                    reasoning_content: None,
                     tool_calls: vec![ToolUseBlock {
                         call_id: String::new(),
                         tool_name: "bash".to_string(),
@@ -1811,17 +1958,14 @@ mod tests {
             loop_state.messages[1].text_content(),
             Some("trying to use a tool")
         );
-        assert!(
-            !loop_state.messages[1]
-                .blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
-        );
-        assert!(
-            !loop_state.messages
-                .iter()
-                .any(|message| matches!(message.role, MessageRole::Tool))
-        );
+        assert!(!loop_state.messages[1]
+            .blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
+        assert!(!loop_state
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool)));
     }
 
     /// LLM provider that returns a single empty-name tool call on every invocation.
@@ -1858,12 +2002,14 @@ mod tests {
             // Emit a text delta so the assistant message is non-empty.
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
+                delta_reasoning: None,
                 delta_tool_call: None,
             });
 
             Ok(LlmResponse {
                 message: AssistantMessage {
                     text: Some("trying to use a tool".to_string()),
+                    reasoning_content: None,
                     tool_calls: vec![ToolUseBlock {
                         call_id: "call_empty_1".to_string(),
                         tool_name: String::new(), // ← empty name: the trigger
