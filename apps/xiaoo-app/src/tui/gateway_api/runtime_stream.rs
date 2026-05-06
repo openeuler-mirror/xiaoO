@@ -34,7 +34,6 @@ impl GatewayRuntime {
                         self.pending_stream_done = None;
                         self.set_stream_message_content(state, content, true);
                         self.record_first_token_latency_if_needed(state);
-                        state.chat_state.stick_to_bottom = true;
                     }
                 }
                 SessionTurnUpdate::SetAssistantThinking {
@@ -47,7 +46,6 @@ impl GatewayRuntime {
                     if agent_id.0 == root_agent_id || agent_id.0 == "cli-agent" {
                         self.set_stream_message_thinking_content(state, content, true);
                         self.record_first_token_latency_if_needed(state);
-                        state.chat_state.stick_to_bottom = true;
                     }
                 }
                 SessionTurnUpdate::Tool {
@@ -55,7 +53,6 @@ impl GatewayRuntime {
                     update,
                 } => {
                     self.apply_tool_update(state, update);
-                    state.chat_state.stick_to_bottom = true;
                 }
                 SessionTurnUpdate::InteractionPrompt(request) => {
                     if let Err(error) = state.open_interaction_prompt(request, true) {
@@ -409,8 +406,12 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use agent_types::common::ids::AgentId;
+    use tokio::sync::mpsc;
+
     use crate::app_state::AppState;
     use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolExecutionUpdate};
+    use crate::session_gateway::SessionTurnUpdate;
 
     use super::{GatewayRuntime, PendingStreamDone};
 
@@ -480,6 +481,53 @@ mod tests {
         assert_eq!(state.chat_state.messages[0].thinking_content, "checking");
         assert_eq!(state.chat_state.messages[0].content, "answer");
         assert!(state.chat_state.messages[0].is_streaming);
+    }
+
+    #[test]
+    fn stream_updates_preserve_user_scroll_lock() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+        state.chat_state.stick_to_bottom = false;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::SetAssistantThinking {
+            agent_id: AgentId("cli-agent".to_string()),
+            text: "checking".to_string(),
+        })
+        .expect("thinking update should send");
+        tx.send(SessionTurnUpdate::SetAssistantContent {
+            agent_id: AgentId("cli-agent".to_string()),
+            text: "answer".to_string(),
+        })
+        .expect("content update should send");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+
+        assert!(!state.chat_state.stick_to_bottom);
+        assert_eq!(state.chat_state.messages.len(), 1);
+        assert_eq!(state.chat_state.messages[0].thinking_content, "checking");
+        assert_eq!(state.chat_state.messages[0].content, "answer");
+    }
+
+    #[test]
+    fn stream_updates_keep_existing_bottom_stickiness() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+        state.chat_state.stick_to_bottom = true;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::SetAssistantContent {
+            agent_id: AgentId("cli-agent".to_string()),
+            text: "answer".to_string(),
+        })
+        .expect("content update should send");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+
+        assert!(state.chat_state.stick_to_bottom);
+        assert_eq!(state.chat_state.messages[0].content, "answer");
     }
 
     #[test]
