@@ -14,6 +14,7 @@ use super::print_hello_world::discover_print_hello_world;
 use super::send_file::discover_send_file;
 use super::skill::discover_skill;
 use super::spawn_subagent::discover_spawn_subagent;
+use super::todo_write::discover_todo_write;
 use super::webfetch::discover_webfetch;
 use super::websearch::discover_web_search;
 use crate::r#impl::ToolRuntimeServices;
@@ -47,6 +48,7 @@ impl ToolSource for BuiltinToolSource {
             discover_spawn_subagent(self.services.clone()),
             discover_join_subagent(self.services.clone()),
             discover_skill(),
+            discover_todo_write(),
             discover_send_file(),
             discover_lsp(self.services.clone()),
         ]

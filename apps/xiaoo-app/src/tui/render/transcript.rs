@@ -13,7 +13,7 @@ use crate::app::App;
 use crate::app_state::{
     CachedMessageLayout, CachedMessageRender, ToolToggleRegion, TranscriptRenderCache,
 };
-use crate::chat::{Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolMessageState};
+use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
 use crate::markdown::render_markdown;
 use crate::theme::Theme;
 
@@ -295,8 +295,6 @@ fn render_message_entry(
             tool_toggle_row_offset = Some(1);
             render_tool_message_lines(message, tool, tool_color, theme, width)
         }
-    } else if let Some(todo) = &message.todo_state {
-        render_todo_message_lines(message, todo, theme)
     } else if let Some(checker) = &message.completion_check_state {
         render_completion_check_lines(message, checker, theme)
     } else {
@@ -523,55 +521,6 @@ fn render_tool_message_lines(
                 Style::default().fg(theme.foreground),
             ));
         }
-    }
-    lines.push(Line::raw(""));
-    lines
-}
-
-fn render_todo_message_lines(
-    message: &Message,
-    todo: &crate::chat::TodoMessageState,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                sanitize_terminal_text("▎ "),
-                Style::default().fg(theme.secondary),
-            ),
-            Span::styled(
-                "Planner",
-                Style::default()
-                    .fg(theme.secondary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
-        ]),
-        Line::styled(
-            format!("  {}", sanitize_terminal_text(&todo.title)),
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-
-    for (status, content) in &todo.items {
-        let (icon, color) = match status {
-            TodoDisplayStatus::Completed => ("✅", theme.success),
-            TodoDisplayStatus::InProgress => ("◔", theme.accent),
-            TodoDisplayStatus::Pending => ("☐", theme.muted),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                sanitize_terminal_text(&format!("  {icon} ")),
-                Style::default().fg(color),
-            ),
-            Span::styled(
-                sanitize_terminal_text(content),
-                Style::default().fg(theme.foreground),
-            ),
-        ]));
     }
     lines.push(Line::raw(""));
     lines

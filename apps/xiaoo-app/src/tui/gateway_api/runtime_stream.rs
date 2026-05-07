@@ -1,7 +1,10 @@
 use std::sync::atomic::Ordering;
 
 use crate::app_state::{AppState, InputMode};
-use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
+use crate::chat::{
+    Message, TodoDisplayStatus, TodoSnapshotItem, TodoSnapshotUpdate, ToolExecutionStatus,
+    ToolExecutionUpdate,
+};
 use crate::debug_log;
 use crate::session_gateway::SessionTurnUpdate;
 
@@ -264,7 +267,6 @@ impl GatewayRuntime {
                     && message.content.trim().is_empty()
                     && message.thinking_content.trim().is_empty()
                     && message.tool_state.is_none()
-                    && message.todo_state.is_none()
                     && message.completion_check_state.is_none()
             })
             .unwrap_or(false);
@@ -282,6 +284,17 @@ impl GatewayRuntime {
     }
 
     fn apply_tool_update(&mut self, state: &mut AppState, update: ToolExecutionUpdate) {
+        if update.tool == "todo_write" {
+            if update.status == ToolExecutionStatus::Completed {
+                if let Some(todo_update) = todo_snapshot_from_tool_args(&update.args_preview) {
+                    self.apply_todo_snapshot(state, todo_update);
+                    return;
+                }
+            } else if update.status == ToolExecutionStatus::Running {
+                return;
+            }
+        }
+
         self.finalize_stream_message_before_aux(state);
         match update.status {
             ToolExecutionStatus::Running => {
@@ -327,6 +340,21 @@ impl GatewayRuntime {
         }
 
         self.insert_aux_message(state, Message::tool_event(update));
+    }
+
+    fn apply_todo_snapshot(&mut self, state: &mut AppState, update: TodoSnapshotUpdate) {
+        state.plan_state = if update.items.is_empty() {
+            None
+        } else {
+            Some(crate::chat::TodoMessageState {
+                title: update.title,
+                items: update
+                    .items
+                    .into_iter()
+                    .map(|item| (item.status, item.content))
+                    .collect(),
+            })
+        };
     }
 
     fn reveal_stream_chars(&mut self, state: &mut AppState) {
@@ -400,6 +428,53 @@ impl GatewayRuntime {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TodoWriteArgs {
+    todos: Vec<TodoWriteArgItem>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TodoWriteArgItem {
+    content: String,
+    status: TodoWriteArgStatus,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TodoWriteArgStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+fn todo_snapshot_from_tool_args(args_preview: &str) -> Option<TodoSnapshotUpdate> {
+    let args: TodoWriteArgs = serde_json::from_str(args_preview).ok()?;
+    let items = args
+        .todos
+        .into_iter()
+        .filter_map(|item| {
+            let content = item.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+            let status = match item.status {
+                TodoWriteArgStatus::Pending => TodoDisplayStatus::Pending,
+                TodoWriteArgStatus::InProgress => TodoDisplayStatus::InProgress,
+                TodoWriteArgStatus::Completed => TodoDisplayStatus::Completed,
+            };
+            Some(TodoSnapshotItem {
+                status,
+                content: content.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Some(TodoSnapshotUpdate {
+        title: "Current task list".to_string(),
+        items,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -410,7 +485,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::app_state::AppState;
-    use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolExecutionUpdate};
+    use crate::chat::{
+        Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolExecutionUpdate,
+    };
     use crate::session_gateway::SessionTurnUpdate;
 
     use super::{GatewayRuntime, PendingStreamDone};
@@ -436,6 +513,44 @@ mod tests {
             duration_ms: None,
             file_change: None,
         }
+    }
+
+    #[test]
+    fn todo_write_completed_update_updates_right_panel_plan() {
+        let mut runtime = GatewayRuntime::new();
+        let mut state = test_state();
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "todo-1".to_string(),
+                tool: "todo_write".to_string(),
+                summary: String::new(),
+                args_preview: serde_json::json!({
+                    "todos": [
+                        { "content": "Inspect current implementation", "status": "completed" },
+                        { "content": "Add todo_write tool", "status": "in_progress" }
+                    ]
+                })
+                .to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            },
+        );
+
+        assert!(state.chat_state.messages.is_empty());
+        let todo = state
+            .plan_state
+            .as_ref()
+            .expect("todo snapshot should update right panel plan");
+        assert_eq!(todo.items.len(), 2);
+        assert_eq!(todo.items[0].0, TodoDisplayStatus::Completed);
+        assert_eq!(todo.items[1].0, TodoDisplayStatus::InProgress);
     }
 
     #[test]

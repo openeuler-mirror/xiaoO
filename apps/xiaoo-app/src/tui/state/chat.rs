@@ -96,7 +96,6 @@ pub struct Message {
     pub timestamp: chrono::DateTime<chrono::Local>,
     pub is_streaming: bool,
     pub tool_state: Option<ToolMessageState>,
-    pub todo_state: Option<TodoMessageState>,
     pub completion_check_state: Option<CompletionCheckMessageState>,
     pub render_revision: u64,
 }
@@ -119,7 +118,6 @@ impl Message {
             timestamp: chrono::Local::now(),
             is_streaming: false,
             tool_state: None,
-            todo_state: None,
             completion_check_state: None,
             render_revision: 0,
         }
@@ -133,7 +131,6 @@ impl Message {
             timestamp: chrono::Local::now(),
             is_streaming: true,
             tool_state: None,
-            todo_state: None,
             completion_check_state: None,
             render_revision: 0,
         }
@@ -147,7 +144,6 @@ impl Message {
             timestamp: chrono::Local::now(),
             is_streaming: false,
             tool_state: None,
-            todo_state: None,
             completion_check_state: None,
             render_revision: 0,
         }
@@ -161,7 +157,6 @@ impl Message {
             timestamp: chrono::Local::now(),
             is_streaming: false,
             tool_state: None,
-            todo_state: None,
             completion_check_state: None,
             render_revision: 0,
         }
@@ -187,29 +182,6 @@ impl Message {
                 exit_code: update.exit_code,
                 duration_ms: update.duration_ms,
             }),
-            todo_state: None,
-            completion_check_state: None,
-            render_revision: 0,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn todo_snapshot(update: TodoSnapshotUpdate) -> Self {
-        Self {
-            role: MessageRole::System,
-            content: String::new(),
-            thinking_content: String::new(),
-            timestamp: chrono::Local::now(),
-            is_streaming: false,
-            tool_state: None,
-            todo_state: Some(TodoMessageState {
-                title: update.title,
-                items: update
-                    .items
-                    .into_iter()
-                    .map(|item| (item.status, item.content))
-                    .collect(),
-            }),
             completion_check_state: None,
             render_revision: 0,
         }
@@ -224,7 +196,6 @@ impl Message {
             timestamp: chrono::Local::now(),
             is_streaming: false,
             tool_state: None,
-            todo_state: None,
             completion_check_state: Some(CompletionCheckMessageState {
                 reason: update.reason,
                 missing_information: update.missing_information,
