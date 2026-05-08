@@ -269,19 +269,6 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
         );
     }
 
-    // For custom/local providers, api_base is required
-    let provider = config.llm.provider.trim().to_lowercase();
-    if ["other", "custom", "local"].contains(&provider.as_str()) {
-        if config.llm.api_base.trim().is_empty() {
-            bail!(
-                "invalid TUI config {}: [llm].api_base is required for provider '{}'",
-                config_path.display(),
-                config.llm.provider
-            );
-        }
-    }
-
-    // Validate context_window if provided
     if let Some(context_window) = config.llm.context_window {
         if context_window == 0 {
             bail!(
@@ -528,29 +515,5 @@ file_edit = false
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
-    }
-
-    #[test]
-    fn tui_bootstrap_requires_api_base_for_custom_provider() {
-        let mut config = valid_config();
-        config.llm.provider = "other".to_string();
-        config.llm.api_base = String::new();
-
-        let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect_err("missing api_base for custom provider should fail");
-        assert!(
-            error.to_string().contains("[llm].api_base is required"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn tui_bootstrap_accepts_custom_provider_with_api_base() {
-        let mut config = valid_config();
-        config.llm.provider = "other".to_string();
-        config.llm.api_base = "http://localhost:8080/v1".to_string();
-
-        let result = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"));
-        assert!(result.is_ok(), "should accept custom provider with api_base");
     }
 }

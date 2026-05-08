@@ -238,18 +238,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: false,
         }),
-        // "other" / "custom" / "local" — for self-hosted or custom endpoints
-        // User must provide api_base; API key is optional (local models often don't need one)
-        "other" | "custom" | "local" => Some(ProviderProfile {
-            provider_name: "other",
-            display_name: "Custom/Local",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: None,
-            default_api_key_env: None,
-            api_key_required: false,
-            api_base_style: ApiBaseStyle::Preserve,
-            supports_model_catalog: false,
-        }),
         // Z.AI Coding Plan (zhipu coding plan) — OpenAI-compatible endpoint at api.z.ai
         // Aliases: zai-coding-plan, zhipu-coding-plan, zhipuai-coding-plan
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => Some(ProviderProfile {
@@ -312,9 +300,6 @@ pub fn supported_providers() -> &'static [&'static str] {
         "minimax-openai",
         "minimax-anthropic",
         "gitcode",
-        "other",
-        "custom",
-        "local",
         "zai-coding-plan",
         "zhipu-coding-plan",
         "zhipuai-coding-plan",
