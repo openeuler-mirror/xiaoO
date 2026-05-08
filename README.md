@@ -40,11 +40,11 @@ At the runtime core, xiaoO ships a layered memory system and an adaptive context
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
 cd xiaoO
-./build.sh --release
+cargo build --release
 cargo install --path apps/xiaoo-app
 ```
 
-**build.sh** is a wrapper that prompts you to install the audit_agent security plugin.
+> **Note**: If you want to install with the security plugin loaded by default, use `./build.sh --release` instead. The `build.sh` script is a wrapper that prompts you to install the audit_agent security plugin.
 
 Install to `~/.cargo/bin/xiaoo`, and ensure that `~/.cargo/bin` is in `PATH`.
 
