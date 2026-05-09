@@ -2,7 +2,6 @@ use crate::runtime::runtime_view::RuntimeView;
 use crate::tool::registry::ToolFilter;
 use agent_types::common::BuildError;
 use agent_types::tool::{FinalToolCall, RawToolCall, ToolExecutionError, ToolExecutionResult};
-use agent_types::ChatMessage;
 use async_trait::async_trait;
 
 pub trait ToolCallBuilder: Send {
@@ -26,6 +25,5 @@ pub trait ToolCall: Send + Sync {
     async fn execute(
         &self,
         runtime: &dyn RuntimeView,
-        recent_messages: &[ChatMessage],
     ) -> Result<ToolExecutionResult, ToolExecutionError>;
 }

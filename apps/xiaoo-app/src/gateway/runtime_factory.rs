@@ -32,7 +32,7 @@ use xiaoo_core::{
 
 use crate::gateway::{GatewayEntryKind, ResolvedSessionRuntime, SessionRecord};
 use llm_client::LlmProviderWrapper;
-use xiaoo_core::LoopStateSnapshot;
+use parking_lot::RwLock;
 
 pub struct AppRuntimeAssembly {
     pub runtime: AgentRuntime,
@@ -78,7 +78,7 @@ impl AppRuntimeFactory {
     pub async fn build(
         resolved: &ResolvedSessionRuntime,
         session: &SessionRecord,
-        loop_state: Option<&LoopStateSnapshot>,
+        messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl::new());
         let compression_pipeline: Arc<dyn CompressionPipeline> = resolved
@@ -128,10 +128,8 @@ impl AppRuntimeFactory {
             let hookers = HookerRegistryBuilderImpl::new()
                 .with_config(resolved.hooker.clone())
                 .build()?;
-            let agent_context = BasicAgentContext::new(
-                loop_state
-                    .map(|snapshot| snapshot.messages.clone())
-                    .unwrap_or_default(),
+            let agent_context = BasicAgentContext::with_shared_messages(
+                messages,
                 resolved.descriptor.workspace_root.clone(),
                 AgentMetadata {
                     agent_id: resolved.descriptor.agent_id.0.clone(),

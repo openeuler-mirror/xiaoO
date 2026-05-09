@@ -184,9 +184,11 @@ impl PluginToolHookerAdaptor {
             .clone()
             .unwrap_or_else(|| input.call.call_id.clone());
 
+        // 从 runtime_view 获取 recent_messages
+        let recent_messages = runtime.agent_context().conversation().recent_messages(100);
+
         // 获取第一条 user message 作为 prompt_session（用于意图一致性检测）
-        let prompt_session = input
-            .recent_messages
+        let prompt_session = recent_messages
             .iter()
             .find(|m| m.role == MessageRole::User)
             .and_then(|m| {
@@ -199,7 +201,7 @@ impl PluginToolHookerAdaptor {
 
         // 获取已完成的工具调用历史（用于 read_before_write 等规则）
         // 收集 ToolUse（包含输入参数如文件路径）和 ToolResult（包含执行结果）
-        let messages = &input.recent_messages;
+        let messages = recent_messages;
         let mut tool_use_map: std::collections::HashMap<&String, Value> = std::collections::HashMap::new();
 
         // 先收集所有 ToolUse，记录 call_id -> input 映射

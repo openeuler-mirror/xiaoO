@@ -1,13 +1,9 @@
 use crate::tool::call_types::FinalToolCall;
 use crate::tool::execution_types::{RawToolOutcome, ToolExecutionError};
-use crate::ChatMessage;
 
 #[derive(Clone, Debug)]
 pub struct PreToolHookInput {
     pub call: FinalToolCall,
-    /// Recent messages from conversation, used for extracting action history
-    /// (completed tool calls) for security rules like read_before_write.
-    pub recent_messages: Vec<ChatMessage>,
 }
 
 #[derive(Clone, Debug)]

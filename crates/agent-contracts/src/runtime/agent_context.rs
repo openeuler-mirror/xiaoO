@@ -8,6 +8,9 @@ pub trait AgentContext: Send + Sync {
 }
 
 pub trait ConversationView: Send + Sync {
-    fn recent_messages(&self, limit: usize) -> &[ChatMessage];
+    /// Returns recent messages from the conversation.
+    /// Returns owned Vec to support Arc<RwLock> backed storage where
+    /// returning a reference to locked data would be unsound.
+    fn recent_messages(&self, limit: usize) -> Vec<ChatMessage>;
     fn message_count(&self) -> usize;
 }
