@@ -75,7 +75,7 @@ pub async fn run_agent_loop(
         {
             input.user_message = expanded;
         }
-        state.messages.push(ChatMessage::text(
+        state.messages.write().push(ChatMessage::text(
             MessageRole::User,
             &input.user_message,
             now_ms(),
@@ -295,7 +295,7 @@ pub async fn run_agent_loop(
 
     Ok(LoopRunResult::Complete(AgentOutcome::Complete {
         reply,
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(&ctx),
@@ -439,7 +439,7 @@ async fn compress(
                     json!({
                         "turn_number": ctx.turn.turn_number,
                         "agent_id": agent_id_str,
-                        "message_count": ctx.state.messages.len(),
+                        "message_count": ctx.state.messages.read().len(),
                         "trigger": trigger.as_str(),
                     }),
                 )
@@ -449,17 +449,19 @@ async fn compress(
         None
     };
 
+    // Clone messages before potential .await to avoid holding RwLockReadGuard across await point
+    let messages = ctx.state.messages.read().clone();
     let analysis = ctx
         .snapshot
         .compression_pipeline
-        .analyze(&ctx.state.messages, &*ctx.snapshot.token_budget_policy);
+        .analyze(&messages, &*ctx.snapshot.token_budget_policy);
 
     tracing::debug!(
         estimated = analysis.estimated_tokens,
         available = analysis.available_tokens,
         ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
         severity = ?analysis.severity,
-        msg_count = ctx.state.messages.len(),
+        msg_count = messages.len(),
         "compression analysis"
     );
 
@@ -490,13 +492,15 @@ async fn compress(
         return Ok(());
     }
 
-    let msg_count_before = ctx.state.messages.len();
+    let msg_count_before = ctx.state.messages.read().len();
 
+    // Clone messages before .await to avoid holding RwLockReadGuard across await point
+    let messages = ctx.state.messages.read().clone();
     let view = ctx
         .snapshot
         .compression_pipeline
         .compress(
-            &ctx.state.messages,
+            &messages,
             &*ctx.snapshot.token_budget_policy,
             &ctx.state.compression_meta,
         )
@@ -536,7 +540,7 @@ async fn compress(
                     .await;
             }
 
-            ctx.state.messages = view.messages.clone();
+            *ctx.state.messages.write() = view.messages.clone();
             ctx.state.compression_meta = view.updated_meta.clone();
             ctx.turn.compression_output = Some(view);
 
@@ -556,10 +560,12 @@ async fn compress(
 
 #[allow(dead_code)]
 fn microcompact(ctx: &mut LoopContext<'_>) {
+    let messages = ctx.state.messages.read();
     let result = ctx
         .snapshot
         .compression_pipeline
-        .microcompact(&ctx.state.messages, now_ms());
+        .microcompact(&messages, now_ms());
+    drop(messages);
 
     if result.applied {
         tracing::info!(
@@ -568,7 +574,7 @@ fn microcompact(ctx: &mut LoopContext<'_>) {
             token_delta = result.token_delta,
             "microcompact applied"
         );
-        ctx.state.messages = result.messages;
+        *ctx.state.messages.write() = result.messages;
     }
 }
 
@@ -602,7 +608,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
 
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         visible_tools: ctx.input.visible_tools.clone(),
         skill_summaries,
         memory_snippets: Vec::new(),
@@ -840,6 +846,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             // corrected tool call, but do not keep that synthetic message in history.
             ctx.state
                 .messages
+                .write()
                 .push(build_invalid_tool_call_result(invalid_call));
             let retry_result = async {
                 build_messages(ctx).await.map_err(|e| {
@@ -848,7 +855,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 llm_call_with_context_limit_recovery(ctx).await
             }
             .await;
-            ctx.state.messages.pop();
+            ctx.state.messages.write().pop();
             retry_result?;
 
             let retry_tool_calls: Vec<ToolUseBlock> = ctx
@@ -943,7 +950,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 );
                 emit_tool_result_event(ctx, &result);
                 let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.push(tool_result_message);
+                ctx.state.messages.write().push(tool_result_message);
                 ctx.turn.tool_results.push(result);
                 continue;
             }
@@ -956,7 +963,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                     build_framework_failed_tool_result(fallback_final_call, error.to_string());
                 emit_tool_result_event(ctx, &result);
                 let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.push(tool_result_message);
+                ctx.state.messages.write().push(tool_result_message);
                 ctx.turn.tool_results.push(result);
                 continue;
             }
@@ -969,7 +976,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         }
 
         let tool_result_message = build_tool_result_message(&result);
-        ctx.state.messages.push(tool_result_message);
+        ctx.state.messages.write().push(tool_result_message);
         ctx.turn.tool_results.push(result);
     }
 
@@ -1121,7 +1128,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         });
     }
 
-    ctx.state.messages.push(ChatMessage {
+    ctx.state.messages.write().push(ChatMessage {
         role: MessageRole::Assistant,
         blocks,
         message_id: None,
@@ -1273,7 +1280,7 @@ fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
@@ -1287,7 +1294,7 @@ fn build_outcome_budget(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
@@ -1301,7 +1308,7 @@ fn build_outcome_cancelled(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),

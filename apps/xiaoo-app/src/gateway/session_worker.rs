@@ -62,9 +62,8 @@ impl SessionWorker {
                 input.loop_event_sink_override.clone(),
             );
         }
-        let assembly =
-            AppRuntimeFactory::build(&resolved, &input.session, input.loop_state.as_ref()).await?;
 
+        // Create LoopState first to get shared message storage
         let loop_session_id = input
             .loop_state
             .as_ref()
@@ -74,8 +73,14 @@ impl SessionWorker {
         let mut loop_state = input
             .loop_state
             .clone()
-            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel))
+            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel.clone()))
             .unwrap_or_else(|| LoopState::new(loop_session_id));
+
+        // Share message storage with runtime_view
+        let messages = loop_state.messages_arc();
+        let assembly =
+            AppRuntimeFactory::build(&resolved, &input.session, messages).await?;
+
         let mut memory_manager = match input.memory_snapshot.clone() {
             Some(snapshot) => MemoryManager::from_snapshot(snapshot),
             None => {
@@ -132,7 +137,7 @@ impl SessionWorker {
             });
         }
 
-        memory_manager.sync_from_loop_state(&loop_state.messages, current_time_ms());
+        memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
 
         Ok(SessionWorkerResult {
             loop_result,

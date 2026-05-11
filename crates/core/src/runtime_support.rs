@@ -73,25 +73,43 @@ impl SkillRegistry for EmptySkillRegistry {
     }
 }
 
+use parking_lot::RwLock;
+
+/// A conversation view that shares message storage with the agent loop.
+/// Uses `Arc<RwLock<Vec<ChatMessage>>>` to allow agent_loop to update messages
+/// while hookers can read them via `recent_messages()`.
 pub struct OwnedConversationView {
-    messages: Vec<ChatMessage>,
+    messages: Arc<RwLock<Vec<ChatMessage>>>,
 }
 
 impl OwnedConversationView {
     pub fn new(messages: Vec<ChatMessage>) -> Self {
+        Self {
+            messages: Arc::new(RwLock::new(messages)),
+        }
+    }
+
+    /// Create a view that shares the same message storage.
+    pub fn shared(messages: Arc<RwLock<Vec<ChatMessage>>>) -> Self {
         Self { messages }
+    }
+
+    /// Get a clone of the underlying Arc for sharing.
+    pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
+        Arc::clone(&self.messages)
     }
 }
 
 impl ConversationView for OwnedConversationView {
-    fn recent_messages(&self, limit: usize) -> &[ChatMessage] {
-        let len = self.messages.len();
+    fn recent_messages(&self, limit: usize) -> Vec<ChatMessage> {
+        let messages = self.messages.read();
+        let len = messages.len();
         let start = len.saturating_sub(limit);
-        &self.messages[start..]
+        messages[start..].to_vec()
     }
 
     fn message_count(&self) -> usize {
-        self.messages.len()
+        self.messages.read().len()
     }
 }
 
@@ -114,6 +132,26 @@ impl BasicAgentContext {
             },
             metadata,
         }
+    }
+
+    /// Create with shared message storage for live updates from agent_loop.
+    pub fn with_shared_messages(
+        messages: Arc<RwLock<Vec<ChatMessage>>>,
+        workspace_root: PathBuf,
+        metadata: AgentMetadata,
+    ) -> Self {
+        Self {
+            conversation: OwnedConversationView::shared(messages),
+            workspace: WorkspaceRef {
+                root: workspace_root,
+            },
+            metadata,
+        }
+    }
+
+    /// Get the shared message storage Arc.
+    pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
+        self.conversation.messages_arc()
     }
 }
 

@@ -48,6 +48,7 @@ arboard = { version = "3", default-features = false }
 base64 = "0.22"
 crossterm = { version = "0.28", features = ["event-stream"] }
 toml = "0.8"
+parking_lot = "0.12"
 futures-util = "0.3"
 tokio-stream = "0.1"
 ratatui = "0.28"

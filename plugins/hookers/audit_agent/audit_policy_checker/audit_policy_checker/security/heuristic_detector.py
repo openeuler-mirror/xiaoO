@@ -21,10 +21,16 @@ DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
 # 包含：递归删除根目录、全权限设置、提权执行、访问敏感文件等
 CRITICAL_COMMAND_PATTERNS: list[dict] = [
     {
-        "pattern": r"rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/",
+        "pattern": r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/",
         "risk_level": "critical",
         "risk_type": "script_execution",
-        "reason": "检测到递归强制删除根目录或关键路径 (rm -rf /)",
+        "reason": "检测到递归强制删除关键路径 (rm -rf /...)",
+    },
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*[a-zA-Z]*f[a-zA-Z]*\s+",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到递归强制删除命令 (rm -rf)",
     },
     {
         "pattern": r"chmod\s+[0-7]*777[0-7]*",
@@ -51,6 +57,12 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "reason": "检测到访问系统密码文件 (/etc/shadow)",
     },
     {
+        "pattern": r"/etc/passwd",
+        "risk_level": "high",
+        "risk_type": "file_access",
+        "reason": "检测到访问系统用户文件 (/etc/passwd)",
+    },
+    {
         "pattern": r"\.ssh/id_rsa",
         "risk_level": "critical",
         "risk_type": "file_access",
@@ -62,6 +74,20 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "risk_level": "high",
         "risk_type": "config_tampering",
         "reason": "检测到尝试访问或修改 xiaoO 配置文件",
+    },
+    # xiaoO 安全 Skill 目录保护：检测删除/修改操作（允许读取/执行）
+    # 只拦截写入类命令，放行 cat/read/ls/grep 等读取操作
+    {
+        "pattern": r"\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
+    },
+    {
+        "pattern": r"\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b.*\.xiaoo/skills/xiaoo-guardian/",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
     },
 ]
 
@@ -93,11 +119,34 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "reason": "检测到磁盘格式化操作",
     },
     {
-        "pattern": r"/dev/(zero|null|random|urandom|full|core|loop|sd|hd|nvme|vd|mem|kmsg|port)",
+        "pattern": r"/dev/(zero|random|urandom|full|core|loop|sd|hd|nvme|vd|mem|kmsg|port)",
         "risk_level": "high",
         "risk_type": "file_access",
         "reason": "检测到访问设备文件 (/dev/*)",
     },
+    # Docker socket 权限提升
+    {
+        "pattern": r"/var/run/docker\.sock",
+        "risk_level": "critical",
+        "risk_type": "privilege_escalation",
+        "reason": "检测到访问 Docker socket，可能导致容器逃逸",
+    },
+    # git 强制推送
+    {
+        "pattern": r"git\s+push\s+.*--force",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到强制推送操作 (git push --force)，可能覆盖远程提交历史",
+    },
+    # curl POST 外传敏感数据
+    {
+        "pattern": r"curl\s+.*-X\s+POST.*\b(env|environment|secret|key|token|password)\b",
+        "risk_level": "high",
+        "risk_type": "data_exfiltration",
+        "reason": "检测到通过 curl POST 外传可能包含敏感信息的请求",
+    },
+    # 注意：/dev/null 已从检测列表移除，因为它通常只用于 shell 重定向（如 2>/dev/null），
+    # 不是真正的安全风险。真正的攻击不会通过读取 /dev/null 来实现。
 ]
 
 # ==================== Prompt 注入检测关键词 ====================
@@ -168,6 +217,47 @@ INJECTION_KEYWORDS: list[dict] = [
 SAFE_ACTION_TYPES = frozenset({
     "ask_user_question", "glob", "grep", "list_dir", "count_text_length",
 })
+
+# ==================== 安全 Bash 子命令模式 ====================
+# 这些是只读、低风险的 bash 命令，可以快速放行
+SAFE_BASH_PATTERNS = [
+    # 文件/目录查看
+    r"^ls(?:\s|$)",
+    r"^ls\s+",
+    r"^dir(?:\s|$)",
+    # 文件内容查看
+    r"^cat\s+\S",
+    r"^head(?:\s|$)",
+    r"^tail(?:\s|$)",
+    r"^less(?:\s|$)",
+    r"^more(?:\s|$)",
+    r"^wc(?:\s|$)",
+    # 搜索
+    r"^grep(?:\s|$)",
+    r"^grep\s+",
+    r"^find\s+",
+    r"^ag(?:\s|$)",
+    r"^rg(?:\s|$)",
+    # 路径查看
+    r"^pwd(?:\s|$)",
+    r"^which\s+",
+    r"^whereis\s+",
+    r"^realpath\s+",
+    # 文件信息
+    r"^file\s+",
+    r"^stat\s+",
+    r"^du(?:\s|$)",
+    # 打印
+    r"^echo\s+",
+    r"^printf\s+",
+    # 类型检查
+    r"^type\s+",
+    r"^basename\s+",
+    r"^dirname\s+",
+]
+
+# 编译安全 bash 命令正则
+SAFE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in SAFE_BASH_PATTERNS]
 
 # ==================== 风险等级优先级映射 ====================
 _RISK_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -270,6 +360,34 @@ class InjectionKeywordChecker:
             ),
             risk_type="prompt_injection",
         )
+
+
+def is_safe_bash_command(command: str) -> bool:
+    """
+    检查 bash 命令是否是安全的只读操作。
+
+    Args:
+        command: bash 命令字符串
+
+    Returns:
+        bool: 如果是安全的只读命令返回 True
+    """
+    # 去掉前后的管道和重定向，获取主要命令
+    # 处理管道命令：只检查第一个命令
+    main_cmd = command.split("|")[0].strip()
+
+    # 处理 && 和 || 组合命令：只检查第一个命令
+    for sep in ["&&", "||"]:
+        if sep in main_cmd:
+            main_cmd = main_cmd.split(sep)[0].strip()
+            break
+
+    # 检查是否匹配安全模式
+    for pattern in SAFE_BASH_COMPILED:
+        if pattern.match(main_cmd):
+            return True
+
+    return False
 
 
 class HeuristicDetector:

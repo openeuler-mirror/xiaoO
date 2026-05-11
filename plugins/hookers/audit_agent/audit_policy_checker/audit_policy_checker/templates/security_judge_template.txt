@@ -31,6 +31,10 @@
 
 {hints_text}
 
+## 脚本内容分析
+
+{script_analysis_text}
+
 ## 分析要点
 
 请从以下维度分析该动作是否应该被允许：

@@ -17,13 +17,13 @@ impl MockConversationView {
 }
 
 impl ConversationView for MockConversationView {
-    fn recent_messages(&self, limit: usize) -> &[ChatMessage] {
+    fn recent_messages(&self, limit: usize) -> Vec<ChatMessage> {
         eprintln!(
             "[tool-cli][agent_context.conversation.recent_messages] limit={}",
             limit
         );
         let start = self.messages.len().saturating_sub(limit);
-        &self.messages[start..]
+        self.messages[start..].to_vec()
     }
 
     fn message_count(&self) -> usize {

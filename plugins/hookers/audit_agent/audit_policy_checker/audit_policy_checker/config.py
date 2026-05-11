@@ -11,12 +11,13 @@ DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.json"
 
 @dataclass
 class LLMConfig:
-    """LLM 调用配置（通过 OpenRouter 调用多种大模型）"""
+    """LLM 调用配置（支持多种 Provider）"""
 
-    api_key: str = ""  # OpenRouter API Key
-    model: str = "anthropic/claude-3.5-sonnet"  # 模型名称（OpenRouter 格式）
+    api_key: str = ""  # API Key
+    model: str = "anthropic/claude-3.5-sonnet"  # 模型名称
     temperature: float = 0.1  # 低温度以确保输出稳定
-    base_url: str = "https://openrouter.ai/api/v1"  # OpenRouter API 地址
+    base_url: str = "https://openrouter.ai/api/v1"  # API 地址
+    provider: str = ""  # Provider 名称（如 openrouter, openai, deepseek 等），用于 Headers 适配
 
 
 @dataclass
@@ -111,6 +112,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         model=llm_data.get("model", "anthropic/claude-3.5-sonnet"),
         temperature=llm_data.get("temperature", 0.1),
         base_url=llm_data.get("base_url", "https://openrouter.ai/api/v1"),
+        provider=llm_data.get("provider", ""),
     )
 
     # 环境变量覆盖 api_key（优先级最高）
@@ -175,16 +177,67 @@ def get_default_config() -> Config:
     return _default_config
 
 
+# Provider 默认 base_url 映射（与 xiaoo-app/src/tui/services/provider.rs 保持一致）
+PROVIDER_BASE_URLS: dict[str, str] = {
+    "openai": "https://api.openai.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "together": "https://api.together.xyz/v1",
+    "xai": "https://api.x.ai/v1",
+    "xai-grok": "https://api.x.ai/v1",
+    "deepseek": "https://api.deepseek.com",
+    "gitcode": "https://api-ai.gitcode.com/v1",
+    "ollama": "http://localhost:11434",
+    "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
+    "zhipu-coding-plan": "https://api.z.ai/api/coding/paas/v4",
+    "zhipuai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
+}
+
+# Provider 默认 api_key_env 映射（与 xiaoo-app 保持一致）
+PROVIDER_API_KEY_ENVS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "cludae": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "xai": "XAI_API_KEY",
+    "xai-grok": "XAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "zai": "ZHIPU_API_KEY",
+    "zai-global": "ZHIPU_API_KEY",
+    "z.ai": "ZHIPU_API_KEY",
+    "zai-cn": "ZHIPU_API_KEY",
+    "zai-china": "ZHIPU_API_KEY",
+    "bigmodel": "ZHIPU_API_KEY",
+    "zhipu": "ZHIPU_API_KEY",
+    "glm-cn": "ZHIPU_API_KEY",
+    "zai-coding-plan": "ZHIPU_API_KEY",
+    "zhipu-coding-plan": "ZHIPU_API_KEY",
+    "zhipuai-coding-plan": "ZHIPU_API_KEY",
+    "glm": "GLM_API_KEY",
+    "glm-global": "GLM_API_KEY",
+    "gitcode": "GITCODE_API_KEY",
+}
+
+
 def load_config_with_xiaoo_fallback() -> Config:
     """
-    加载配置，自动从 xiaoo 配置文件中 fallback model。
+    加载配置，自动从 xiaoo 配置文件中 fallback LLM 配置。
 
     加载优先级：
     1. audit_policy_checker/config.json（完整配置）
     2. 环境变量 AUDIT_CONFIG_PATH 指定的路径
-    3. xiaoo ~/.config/xiaoo/config.toml 中的 model 字段覆盖
+    3. xiaoo ~/.config/xiaoo/config.toml 中的 LLM 配置覆盖
 
-    对于 LLM 的 api_key，优先使用环境变量 OPENROUTER_API_KEY（已有逻辑）。
+    对于 LLM 的配置：
+    - model: 从 xiaoo config.toml 读取
+    - provider: 从 xiaoo config.toml 读取，用于确定默认 base_url
+    - base_url: 优先使用 xiaoo config.toml 中的 api_base，否则用 provider 默认值
+    - api_key: 通过 api_key_env 指定的环境变量获取
 
     Returns:
         Config: 加载后的配置对象
@@ -200,9 +253,135 @@ def load_config_with_xiaoo_fallback() -> Config:
             import tomllib
             data = tomllib.loads(xiaoo_config.read_text())
             if llm := data.get("llm"):
+                # 覆盖 model
                 if model := llm.get("model"):
                     cfg.llm.model = model
+
+                # 获取 provider（用于确定默认 base_url 和 Headers 适配）
+                provider = llm.get("provider", "").lower()
+                if provider:
+                    cfg.llm.provider = provider
+
+                # 覆盖 base_url：优先使用 api_base，否则用 provider 默认值
+                if api_base := llm.get("api_base"):
+                    cfg.llm.base_url = api_base
+                elif provider:
+                    default_base = PROVIDER_BASE_URLS.get(provider, "")
+                    if default_base:
+                        cfg.llm.base_url = default_base
+
+                # 通过 api_key_env 环境变量获取 api_key
+                api_key_env = llm.get("api_key_env", "")
+                if api_key_env:
+                    env_api_key = os.getenv(api_key_env)
+                    if env_api_key:
+                        cfg.llm.api_key = env_api_key
+                elif provider:
+                    # 使用 provider 默认的 api_key_env
+                    default_key_env = PROVIDER_API_KEY_ENVS.get(provider, "")
+                    if default_key_env:
+                        env_api_key = os.getenv(default_key_env)
+                        if env_api_key:
+                            cfg.llm.api_key = env_api_key
         except Exception:
             pass
 
     return cfg
+
+
+# ========== audit_settings.json 加载逻辑 ==========
+# 优先级：环境变量 > audit_settings.json > 默认值
+
+# audit_settings.json 默认路径：与 config.py 同级目录
+DEFAULT_AUDIT_SETTINGS_PATH = Path(__file__).parent / "audit_settings.json"
+
+
+def load_audit_settings(settings_path: str | Path | None = None) -> dict:
+    """
+    从 audit_settings.json 加载审计配置。
+
+    Args:
+        settings_path: 配置文件路径，为 None 时使用默认路径
+
+    Returns:
+        dict: 审计配置字典
+
+    Raises:
+        FileNotFoundError: 配置文件不存在
+        json.JSONDecodeError: 配置文件 JSON 格式错误
+    """
+    if settings_path is not None:
+        path = Path(settings_path)
+    else:
+        path = DEFAULT_AUDIT_SETTINGS_PATH
+
+    if not path.exists():
+        return {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        # 过滤掉 _comment 键
+        data = json.load(f)
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+# 全局审计设置缓存（延迟加载）
+_audit_settings: dict | None = None
+
+
+def get_audit_settings() -> dict:
+    """获取全局审计设置（延迟加载）"""
+    global _audit_settings
+    if _audit_settings is None:
+        _audit_settings = load_audit_settings()
+    return _audit_settings
+
+
+def get_audit_setting(key: str, default: str | int | bool = "") -> str:
+    """
+    获取审计配置值，优先级：环境变量 > audit_settings.json > 默认值
+
+    Args:
+        key: 配置键名（如 AUDIT_DISABLE_LLM_LAYER3）
+        default: 默认值
+
+    Returns:
+        str: 配置值（环境变量优先，否则从 audit_settings.json 读取，否则返回默认值）
+    """
+    # 1. 环境变量优先
+    env_value = os.environ.get(key)
+    if env_value is not None:
+        return env_value
+
+    # 2. 从 audit_settings.json 读取
+    settings = get_audit_settings()
+    if key in settings:
+        return str(settings[key])
+
+    # 3. 返回默认值
+    return str(default)
+
+
+def is_llm_layer3_enabled() -> bool:
+    """判断是否启用层3 LLM 深度分析"""
+    disable_value = get_audit_setting("AUDIT_DISABLE_LLM_LAYER3", "")
+    return disable_value != "1"
+
+
+def get_llm_timeout() -> int:
+    """获取 LLM 超时时间（秒）"""
+    timeout = get_audit_setting("AUDIT_LLM_TIMEOUT", 300)
+    try:
+        return int(timeout)
+    except ValueError:
+        return 300
+
+
+def get_log_path() -> str:
+    """获取 LLM prompt 日志路径"""
+    return get_audit_setting("AUDIT_LOG_PATH", "")
+
+
+def is_policy_gen_enabled() -> bool:
+    """判断是否启用策略生成"""
+    enable_value = get_audit_setting("AUDIT_ENABLE_POLICY_GEN", "")
+    return enable_value == "1"

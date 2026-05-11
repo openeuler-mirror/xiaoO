@@ -37,7 +37,7 @@
       "description": "使用 curl POST 请求发送数据到外部服务器"
     },
     {
-      "pattern": "wget * --post-data *",
+      "pattern": "wget *--post-data*",
       "description": "使用 wget 发送 POST 数据到外部服务器"
     },
     {
@@ -70,16 +70,8 @@
     }
   ],
   "sensitive_tools": [
-    "execute_command",
-    "run_shell",
-    "file_delete",
     "eval",
     "exec",
-    "system",
-    "send_email",
-    "http_request",
-    "fetch_url",
-    "database_query",
-    "subprocess"
+    "system"
   ]
 }

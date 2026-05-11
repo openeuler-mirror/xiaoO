@@ -1,0 +1,14 @@
+{
+    "AUDIT_DISABLE_LLM_LAYER3": "",
+    "AUDIT_LLM_TIMEOUT": 300,
+    "AUDIT_LOG_PATH": "",
+    "AUDIT_ENABLE_POLICY_GEN": "",
+    "AUDIT_CONFIG_PATH": "",
+    "_comment": {
+        "AUDIT_DISABLE_LLM_LAYER3": "设为 '1' 禁用层3 LLM 深度分析，留空或 '0' 启用",
+        "AUDIT_LLM_TIMEOUT": "层3 LLM 调用超时时间（秒），默认 300（5分钟）",
+        "AUDIT_LOG_PATH": "LLM prompt 日志文件路径，用于调试。留空则不记录",
+        "AUDIT_ENABLE_POLICY_GEN": "设为 '1' 启用策略生成（Step 2），留空或 '0' 禁用（使用默认只读策略）",
+        "AUDIT_CONFIG_PATH": "自定义配置文件路径，留空使用默认 config.json"
+    }
+}

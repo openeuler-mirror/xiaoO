@@ -24,10 +24,8 @@ xiaoO 在触发 tool-pre hook 时通过 stdin 发送 JSON：
 
 import json
 import os
-import socket
 import sys
 from datetime import datetime
-from unittest import result
 
 from audit_policy_checker.main import audit_action
 
@@ -60,8 +58,12 @@ def _handle_hook_payload(data: dict) -> int:
     span_id = metadata.get("span_id", "unknown_span_id")
 
     # 将 tool input 序列化为字符串作为 action_detail
+    # 对于 Bash 工具，提取 command 字段以正确检测危险命令
     if isinstance(tool_input, dict):
-        action_detail = json.dumps(tool_input, ensure_ascii=False)
+        if tool_name.lower() == "bash" and "command" in tool_input:
+            action_detail = str(tool_input.get("command", ""))
+        else:
+            action_detail = json.dumps(tool_input, ensure_ascii=False)
     else:
         action_detail = str(tool_input)
 
@@ -106,7 +108,6 @@ def _handle_hook_payload(data: dict) -> int:
         "HOOK_OUTPUT",
         {"tool_name": tool_name, "hook_result": hook_result, "audit_result": result},
     )
-    os.system(f'echo "[run_audit] done" >> /tmp/audit_err.log')
 
     print(json.dumps(hook_result, ensure_ascii=False))
     return 0  # hook 模式始终以 0 退出；xiaoO 通过 stdout JSON 获取决策

@@ -44,6 +44,8 @@ cargo build --release
 cargo install --path apps/xiaoo-app
 ```
 
+> **Note**: If you want to install with the security plugin loaded by default, use `./build.sh --release` instead. The `build.sh` script is a wrapper that prompts you to install the audit_agent security plugin.
+
 Install to `~/.cargo/bin/xiaoo`, and ensure that `~/.cargo/bin` is in `PATH`.
 
 For plugin installation and usage, please refer to [plugins.md](./docs/plugins.md).
