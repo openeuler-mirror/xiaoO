@@ -108,7 +108,9 @@ impl GatewayRuntime {
                     hard_limit_ratio: 1.0,
                 },
                 workspace_root: state.workspace.clone(),
-                max_turns: None,
+                max_turns: state
+                    .active_agent_role_config()
+                    .and_then(|role| role.max_turns),
             },
             provider: state.agent_config.llm.provider.clone(),
             model: state.agent_config.llm.model.clone(),
@@ -139,7 +141,7 @@ impl GatewayRuntime {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
-            entry: GatewayEntryContext::tui(None),
+            entry: tui_entry_context(state),
             channel: None,
             channel_instance_id: None,
         })
@@ -149,7 +151,7 @@ impl GatewayRuntime {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
         Ok(AppTurnRequest {
             session_id: state.session_id.clone(),
-            entry: GatewayEntryContext::tui(None),
+            entry: tui_entry_context(state),
             channel: None,
             message_id: None,
             conversation_id: state.session_id.clone(),
@@ -163,6 +165,12 @@ impl GatewayRuntime {
             reasoning_effort: state.reasoning_effort,
         })
     }
+}
+
+fn tui_entry_context(state: &AppState) -> GatewayEntryContext {
+    let mut entry = GatewayEntryContext::tui(None);
+    entry.runtime_profile_id = state.active_agent_role.clone();
+    entry
 }
 
 fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
@@ -230,7 +238,7 @@ pub(super) fn resolve_agent_id(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_visible_tool_names;
+    use super::{resolve_visible_tool_names, tui_entry_context};
     use crate::app_state::AppState;
     use crate::config::{AgentRoleConfig, Config};
     use std::collections::{BTreeMap, BTreeSet};
@@ -244,6 +252,7 @@ mod tests {
             AgentRoleConfig {
                 description: String::new(),
                 prompt: None,
+                max_turns: None,
                 tools: BTreeMap::from([
                     ("write".to_string(), false),
                     ("file_write".to_string(), false),
@@ -261,5 +270,27 @@ mod tests {
 
         assert!(visible.contains("file_edit"));
         assert!(!visible.contains("file_write"));
+    }
+
+    #[test]
+    fn tui_entry_context_carries_active_agent_role() {
+        let mut config = Config::default();
+        config.agent.insert(
+            "plan".to_string(),
+            AgentRoleConfig {
+                description: String::new(),
+                prompt: None,
+                max_turns: None,
+                tools: BTreeMap::new(),
+            },
+        );
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
+        state.active_agent_role = Some("plan".to_string());
+
+        let entry = tui_entry_context(&state);
+
+        assert_eq!(entry.runtime_profile_id.as_deref(), Some("plan"));
     }
 }

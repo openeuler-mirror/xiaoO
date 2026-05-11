@@ -1,3 +1,4 @@
+use crate::builtin_agent_roles::PLAN_AGENT_ID;
 use crate::gateway::{
     AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolver, SessionServiceError,
@@ -9,7 +10,9 @@ use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use xiaoo_core::{run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot};
+use xiaoo_core::{
+    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
+};
 
 pub struct SessionWorkerInput {
     pub runtime_input: SessionRuntimeBuildInput,
@@ -98,6 +101,11 @@ impl SessionWorker {
             .with_reasoning_effort(input.reasoning_effort);
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
+        }
+        if input.runtime_input.entry.runtime_profile_id.as_deref() == Some(PLAN_AGENT_ID) {
+            loop_input = loop_input.with_stop_rules([LoopStopRule::AfterSuccessfulTool {
+                tool_name: "todo_write".to_string(),
+            }]);
         }
         if let Some(loop_event_sink) = resolved.bindings.loop_event_sink.clone() {
             loop_input = loop_input.with_event_sink(loop_event_sink);

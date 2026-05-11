@@ -544,13 +544,13 @@ impl AppState {
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
-        let mut tabs = vec!["Chat".to_string()];
+        let mut tabs = vec!["Core".to_string()];
         tabs.extend(self.agent_config.agent_role_ids());
         tabs
     }
 
     pub fn active_agent_tab_label(&self) -> &str {
-        self.active_agent_role.as_deref().unwrap_or("Chat")
+        self.active_agent_role.as_deref().unwrap_or("Core")
     }
 
     pub fn active_agent_role_config(&self) -> Option<&AgentRoleConfig> {

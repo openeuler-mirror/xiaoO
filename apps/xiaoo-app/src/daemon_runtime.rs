@@ -200,7 +200,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
 
                 token_budget: self.token_budget.clone(),
                 workspace_root: self.agent.workspace_root.clone(),
-                max_turns: None,
+                max_turns: agent_role.and_then(|role| role.max_turns),
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: Arc::clone(&self.llm_provider),
@@ -447,6 +447,7 @@ mod tests {
         let agent_role = AgentRoleConfig {
             description: String::new(),
             prompt: None,
+            max_turns: None,
             tools: BTreeMap::from([
                 ("write".to_string(), false),
                 ("file_write".to_string(), false),
@@ -468,6 +469,7 @@ mod tests {
             AgentRoleConfig {
                 description: "Reviews code".to_string(),
                 prompt: Some("You are a code reviewer.".to_string()),
+                max_turns: None,
                 tools: BTreeMap::new(),
             },
         );

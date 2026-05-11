@@ -16,7 +16,7 @@ use agent_types::{
 use serde_json::json;
 use tool::ToolCallBuilderImpl;
 
-use crate::input::AgentLoopInput;
+use crate::input::{AgentLoopInput, LoopStopRule};
 use crate::loop_state::LoopState;
 use crate::runtime::AgentRuntime;
 use crate::snapshot::RuntimeSnapshot;
@@ -38,6 +38,7 @@ pub struct TurnState {
     pub tool_results: Vec<ToolExecutionResult>,
     pub decision: Option<LoopDecision>,
     pub turn_span: Option<TraceSpanHandle>,
+    pub force_return_complete: bool,
 }
 
 impl TurnState {
@@ -50,6 +51,7 @@ impl TurnState {
             tool_results: Vec::new(),
             decision: None,
             turn_span: None,
+            force_return_complete: false,
         }
     }
 }
@@ -961,6 +963,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 continue;
             }
         };
+        let should_stop_after_result = should_stop_after_tool_result(ctx, &result);
         emit_tool_result_event(ctx, &result);
 
         if let Some(suspended_call) = SuspendedToolCall::from_tool_result(&result) {
@@ -971,6 +974,11 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         let tool_result_message = build_tool_result_message(&result);
         ctx.state.messages.push(tool_result_message);
         ctx.turn.tool_results.push(result);
+
+        if should_stop_after_result {
+            ctx.turn.force_return_complete = true;
+            break;
+        }
     }
 
     Ok(None)
@@ -1078,8 +1086,8 @@ fn decide(ctx: &mut LoopContext<'_>) {
         return;
     }
 
-    if ctx.state.turn_count + 1 >= ctx.snapshot.max_turns {
-        ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
+    if ctx.turn.force_return_complete {
+        ctx.turn.decision = Some(LoopDecision::ReturnComplete);
         return;
     }
 
@@ -1093,12 +1101,39 @@ fn decide(ctx: &mut LoopContext<'_>) {
             && ctx.input.runtime_view.is_some();
 
         if msg.has_tool_calls() && can_execute_tool_calls {
+            if ctx.turn.turn_number >= ctx.snapshot.max_turns {
+                ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
+                return;
+            }
+
             ctx.turn.decision = Some(LoopDecision::Continue);
             return;
         }
     }
 
     ctx.turn.decision = Some(LoopDecision::ReturnComplete);
+}
+
+fn should_stop_after_tool_result(ctx: &LoopContext<'_>, result: &ToolExecutionResult) -> bool {
+    ctx.input
+        .stop_rules
+        .iter()
+        .any(|rule| stop_rule_matches_tool_result(rule, result))
+}
+
+fn stop_rule_matches_tool_result(rule: &LoopStopRule, result: &ToolExecutionResult) -> bool {
+    match rule {
+        LoopStopRule::AfterSuccessfulTool { tool_name } => {
+            result.tool_name() == tool_name
+                && matches!(
+                    result,
+                    ToolExecutionResult::Completed {
+                        raw_outcome: RawToolOutcome::Success { .. },
+                        ..
+                    }
+                )
+        }
+    }
 }
 
 fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
@@ -1678,6 +1713,13 @@ mod tests {
     }
 
     fn test_runtime(provider: Arc<LlmProviderWrapper>) -> AgentRuntime {
+        test_runtime_with_max_turns(provider, 4)
+    }
+
+    fn test_runtime_with_max_turns(
+        provider: Arc<LlmProviderWrapper>,
+        max_turns: u32,
+    ) -> AgentRuntime {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(FixedPromptBuilder);
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             Arc::new(compact::PassthroughCompressionPipeline::new());
@@ -1700,7 +1742,7 @@ mod tests {
             .tool_registry(tool_registry)
             .skill_registry(skill_registry)
             .feature_flags(FeatureFlags::default())
-            .max_turns(4)
+            .max_turns(max_turns)
             .token_budget_config(budget_config)
             .token_budget_policy(budget_policy)
             .build()
@@ -1833,6 +1875,80 @@ mod tests {
                 .and_then(ChatMessage::text_content),
             Some("Hello world")
         );
+    }
+
+    #[tokio::test]
+    async fn run_agent_loop_applies_max_turns_per_run_not_session_total() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime_with_max_turns(provider, 2);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        loop_state.turn_count = 10;
+
+        let outcome = run_agent_loop(
+            &runtime,
+            &mut loop_state,
+            AgentLoopInput::new("revise plan"),
+        )
+        .await
+        .expect("loop should complete despite prior session turns");
+
+        assert!(matches!(
+            outcome,
+            LoopRunResult::Complete(AgentOutcome::Complete { .. })
+        ));
+        assert_eq!(loop_state.turn_count, 11);
+    }
+
+    #[test]
+    fn loop_stop_rule_matches_only_configured_successful_tool() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let input =
+            AgentLoopInput::new("plan").with_stop_rules([LoopStopRule::AfterSuccessfulTool {
+                tool_name: "todo_write".to_string(),
+            }]);
+        let ctx = LoopContext {
+            snapshot: runtime.snapshot(),
+            state: &mut loop_state,
+            input,
+            turn: TurnState::new(1),
+        };
+        let result = ToolExecutionResult::Completed {
+            final_call: agent_types::tool::FinalToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "todo_write".to_string(),
+                input: serde_json::json!({}),
+            },
+            raw_outcome: RawToolOutcome::Success {
+                output: "ok".to_string(),
+            },
+            pre_hook_results: Vec::new(),
+            post_hook_results: Vec::new(),
+        };
+        let failed_result = ToolExecutionResult::Completed {
+            final_call: agent_types::tool::FinalToolCall {
+                call_id: "call_2".to_string(),
+                tool_name: "todo_write".to_string(),
+                input: serde_json::json!({}),
+            },
+            raw_outcome: RawToolOutcome::Error {
+                message: "bad input".to_string(),
+            },
+            pre_hook_results: Vec::new(),
+            post_hook_results: Vec::new(),
+        };
+
+        assert!(should_stop_after_tool_result(&ctx, &result));
+        assert!(!should_stop_after_tool_result(&ctx, &failed_result));
     }
 
     #[tokio::test]
