@@ -3,3 +3,4 @@ pub mod channels;
 pub mod cli;
 pub mod gateway;
 pub mod httpserver;
+pub mod llm_secrets;

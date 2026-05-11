@@ -4,7 +4,9 @@ use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
 /// ~/.config/xiaoo/config.toml
 #[derive(Debug, Deserialize, Default)]
@@ -51,15 +53,30 @@ pub struct CompactSection {
 }
 
 impl FileConfig {
+    pub fn resolve_path(path: Option<&str>) -> Option<PathBuf> {
+        if let Some(path) = path.filter(|value| !value.trim().is_empty()) {
+            return Some(PathBuf::from(path));
+        }
+
+        if let Some(path) = std::env::var_os(CONFIG_ENV_VAR)
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            return Some(path);
+        }
+
+        dirs::home_dir().map(|home| home.join(".config").join("xiaoo").join("config.toml"))
+    }
+
     /// Load from the given path, or `~/.config/xiaoo/config.toml` by default.
     pub fn load(path: Option<&str>, debug: bool) -> Self {
-        let path = match path {
-            Some(p) => PathBuf::from(p),
-            None => match dirs::home_dir() {
-                Some(home) => home.join(".config").join("xiaoo").join("config.toml"),
-                None => return Self::default(),
-            },
+        let Some(path) = Self::resolve_path(path) else {
+            return Self::default();
         };
+        Self::load_from_path(&path, debug)
+    }
+
+    pub fn load_from_path(path: &Path, debug: bool) -> Self {
         match std::fs::read_to_string(&path) {
             Ok(content) => match toml::from_str::<toml::Value>(&content) {
                 Ok(root) => {
@@ -91,8 +108,13 @@ impl FileConfig {
 
     /// Resolve API key: read the env var named by `api_key_env`.
     pub fn resolve_api_key(&self) -> Option<String> {
-        let env_name = self.llm.as_ref()?.api_key_env.as_deref()?;
-        std::env::var(env_name).ok().filter(|v| !v.is_empty())
+        let env_name = self.llm.as_ref()?.api_key_env.as_deref()?.trim();
+        if env_name.is_empty() {
+            return None;
+        }
+        std::env::var(env_name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
     }
 }
 
