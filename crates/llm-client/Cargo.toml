@@ -16,7 +16,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "time"] }
 futures = "0.3"
 async-stream = "0.3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 uuid.workspace = true
 tracing.workspace = true
 tokio-util = { version = "0.7", features = ["io"] }

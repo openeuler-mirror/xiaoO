@@ -42,7 +42,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 tracing = "0.1"
 arc-swap = "1.7"
 tempfile = "3.9"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 chrono = "0.4"
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
