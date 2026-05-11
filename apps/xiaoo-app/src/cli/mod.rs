@@ -69,6 +69,7 @@ pub struct CliConfig {
     pub provider: String,
     pub model: String,
     pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
     pub api_base: Option<String>,
     pub trace: Value,
     pub system_prompt: String,
@@ -164,7 +165,7 @@ pub async fn resolve_effective_context_window(
         provider: Some(config.provider.clone()),
         protocol: None,
         api_key: config.api_key.clone(),
-        api_key_env: None,
+        api_key_env: config.api_key_env.clone(),
         base_url: config.api_base.clone(),
     });
 
@@ -242,6 +243,7 @@ mod tests {
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             api_key: None,
+            api_key_env: None,
             api_base: None,
             trace: Value::Object(serde_json::Map::new()),
             system_prompt: "test".to_string(),

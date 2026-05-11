@@ -7,6 +7,11 @@ use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::AgentId;
 use agent_types::ReasoningEffort;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoopStopRule {
+    AfterSuccessfulTool { tool_name: String },
+}
+
 pub struct AgentLoopInput {
     pub user_message: String,
     pub append_user_message: bool,
@@ -18,6 +23,7 @@ pub struct AgentLoopInput {
     /// `None` = tool execution 跳过。
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub reasoning_effort: ReasoningEffort,
+    pub stop_rules: Vec<LoopStopRule>,
 }
 
 impl AgentLoopInput {
@@ -31,6 +37,7 @@ impl AgentLoopInput {
             visible_tools: Vec::new(),
             runtime_view: None,
             reasoning_effort: ReasoningEffort::Off,
+            stop_rules: Vec::new(),
         }
     }
 
@@ -61,6 +68,11 @@ impl AgentLoopInput {
 
     pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    pub fn with_stop_rules(mut self, rules: impl IntoIterator<Item = LoopStopRule>) -> Self {
+        self.stop_rules = rules.into_iter().collect();
         self
     }
 
