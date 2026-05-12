@@ -1,6 +1,6 @@
 pub mod config;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use agent_contracts::CompressionPipeline;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
@@ -21,20 +21,70 @@ use serde_json::Value;
 // ---------------------------------------------------------------------------
 
 pub struct CliEventSink {
-    pub debug: bool,
+    state: Mutex<CliEventSinkState>,
+}
+
+#[derive(Default)]
+struct CliEventSinkState {
+    active_assistant_agent: Option<String>,
+    last_assistant_snapshot_len: usize,
+}
+
+impl CliEventSink {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(CliEventSinkState::default()),
+        }
+    }
+
+    fn finish_assistant_line(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("cli event sink state mutex should not be poisoned");
+        if state.active_assistant_agent.is_some() {
+            eprintln!();
+        }
+        state.active_assistant_agent = None;
+        state.last_assistant_snapshot_len = 0;
+    }
 }
 
 impl agent_contracts::events::LoopEventSink for CliEventSink {
     fn on_turn_start(&self, agent_id: &agent_types::common::ids::AgentId, turn: u32) {
-        if self.debug {
-            eprintln!("--- turn {} [{}] ---", turn, agent_id.0);
-        }
+        self.finish_assistant_line();
+        eprintln!("--- turn {} [{}] ---", turn, agent_id.0);
     }
 
     fn on_assistant_message(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
-        if self.debug {
-            eprintln!("[assistant: {}] {}", agent_id.0, text);
+        let mut state = self
+            .state
+            .lock()
+            .expect("cli event sink state mutex should not be poisoned");
+        let is_same_stream = state
+            .active_assistant_agent
+            .as_deref()
+            .is_some_and(|active| active == agent_id.0);
+        let prev_len = if is_same_stream {
+            state.last_assistant_snapshot_len
+        } else {
+            if state.active_assistant_agent.is_some() {
+                eprintln!();
+            }
+            0
+        };
+
+        if prev_len >= text.len() || !text.is_char_boundary(prev_len) {
+            return;
         }
+
+        if !is_same_stream {
+            eprint!("[assistant: {}] ", agent_id.0);
+            state.active_assistant_agent = Some(agent_id.0.clone());
+        }
+
+        eprint!("{}", &text[prev_len..]);
+        state.last_assistant_snapshot_len = text.len();
     }
 
     fn on_tool_result(
@@ -42,22 +92,20 @@ impl agent_contracts::events::LoopEventSink for CliEventSink {
         agent_id: &agent_types::common::ids::AgentId,
         event: &ToolResultEvent,
     ) {
-        if self.debug {
-            let status = if event.is_error { "ERR" } else { "OK" };
-            eprintln!(
-                "  [tool: {}] {} ({}) => {}",
-                agent_id.0, event.tool_name, status, event.output_preview
-            );
-        }
+        self.finish_assistant_line();
+        let status = if event.is_error { "ERR" } else { "OK" };
+        eprintln!(
+            "  [tool: {}] {} ({}) => {}",
+            agent_id.0, event.tool_name, status, event.output_preview
+        );
     }
 
     fn on_loop_end(&self, agent_id: &agent_types::common::ids::AgentId, summary: &LoopEndSummary) {
-        if self.debug {
-            eprintln!(
-                "--- end [{}] (turns={}, tokens={}, reason={}) ---",
-                agent_id.0, summary.turn_count, summary.total_tokens, summary.stop_reason
-            );
-        }
+        self.finish_assistant_line();
+        eprintln!(
+            "--- end [{}] (turns={}, tokens={}, reason={}) ---",
+            agent_id.0, summary.turn_count, summary.total_tokens, summary.stop_reason
+        );
     }
 }
 

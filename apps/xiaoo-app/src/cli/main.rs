@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_contracts::SkillRegistry;
+use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
@@ -464,8 +464,10 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
     };
 
     // 4. Bindings (CliEventSink for debug output)
+    let loop_event_sink: Option<Arc<dyn LoopEventSink>> =
+        debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>);
     let bindings = SessionRuntimeBindings {
-        loop_event_sink: Some(Arc::new(CliEventSink { debug })),
+        loop_event_sink,
         tool_event_sink: None,
         interaction_handle: None,
         channel_file_sender: None,
