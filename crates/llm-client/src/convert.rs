@@ -246,7 +246,16 @@ pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse 
         },
     };
 
-    LlmResponse { message }
+    let kv_cache_chunk_hashes = wire
+        .kv_transfer_params
+        .as_ref()
+        .map(|p| p.chunk_hashes.clone())
+        .unwrap_or_default();
+
+    LlmResponse {
+        message,
+        kv_cache_chunk_hashes,
+    }
 }
 
 pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> AssistantMessage {
@@ -432,6 +441,7 @@ mod tests {
                 total_tokens: 15,
             },
             warnings: None,
+            kv_transfer_params: None,
         };
 
         let response = wire_response_to_llm_response(&wire);

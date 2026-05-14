@@ -574,6 +574,7 @@ impl PluginLlmHookerAdaptor {
                 usage,
                 stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 

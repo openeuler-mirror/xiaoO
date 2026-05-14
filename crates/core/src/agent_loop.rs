@@ -692,26 +692,30 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
-    let response = ctx
-        .snapshot
-        .llm_provider
-        .complete_stream(&build_result.request, &|chunk| {
-            let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-            let agent_id = ctx
-                .input
-                .agent_id
-                .as_ref()
-                .unwrap_or(&default_agent_id)
-                .clone();
-            stream_assistant_chunk(
-                event_sink.as_deref(),
-                &agent_id,
-                &streamed_text,
-                &streamed_reasoning,
-                chunk,
-            );
-        })
-        .await?;
+    let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
+        ctx.snapshot.llm_provider.complete(&build_result.request).await?
+    } else {
+        ctx.snapshot
+            .llm_provider
+            .complete_stream(&build_result.request, &|chunk| {
+                let default_agent_id =
+                    agent_types::common::ids::AgentId(String::from("anonymous"));
+                let agent_id = ctx
+                    .input
+                    .agent_id
+                    .as_ref()
+                    .unwrap_or(&default_agent_id)
+                    .clone();
+                stream_assistant_chunk(
+                    event_sink.as_deref(),
+                    &agent_id,
+                    &streamed_text,
+                    &streamed_reasoning,
+                    chunk,
+                );
+            })
+            .await?
+    };
 
     ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
     ctx.state.token_usage.completion_tokens = response.message.usage.completion_tokens;
@@ -731,6 +735,43 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     }
 
     ctx.turn.assistant_message = Some(response.message);
+
+    for chunk_hash in &response.kv_cache_chunk_hashes {
+        if let Some(ref text) = ctx.turn.assistant_message.as_ref().and_then(|m| m.text.as_ref()) {
+            ctx.state
+                .kv_cache_map
+                .insert(chunk_hash.clone(), text.to_string());
+        }
+    }
+
+    if !response.kv_cache_chunk_hashes.is_empty() {
+        let debug_entry = serde_json::json!({
+            "session_id": ctx.state.session_id.to_string(),
+            "turn": ctx.turn.turn_number,
+            "request": {
+                "messages": build_result.request.messages.iter().map(|m| {
+                    serde_json::json!({
+                        "role": m.role,
+                        "content": m.text_content(),
+                    })
+                }).collect::<Vec<_>>(),
+            },
+            "response": {
+                "text": ctx.turn.assistant_message.as_ref().and_then(|m| m.text.as_ref()),
+                "chunk_hashes": response.kv_cache_chunk_hashes,
+            },
+        });
+        let filename = format!(
+            "kvcache_debug_{}_{}.json",
+            ctx.state.session_id,
+            ctx.turn.turn_number
+        );
+        if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
+            let _ = std::fs::write(&filename, json);
+            tracing::info!(%filename, "kvcache debug file written");
+        }
+    }
+
     Ok(())
 }
 
@@ -1395,6 +1436,7 @@ mod tests {
                     },
                     stop_reason: StopReason::EndTurn,
                 },
+                kv_cache_chunk_hashes: vec![],
             })
         }
 
@@ -1477,6 +1519,7 @@ mod tests {
                     usage,
                     stop_reason: StopReason::EndTurn,
                 },
+                kv_cache_chunk_hashes: vec![],
             })
         }
 
@@ -1549,6 +1592,7 @@ mod tests {
                     },
                     stop_reason: StopReason::EndTurn,
                 },
+                kv_cache_chunk_hashes: vec![],
             })
         }
 
@@ -1922,6 +1966,7 @@ mod tests {
                     },
                     stop_reason: StopReason::ToolUse,
                 },
+                kv_cache_chunk_hashes: vec![],
             })
         }
 
@@ -2022,6 +2067,7 @@ mod tests {
                     },
                     stop_reason: StopReason::EndTurn,
                 },
+                kv_cache_chunk_hashes: vec![],
             })
         }
 
