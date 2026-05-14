@@ -69,6 +69,8 @@ pub struct TuiSessionSnapshot {
     #[serde(default)]
     pub session_messages: Vec<llm_client::ChatMessage>,
     #[serde(default)]
+    pub plan_state: Option<SavedTodoMessageState>,
+    #[serde(default)]
     pub chat_messages: Vec<SavedMessage>,
     #[serde(default)]
     pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
@@ -85,8 +87,6 @@ pub struct SavedMessage {
     pub timestamp: String,
     #[serde(default)]
     pub tool_state: Option<SavedToolMessageState>,
-    #[serde(default)]
-    pub todo_state: Option<SavedTodoMessageState>,
     #[serde(default)]
     pub completion_check_state: Option<CompletionCheckMessageState>,
 }
@@ -176,6 +176,7 @@ pub fn build_snapshot(
         active_agent_role: state.active_agent_role.clone(),
         reasoning_effort: state.reasoning_effort,
         session_messages: state.session_messages.clone(),
+        plan_state: state.plan_state.as_ref().map(SavedTodoMessageState::from),
         chat_messages: state
             .chat_state
             .messages
@@ -278,6 +279,7 @@ pub fn apply_snapshot(
     state.active_agent_role = snapshot.active_agent_role;
     state.reasoning_effort = snapshot.reasoning_effort;
     state.session_messages = snapshot.session_messages;
+    state.plan_state = snapshot.plan_state.map(Into::into);
     state.session_file_changes = snapshot.session_file_changes;
     state.tool_file_changes.clear();
     state.clear_tool_file_baselines();
@@ -416,7 +418,6 @@ impl SavedMessage {
             thinking_content: message.thinking_content.clone(),
             timestamp: message.timestamp.to_rfc3339(),
             tool_state: message.tool_state.as_ref().map(SavedToolMessageState::from),
-            todo_state: message.todo_state.as_ref().map(SavedTodoMessageState::from),
             completion_check_state: message.completion_check_state.clone(),
         }
     }
@@ -433,7 +434,6 @@ impl SavedMessage {
                 .unwrap_or_else(|_| Local::now()),
             is_streaming: false,
             tool_state: self.tool_state.map(Into::into),
-            todo_state: self.todo_state.map(Into::into),
             completion_check_state: self.completion_check_state,
             render_revision: 0,
         }

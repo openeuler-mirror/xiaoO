@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::chat::{default_provider_list, merge_config_provider, ChatState};
+use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
@@ -136,6 +136,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
+    pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
     pub current_snapshot_name: Option<String>,
     pub slash: SlashState,
@@ -170,6 +171,7 @@ impl AppState {
             config_path,
             workspace,
             session_messages: Vec::new(),
+            plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             current_snapshot_name: None,
             slash: SlashState::default(),
@@ -205,6 +207,7 @@ impl AppState {
             config_path,
             workspace,
             session_messages: Vec::new(),
+            plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             current_snapshot_name: None,
             slash: SlashState::default(),
@@ -229,6 +232,7 @@ impl AppState {
         self.api_key_dialog = None;
         self.loading_tick = 0;
         self.session_messages.clear();
+        self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.current_snapshot_name = None;
         self.slash = SlashState::default();
