@@ -36,11 +36,14 @@ impl ToolRegistryImpl {
             .map(|tool_name| tool_name.0.as_str())
             .collect();
 
-        self.specs
+        let mut visible_specs: Vec<_> = self
+            .specs
             .values()
             .filter(|spec| allowed_tool_names.contains(spec.name().0.as_str()))
             .map(Arc::clone)
-            .collect()
+            .collect();
+        visible_specs.sort_by(|left, right| left.name().0.cmp(&right.name().0));
+        visible_specs
     }
 
     fn resolve_visible_executors_by_name(
@@ -68,10 +71,13 @@ impl ToolRegistry for ToolRegistryImpl {
     }
 
     fn list_specs(&self) -> Vec<&dyn ToolSpecView> {
-        self.specs
+        let mut specs: Vec<_> = self
+            .specs
             .values()
             .map(|spec| spec.as_ref() as &dyn ToolSpecView)
-            .collect()
+            .collect();
+        specs.sort_by(|left, right| left.name().0.cmp(&right.name().0));
+        specs
     }
 
     fn filter_for(&self, agent_id: &AgentId) -> Box<dyn ToolFilter> {
