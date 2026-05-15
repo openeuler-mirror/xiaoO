@@ -4,7 +4,7 @@ use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
 use agent_contracts::tool::ToolCallBuilder;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
-use agent_llm::{AssistantMessageExt, ChatMessageExt};
+use agent_llm::{AssistantMessageExt, ChatMessageExt, MessageRoleExt};
 use agent_types::compression::CompressedView;
 use agent_types::context::prompt::result::PromptBuildResult;
 use agent_types::events::ToolResultEvent;
@@ -745,26 +745,37 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     }
 
     if !response.kv_cache_chunk_hashes.is_empty() {
+        let cumulative_turn = ctx.state.turn_count + 1;
+        let messages: Vec<serde_json::Value> = build_result
+            .request
+            .messages
+            .iter()
+            .map(|m| {
+                let content = m
+                    .blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                serde_json::json!({
+                    "role": m.role.as_str(),
+                    "content": content,
+                })
+            })
+            .collect();
         let debug_entry = serde_json::json!({
             "session_id": ctx.state.session_id.to_string(),
-            "turn": ctx.turn.turn_number,
-            "request": {
-                "messages": build_result.request.messages.iter().map(|m| {
-                    serde_json::json!({
-                        "role": m.role,
-                        "content": m.text_content(),
-                    })
-                }).collect::<Vec<_>>(),
-            },
-            "response": {
-                "text": ctx.turn.assistant_message.as_ref().and_then(|m| m.text.as_ref()),
-                "chunk_hashes": response.kv_cache_chunk_hashes,
-            },
+            "turn": cumulative_turn,
+            "messages": messages,
+            "chunk_hashes": response.kv_cache_chunk_hashes,
         });
         let filename = format!(
             "kvcache_debug_{}_{}.json",
             ctx.state.session_id,
-            ctx.turn.turn_number
+            cumulative_turn
         );
         if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
             let _ = std::fs::write(&filename, json);
