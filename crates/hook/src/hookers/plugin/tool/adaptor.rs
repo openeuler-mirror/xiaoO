@@ -657,10 +657,10 @@ mod tests {
 
     struct TestConversation;
 
-    impl ConversationView for TestConversation {
-        fn recent_messages(&self, _limit: usize) -> &[ChatMessage] {
-            &[]
-        }
+	impl ConversationView for TestConversation {
+		fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
+			Vec::new()
+		}
 
         fn message_count(&self) -> usize {
             0
