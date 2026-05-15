@@ -38,6 +38,9 @@ pub struct TurnState {
     pub tool_results: Vec<ToolExecutionResult>,
     pub decision: Option<LoopDecision>,
     pub turn_span: Option<TraceSpanHandle>,
+    pub ttft_ms: u64,
+    pub total_time_ms: u64,
+    pub tpot_ms: f64,
 }
 
 impl TurnState {
@@ -50,6 +53,9 @@ impl TurnState {
             tool_results: Vec::new(),
             decision: None,
             turn_span: None,
+            ttft_ms: 0,
+            total_time_ms: 0,
+            tpot_ms: 0.0,
         }
     }
 }
@@ -689,15 +695,25 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
         .as_ref()
         .expect("build_messages must run before llm_call");
 
+    let start = std::time::Instant::now();
+    let first_token_at = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
         ctx.snapshot.llm_provider.complete(&build_result.request).await?
     } else {
+        let first_token_at = std::sync::Arc::clone(&first_token_at);
         ctx.snapshot
             .llm_provider
             .complete_stream(&build_result.request, &|chunk| {
+                if first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    first_token_at.store(
+                        start.elapsed().as_millis() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 let default_agent_id =
                     agent_types::common::ids::AgentId(String::from("anonymous"));
                 let agent_id = ctx
@@ -717,8 +733,25 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             .await?
     };
 
+    let total_time_ms = start.elapsed().as_millis() as u64;
+    let ttft_ms = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
+        total_time_ms
+    } else {
+        first_token_at.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let completion_tokens = response.message.usage.completion_tokens;
+    let tpot_ms = if ttft_ms > 0 && completion_tokens > 0 {
+        (total_time_ms - ttft_ms) as f64 / completion_tokens as f64
+    } else {
+        0.0
+    };
+
+    ctx.turn.ttft_ms = ttft_ms;
+    ctx.turn.total_time_ms = total_time_ms;
+    ctx.turn.tpot_ms = tpot_ms;
+
     ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
-    ctx.state.token_usage.completion_tokens = response.message.usage.completion_tokens;
+    ctx.state.token_usage.completion_tokens = completion_tokens;
     ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
 
     let streamed_text = streamed_text
@@ -751,18 +784,50 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             .messages
             .iter()
             .map(|m| {
-                let content = m
+                let blocks: Vec<serde_json::Value> = m
                     .blocks
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => {
+                            serde_json::json!({"type": "text", "text": text})
+                        }
+                        ContentBlock::ToolUse {
+                            call_id,
+                            tool_name,
+                            input,
+                        } => {
+                            serde_json::json!({
+                                "type": "tool_use",
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "input": input,
+                            })
+                        }
+                        ContentBlock::ToolResult {
+                            call_id,
+                            tool_name,
+                            output,
+                            is_error,
+                        } => {
+                            serde_json::json!({
+                                "type": "tool_result",
+                                "call_id": call_id,
+                                "tool_name": tool_name,
+                                "output": output,
+                                "is_error": is_error,
+                            })
+                        }
+                        ContentBlock::Image { description } => {
+                            serde_json::json!({"type": "image", "description": description})
+                        }
+                        ContentBlock::Document { description } => {
+                            serde_json::json!({"type": "document", "description": description})
+                        }
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .collect();
                 serde_json::json!({
                     "role": m.role.as_str(),
-                    "content": content,
+                    "blocks": blocks,
                 })
             })
             .collect();
@@ -771,15 +836,23 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             "turn": cumulative_turn,
             "messages": messages,
             "chunk_hashes": response.kv_cache_chunk_hashes,
+            "timing": {
+                "ttft_ms": ctx.turn.ttft_ms,
+                "total_time_ms": ctx.turn.total_time_ms,
+                "tpot_ms": ctx.turn.tpot_ms,
+            },
         });
+        let dir = std::path::Path::new("kvcache_debug");
+        let _ = std::fs::create_dir_all(dir);
         let filename = format!(
             "kvcache_debug_{}_{}.json",
             ctx.state.session_id,
             cumulative_turn
         );
+        let path = dir.join(&filename);
         if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
-            let _ = std::fs::write(&filename, json);
-            tracing::info!(%filename, "kvcache debug file written");
+            let _ = std::fs::write(&path, json);
+            tracing::info!(path = %path.display(), "kvcache debug file written");
         }
     }
 
