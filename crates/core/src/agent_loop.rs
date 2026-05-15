@@ -14,7 +14,7 @@ use agent_types::{
     AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk, ToolUseBlock,
 };
 use serde_json::json;
-use tool::ToolCallBuilderImpl;
+use tool::{tool_filter_from_specs, ToolCallBuilderImpl};
 
 use crate::input::{AgentLoopInput, LoopStopRule};
 use crate::loop_state::LoopState;
@@ -922,7 +922,6 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Execute valid tool calls (original logic).
-    let agent_id = ctx.input.agent_id.as_ref().unwrap();
     let runtime_view = ctx.input.runtime_view.as_ref().unwrap();
 
     for tc in &valid_calls {
@@ -937,7 +936,10 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             input: raw_tool_call.input.clone(),
         };
 
-        let per_call_filter = ctx.snapshot.tool_registry.filter_for(agent_id);
+        let per_call_filter = tool_filter_from_specs(
+            &ctx.input.visible_tools,
+            ctx.snapshot.tool_registry.as_ref(),
+        );
 
         let tool_call = match ToolCallBuilderImpl::new()
             .with_raw_llm_tool_call(raw_tool_call)

@@ -9,12 +9,10 @@ use agent_contracts::{
     CompressionPipeline, InteractionHandle, PromptBuilder, SkillRegistry, ToolEventSink,
     ToolRegistry,
 };
-use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::common::{AgentMetadata, BuildError};
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::ToolStateStoreConfig;
-use agent_types::tool::{EffectProfile, InputSchemaRef, OutputContract};
 use async_trait::async_trait;
 use compact::{CompactionPolicy, PassthroughCompressionPipeline};
 use hook::framework::HookerRegistryBuilderImpl;
@@ -23,7 +21,10 @@ use operation_backend::OperationBackendBuilderImpl;
 use prompt::PromptBuilderImpl;
 use serde_json::Value;
 use std::sync::Arc;
-use tool::{EmptyToolRegistry, ToolStateStoreBuilderImpl};
+use tool::{
+    snapshot_tool_specs, tool_specs_from_snapshot, EmptyToolRegistry, ToolSpecSnapshot,
+    ToolStateStoreBuilderImpl,
+};
 use trace::TraceRecorderBuilderImpl;
 use xiaoo_core::{
     AgentRuntime, AgentRuntimeBuilder, BasicAgentContext, BasicRuntimeView, EmptySkillRegistry,
@@ -38,6 +39,7 @@ pub struct AppRuntimeAssembly {
     pub runtime: AgentRuntime,
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
+    pub tool_manifest: Vec<ToolSpecSnapshot>,
     operation_backend: Option<Arc<dyn OperationBackend>>,
     llm_provider: Arc<LlmProviderWrapper>,
 }
@@ -48,6 +50,7 @@ impl AppRuntimeAssembly {
             runtime,
             runtime_view,
             visible_tools: _,
+            tool_manifest: _,
             operation_backend,
             llm_provider,
         } = self;
@@ -79,6 +82,7 @@ impl AppRuntimeFactory {
         resolved: &ResolvedSessionRuntime,
         session: &SessionRecord,
         messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,
+        existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl::new());
         let compression_pipeline: Arc<dyn CompressionPipeline> = resolved
@@ -97,22 +101,25 @@ impl AppRuntimeFactory {
             CompactionPolicy::from_budget(&resolved.descriptor.token_budget),
         );
         let is_channel_session = session.channel.is_some();
-        let visible_tools = tool_registry
-            .filter_for(&resolved.descriptor.agent_id)
-            .visible_tools()
-            .into_iter()
-            .filter(|spec| {
-                // Hide channel-only tools when not in a channel session.
-                if !is_channel_session {
-                    let name = spec.name().0.as_str();
-                    if CHANNEL_ONLY_TOOLS.contains(&name) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .map(|spec| Arc::new(DetachedToolSpec::from(spec)) as Arc<dyn ToolSpecView>)
-            .collect::<Vec<_>>();
+        let tool_manifest = existing_tool_manifest.unwrap_or_else(|| {
+            snapshot_tool_specs(
+                tool_registry
+                    .filter_for(&resolved.descriptor.agent_id)
+                    .visible_tools()
+                    .into_iter()
+                    .filter(|spec| {
+                        // Hide channel-only tools when not in a channel session.
+                        if !is_channel_session {
+                            let name = spec.name().0.as_str();
+                            if CHANNEL_ONLY_TOOLS.contains(&name) {
+                                return false;
+                            }
+                        }
+                        true
+                    }),
+            )
+        });
+        let visible_tools = tool_specs_from_snapshot(&tool_manifest);
 
         let operation_backend = build_operation_backend(
             resolved.operation_backend.as_ref(),
@@ -206,6 +213,7 @@ impl AppRuntimeFactory {
             runtime,
             runtime_view,
             visible_tools,
+            tool_manifest,
             operation_backend: Some(operation_backend),
             llm_provider: Arc::clone(&resolved.llm_provider),
         })
@@ -244,55 +252,6 @@ async fn build_operation_backend(
     };
 
     builder.build(&input).await
-}
-
-#[derive(Clone)]
-struct DetachedToolSpec {
-    id: ToolId,
-    name: ToolName,
-    description: String,
-    input_schema: InputSchemaRef,
-    output_contract: OutputContract,
-    effect_profile: EffectProfile,
-}
-
-impl From<&dyn ToolSpecView> for DetachedToolSpec {
-    fn from(value: &dyn ToolSpecView) -> Self {
-        Self {
-            id: value.id().clone(),
-            name: value.name().clone(),
-            description: value.description().to_string(),
-            input_schema: value.input_schema().clone(),
-            output_contract: value.output_contract().clone(),
-            effect_profile: value.effect_profile().clone(),
-        }
-    }
-}
-
-impl ToolSpecView for DetachedToolSpec {
-    fn id(&self) -> &ToolId {
-        &self.id
-    }
-
-    fn name(&self) -> &ToolName {
-        &self.name
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn input_schema(&self) -> &InputSchemaRef {
-        &self.input_schema
-    }
-
-    fn output_contract(&self) -> &OutputContract {
-        &self.output_contract
-    }
-
-    fn effect_profile(&self) -> &EffectProfile {
-        &self.effect_profile
-    }
 }
 
 struct SharedToolEventSink {
