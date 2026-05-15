@@ -10,6 +10,7 @@ use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tool::ToolSpecSnapshot;
 use xiaoo_core::{
     run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
 };
@@ -26,12 +27,14 @@ pub struct SessionWorkerInput {
     pub channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
+    pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
 }
 
 pub struct SessionWorkerResult {
     pub loop_result: LoopRunResult,
     pub loop_state: LoopStateSnapshot,
     pub memory_snapshot: MemorySnapshot,
+    pub tool_manifest: Vec<ToolSpecSnapshot>,
 }
 
 pub struct SessionWorker;
@@ -81,8 +84,14 @@ impl SessionWorker {
 
         // Share message storage with runtime_view
         let messages = loop_state.messages_arc();
-        let assembly =
-            AppRuntimeFactory::build(&resolved, &input.session, messages).await?;
+        let assembly = AppRuntimeFactory::build(
+            &resolved,
+            &input.session,
+            messages,
+            input.tool_manifest.clone(),
+        )
+        .await?;
+        let tool_manifest = assembly.tool_manifest.clone();
 
         let mut memory_manager = match input.memory_snapshot.clone() {
             Some(snapshot) => MemoryManager::from_snapshot(snapshot),
@@ -151,6 +160,7 @@ impl SessionWorker {
             loop_result,
             loop_state: loop_state.to_snapshot(),
             memory_snapshot: memory_manager.snapshot().clone(),
+            tool_manifest,
         })
     }
 }
