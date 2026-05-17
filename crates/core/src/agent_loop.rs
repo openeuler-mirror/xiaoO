@@ -769,6 +769,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
 
     ctx.turn.assistant_message = Some(response.message);
 
+    ctx.state.kv_cache_map.clear();
     for chunk_hash in &response.kv_cache_chunk_hashes {
         if let Some(ref text) = ctx.turn.assistant_message.as_ref().and_then(|m| m.text.as_ref()) {
             ctx.state
@@ -825,10 +826,14 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         }
                     })
                     .collect();
-                serde_json::json!({
+                let mut msg_json = serde_json::json!({
                     "role": m.role.as_str(),
                     "blocks": blocks,
-                })
+                });
+                if let Some(ref rc) = m.reasoning_content {
+                    msg_json["reasoning_content"] = serde_json::json!(rc);
+                }
+                msg_json
             })
             .collect();
         let debug_entry = serde_json::json!({

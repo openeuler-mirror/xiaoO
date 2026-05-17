@@ -256,7 +256,6 @@ impl App {
                     );
                 }
                 self.state.note_input_changed();
-                self.maybe_open_load_snapshot_dialog();
             } else {
                 self.state.cycle_agent_role(false);
             }
@@ -292,7 +291,6 @@ impl App {
                 KeyCode::Enter => {
                     self.state.apply_slash_selection();
                     self.state.dismiss_current_slash_menu();
-                    self.maybe_open_load_snapshot_dialog();
                     return Ok(());
                 }
                 KeyCode::Esc => {
@@ -312,7 +310,6 @@ impl App {
             _ => {
                 self.state.chat_state.input.handle_event(&Event::Key(key));
                 self.state.note_input_changed();
-                self.maybe_open_load_snapshot_dialog();
             }
         }
         Ok(())
@@ -615,30 +612,6 @@ impl App {
             self.state.provider_dialog = None;
         }
         Ok(())
-    }
-
-    fn maybe_open_load_snapshot_dialog(&mut self) {
-        if self.state.input_mode != InputMode::Editing
-            || self.state.chat_state.is_loading
-            || self.state.provider_dialog.is_some()
-            || self.state.api_key_dialog.is_some()
-            || self.state.interaction_prompt.is_some()
-            || self.state.session_snapshot_dialog.is_some()
-        {
-            return;
-        }
-        if !self
-            .state
-            .chat_state
-            .input
-            .value()
-            .trim()
-            .eq_ignore_ascii_case("/load")
-        {
-            return;
-        }
-        self.state.chat_state.input.reset();
-        self.open_load_snapshot_dialog();
     }
 
     fn open_load_snapshot_dialog(&mut self) {
