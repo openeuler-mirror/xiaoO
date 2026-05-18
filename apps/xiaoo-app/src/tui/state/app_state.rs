@@ -532,6 +532,7 @@ impl AppState {
             let candidates = candidates_for_prefix(&prefix, &self.external_commands);
             if let Some(chosen) = candidates.get(self.slash.selected) {
                 apply_slash_pick(&mut self.chat_state.input, chosen);
+                self.chat_state.reset_input_history_navigation();
                 self.note_input_changed();
             }
         }
