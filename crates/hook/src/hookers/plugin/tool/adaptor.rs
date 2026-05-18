@@ -202,25 +202,16 @@ impl PluginToolHookerAdaptor {
         // 获取已完成的工具调用历史（用于 read_before_write 等规则）
         // 收集 ToolUse（包含输入参数如文件路径）和 ToolResult（包含执行结果）
         let messages = recent_messages;
-        let mut tool_use_map: std::collections::HashMap<&String, Value> =
-            std::collections::HashMap::new();
+        let mut tool_use_map: std::collections::HashMap<&String, Value> = std::collections::HashMap::new();
 
         // 先收集所有 ToolUse，记录 call_id -> input 映射
         for m in messages.iter() {
             for block in &m.blocks {
-                if let agent_types::llm::ContentBlock::ToolUse {
-                    call_id,
-                    tool_name,
-                    input,
-                } = block
-                {
-                    tool_use_map.insert(
-                        call_id,
-                        json!({
-                            "action_type": tool_name,
-                            "action_detail": input,
-                        }),
-                    );
+                if let agent_types::llm::ContentBlock::ToolUse { call_id, tool_name, input } = block {
+                    tool_use_map.insert(call_id, json!({
+                        "action_type": tool_name,
+                        "action_detail": input,
+                    }));
                 }
             }
         }
@@ -230,19 +221,12 @@ impl PluginToolHookerAdaptor {
             .iter()
             .flat_map(|m| m.blocks.iter())
             .filter_map(|block| match block {
-                agent_types::llm::ContentBlock::ToolResult {
-                    call_id,
-                    tool_name,
-                    output,
-                    is_error,
-                } => {
+                agent_types::llm::ContentBlock::ToolResult { call_id, tool_name, output, is_error } => {
                     // 合并 ToolUse 的输入信息
-                    let mut entry = tool_use_map.get(call_id).cloned().unwrap_or_else(|| {
-                        json!({
-                            "action_type": tool_name,
-                            "action_detail": "",
-                        })
-                    });
+                    let mut entry = tool_use_map.get(call_id).cloned().unwrap_or_else(|| json!({
+                        "action_type": tool_name,
+                        "action_detail": "",
+                    }));
                     if let Some(obj) = entry.as_object_mut() {
                         obj.insert("call_id".to_string(), json!(call_id));
                         obj.insert("output".to_string(), json!(output));
@@ -673,10 +657,10 @@ mod tests {
 
     struct TestConversation;
 
-    impl ConversationView for TestConversation {
-        fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
-            Vec::new()
-        }
+	impl ConversationView for TestConversation {
+		fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
+			Vec::new()
+		}
 
         fn message_count(&self) -> usize {
             0
