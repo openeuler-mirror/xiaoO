@@ -235,6 +235,10 @@ impl Message {
 pub struct ChatState {
     pub messages: Vec<Message>,
     pub input: Input,
+    /// Current input-history cursor, indexing into user messages only.
+    pub input_history_cursor: Option<usize>,
+    /// Draft text to restore after navigating back to the newest history edge.
+    pub input_history_draft: String,
     /// Line-based scroll: number of lines skipped from the top of the message list.
     pub scroll_offset: usize,
     pub scrollbar_state: ScrollbarState,
@@ -485,6 +489,8 @@ impl Default for ChatState {
                 "Welcome to XiaoO TUI. Type /connect to select provider/model. Type your message and press Enter to send.",
             )],
             input: Input::default(),
+            input_history_cursor: None,
+            input_history_draft: String::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_loading: false,
@@ -500,6 +506,56 @@ impl Default for ChatState {
 impl ChatState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn user_input_history(&self) -> Vec<String> {
+        self.messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User)
+            .map(|message| message.content.clone())
+            .filter(|content| !content.trim().is_empty())
+            .collect()
+    }
+
+    pub fn reset_input_history_navigation(&mut self) {
+        self.input_history_cursor = None;
+        self.input_history_draft.clear();
+    }
+
+    pub fn previous_input_history(&mut self) -> bool {
+        let history = self.user_input_history();
+        if history.is_empty() {
+            return false;
+        }
+
+        let index = match self.input_history_cursor {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.input_history_draft = self.input.value().to_string();
+                history.len().saturating_sub(1)
+            }
+        };
+        self.input_history_cursor = Some(index);
+        self.input = Input::from(history[index].clone());
+        true
+    }
+
+    pub fn next_input_history(&mut self) -> bool {
+        let Some(current) = self.input_history_cursor else {
+            return false;
+        };
+
+        let history = self.user_input_history();
+        if current + 1 < history.len() {
+            let next = current + 1;
+            self.input_history_cursor = Some(next);
+            self.input = Input::from(history[next].clone());
+        } else {
+            let draft = std::mem::take(&mut self.input_history_draft);
+            self.input_history_cursor = None;
+            self.input = Input::from(draft);
+        }
+        true
     }
 
     /// Max scroll offset (lines) so the last line is visible. Uses last_visible_height and total_lines.
@@ -537,7 +593,7 @@ impl ChatState {
 
 #[cfg(test)]
 mod tests {
-    use super::Message;
+    use super::{ChatState, Input, Message};
 
     #[test]
     fn message_render_revision_updates_with_content_and_streaming_changes() {
@@ -555,5 +611,48 @@ mod tests {
 
         message.set_streaming(false);
         assert_eq!(message.render_revision, 3);
+    }
+
+    #[test]
+    fn input_history_walks_user_messages_from_newest_to_oldest() {
+        let mut chat = ChatState::default();
+        chat.messages.push(Message::user("first"));
+        chat.messages.push(Message::assistant_streaming());
+        chat.messages.push(Message::user("second"));
+
+        assert!(chat.previous_input_history());
+        assert_eq!(chat.input.value(), "second");
+
+        assert!(chat.previous_input_history());
+        assert_eq!(chat.input.value(), "first");
+
+        assert!(chat.previous_input_history());
+        assert_eq!(chat.input.value(), "first");
+    }
+
+    #[test]
+    fn input_history_down_restores_draft_after_latest_entry() {
+        let mut chat = ChatState::default();
+        chat.messages.push(Message::user("first"));
+        chat.messages.push(Message::user("second"));
+        chat.input = Input::from("draft");
+
+        assert!(chat.previous_input_history());
+        assert_eq!(chat.input.value(), "second");
+
+        assert!(chat.next_input_history());
+        assert_eq!(chat.input.value(), "draft");
+        assert_eq!(chat.input_history_cursor, None);
+    }
+
+    #[test]
+    fn input_history_ignores_non_user_messages() {
+        let mut chat = ChatState::default();
+        chat.messages.push(Message::system("system"));
+        chat.messages.push(Message::assistant_streaming());
+        chat.input = Input::from("draft");
+
+        assert!(!chat.previous_input_history());
+        assert_eq!(chat.input.value(), "draft");
     }
 }

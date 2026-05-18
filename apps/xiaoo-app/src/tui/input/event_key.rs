@@ -60,6 +60,7 @@ impl App {
                 if let Err(e) = copy_to_clipboard(&text) {
                     tracing::warn!("copy_to_clipboard failed: {}", e);
                 }
+                self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
             }
             return Ok(());
@@ -255,6 +256,7 @@ impl App {
                         &self.state.external_commands,
                     );
                 }
+                self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
                 self.maybe_open_load_snapshot_dialog();
             } else {
@@ -309,8 +311,22 @@ impl App {
                 self.state.transcript_selection = None;
             }
             KeyCode::Enter => self.submit_editing_input().await?,
+            KeyCode::Up if key.modifiers.is_empty() => {
+                if self.state.chat_state.previous_input_history() {
+                    self.state.note_input_changed();
+                }
+            }
+            KeyCode::Down if key.modifiers.is_empty() => {
+                if self.state.chat_state.next_input_history() {
+                    self.state.note_input_changed();
+                }
+            }
             _ => {
+                let before = self.state.chat_state.input.value().to_string();
                 self.state.chat_state.input.handle_event(&Event::Key(key));
+                if self.state.chat_state.input.value() != before {
+                    self.state.chat_state.reset_input_history_navigation();
+                }
                 self.state.note_input_changed();
                 self.maybe_open_load_snapshot_dialog();
             }
@@ -325,6 +341,7 @@ impl App {
         }
 
         let trimmed = user_input.trim();
+        self.state.chat_state.reset_input_history_navigation();
 
         if trimmed.eq_ignore_ascii_case("/new") {
             self.gateway
