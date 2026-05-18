@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use subagent::SubagentSessionState;
+use tool::ToolSpecSnapshot;
 use xiaoo_core::LoopStateSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub struct SessionRuntimeSnapshot {
     pub workspace_root: PathBuf,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +63,8 @@ pub struct SessionAgentRecord {
     pub parent_agent_id: Option<AgentId>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
+    #[serde(default)]
+    pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
     #[serde(default)]
     pub last_error: Option<String>,
     pub created_at_ms: u64,

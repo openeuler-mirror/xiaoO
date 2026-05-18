@@ -17,6 +17,7 @@ use subagent::{
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
 use tokio::sync::{oneshot, Mutex};
+use tool::ToolSpecSnapshot;
 use xiaoo_core::agent_loop::build_tool_result_message;
 use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};
 
@@ -130,6 +131,7 @@ impl SessionSupervisor {
                 parent_agent_id: Some(request.parent_agent_id.clone()),
                 loop_state: None,
                 memory_snapshot: None,
+                tool_manifest: None,
                 last_error: None,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
@@ -225,6 +227,7 @@ impl SessionSupervisor {
         let mut append_user_message = input.append_user_message;
         let mut loop_state = self.load_lane_loop_state(&input.agent_id).await?;
         let mut memory_snapshot = self.load_lane_memory_snapshot(&input.agent_id).await?;
+        let mut tool_manifest = self.load_lane_tool_manifest(&input.agent_id).await?;
 
         loop {
             let session_snapshot = self.snapshot().await;
@@ -242,16 +245,19 @@ impl SessionSupervisor {
                     channel_file_sender_override: input.channel_file_sender_override.clone(),
                     loop_state: loop_state.clone(),
                     memory_snapshot: memory_snapshot.clone(),
+                    tool_manifest: tool_manifest.clone(),
                 },
             )
             .await?;
 
             loop_state = Some(worker_result.loop_state.clone());
             memory_snapshot = Some(worker_result.memory_snapshot.clone());
+            tool_manifest = Some(worker_result.tool_manifest.clone());
             self.persist_lane_state(
                 &input.agent_id,
                 loop_state.clone(),
                 memory_snapshot.clone(),
+                tool_manifest.clone(),
                 None,
             )
             .await?;
@@ -267,6 +273,7 @@ impl SessionSupervisor {
                         &input.agent_id,
                         Some(terminal.loop_state.clone()),
                         Some(terminal.memory_snapshot.clone()),
+                        tool_manifest.clone(),
                         None,
                     )
                     .await?;
@@ -329,6 +336,7 @@ impl SessionSupervisor {
                         &input.agent_id,
                         Some(resumed_loop_state),
                         memory_snapshot.clone(),
+                        tool_manifest.clone(),
                         None,
                     )
                     .await?;
@@ -504,11 +512,30 @@ impl SessionSupervisor {
         Ok(lane.memory_snapshot.clone())
     }
 
+    async fn load_lane_tool_manifest(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<Option<Vec<ToolSpecSnapshot>>, SessionServiceError> {
+        let session = self.session.lock().await;
+        if *agent_id == session.runtime.agent_id {
+            return Ok(session.runtime.tool_manifest.clone());
+        }
+
+        let lane = session
+            .agents
+            .get(&agent_id.0)
+            .ok_or_else(|| SessionServiceError::CoreRun {
+                message: format!("missing tool manifest state for agent '{}'", agent_id),
+            })?;
+        Ok(lane.tool_manifest.clone())
+    }
+
     async fn persist_lane_state(
         &self,
         agent_id: &AgentId,
         loop_state: Option<LoopStateSnapshot>,
         memory_snapshot: Option<MemorySnapshot>,
+        tool_manifest: Option<Vec<ToolSpecSnapshot>>,
         last_error: Option<String>,
     ) -> Result<(), SessionServiceError> {
         let mut session = self.session.lock().await;
@@ -516,6 +543,7 @@ impl SessionSupervisor {
         if *agent_id == session.runtime.agent_id {
             session.loop_state = loop_state;
             session.memory_snapshot = memory_snapshot;
+            session.runtime.tool_manifest = tool_manifest;
             session.last_error = last_error;
         } else {
             let lane = session.agents.get_mut(&agent_id.0).ok_or_else(|| {
@@ -525,6 +553,7 @@ impl SessionSupervisor {
             })?;
             lane.loop_state = loop_state;
             lane.memory_snapshot = memory_snapshot;
+            lane.tool_manifest = tool_manifest;
             lane.last_error = last_error;
             lane.updated_at_ms = now_ms;
         }

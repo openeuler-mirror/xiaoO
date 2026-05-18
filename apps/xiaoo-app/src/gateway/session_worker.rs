@@ -1,3 +1,4 @@
+use crate::builtin_agent_roles::PLAN_AGENT_ID;
 use crate::gateway::{
     AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolver, SessionServiceError,
@@ -9,7 +10,10 @@ use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use xiaoo_core::{run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot};
+use tool::ToolSpecSnapshot;
+use xiaoo_core::{
+    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
+};
 
 pub struct SessionWorkerInput {
     pub runtime_input: SessionRuntimeBuildInput,
@@ -23,12 +27,14 @@ pub struct SessionWorkerInput {
     pub channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
+    pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
 }
 
 pub struct SessionWorkerResult {
     pub loop_result: LoopRunResult,
     pub loop_state: LoopStateSnapshot,
     pub memory_snapshot: MemorySnapshot,
+    pub tool_manifest: Vec<ToolSpecSnapshot>,
 }
 
 pub struct SessionWorker;
@@ -62,9 +68,8 @@ impl SessionWorker {
                 input.loop_event_sink_override.clone(),
             );
         }
-        let assembly =
-            AppRuntimeFactory::build(&resolved, &input.session, input.loop_state.as_ref()).await?;
 
+        // Create LoopState first to get shared message storage
         let loop_session_id = input
             .loop_state
             .as_ref()
@@ -74,8 +79,20 @@ impl SessionWorker {
         let mut loop_state = input
             .loop_state
             .clone()
-            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel))
+            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel.clone()))
             .unwrap_or_else(|| LoopState::new(loop_session_id));
+
+        // Share message storage with runtime_view
+        let messages = loop_state.messages_arc();
+        let assembly = AppRuntimeFactory::build(
+            &resolved,
+            &input.session,
+            messages,
+            input.tool_manifest.clone(),
+        )
+        .await?;
+        let tool_manifest = assembly.tool_manifest.clone();
+
         let mut memory_manager = match input.memory_snapshot.clone() {
             Some(snapshot) => MemoryManager::from_snapshot(snapshot),
             None => {
@@ -98,6 +115,11 @@ impl SessionWorker {
             .with_reasoning_effort(input.reasoning_effort);
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
+        }
+        if input.runtime_input.entry.runtime_profile_id.as_deref() == Some(PLAN_AGENT_ID) {
+            loop_input = loop_input.with_stop_rules([LoopStopRule::AfterSuccessfulTool {
+                tool_name: "todo_write".to_string(),
+            }]);
         }
         if let Some(loop_event_sink) = resolved.bindings.loop_event_sink.clone() {
             loop_input = loop_input.with_event_sink(loop_event_sink);
@@ -132,12 +154,13 @@ impl SessionWorker {
             });
         }
 
-        memory_manager.sync_from_loop_state(&loop_state.messages, current_time_ms());
+        memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
 
         Ok(SessionWorkerResult {
             loop_result,
             loop_state: loop_state.to_snapshot(),
             memory_snapshot: memory_manager.snapshot().clone(),
+            tool_manifest,
         })
     }
 }

@@ -38,6 +38,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tower = { workspace = true }
 tower_governor = "0.4"
+parking_lot.workspace = true
 governor = "0.6"
 tracing.workspace = true
 unicode-width = "0.1.14"

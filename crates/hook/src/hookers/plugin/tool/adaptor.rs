@@ -9,6 +9,7 @@ use agent_types::hook::HookPointId;
 use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
 use agent_types::interaction::types::InteractionSource;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use agent_types::llm::MessageRole;
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
@@ -175,8 +176,73 @@ impl PluginToolHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
+        // 获取 session_id（用于缓存 key）
+        let session_id = runtime
+            .agent_context()
+            .metadata()
+            .session_id
+            .clone()
+            .unwrap_or_else(|| input.call.call_id.clone());
+
+        // 从 runtime_view 获取 recent_messages
+        let recent_messages = runtime.agent_context().conversation().recent_messages(100);
+
+        // 获取第一条 user message 作为 prompt_session（用于意图一致性检测）
+        let prompt_session = recent_messages
+            .iter()
+            .find(|m| m.role == MessageRole::User)
+            .and_then(|m| {
+                m.blocks.iter().find_map(|b| match b {
+                    agent_types::llm::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+
+        // 获取已完成的工具调用历史（用于 read_before_write 等规则）
+        // 收集 ToolUse（包含输入参数如文件路径）和 ToolResult（包含执行结果）
+        let messages = recent_messages;
+        let mut tool_use_map: std::collections::HashMap<&String, Value> = std::collections::HashMap::new();
+
+        // 先收集所有 ToolUse，记录 call_id -> input 映射
+        for m in messages.iter() {
+            for block in &m.blocks {
+                if let agent_types::llm::ContentBlock::ToolUse { call_id, tool_name, input } = block {
+                    tool_use_map.insert(call_id, json!({
+                        "action_type": tool_name,
+                        "action_detail": input,
+                    }));
+                }
+            }
+        }
+
+        // 然后收集 ToolResult，合并输入和输出
+        let action_history: Vec<Value> = messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|block| match block {
+                agent_types::llm::ContentBlock::ToolResult { call_id, tool_name, output, is_error } => {
+                    // 合并 ToolUse 的输入信息
+                    let mut entry = tool_use_map.get(call_id).cloned().unwrap_or_else(|| json!({
+                        "action_type": tool_name,
+                        "action_detail": "",
+                    }));
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("call_id".to_string(), json!(call_id));
+                        obj.insert("output".to_string(), json!(output));
+                        obj.insert("is_error".to_string(), json!(is_error));
+                    }
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .collect();
+
         Ok(json!({
             "stage": "pre",
+            "session_id": session_id,
+            "prompt_session": prompt_session,
+            "action_history": action_history,
             "hooker": self.serialize_hooker_info(runtime),
             "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
@@ -591,10 +657,10 @@ mod tests {
 
     struct TestConversation;
 
-    impl ConversationView for TestConversation {
-        fn recent_messages(&self, _limit: usize) -> &[ChatMessage] {
-            &[]
-        }
+	impl ConversationView for TestConversation {
+		fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
+			Vec::new()
+		}
 
         fn message_count(&self) -> usize {
             0

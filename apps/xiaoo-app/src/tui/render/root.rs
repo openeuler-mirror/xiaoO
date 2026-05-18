@@ -35,7 +35,8 @@ impl App {
             .split(size);
 
         let body_area = chunks[1];
-        let show_sidebar = body_area.width >= 72;
+        let show_sidebar =
+            body_area.width >= 72 || (self.state.plan_state.is_some() && body_area.width >= 60);
         let sidebar_width = (body_area.width / 3).clamp(28, 40);
         let body_chunks = if show_sidebar {
             Layout::default()
@@ -58,7 +59,7 @@ impl App {
         self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
         if show_sidebar {
-            self.render_session_diff(frame, body_chunks[1]);
+            self.render_sidebar(frame, body_chunks[1]);
         }
         self.render_status_bar(frame, chunks[3]);
 

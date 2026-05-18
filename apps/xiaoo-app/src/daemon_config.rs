@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_app::channels::{
     build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig, TelegramConfig,
     TelegramEventTransport,
@@ -155,6 +156,8 @@ pub struct AgentRoleConfig {
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
     pub tools: BTreeMap<String, bool>,
 }
 
@@ -245,8 +248,10 @@ impl DaemonConfig {
         let config_path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
-        let app: AppConfig = toml::from_str(&content)
+        let mut app: AppConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config {}", config_path.display()))?;
+        install_builtin_agent_roles(&mut app.agent)
+            .with_context(|| format!("invalid config {}", config_path.display()))?;
         Ok(Self { app, config_path })
     }
 
@@ -510,6 +515,30 @@ impl DaemonConfig {
     }
 }
 
+fn install_builtin_agent_roles(agent_roles: &mut BTreeMap<String, AgentRoleConfig>) -> Result<()> {
+    if agent_roles.contains_key(PLAN_AGENT_ID) {
+        bail!("agent role `{PLAN_AGENT_ID}` is builtin and cannot be overridden in config");
+    }
+
+    agent_roles.insert(
+        PLAN_AGENT_ID.to_string(),
+        AgentRoleConfig {
+            description: PLAN_AGENT_DESCRIPTION.to_string(),
+            prompt: Some(PLAN_AGENT_PROMPT.to_string()),
+            max_turns: None,
+            tools: BTreeMap::from([
+                ("bash".to_string(), false),
+                ("file_edit".to_string(), false),
+                ("file_write".to_string(), false),
+                ("send_file".to_string(), false),
+                ("spawn_subagent".to_string(), false),
+            ]),
+        },
+    );
+
+    Ok(())
+}
+
 pub fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
@@ -700,6 +729,7 @@ mod tests {
             [agent.code-reviewer]
             description = "Reviews code for best practices and potential issues"
             prompt = "You are a code reviewer."
+            max_turns = 3
 
             [agent.code-reviewer.tools]
             file_write = false
@@ -716,6 +746,7 @@ mod tests {
             "Reviews code for best practices and potential issues"
         );
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
     }

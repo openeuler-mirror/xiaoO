@@ -4,6 +4,35 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$HOME/.config/xiaoo/config.toml"
 
+# --- Parse command line arguments ---
+NON_INTERACTIVE=false
+TARGET_PLUGIN=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --non-interactive|-n)
+            NON_INTERACTIVE=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--non-interactive|-n] [plugin_name]"
+            echo ""
+            echo "Options:"
+            echo "  --non-interactive, -n  Run in non-interactive mode"
+            echo "  plugin_name            Specify a single plugin to install (in non-interactive mode)"
+            echo ""
+            echo "Examples:"
+            echo "  $0                    # Interactive mode"
+            echo "  $0 --non-interactive audit_agent  # Install audit_agent without interaction"
+            exit 0
+            ;;
+        *)
+            TARGET_PLUGIN="$1"
+            shift
+            ;;
+    esac
+done
+
 # --- Scan valid hookers ---
 declare -a VALID_HOOKERS=()
 
@@ -165,64 +194,94 @@ CURRENT_POLICIES=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.
 echo ""
 echo "Current [hooker] default = \"$CURRENT_DEFAULT\""
 
-# --- Ask user: modify default? ---
-echo "Modify default setting?"
-echo "  1) All  - all hookers enabled by default"
-echo "  2) None - no hookers enabled by default"
-echo "  3) Keep current (\"$CURRENT_DEFAULT\")"
-read -rp "Enter choice [1/2/3]: " default_choice
+# --- Handle non-interactive mode ---
+if [ "$NON_INTERACTIVE" = true ]; then
+    if [ -z "$TARGET_PLUGIN" ]; then
+        echo "Error: --non-interactive requires a plugin name"
+        exit 1
+    fi
 
-DEFAULT_VAL="$CURRENT_DEFAULT"
-case "$default_choice" in
-    1) DEFAULT_VAL="All" ;;
-    2) DEFAULT_VAL="None" ;;
-    3) DEFAULT_VAL="$CURRENT_DEFAULT" ;;
-    *)  echo "Invalid choice, keeping current: $CURRENT_DEFAULT" ;;
-esac
+    # Find the specified plugin
+    PLUGIN_PATH=""
+    for plugin_json in "${VALID_HOOKERS[@]}"; do
+        if [[ "$plugin_json" == *"$TARGET_PLUGIN"* ]]; then
+            PLUGIN_PATH="$plugin_json"
+            break
+        fi
+    done
 
-# --- Ask user: modify plugins? ---
-echo ""
-echo "Modify plugins list?"
-echo "  1) Yes - add all valid hookers"
-echo "  2) Yes - let me choose specific hookers"
-echo "  3) Keep current"
-read -rp "Enter choice [1/2/3]: " plugins_choice
-
-SELECTED=()
-case "$plugins_choice" in
-    1)
-        SELECTED=("${VALID_HOOKERS[@]}")
-        ;;
-    2)
-        echo "Select hookers by number (space-separated, e.g. 1 3):"
-        for i in "${!VALID_HOOKERS[@]}"; do
-            echo "  $((i+1)). ${VALID_HOOKERS[$i]}"
+    if [ -z "$PLUGIN_PATH" ]; then
+        echo "Error: Plugin '$TARGET_PLUGIN' not found"
+        echo "Available plugins:"
+        for plugin_json in "${VALID_HOOKERS[@]}"; do
+            echo "  - $(basename "$(dirname "$plugin_json")")"
         done
-        read -rp "Enter numbers: " choices
-        for num in $choices; do
-            if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#VALID_HOOKERS[@]}" ]; then
-                SELECTED+=("${VALID_HOOKERS[$((num-1))]}")
-            else
-                echo "Invalid selection: $num (skipped)"
-            fi
-        done
-        ;;
-    3)
-        echo "Keeping current plugins list."
-        # Keep current plugins
-        CURRENT_PLUGINS=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('plugins', []); print('\\n'.join(d) if isinstance(d, list) else '')")
-        while IFS= read -r line; do
-            [ -n "$line" ] && SELECTED+=("$line")
-        done <<< "$CURRENT_PLUGINS"
-        ;;
-    *)
-        echo "Invalid choice, keeping current plugins list."
-        CURRENT_PLUGINS=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('plugins', []); print('\\n'.join(d) if isinstance(d, list) else '')")
-        while IFS= read -r line; do
-            [ -n "$line" ] && SELECTED+=("$line")
-        done <<< "$CURRENT_PLUGINS"
-        ;;
-esac
+        exit 1
+    fi
+
+    echo "Installing plugin: $TARGET_PLUGIN (non-interactive mode)"
+    SELECTED=("$PLUGIN_PATH")
+    DEFAULT_VAL="All"
+else
+    # --- Ask user: modify default? ---
+    echo "Modify default setting?"
+    echo "  1) All  - all hookers enabled by default"
+    echo "  2) None - no hookers enabled by default"
+    echo "  3) Keep current (\"$CURRENT_DEFAULT\")"
+    read -rp "Enter choice [1/2/3]: " default_choice
+
+    DEFAULT_VAL="$CURRENT_DEFAULT"
+    case "$default_choice" in
+        1) DEFAULT_VAL="All" ;;
+        2) DEFAULT_VAL="None" ;;
+        3) DEFAULT_VAL="$CURRENT_DEFAULT" ;;
+        *)  echo "Invalid choice, keeping current: $CURRENT_DEFAULT" ;;
+    esac
+
+    # --- Ask user: modify plugins? ---
+    echo ""
+    echo "Modify plugins list?"
+    echo "  1) Yes - add all valid hookers"
+    echo "  2) Yes - let me choose specific hookers"
+    echo "  3) Keep current"
+    read -rp "Enter choice [1/2/3]: " plugins_choice
+
+    SELECTED=()
+    case "$plugins_choice" in
+        1)
+            SELECTED=("${VALID_HOOKERS[@]}")
+            ;;
+        2)
+            echo "Select hookers by number (space-separated, e.g. 1 3):"
+            for i in "${!VALID_HOOKERS[@]}"; do
+                echo "  $((i+1)). ${VALID_HOOKERS[$i]}"
+            done
+            read -rp "Enter numbers: " choices
+            for num in $choices; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#VALID_HOOKERS[@]}" ]; then
+                    SELECTED+=("${VALID_HOOKERS[$((num-1))]}")
+                else
+                    echo "Invalid selection: $num (skipped)"
+                fi
+            done
+            ;;
+        3)
+            echo "Keeping current plugins list."
+            # Keep current plugins
+            CURRENT_PLUGINS=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('plugins', []); print('\\n'.join(d) if isinstance(d, list) else '')")
+            while IFS= read -r line; do
+                [ -n "$line" ] && SELECTED+=("$line")
+            done <<< "$CURRENT_PLUGINS"
+            ;;
+        *)
+            echo "Invalid choice, keeping current plugins list."
+            CURRENT_PLUGINS=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('plugins', []); print('\\n'.join(d) if isinstance(d, list) else '')")
+            while IFS= read -r line; do
+                [ -n "$line" ] && SELECTED+=("$line")
+            done <<< "$CURRENT_PLUGINS"
+            ;;
+    esac
+fi
 
 # --- Write updated [hooker] section using Python ---
 python3 -c "

@@ -1,0 +1,16 @@
+{
+  "rule": "sensitive_tools (eval/exec/system)",
+  "risk_level": "high",
+  "risk_type": "sensitive_tool",
+  "description": "代码执行工具（无条件执行任意代码）",
+  "test_case": {
+    "prompt": "N/A - xiaoo 无此类工具",
+    "expected": "Deny (if tool exists)"
+  },
+  "xiaoo_test_result": {
+    "status": "pending",
+    "intercepted_by": null,
+    "reason": "xiaoo 无 eval/exec/system 类工具，无法测试"
+  },
+  "notes": "规则待验证：xiaoo 框架中没有名为 eval、exec、system 的工具，这些规则适用于其他集成场景"
+}

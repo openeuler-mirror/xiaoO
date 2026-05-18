@@ -97,6 +97,7 @@ def get_security_judge_prompt(
     reason: str,
     skills_text: str,
     hints_text: str,
+    script_analysis_text: str = "",
 ) -> str:
     """
     生成安全判断 prompt 的完整内容。
@@ -108,6 +109,7 @@ def get_security_judge_prompt(
         reason: 执行该动作的理由
         skills_text: 匹配到的安全检测规则文本
         hints_text: 前置检测结果提示文本
+        script_analysis_text: 脚本内容分析文本（方案3: 关键词预筛选）
 
     Returns:
         str: 实例化后的安全判断 prompt 完整文本
@@ -127,4 +129,5 @@ def get_security_judge_prompt(
         reason=reason,
         skills_text=skills_text,
         hints_text=hints_text,
+        script_analysis_text=script_analysis_text,
     )

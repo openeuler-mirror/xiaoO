@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agent_contracts::SkillRegistry;
+use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
@@ -114,7 +114,7 @@ async fn main() {
 
     let args = Args::parse();
     let debug = args.debug;
-    let file_cfg = FileConfig::load(args.config.as_deref(), debug);
+    let config_path = FileConfig::resolve_path(args.config.as_deref());
 
     match args.command {
         Command::Run {
@@ -128,6 +128,20 @@ async fn main() {
             no_tools,
             reasoning_effort,
         } => {
+            if let Some(path) = config_path.as_ref() {
+                if let Err(error) = xiaoo_app::llm_secrets::inject_llm_secrets_into_env(path) {
+                    eprintln!(
+                        "Failed to initialize LLM secrets from {}: {}",
+                        path.display(),
+                        error
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let file_cfg = config_path
+                .as_ref()
+                .map(|path| FileConfig::load_from_path(path, debug))
+                .unwrap_or_default();
             let llm = file_cfg.llm.as_ref();
 
             let provider = provider
@@ -137,6 +151,7 @@ async fn main() {
                 .or_else(|| llm.and_then(|l| l.model.clone()))
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
             let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
+            let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let context_window = llm.and_then(|l| l.context_window);
             let reasoning_effort = reasoning_effort
@@ -147,6 +162,7 @@ async fn main() {
                 provider,
                 model,
                 api_key,
+                api_key_env,
                 api_base,
                 trace: file_cfg
                     .trace
@@ -454,7 +470,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         provider: config.provider.clone(),
         model: config.model.clone(),
         api_key: config.api_key.clone(),
-        api_key_env: None,
+        api_key_env: config.api_key_env.clone(),
         api_base: config.api_base.clone(),
         visible_tool_names: if config.enable_tools {
             None
@@ -469,8 +485,10 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
     };
 
     // 4. Bindings (CliEventSink for debug output)
+    let loop_event_sink: Option<Arc<dyn LoopEventSink>> =
+        debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>);
     let bindings = SessionRuntimeBindings {
-        loop_event_sink: Some(Arc::new(CliEventSink { debug })),
+        loop_event_sink,
         tool_event_sink: None,
         interaction_handle: None,
         channel_file_sender: None,

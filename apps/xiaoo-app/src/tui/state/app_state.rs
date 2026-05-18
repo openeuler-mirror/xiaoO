@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::chat::{default_provider_list, merge_config_provider, ChatState};
+use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
@@ -136,6 +136,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub workspace: PathBuf,
     pub session_messages: Vec<llm_client::ChatMessage>,
+    pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
     pub current_snapshot_name: Option<String>,
     pub slash: SlashState,
@@ -170,6 +171,7 @@ impl AppState {
             config_path,
             workspace,
             session_messages: Vec::new(),
+            plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             current_snapshot_name: None,
             slash: SlashState::default(),
@@ -205,6 +207,7 @@ impl AppState {
             config_path,
             workspace,
             session_messages: Vec::new(),
+            plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             current_snapshot_name: None,
             slash: SlashState::default(),
@@ -229,6 +232,7 @@ impl AppState {
         self.api_key_dialog = None;
         self.loading_tick = 0;
         self.session_messages.clear();
+        self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.current_snapshot_name = None;
         self.slash = SlashState::default();
@@ -528,6 +532,7 @@ impl AppState {
             let candidates = candidates_for_prefix(&prefix, &self.external_commands);
             if let Some(chosen) = candidates.get(self.slash.selected) {
                 apply_slash_pick(&mut self.chat_state.input, chosen);
+                self.chat_state.reset_input_history_navigation();
                 self.note_input_changed();
             }
         }
@@ -540,13 +545,13 @@ impl AppState {
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
-        let mut tabs = vec!["Chat".to_string()];
+        let mut tabs = vec!["Core".to_string()];
         tabs.extend(self.agent_config.agent_role_ids());
         tabs
     }
 
     pub fn active_agent_tab_label(&self) -> &str {
-        self.active_agent_role.as_deref().unwrap_or("Chat")
+        self.active_agent_role.as_deref().unwrap_or("Core")
     }
 
     pub fn active_agent_role_config(&self) -> Option<&AgentRoleConfig> {
