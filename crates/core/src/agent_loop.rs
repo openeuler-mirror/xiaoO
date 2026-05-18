@@ -1880,6 +1880,7 @@ mod tests {
         assert_eq!(
             loop_state
                 .messages
+                .read()
                 .last()
                 .and_then(ChatMessage::text_content),
             Some("Hello world")
@@ -2078,17 +2079,18 @@ mod tests {
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
         assert_eq!(loop_state.turn_count, 1);
-        assert_eq!(loop_state.messages.len(), 2);
+        assert_eq!(loop_state.messages.read().len(), 2);
         assert_eq!(
-            loop_state.messages[1].text_content(),
+            loop_state.messages.read()[1].text_content(),
             Some("trying to use a tool")
         );
-        assert!(!loop_state.messages[1]
+        assert!(!loop_state.messages.read()[1]
             .blocks
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
         assert!(!loop_state
             .messages
+            .read()
             .iter()
             .any(|message| matches!(message.role, MessageRole::Tool)));
     }
