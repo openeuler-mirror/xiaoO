@@ -2,40 +2,46 @@
   <img src="./img/logo.jpeg" width="180" alt="xiaoO" style="border-radius: 6px;">
 </div>
 
-# xiaoO - Open-source Intelligence Hub of AgentOS
-## What is xiaoO?
-It is the intelligence hub of AgentOS, delivering self-governing system management, seamless agent orchestration, and ready-to-use smart capabilities across all user channels. xiaoO turns the entire OS into the agent's home — every resource, every service, every capability, curated and served under one roof.
+# xiaoO
 
-At the runtime core, xiaoO ships a layered memory system and an adaptive context compression engine, so agents can stay stable across long conversations, tool-heavy execution, and multi-agent collaboration instead of collapsing under raw history growth.
+[English](./README.md) | [中文](./README.zh-CN.md)
+
+Open-source intelligence hub for AgentOS.
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-<a href="https://gitcode.com/openeuler/xiaoO"><img src="https://img.shields.io/badge/version-v0.0.1-red" alt="Version v0.0.1" /></a>
+[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://gitcode.com/openeuler/xiaoO)
 
+## What is xiaoO?
+
+xiaoO is the intelligence hub of AgentOS. It provides a self-governing agent runtime for system management, agent orchestration, tool execution, memory, context compression, and multi-channel access.
+
+At its core, xiaoO turns the operating system into a practical home for agents: files, shell commands, Git, web access, LSP diagnostics, skills, hooks, channels, and runtime telemetry are exposed through one coordinated agent loop.
+
+The runtime also includes a layered memory and adaptive context-compression system, so long conversations, tool-heavy tasks, and multi-agent collaboration can remain stable without being overwhelmed by raw history growth.
 
 ## Key Features
-- Auto mode — --model auto / /model auto chooses both the model and thinking level for each turn
-- Thinking-mode streaming — see DeepSeek reasoning blocks as the model works
-- Full tool suite — file ops, shell execution, git, web search/browse, apply-patch, sub-agents, MCP servers
-- Context managemant — context tracking, manual or configured compaction, and prefix-cache telemetry
-- Reasoning-effort tiers — cycle through off → high → max with Shift + Tab
-- Session save/resume managemant — checkpoint and resume long-running sessions
-<!-- - Workspace rollback — side-git pre/post-turn snapshots with /restore and revert_turn, without touching your repo's .git -->
-<!-- - Durable task queue — background tasks can survive restarts -->
-- HTTP/SSE runtime API -http for headless agent workflows
-<!-- - MCP protocol — connect to Model Context Protocol servers for extended tooling; please see docs/MCP.md -->
-- LSP diagnostics — inline error/warning surfacing after every edit via rust-analyzer, pyright, typescript-language-server, gopls, clangd
-- User memory — optional persistent note file injected into the system prompt for cross-session preferences. See in [Memory & Context Compression](./docs/memory_context_system.md).
-- Localized UI — A clean, elegant, and user-friendly interface
-- Live cost tracking — per-turn and session-level token usage and cost estimates; cache hit/miss breakdown
-- Skills system — composable, installable instruction packs from GitHub with no backend service required
-- Full-stack traceability: Hook points have been added at locations such as agent creation, before/after LLM calls, and before/after tool calls, enabling full-stack observability and allowing custom plugins to be inserted.
-- Scheduled/triggered task: Supports long-term, scheduled/triggered tasks.
+
+- Agent runtime hub: CLI, TUI, daemon, HTTP API, and channel integrations.
+- Full tool suite: file operations, shell execution, Git, web search/browse, patch application, sub-agents, and extensible tool manifests.
+- Adaptive context management: token-budget tracking, configured compaction, forced recovery after context-limit errors, and prefix-cache telemetry.
+- Streaming reasoning: provider reasoning/thinking deltas can be surfaced while the model works.
+- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Shift+Tab`.
+- Session management: save and resume long-running work.
+- LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
+- Skills system: installable instruction packs loaded from local directories or Git sources.
+- Hook and plugin system: lifecycle hook points around agent creation, LLM calls, and tool calls for audit, policy, traceability, and custom extensions.
+- Observability: live token/cost tracking and trace storage through `noop`, `stdout`, or `moirai-sqlite`.
+- Scheduled and triggered tasks: long-running automation workflows can be attached to the runtime.
+- Localized UI: a clean terminal interface designed for daily agent work.
 
 ## Prerequisites
-- Cargo >= 1.7 installed
 
-## Installation (From Source)
+- Rust toolchain with Cargo installed.
+- A supported LLM provider account or a local model endpoint.
+- Provider credentials available through environment variables or the xiaoO configuration file.
+
+## Installation From Source
 
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
@@ -44,40 +50,72 @@ cargo build --release
 cargo install --path apps/xiaoo-app
 ```
 
-> **Note**: If you want to install with the security plugin loaded by default, use `./build.sh --release` instead. The `build.sh` script is a wrapper that prompts you to install the audit_agent security plugin.
+This installs the application binaries into `~/.cargo/bin`. Make sure `~/.cargo/bin` is in your `PATH`.
 
-Install to `~/.cargo/bin/xiaoo`, and ensure that `~/.cargo/bin` is in `PATH`.
+If you want the interactive security-plugin prompt during build, use:
 
-For plugin installation and usage, please refer to [plugins.md](./docs/plugins.md).
+```bash
+./build.sh --release
+```
+
+The build wrapper can install the `audit_agent` hooker, which audits tool execution for risky operations. Plugin installation details are available in [docs/plugins.md](./docs/plugins.md).
 
 ## Quick Start
-Create the configuration file `~/.config/xiaoo/config.toml`
+
+Create `~/.config/xiaoo/config.toml`:
 
 ```toml
 [llm]
-provider = "openrouter" # openai, anthropic, ollama, openrouter, deepseek, zai, ...
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, ...
 model = "z-ai/glm-5"
-api_key_env = "OPENROUTER_API_KEY" # Read the API key from this environment variable
-max_tokens = 128000  # Optional: max output tokens per response, defaults to 128000
-context_window = 128000 # Optional: explicit total context budget override
-reasoning_effort = "off" # Optional: off/high/max, defaults to off
+api_key_env = "OPENROUTER_API_KEY"   # Read the API key from this environment variable
+max_tokens = 128000                  # Optional, max output tokens per response
+context_window = 128000              # Optional, explicit total context budget override
+reasoning_effort = "off"             # Optional: off, high, or max
 
 [trace]
-storage_backend = "moirai-sqlite"    # noop/stdout/moirai-sqlite
-db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-sqlite 时生效；未配置时为 ~/.moirai
-
+storage_backend = "moirai-sqlite"    # noop, stdout, or moirai-sqlite
+db_path = "~/.xiaoo/traces.db"       # Used when storage_backend is moirai-sqlite
 ```
 
-`[llm].context_window` is optional. It sets an explicit total context budget override for runtime token budgeting and context compression. We resolves the effective value in this order:
+Set your provider credential:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Run xiaoO:
+
+```bash
+# Terminal UI
+xiaoo-tui
+
+# Single-shot CLI
+xiaoo run -p "Count the characters in hello world"
+```
+
+Example CLI output:
+
+```text
+"hello world" has 11 characters.
+```
+
+## Context Window
+
+`[llm].context_window` is optional. It sets an explicit total context budget used by token budgeting and context compression. xiaoO resolves the effective value in this order:
 
 1. Explicit user config: `[llm].context_window`
-2. Dynamic model lookup: currently supported for `gemini`, `anthropic`, and `ollama`
+2. Dynamic model lookup, currently supported for `gemini`, `anthropic`, and `ollama`
 3. Local fallback defaults:
-   OpenAI-compatible / Ollama / Zhipu families default to `128000`
-   Anthropic defaults to `200000`
-   Gemini defaults to `1000000`
+   - OpenAI-compatible, Ollama, and Zhipu families default to `128000`
+   - Anthropic defaults to `200000`
+   - Gemini defaults to `1000000`
 
-`[llm].reasoning_effort` controls the provider-side thinking/reasoning level:
+More details are available in [Memory & Context Compression](./docs/memory_context_system.md).
+
+## Reasoning Effort
+
+`[llm].reasoning_effort` controls provider-side thinking or reasoning where supported.
 
 | Value | Meaning | TUI color |
 | --- | --- | --- |
@@ -85,27 +123,42 @@ db_path = "/root/.config/xiaoo/traces.db"    # 仅当storage_backend 为 moirai-
 | `high` | Use a stronger reasoning/thinking setting | Yellow |
 | `max` | Use the strongest reasoning/thinking setting | Red |
 
-The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use `xiaoo run --reasoning-effort high -p "..."` to override the config for one run.
-
-Provider mapping is best-effort: OpenAI-compatible providers receive `reasoning_effort` only for `high`/`max`, Anthropic receives `thinking.budget_tokens`, Gemini receives `thinkingConfig.thinkingBudget`, and unsupported providers ignore the setting. `off` omits provider-specific reasoning fields so default requests keep each provider's native behavior.
-
-Set environment variables
+The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-..."
+xiaoo run --reasoning-effort high -p "Explain this repository"
 ```
+
+Provider mapping is best-effort. OpenAI-compatible providers receive `reasoning_effort` for `high` and `max`; Anthropic receives `thinking.budget_tokens`; Gemini receives `thinkingConfig.thinkingBudget`; unsupported providers ignore the setting. `off` omits provider-specific reasoning fields so default requests keep each provider's native behavior.
+
+## Skills
+
+xiaoO loads skills from `~/.xiaoo/skills` by default. Each skill is a reusable instruction pack backed by `SKILL.md` or `SKILL.toml`.
 
 ```bash
-# TUI Command
-xiaoo-tui
-
-# CLI Command
-xiaoo run -p "Your Command"
+xiaoo skill list
+xiaoo skill show <name>
+xiaoo skill audit <path>
+xiaoo skill install ./my-skill/
+xiaoo skill install https://github.com/user/my-skill.git
+xiaoo skill remove <name>
 ```
 
-In TUI, press `Tab` to switch agent role presets. Press `Shift+Tab` to switch think level. When the current line starts with a slash command, `Tab` still performs slash completion.
+See [docs/skill_usage.md](./docs/skill_usage.md) for the full skill workflow.
 
-HTTP requests can also select an agent role preset by passing `agent` in the JSON body:
+## Run as a Daemon
+
+xiaoO can run as a daemon and expose a REST API for external systems such as Feishu, Telegram, or custom services.
+
+```bash
+# Default address: 0.0.0.0:18080
+xiaoo-app daemon
+
+# Specify configuration file, host, and port
+xiaoo-app daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+```
+
+HTTP requests can select an agent role preset by passing `agent` in the JSON body:
 
 ```json
 {
@@ -116,24 +169,19 @@ HTTP requests can also select an agent role preset by passing `agent` in the JSO
   "agent": "code-reviewer"
 }
 ```
-Example
 
-```
-$ xiaoo run -p 'Count "hello world" char numbers'
-"hello world" has 11 chars.
-```
-## Run as Daemon
+More daemon configuration details are in [docs/daemon_config.md](./docs/daemon_config.md).
 
-The Gateway operates in **daemon mode**, providing a RESTful API for external systems (such as Lark Webhook) to access.
+## More Documentation
 
-```bash
-# default port（0.0.0.0:18080）
-xiaoo-app daemon
+- [Memory & Context Compression](./docs/memory_context_system.md)
+- [Plugin System](./docs/plugins.md)
+- [Skill Usage](./docs/skill_usage.md)
+- [Custom Agents](./docs/custom_agent.md)
+- [Remote TUI](./docs/remote_tui.md)
+- [Feishu Deployment](./docs/feishu_deploy.md)
+- [Telegram Deployment](./docs/telegram_deploy.md)
 
-# Specify configuration file, address and port
-xiaoo-app daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
-```
+## License
 
-More config details in [daemon.md](./docs/daemon_config.md)
-
-Feishu channel setup guide in [feishu_deploy.md](./docs/feishu_deploy.md)
+xiaoO is licensed under [MulanPSL-2.0](./License).
