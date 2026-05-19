@@ -43,6 +43,77 @@ fn render_popup_backdrop(frame: &mut Frame, area: Rect, bounds: Rect, bg: ratatu
 }
 
 impl App {
+    pub(crate) fn render_pending_turns(&self, frame: &mut Frame, input_area: Rect, bounds: Rect) {
+        let pending = &self.state.chat_state.pending_turns;
+        if pending.is_empty() || input_area.y <= bounds.y {
+            return;
+        }
+
+        let visible_count = if pending.len() > 3 { 2 } else { pending.len() };
+        let skipped = pending.len().saturating_sub(visible_count);
+        let line_count = visible_count + usize::from(skipped > 0);
+        let height = (line_count as u16 + 2).min(input_area.y.saturating_sub(bounds.y));
+        if height == 0 {
+            return;
+        }
+
+        let available_width = bounds.width.min(input_area.width).max(1);
+        let width = if available_width >= 32 {
+            available_width.min(56)
+        } else {
+            available_width
+        };
+        let x = bounds
+            .x
+            .saturating_add(bounds.width)
+            .saturating_sub(width.saturating_add(2))
+            .max(bounds.x);
+        let y = input_area
+            .y
+            .saturating_sub(height.saturating_add(1))
+            .max(bounds.y);
+        let area = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(self.state.theme.muted))
+            .title(" 待发送 ")
+            .style(Style::default().bg(self.state.theme.input_bg));
+
+        let inner_width = width.saturating_sub(4) as usize;
+        let mut lines = Vec::new();
+        if skipped > 0 {
+            lines.push(Line::styled(
+                format!("  ... 还有 {skipped} 条更早输入"),
+                Style::default().fg(self.state.theme.muted),
+            ));
+        }
+
+        for queued in pending.iter().skip(skipped) {
+            let prompt = one_line_preview(&queued.prompt, inner_width.saturating_sub(5));
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+                Span::styled(prompt, Style::default().fg(self.state.theme.muted)),
+                Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+                Span::styled(
+                    sanitize_terminal_text("●"),
+                    Style::default()
+                        .fg(self.state.theme.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
     pub(crate) fn render_interaction_prompt_dialog(&mut self, frame: &mut Frame, area: Rect) {
         let Some(prompt) = self.state.interaction_prompt.as_ref() else {
             self.state.render_state.interaction_prompt_list_area = None;
@@ -181,7 +252,7 @@ impl App {
             .iter()
             .any(|message| message.tool_state.is_some());
         let title = if self.state.chat_state.is_loading {
-            " Esc 取消 "
+            " Enter 加入队列 | Esc 取消当前任务 "
         } else if self.state.input_mode == InputMode::InteractionPrompt {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 | Tab 切换补充 "
         } else if self.state.slash_menu_visible() {
@@ -241,8 +312,7 @@ impl App {
         };
         frame.render_widget(paragraph, area);
 
-        if !self.state.chat_state.is_loading
-            && inner.width > 0
+        if inner.width > 0
             && inner.height > 0
             && self.state.interaction_prompt.is_none()
             && self.state.api_key_dialog.is_none()
@@ -549,6 +619,20 @@ impl App {
                 .wrap(Wrap { trim: true });
             frame.render_widget(error_paragraph, chunks[2]);
         }
+    }
+}
+
+fn one_line_preview(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut chars = collapsed.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }
 

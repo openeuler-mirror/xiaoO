@@ -10,7 +10,7 @@
 
 ```toml
 [llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, ...
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read API key from this environment variable
 api_base = "https://..."             # Optional, custom API base URL

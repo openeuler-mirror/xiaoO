@@ -22,8 +22,30 @@ const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_syst
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
+        self.start_turn_internal(state, prompt, true).await
+    }
+
+    pub async fn start_next_queued_turn(&mut self, state: &mut AppState) -> Result<bool, String> {
+        if state.chat_state.is_loading {
+            return Ok(false);
+        }
+        let Some(queued) = state.chat_state.pop_pending_turn() else {
+            return Ok(false);
+        };
+        self.start_turn_internal(state, queued.prompt, true).await?;
+        Ok(true)
+    }
+
+    async fn start_turn_internal(
+        &mut self,
+        state: &mut AppState,
+        prompt: String,
+        append_user_message: bool,
+    ) -> Result<(), String> {
         if self.remote.is_some() {
-            return self.start_remote_turn(state, prompt).await;
+            return self
+                .start_remote_turn(state, prompt, append_user_message)
+                .await;
         }
 
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
@@ -46,8 +68,10 @@ impl GatewayRuntime {
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(Instant::now());
         self.first_token_latency_recorded = false;
-        state.chat_state.messages.push(Message::user(prompt));
-        state.chat_state.input.reset();
+        if append_user_message {
+            state.chat_state.messages.push(Message::user(prompt));
+            state.chat_state.input.reset();
+        }
         state.chat_state.is_loading = true;
         state
             .chat_state

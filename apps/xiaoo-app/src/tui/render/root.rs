@@ -58,6 +58,13 @@ impl App {
         self.state.render_state.slash_popup_inner = None;
         self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
+        let pending_bounds = Rect {
+            x: body_chunks[0].x,
+            y: size.y,
+            width: body_chunks[0].width,
+            height: input_chunk.y.saturating_sub(size.y),
+        };
+        self.render_pending_turns(frame, input_chunk, pending_bounds);
         if show_sidebar {
             self.render_sidebar(frame, body_chunks[1]);
         }
