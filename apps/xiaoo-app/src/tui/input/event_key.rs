@@ -10,6 +10,8 @@ use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
     validate_and_connect_api_key,
 };
+use crate::services::turn_delete::DeleteDialog;
+use crate::gateway::SessionStore;
 use crate::session_snapshot_service::{
     apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, save_snapshot,
     snapshot_name_from_command, SessionSnapshotDialog,
@@ -83,11 +85,16 @@ impl App {
             return self.handle_session_snapshot_selection_key(key).await;
         }
 
+        if self.state.input_mode == InputMode::TurnDelete {
+            return self.handle_turn_delete_key(key).await;
+        }
+
         match self.state.input_mode {
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
             InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
+            InputMode::TurnDelete => Ok(()),
         }
     }
 
@@ -342,6 +349,26 @@ impl App {
 
         let trimmed = user_input.trim();
         self.state.chat_state.reset_input_history_navigation();
+
+        if trimmed.eq_ignore_ascii_case("/delete") {
+            self.state.chat_state.input.reset();
+            if self.state.chat_state.is_loading {
+                self.state.chat_state.messages.push(
+                    crate::chat::Message::system(
+                        "当前任务仍在运行。请等待它结束，或先按 Esc 取消。".to_string(),
+                    ),
+                );
+            } else if let Some(dialog) = DeleteDialog::new(&self.state.chat_state.messages) {
+                self.state.input_mode = InputMode::TurnDelete;
+                self.state.delete_dialog = Some(dialog);
+            } else {
+                self.state.chat_state.messages.push(
+                    crate::chat::Message::system("当前会话没有可删除的对话。".to_string()),
+                );
+            }
+            self.state.chat_state.stick_to_bottom = true;
+            return Ok(());
+        }
 
         if trimmed.eq_ignore_ascii_case("/new") {
             self.gateway
@@ -754,6 +781,81 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
+    }
+
+    async fn handle_turn_delete_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(dialog) = self.state.delete_dialog.as_mut() {
+                    if dialog.is_selecting() {
+                        self.state.input_mode = InputMode::Editing;
+                        self.state.delete_dialog = None;
+                    } else {
+                        self.state.delete_dialog =
+                            DeleteDialog::new(&self.state.chat_state.messages);
+                    }
+                } else {
+                    self.state.input_mode = InputMode::Editing;
+                }
+            }
+            KeyCode::Up => {
+                if let Some(dialog) = self.state.delete_dialog.as_mut() {
+                    dialog.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = self.state.delete_dialog.as_mut() {
+                    dialog.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let action = match self.state.delete_dialog.as_mut() {
+                    Some(dialog) => {
+                        if dialog.is_selecting() {
+                            dialog.advance_to_confirm();
+                            None
+                        } else {
+                            dialog.selected_turn()
+                                .map(|t| (t.msg_range, t.turn_index))
+                        }
+                    }
+                    None => None,
+                };
+
+                if let Some(((start, end), turn_index)) = action {
+                    self.state.input_mode = InputMode::Editing;
+                    self.state.delete_dialog = None;
+
+                    // 1. Remove from core's LoopState (true LLM context)
+                    {
+                        let session_id = self.state.session_id.clone();
+                        let store = self.gateway.session_store_handle();
+                        if let Some(mut record) = store.load(&session_id).await {
+                            if let Some(ref mut snapshot) = record.loop_state {
+                                crate::services::turn_delete::remove_turn_from_session_messages(
+                                    &mut snapshot.messages,
+                                    turn_index,
+                                );
+                            }
+                            store.save(record).await;
+                        }
+                    }
+
+                    // 2. Remove from TUI's local copy
+                    crate::services::turn_delete::remove_turn_from_session_messages(
+                        &mut self.state.session_messages,
+                        turn_index,
+                    );
+
+                    // 3. Remove from TUI display
+                    self.state.chat_state.messages.drain(start..end);
+                    self.state.render_state = crate::app_state::RenderState::default();
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
