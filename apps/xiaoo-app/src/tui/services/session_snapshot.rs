@@ -76,6 +76,18 @@ pub struct TuiSessionSnapshot {
     pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
     #[serde(default)]
     pub session_record: Option<SessionRecord>,
+    #[serde(default)]
+    pub status_metrics: Option<SavedStatusMetrics>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedStatusMetrics {
+    pub total_tokens: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub input_context_tokens: u64,
+    pub input_context_tokens_estimated: bool,
+    pub last_latency_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +179,14 @@ pub fn build_snapshot(
     session_record: Option<SessionRecord>,
     parent_snapshot: Option<String>,
 ) -> TuiSessionSnapshot {
+    let status_metrics = SavedStatusMetrics {
+        total_tokens: state.status_panel.total_tokens,
+        prompt_tokens: state.status_panel.prompt_tokens,
+        completion_tokens: state.status_panel.completion_tokens,
+        input_context_tokens: state.status_panel.input_context_tokens,
+        input_context_tokens_estimated: state.status_panel.input_context_tokens_estimated,
+        last_latency_ms: state.status_panel.last_latency_ms,
+    };
     TuiSessionSnapshot {
         version: SNAPSHOT_VERSION,
         saved_at_ms: current_time_ms(),
@@ -186,6 +206,7 @@ pub fn build_snapshot(
             .collect(),
         session_file_changes: state.session_file_changes.clone(),
         session_record,
+        status_metrics: Some(status_metrics),
     }
 }
 
@@ -293,6 +314,15 @@ pub fn apply_snapshot(
     state.render_state = Default::default();
     state.external_commands = crate::services::command_loader::load_external_commands();
     state.chat_state = chat_state_with_messages(&state.agent_config, snapshot.chat_messages);
+
+    if let Some(metrics) = snapshot.status_metrics {
+        state.status_panel.total_tokens = metrics.total_tokens;
+        state.status_panel.prompt_tokens = metrics.prompt_tokens;
+        state.status_panel.completion_tokens = metrics.completion_tokens;
+        state.status_panel.input_context_tokens = metrics.input_context_tokens;
+        state.status_panel.input_context_tokens_estimated = metrics.input_context_tokens_estimated;
+        state.status_panel.last_latency_ms = metrics.last_latency_ms;
+    }
 
     snapshot.session_record.as_mut().map(|record| {
         record.status = SessionLifecycleStatus::Idle;
