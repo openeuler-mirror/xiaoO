@@ -76,6 +76,9 @@ impl App {
         if let Some(dialog) = self.state.session_snapshot_dialog.as_ref() {
             self.render_session_snapshot_dialog(frame, frame.area(), dialog);
         }
+        if let Some(dialog) = self.state.delete_dialog.as_ref() {
+            self.render_delete_dialog(frame, frame.area(), dialog);
+        }
         if let Some(dialog) = self.state.api_key_dialog.clone() {
             self.render_api_key_dialog(frame, frame.area(), &dialog);
         }

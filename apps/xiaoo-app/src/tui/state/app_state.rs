@@ -24,6 +24,7 @@ pub enum InputMode {
     ProviderSelection,
     SessionSnapshotSelection,
     InteractionPrompt,
+    TurnDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
     pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
+    pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
@@ -163,6 +165,7 @@ impl AppState {
             should_quit: false,
             provider_dialog: None,
             session_snapshot_dialog: None,
+            delete_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
@@ -199,6 +202,7 @@ impl AppState {
             should_quit: false,
             provider_dialog: None,
             session_snapshot_dialog: None,
+            delete_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
@@ -229,6 +233,7 @@ impl AppState {
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
         self.session_snapshot_dialog = None;
+        self.delete_dialog = None;
         self.api_key_dialog = None;
         self.loading_tick = 0;
         self.session_messages.clear();
