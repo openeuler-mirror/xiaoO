@@ -84,6 +84,10 @@ impl GatewayRuntime {
         self.session_gateway.import_session_snapshot(record).await;
     }
 
+    pub fn session_store_handle(&self) -> Arc<crate::gateway::InMemorySessionStore> {
+        self.session_gateway.session_store.clone()
+    }
+
     /// Closes all active sessions, firing the SessionClosed hook for each.
     /// Should be called before the application exits.
     pub async fn close_sessions(&mut self, session_id: &str) {
