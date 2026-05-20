@@ -32,8 +32,32 @@ impl GatewayRuntime {
         let Some(queued) = state.chat_state.pop_pending_turn() else {
             return Ok(false);
         };
+        self.discard_pending_user_message(&queued.prompt);
         self.start_turn_internal(state, queued.prompt, true).await?;
         Ok(true)
+    }
+
+    pub fn enqueue_pending_user_message_for_running_turn(&mut self, prompt: String) -> bool {
+        if self.remote.is_some() || self.stream_rx.is_none() {
+            return false;
+        }
+
+        if let Ok(mut pending) = self.pending_user_messages.lock() {
+            pending.push_back(prompt);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn discard_pending_user_message(&mut self, prompt: &str) {
+        let Ok(mut pending) = self.pending_user_messages.lock() else {
+            return;
+        };
+        let Some(index) = pending.iter().position(|queued| queued == prompt) else {
+            return;
+        };
+        pending.remove(index);
     }
 
     async fn start_turn_internal(
@@ -88,6 +112,7 @@ impl GatewayRuntime {
         self.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
 
         let session_gateway = self.session_gateway.clone();
+        let pending_user_messages = self.pending_user_messages.clone();
         tokio::spawn(async move {
             if let Err(error) = session_gateway
                 .ensure_session_open(runtime_config.clone(), open_request)
@@ -96,7 +121,13 @@ impl GatewayRuntime {
                 let _ = updates_tx.send(crate::session_gateway::SessionTurnUpdate::Err(error));
                 return;
             }
-            session_gateway.spawn_turn(runtime_config, turn_request, updates_tx, interaction_rx);
+            session_gateway.spawn_turn(
+                runtime_config,
+                turn_request,
+                updates_tx,
+                interaction_rx,
+                pending_user_messages,
+            );
         });
 
         Ok(())

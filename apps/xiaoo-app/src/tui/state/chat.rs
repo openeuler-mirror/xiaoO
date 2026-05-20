@@ -604,6 +604,18 @@ impl ChatState {
         self.pending_turns.pop_front()
     }
 
+    pub fn remove_pending_turn_prompt(&mut self, prompt: &str) -> bool {
+        let Some(index) = self
+            .pending_turns
+            .iter()
+            .position(|queued| queued.prompt == prompt)
+        else {
+            return false;
+        };
+        self.pending_turns.remove(index);
+        true
+    }
+
     pub fn has_pending_turns(&self) -> bool {
         !self.pending_turns.is_empty()
     }

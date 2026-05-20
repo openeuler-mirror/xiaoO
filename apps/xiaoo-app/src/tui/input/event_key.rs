@@ -360,6 +360,8 @@ impl App {
 
         if self.state.chat_state.is_loading {
             if let Some(body) = self.external_command_body(trimmed) {
+                self.gateway
+                    .enqueue_pending_user_message_for_running_turn(body.clone());
                 self.state.chat_state.enqueue_pending_turn(body);
                 return Ok(());
             }
@@ -373,6 +375,8 @@ impl App {
                             .to_string(),
                     ));
             } else {
+                self.gateway
+                    .enqueue_pending_user_message_for_running_turn(user_input.clone());
                 self.state.chat_state.enqueue_pending_turn(user_input);
             }
             self.state.chat_state.stick_to_bottom = true;

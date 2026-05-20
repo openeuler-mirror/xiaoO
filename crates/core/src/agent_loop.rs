@@ -100,6 +100,7 @@ pub async fn run_agent_loop(
             let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
             sink.on_turn_start(agent_id, ctx.turn.turn_number);
         }
+        drain_pending_user_messages(&mut ctx).await;
         if let Err(error) = compress(&mut ctx, CompressionTrigger::Automatic).await {
             end_turn_span(
                 &mut ctx,
@@ -302,6 +303,22 @@ pub async fn run_agent_loop(
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(&ctx),
     }))
+}
+
+async fn drain_pending_user_messages(ctx: &mut LoopContext<'_>) {
+    let Some(source) = ctx.input.pending_user_messages.clone() else {
+        return;
+    };
+
+    for message in source.drain_pending_user_messages().await {
+        if message.trim().is_empty() {
+            continue;
+        }
+        ctx.state
+            .messages
+            .write()
+            .push(ChatMessage::text(MessageRole::User, &message, now_ms()));
+    }
 }
 
 async fn finalize_trace_for_ctx(
@@ -2154,6 +2171,106 @@ mod tests {
 
         fn capabilities(&self) -> &ProviderCapabilities {
             &self.capabilities
+        }
+    }
+
+    struct ToolThenDoneProvider {
+        capabilities: ProviderCapabilities,
+        requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>,
+    }
+
+    impl ToolThenDoneProvider {
+        fn new(requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>) -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: true,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "tool-then-done-test".to_string(),
+                },
+                requests,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ToolThenDoneProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut requests = self
+                    .requests
+                    .lock()
+                    .expect("request recorder mutex should not be poisoned");
+                requests.push(request.messages.clone());
+                requests.len()
+            };
+
+            if call_number == 1 {
+                Ok(LlmResponse {
+                    message: AssistantMessage {
+                        text: Some("checking".to_string()),
+                        reasoning_content: None,
+                        tool_calls: vec![ToolUseBlock {
+                            call_id: "call_1".to_string(),
+                            tool_name: "bash".to_string(),
+                            input: serde_json::json!({"command": "date"}),
+                        }],
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 3,
+                            total_tokens: 13,
+                        },
+                        stop_reason: StopReason::ToolUse,
+                    },
+                })
+            } else {
+                Ok(LlmResponse {
+                    message: AssistantMessage {
+                        text: Some("done".to_string()),
+                        reasoning_content: None,
+                        tool_calls: Vec::new(),
+                        usage: Usage {
+                            prompt_tokens: 20,
+                            completion_tokens: 2,
+                            total_tokens: 22,
+                        },
+                        stop_reason: StopReason::EndTurn,
+                    },
+                })
+            }
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    struct SecondTurnPendingSource {
+        drain_count: StdMutex<usize>,
+    }
+
+    #[async_trait]
+    impl crate::input::PendingUserMessageSource for SecondTurnPendingSource {
+        async fn drain_pending_user_messages(&self) -> Vec<String> {
+            let mut count = self
+                .drain_count
+                .lock()
+                .expect("pending source mutex should not be poisoned");
+            *count += 1;
+            if *count == 2 {
+                vec!["please use the fresh requirement".to_string()]
+            } else {
+                Vec::new()
+            }
         }
     }
 }
