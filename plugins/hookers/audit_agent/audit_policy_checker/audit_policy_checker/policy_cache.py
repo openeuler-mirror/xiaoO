@@ -1,30 +1,50 @@
 """Session 级别 Policy 缓存管理
 
 同一 session 中同一 prompt 对应的 policy 只生成一次，后续从缓存读取。
-预留缓存失效接口，供后续版本支持"历史动作序列中存在用户重新指定 prompt 时重新生成 policy"。
+缓存持久化到文件系统，支持跨进程共享。
+
+缓存文件路径: /tmp/audit_policy_cache/{session_id}/{hash(prompt_session)}.toml
 """
 
+import hashlib
+import os
+import tempfile
 import threading
 from collections import OrderedDict
+from pathlib import Path
 
 from .config import CacheConfig, get_default_config
 
+# 缓存文件目录
+CACHE_DIR = Path(tempfile.gettempdir()) / "audit_policy_cache"
+
 
 class PolicyCache:
-    """Session 级别的 policy 缓存，支持 LRU 淘汰"""
+    """Session 级别的 policy 缓存，支持文件持久化"""
 
     def __init__(self, config: CacheConfig | None = None):
         self._config = config or get_default_config().cache
-        self._cache: OrderedDict[str, str] = OrderedDict()  # session_id -> policy_toml_str
+        self._memory_cache: OrderedDict[str, str] = OrderedDict()  # 内存缓存（LRU）
         self._lock = threading.Lock()
 
     def _cache_key(self, session_id: str, prompt_session: str) -> str:
         """生成缓存键：基于 session_id 和 prompt 内容"""
         return f"{session_id}::{prompt_session}"
 
+    def _cache_file_path(self, session_id: str, prompt_session: str) -> Path:
+        """生成缓存文件路径"""
+        # 对 prompt_session 做hash，避免路径过长或特殊字符问题
+        prompt_hash = hashlib.md5(prompt_session.encode()).hexdigest()[:12]
+        safe_session_id = session_id.replace("/", "_").replace("\\", "_")
+        return CACHE_DIR / safe_session_id / f"{prompt_hash}.toml"
+
     def get(self, session_id: str, prompt_session: str) -> str | None:
         """
         从缓存中获取 policy。
+
+        优先级：
+        1. 内存缓存（当前进程）
+        2. 文件缓存（跨进程共享）
 
         Args:
             session_id: 会话唯一标识
@@ -37,16 +57,34 @@ class PolicyCache:
             return None
 
         key = self._cache_key(session_id, prompt_session)
+
+        # 1. 先查内存缓存
         with self._lock:
-            if key in self._cache:
-                # LRU：移动到末尾
-                self._cache.move_to_end(key)
-                return self._cache[key]
-            return None
+            if key in self._memory_cache:
+                self._memory_cache.move_to_end(key)
+                return self._memory_cache[key]
+
+        # 2. 查文件缓存
+        cache_file = self._cache_file_path(session_id, prompt_session)
+        if cache_file.exists():
+            try:
+                policy = cache_file.read_text(encoding="utf-8")
+                # 写入内存缓存
+                with self._lock:
+                    self._memory_cache[key] = policy
+                    self._memory_cache.move_to_end(key)
+                    # LRU 淘汰
+                    while len(self._memory_cache) > self._config.max_size:
+                        self._memory_cache.popitem(last=False)
+                return policy
+            except Exception:
+                pass
+
+        return None
 
     def put(self, session_id: str, prompt_session: str, policy: str) -> None:
         """
-        将生成的 policy 存入缓存。
+        将生成的 policy 存入缓存（内存 + 文件）。
 
         Args:
             session_id: 会话唯一标识
@@ -57,23 +95,27 @@ class PolicyCache:
             return
 
         key = self._cache_key(session_id, prompt_session)
-        with self._lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-            self._cache[key] = policy
 
+        # 1. 写入内存缓存
+        with self._lock:
+            if key in self._memory_cache:
+                self._memory_cache.move_to_end(key)
+            self._memory_cache[key] = policy
             # LRU 淘汰
-            while len(self._cache) > self._config.max_size:
-                self._cache.popitem(last=False)
+            while len(self._memory_cache) > self._config.max_size:
+                self._memory_cache.popitem(last=False)
+
+        # 2. 写入文件缓存
+        cache_file = self._cache_file_path(session_id, prompt_session)
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(policy, encoding="utf-8")
+        except Exception:
+            pass
 
     def invalidate(self, session_id: str, prompt_session: str) -> None:
         """
         使指定 session + prompt 的 policy 缓存失效。
-
-        TODO: 预留接口 — 当历史动作序列中存在用户重新指定 prompt 时，
-        需要使缓存失效并重新生成 policy。当前版本暂不实现该逻辑的自动触发，
-        后续版本可根据 action_history 中的特定标记
-        （如 action_type == "user_new_prompt"）调用此接口。
 
         Args:
             session_id: 会话唯一标识
@@ -81,7 +123,14 @@ class PolicyCache:
         """
         key = self._cache_key(session_id, prompt_session)
         with self._lock:
-            self._cache.pop(key, None)
+            self._memory_cache.pop(key, None)
+
+        # 删除文件缓存
+        cache_file = self._cache_file_path(session_id, prompt_session)
+        try:
+            cache_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def invalidate_session(self, session_id: str) -> None:
         """
@@ -90,20 +139,42 @@ class PolicyCache:
         Args:
             session_id: 会话唯一标识
         """
+        # 清除内存缓存
         with self._lock:
-            keys_to_remove = [k for k in self._cache if k.startswith(f"{session_id}::")]
+            keys_to_remove = [k for k in self._memory_cache if k.startswith(f"{session_id}::")]
             for key in keys_to_remove:
-                del self._cache[key]
+                del self._memory_cache[key]
+
+        # 清除文件缓存
+        safe_session_id = session_id.replace("/", "_").replace("\\", "_")
+        session_dir = CACHE_DIR / safe_session_id
+        try:
+            if session_dir.exists():
+                for f in session_dir.iterdir():
+                    f.unlink()
+                session_dir.rmdir()
+        except Exception:
+            pass
 
     def clear(self) -> None:
         """清空所有缓存"""
         with self._lock:
-            self._cache.clear()
+            self._memory_cache.clear()
+
+        # 清空文件缓存
+        try:
+            if CACHE_DIR.exists():
+                for session_dir in CACHE_DIR.iterdir():
+                    for f in session_dir.iterdir():
+                        f.unlink()
+                    session_dir.rmdir()
+        except Exception:
+            pass
 
     def size(self) -> int:
-        """返回当前缓存条目数"""
+        """返回当前内存缓存条目数"""
         with self._lock:
-            return len(self._cache)
+            return len(self._memory_cache)
 
 
 # 全局默认缓存实例（延迟初始化）

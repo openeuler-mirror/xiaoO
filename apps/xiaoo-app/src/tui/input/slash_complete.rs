@@ -1,5 +1,5 @@
 //! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/dir`, `/load`, `/new`, `/remote`, `/save`, `/skills`).
+//! `app.rs` (`/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/save`, `/skills`).
 
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
@@ -23,6 +23,10 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "/dir",
         summary: "切换当前工作目录。",
+    },
+    SlashCommandSpec {
+        name: "/delete",
+        summary: "从当前会话中删除选定的对话。",
     },
     SlashCommandSpec {
         name: "/load",
@@ -228,11 +232,11 @@ mod tests {
     fn candidates_prefix_builtin() {
         assert_eq!(
             candidates_for_prefix("/", NO_EXT),
-            vec!["/connect", "/dir", "/load", "/new", "/save", "/remote", "/skills"]
+            vec!["/connect", "/dir", "/delete", "/load", "/new", "/save", "/remote", "/skills"]
         );
         assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
-        assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir"]);
+        assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
         assert_eq!(candidates_for_prefix("/l", NO_EXT), vec!["/load"]);
         assert_eq!(candidates_for_prefix("/n", NO_EXT), vec!["/new"]);
         assert_eq!(candidates_for_prefix("/r", NO_EXT), vec!["/remote"]);

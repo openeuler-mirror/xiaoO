@@ -6,7 +6,7 @@ use crate::channels::feishu::types::{
 use crate::channels::{
     AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelError, ChannelMember,
     ChannelMessage, ChannelMeta, ChannelOutboundAttachment, ChannelProgressUpdate, ChannelResult,
-    ChannelTextFormat,
+    ChannelRuntime, ChannelTextFormat,
 };
 use async_trait::async_trait;
 use axum::http::HeaderMap;
@@ -34,6 +34,18 @@ impl FeishuAdapter {
     pub async fn get_chat_info(&self, chat_id: &str) -> ChannelResult<FeishuChatInfo> {
         self.client.get_chat_info(chat_id).await
     }
+}
+
+pub fn runtime(config: FeishuConfig) -> ChannelResult<ChannelRuntime> {
+    let adapter: std::sync::Arc<dyn ChannelAdapter> =
+        std::sync::Arc::new(FeishuAdapter::new(config)?);
+    Ok(ChannelRuntime {
+        instance_id: "feishu".to_string(),
+        channel_id: "feishu".to_string(),
+        meta: meta(),
+        capabilities: capabilities(),
+        adapter,
+    })
 }
 
 #[async_trait]
@@ -168,6 +180,7 @@ pub fn capabilities() -> ChannelCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::FeishuEventTransport;
 
     fn config() -> FeishuConfig {
         FeishuConfig {
@@ -175,7 +188,8 @@ mod tests {
             base_url: "https://open.feishu.cn".to_string(),
             app_id: "cli_test".to_string(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
-            verification_token: "verify_token".to_string(),
+            event_transport: FeishuEventTransport::Webhook,
+            verification_token: Some("verify_token".to_string()),
             parse_file_messages: false,
             max_file_download_bytes: 0,
             max_file_text_chars: 0,

@@ -187,6 +187,21 @@ fn resolve_relative_custom_paths(mut policy: Policy, cwd: &Path) -> Result<Polic
             continue;
         }
 
+        // Handle ~ home directory expansion
+        let raw_path_str = rule.path.to_string_lossy();
+        if raw_path_str.starts_with('~') {
+            if let Some(home) = dirs::home_dir() {
+                let stripped = raw_path_str.strip_prefix('~').unwrap_or(&raw_path_str);
+                let suffix = if stripped.starts_with('/') {
+                    stripped
+                } else {
+                    &raw_path_str // Fallback to original if no separator
+                };
+                rule.path = home.join(suffix.trim_start_matches('/'));
+            }
+            continue;
+        }
+
         rule.path = resolve_path_against_cwd(cwd, &rule.path)?;
     }
 
@@ -508,5 +523,69 @@ mod tests {
         let (policy, source) = result.unwrap();
         assert!(!source.is_builtin());
         assert_eq!(policy.timeout().as_secs(), 42);
+    }
+
+    #[test]
+    fn test_resolve_policy_file_expands_tilde_to_home() {
+        use std::io::Write;
+
+        let _guard = crate::test_support::lock_cwd();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy_path = temp_dir.path().join("tilde-policy.toml");
+        let mut file = std::fs::File::create(&policy_path).unwrap();
+        writeln!(
+            file,
+            "[[custom_paths]]\npath = \"~/.xiaoo/skills/xiaoo-guardian/\"\npermission = \"readexecute\""
+        )
+        .unwrap();
+        drop(file);
+
+        let original_dir = crate::test_support::current_dir_or_manifest_dir();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let policy = resolve_policy_file(&policy_path).expect("policy should load");
+
+        let _ = std::env::set_current_dir(&original_dir);
+
+        assert_eq!(policy.custom_paths.len(), 1);
+        let expected_path = dirs::home_dir()
+            .unwrap()
+            .join(".xiaoo/skills/xiaoo-guardian/");
+        assert_eq!(
+            policy.custom_paths[0].path, expected_path,
+            "tilde should be expanded to home directory"
+        );
+    }
+
+    #[test]
+    fn test_resolve_policy_file_expands_tilde_with_subpath() {
+        use std::io::Write;
+
+        let _guard = crate::test_support::lock_cwd();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let policy_path = temp_dir.path().join("tilde-subpath-policy.toml");
+        let mut file = std::fs::File::create(&policy_path).unwrap();
+        writeln!(
+            file,
+            "[[custom_paths]]\npath = \"~/my-project/config\"\npermission = \"readwrite\""
+        )
+        .unwrap();
+        drop(file);
+
+        let original_dir = crate::test_support::current_dir_or_manifest_dir();
+        std::env::set_current_dir(temp_dir.path()).unwrap();
+
+        let policy = resolve_policy_file(&policy_path).expect("policy should load");
+
+        let _ = std::env::set_current_dir(&original_dir);
+
+        assert_eq!(policy.custom_paths.len(), 1);
+        let expected_path = dirs::home_dir().unwrap().join("my-project/config");
+        assert_eq!(
+            policy.custom_paths[0].path, expected_path,
+            "tilde with subpath should be expanded correctly"
+        );
     }
 }

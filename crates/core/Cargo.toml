@@ -19,6 +19,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 arc-swap.workspace = true
 tracing.workspace = true
+parking_lot.workspace = true
 reqwest.workspace = true
 
 [dev-dependencies]

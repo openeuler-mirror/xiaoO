@@ -11,9 +11,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 
 const DEFAULT_AGENT_ID: &str = "main";
-const LLM_SECRETS_FILE: &str = "llm_secrets.json";
 const DEFAULT_LLM_MAX_TOKENS: u32 = 128000;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -139,6 +139,8 @@ pub struct AgentRoleConfig {
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
     pub tools: BTreeMap<String, bool>,
 }
 
@@ -173,9 +175,11 @@ impl Config {
                 format!("failed to create config directory {}", parent.display())
             })?;
         }
+        let mut persisted = self.clone();
+        persisted.agent.remove(PLAN_AGENT_ID);
         fs::write(
             path,
-            toml::to_string_pretty(self).context("failed to serialize config")?,
+            toml::to_string_pretty(&persisted).context("failed to serialize config")?,
         )
         .with_context(|| format!("failed to write config file {}", path.display()))?;
         Ok(())
@@ -263,8 +267,10 @@ impl Config {
 }
 
 pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) -> Result<Config> {
-    let config = config
+    let mut config = config
         .ok_or_else(|| anyhow::anyhow!("config file not found: {}", config_path.display()))?;
+    install_builtin_agent_roles(&mut config.agent)
+        .with_context(|| format!("invalid TUI config {}", config_path.display()))?;
 
     if config.llm.provider.trim().is_empty() {
         bail!(
@@ -311,47 +317,36 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
     Ok(config)
 }
 
-pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()> {
-    let secrets_path = llm_secrets_path(config_path);
-    if let Some(parent) = secrets_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create secrets directory {}", parent.display()))?;
+fn install_builtin_agent_roles(agent_roles: &mut BTreeMap<String, AgentRoleConfig>) -> Result<()> {
+    if agent_roles.contains_key(PLAN_AGENT_ID) {
+        bail!("agent role `{PLAN_AGENT_ID}` is builtin and cannot be overridden in config");
     }
 
-    let mut secrets = load_llm_secrets(&secrets_path)?;
-    secrets.insert(env_name.to_string(), secret.to_string());
-    fs::write(
-        &secrets_path,
-        serde_json::to_vec_pretty(&secrets).context("failed to serialize llm secrets")?,
-    )
-    .with_context(|| format!("failed to write secrets file {}", secrets_path.display()))?;
+    agent_roles.insert(
+        PLAN_AGENT_ID.to_string(),
+        AgentRoleConfig {
+            description: PLAN_AGENT_DESCRIPTION.to_string(),
+            prompt: Some(PLAN_AGENT_PROMPT.to_string()),
+            max_turns: None,
+            tools: BTreeMap::from([
+                ("bash".to_string(), false),
+                ("file_edit".to_string(), false),
+                ("file_write".to_string(), false),
+                ("send_file".to_string(), false),
+                ("spawn_subagent".to_string(), false),
+            ]),
+        },
+    );
+
     Ok(())
+}
+
+pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Result<()> {
+    xiaoo_app::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
 pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    let secrets_path = llm_secrets_path(config_path);
-    let secrets = load_llm_secrets(&secrets_path)?;
-    for (key, value) in secrets {
-        std::env::set_var(key, value);
-    }
-    Ok(())
-}
-
-fn load_llm_secrets(path: &Path) -> Result<BTreeMap<String, String>> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let bytes = fs::read(path)
-        .with_context(|| format!("failed to read secrets file {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse secrets file {}", path.display()))
-}
-
-fn llm_secrets_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(LLM_SECRETS_FILE)
+    xiaoo_app::llm_secrets::inject_llm_secrets_into_env(config_path)
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
@@ -507,6 +502,7 @@ context_window = 128000
 [agent.code-reviewer]
 description = "Reviews code for best practices and potential issues"
 prompt = "You are a code reviewer."
+max_turns = 3
 
 [agent.code-reviewer.tools]
 file_write = false
@@ -523,7 +519,42 @@ file_edit = false
             "Reviews code for best practices and potential issues"
         );
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
+    }
+
+    #[test]
+    fn tui_bootstrap_adds_builtin_plan_agent_role() {
+        let config =
+            require_tui_bootstrap_config(Some(valid_config()), Path::new("/tmp/config.toml"))
+                .expect("valid config should bootstrap");
+        let plan = config
+            .agent_role("plan")
+            .expect("builtin plan role should exist");
+
+        assert_eq!(plan.max_turns, None);
+        assert!(plan
+            .prompt
+            .as_deref()
+            .unwrap_or_default()
+            .contains("todo_write"));
+        assert_eq!(plan.tools.get("bash"), Some(&false));
+    }
+
+    #[test]
+    fn tui_bootstrap_rejects_builtin_plan_override() {
+        let mut config = valid_config();
+        config.agent.insert(
+            "plan".to_string(),
+            super::AgentRoleConfig {
+                description: "override".to_string(),
+                ..super::AgentRoleConfig::default()
+            },
+        );
+
+        let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
+            .expect_err("builtin plan override should fail");
+        assert!(format!("{error:?}").contains("builtin"));
     }
 }

@@ -10,9 +10,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_app::channels::{
-    build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig, TelegramConfig,
-    TelegramEventTransport,
+    build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig,
+    FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
@@ -78,6 +79,8 @@ pub struct ChannelsConfig {
 pub struct FeishuChannelConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default, rename = "transport")]
+    pub event_transport: FeishuEventTransport,
     #[serde(default)]
     pub channel_instance_id: Option<String>,
     #[serde(default)]
@@ -158,6 +161,8 @@ pub struct AgentRoleConfig {
     pub description: String,
     #[serde(default)]
     pub prompt: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
     #[serde(default)]
     pub tools: BTreeMap<String, bool>,
 }
@@ -249,8 +254,10 @@ impl DaemonConfig {
         let config_path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
-        let app: AppConfig = toml::from_str(&content)
+        let mut app: AppConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config {}", config_path.display()))?;
+        install_builtin_agent_roles(&mut app.agent)
+            .with_context(|| format!("invalid config {}", config_path.display()))?;
         Ok(Self { app, config_path })
     }
 
@@ -366,10 +373,18 @@ impl DaemonConfig {
             "channels.feishu.app_secret_env",
             feishu.app_secret_env.as_deref(),
         )?;
-        let verification_token = required_field(
-            "channels.feishu.verification_token",
-            feishu.verification_token.as_deref(),
-        )?;
+        let verification_token = match feishu.event_transport {
+            FeishuEventTransport::Webhook => Some(required_field(
+                "channels.feishu.verification_token",
+                feishu.verification_token.as_deref(),
+            )?),
+            FeishuEventTransport::Websocket => feishu
+                .verification_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        };
         let base_url = feishu
             .base_url
             .clone()
@@ -379,6 +394,7 @@ impl DaemonConfig {
             channel_instance_id: normalize_optional_string(feishu.channel_instance_id.clone()),
             app_id,
             app_secret_env,
+            event_transport: feishu.event_transport,
             verification_token,
             base_url,
             parse_file_messages: false,
@@ -429,7 +445,9 @@ impl DaemonConfig {
     pub fn channel_runtimes(&self) -> Result<Vec<ChannelRuntime>> {
         let mut runtimes = Vec::new();
         if let Some(feishu) = self.feishu_config()? {
-            runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
+            if feishu.event_transport == FeishuEventTransport::Webhook {
+                runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
+            }
         }
         if let Some(telegram) = self.telegram_config()? {
             if telegram.event_transport == TelegramEventTransport::Webhook {
@@ -514,6 +532,30 @@ impl DaemonConfig {
     }
 }
 
+fn install_builtin_agent_roles(agent_roles: &mut BTreeMap<String, AgentRoleConfig>) -> Result<()> {
+    if agent_roles.contains_key(PLAN_AGENT_ID) {
+        bail!("agent role `{PLAN_AGENT_ID}` is builtin and cannot be overridden in config");
+    }
+
+    agent_roles.insert(
+        PLAN_AGENT_ID.to_string(),
+        AgentRoleConfig {
+            description: PLAN_AGENT_DESCRIPTION.to_string(),
+            prompt: Some(PLAN_AGENT_PROMPT.to_string()),
+            max_turns: None,
+            tools: BTreeMap::from([
+                ("bash".to_string(), false),
+                ("file_edit".to_string(), false),
+                ("file_write".to_string(), false),
+                ("send_file".to_string(), false),
+                ("spawn_subagent".to_string(), false),
+            ]),
+        },
+    );
+
+    Ok(())
+}
+
 pub fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path);
@@ -596,6 +638,43 @@ mod tests {
             .expect("feishu should be enabled");
         assert_eq!(feishu.app_id, "cli_123");
         assert_eq!(feishu.base_url, "https://open.feishu.cn");
+    }
+
+    #[test]
+    fn parses_feishu_websocket_config_without_webhook_runtime() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [channels.feishu]
+            enabled = true
+            transport = "websocket"
+            channel_instance_id = "ops-feishu"
+            app_id = "cli_123"
+            app_secret_env = "FEISHU_APP_SECRET"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let feishu = daemon
+            .feishu_config()
+            .expect("feishu websocket config should validate")
+            .expect("feishu should be enabled");
+
+        assert_eq!(
+            feishu.event_transport,
+            super::FeishuEventTransport::Websocket
+        );
+        assert_eq!(feishu.channel_instance_id.as_deref(), Some("ops-feishu"));
+        assert!(feishu.verification_token.is_none());
+        assert!(daemon
+            .channel_runtimes()
+            .expect("webhook channel runtimes should resolve")
+            .is_empty());
     }
 
     #[test]
@@ -704,6 +783,7 @@ mod tests {
             [agent.code-reviewer]
             description = "Reviews code for best practices and potential issues"
             prompt = "You are a code reviewer."
+            max_turns = 3
 
             [agent.code-reviewer.tools]
             file_write = false
@@ -720,6 +800,7 @@ mod tests {
             "Reviews code for best practices and potential issues"
         );
         assert_eq!(role.prompt.as_deref(), Some("You are a code reviewer."));
+        assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
     }

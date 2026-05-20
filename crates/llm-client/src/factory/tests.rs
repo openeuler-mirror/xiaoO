@@ -353,10 +353,10 @@ mod wrapper_tests {
         messages: Vec<ChatMessage>,
     }
 
-    impl agent_contracts::ConversationView for TestConversationView {
-        fn recent_messages(&self, _limit: usize) -> &[ChatMessage] {
-            &self.messages
-        }
+	impl agent_contracts::ConversationView for TestConversationView {
+		fn recent_messages(&self, _limit: usize) -> Vec<ChatMessage> {
+			self.messages.clone()
+		}
 
         fn message_count(&self) -> usize {
             self.messages.len()

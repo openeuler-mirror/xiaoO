@@ -7,9 +7,16 @@
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from datetime import datetime
 
-from ..config import Config
+from ..config import Config, get_log_path, get_llm_timeout
 from ..llm_client import call_llm
+from .script_content_analyzer import (
+    ScriptAnalysisResult,
+    analyze_script_content,
+    format_script_analysis_for_prompt,
+)
 from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
 
@@ -64,6 +71,14 @@ class LLMAnalyzer:
         # 3. 格式化启发式/逻辑规则提示
         hints_text = self._format_hints(heuristic_result, logic_result)
 
+        # 3.5 脚本内容分析（方案3: 关键词预筛选）
+        # 当检测到脚本执行时，预扫描脚本内容中的可疑关键词
+        # 如果命中可疑关键词，将脚本内容注入 LLM prompt 进行深度分析
+        action_type = a_next.get("action_type", "")
+        action_detail = a_next.get("action_detail", "")
+        script_analysis = analyze_script_content(action_type, action_detail)
+        script_analysis_text = format_script_analysis_for_prompt(script_analysis)
+
         # 4. 生成安全判断 prompt
         judge_prompt = get_security_judge_prompt(
             prompt_session=prompt_session,
@@ -72,33 +87,92 @@ class LLMAnalyzer:
             reason=reason,
             skills_text=skills_text,
             hints_text=hints_text,
+            script_analysis_text=script_analysis_text,
         )
 
-        # 5. 调用 LLM（带重试）
+        # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）
+        log_path = get_log_path()
+        if log_path:
+            self._log_prompt(judge_prompt, a_next, log_path)
+
+        # 5. 调用 LLM（带超时和重试）
         max_retries = config.retry.max_retries
         retry_interval = config.retry.retry_interval
+        _call_start = time.monotonic()  # 记录调用开始时间，用于精确计算耗时
+        llm_timeout = get_llm_timeout()
+
+        # 根据 LLM 超时时间自动计算单次 call_llm 超时时间
+        # 公式：总超时 = N 次调用 + (N-1) 次重试间隔
+        # 所以：单次超时 = (总超时 - 重试间隔 * (max_retries - 1)) / max_retries
+        single_call_timeout = (
+            llm_timeout - retry_interval * (max_retries - 1)
+        ) / max_retries
+        # 确保单次超时至少 10 秒
+        single_call_timeout = max(single_call_timeout, 10.0)
 
         for attempt in range(1, max_retries + 1):
             try:
-                llm_response = call_llm(
-                    prompt=judge_prompt,
-                    timeout=config.timeout.prompt2_timeout,  # 复用 prompt2 超时配置
-                    config=config.llm,
-                )
+                # 使用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        call_llm,
+                        prompt=judge_prompt,
+                        timeout=single_call_timeout,
+                        config=config.llm,
+                    )
+                    llm_response = future.result(timeout=llm_timeout)
+
                 judgment = self._parse_llm_response(llm_response)
                 judgment.source = "llm"
                 return judgment
 
-            except (TimeoutError, ValueError, Exception) as e:
+            except FuturesTimeoutError:
+                # ThreadPoolExecutor 超时：LLM 调用在 llm_timeout 内未返回
+                elapsed = time.monotonic() - _call_start
                 logger.warning(
-                    "LLM 安全分析第 %d 次调用失败: %s", attempt, e
+                    "LLM 安全分析超时（耗时 %.1fs，上限 %ds），第 %d/%d 次尝试",
+                    elapsed,
+                    llm_timeout,
+                    attempt,
+                    max_retries,
                 )
                 if attempt < max_retries:
                     time.sleep(retry_interval)
                 else:
-                    # LLM 分析全部失败
                     raise LLMAnalysisFailure(
-                        f"LLM 安全分析全部失败（{max_retries} 次）"
+                        f"LLM 安全分析超时（耗时 {elapsed:.1f}s，上限 {llm_timeout}s，已重试 {max_retries} 次）"
+                    )
+
+            except TimeoutError as e:
+                # call_llm 抛出的真正超时（网络/读取超时）
+                logger.warning(
+                    "LLM 调用网络超时: %s，第 %d/%d 次尝试",
+                    e,
+                    attempt,
+                    max_retries,
+                )
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+                else:
+                    raise LLMAnalysisFailure(
+                        f"LLM 调用网络超时（已重试 {max_retries} 次）: {e}"
+                    )
+
+            except Exception as e:
+                # API 错误（如并发限制 500006、400/500 错误等），非超时
+                error_type = type(e).__name__
+                logger.warning(
+                    "LLM 安全分析第 %d/%d 次调用失败 [%s]: %s",
+                    attempt,
+                    max_retries,
+                    error_type,
+                    e,
+                )
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+                else:
+                    raise LLMAnalysisFailure(
+                        f"LLM 安全分析失败（{max_retries} 次）[{error_type}]: {e}"
                     )
 
     def _parse_llm_response(self, response: str) -> SecurityJudgment:
@@ -154,3 +228,23 @@ class LLMAnalyzer:
             return "启发式检测和逻辑规则检测均未发现风险。"
 
         return "\n\n".join(hints)
+
+    @staticmethod
+    def _log_prompt(prompt: str, a_next: dict[str, str], log_path: str) -> None:
+        """将 LLM prompt 写入日志文件。"""
+        if not log_path:
+            return
+        try:
+            action_type = a_next.get("action_type", "unknown")
+            action_detail = a_next.get("action_detail", "")[:100]
+            log_line = (
+                f"[{datetime.now().isoformat(timespec='milliseconds')}] "
+                f"[LLM_PROMPT] action_type={action_type}, action_detail={action_detail}... "
+                f"prompt_length={len(prompt)}\n"
+                f"{prompt}\n"
+                f"--- END PROMPT ---\n"
+            )
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(log_line)
+        except Exception as e:
+            logger.warning("Failed to write LLM prompt to log: %s", e)

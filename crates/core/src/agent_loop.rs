@@ -14,9 +14,9 @@ use agent_types::{
     AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk, ToolUseBlock,
 };
 use serde_json::json;
-use tool::ToolCallBuilderImpl;
+use tool::{tool_filter_from_specs, ToolCallBuilderImpl};
 
-use crate::input::AgentLoopInput;
+use crate::input::{AgentLoopInput, LoopStopRule};
 use crate::loop_state::LoopState;
 use crate::runtime::AgentRuntime;
 use crate::snapshot::RuntimeSnapshot;
@@ -43,6 +43,7 @@ pub struct TurnState {
     pub ttft_ms: u64,
     pub total_time_ms: u64,
     pub tpot_ms: f64,
+    pub force_return_complete: bool,
 }
 
 impl TurnState {
@@ -58,6 +59,7 @@ impl TurnState {
             ttft_ms: 0,
             total_time_ms: 0,
             tpot_ms: 0.0,
+            force_return_complete: false,
         }
     }
 }
@@ -83,7 +85,7 @@ pub async fn run_agent_loop(
         {
             input.user_message = expanded;
         }
-        state.messages.push(ChatMessage::text(
+        state.messages.write().push(ChatMessage::text(
             MessageRole::User,
             &input.user_message,
             now_ms(),
@@ -303,7 +305,7 @@ pub async fn run_agent_loop(
 
     Ok(LoopRunResult::Complete(AgentOutcome::Complete {
         reply,
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(&ctx),
@@ -447,7 +449,7 @@ async fn compress(
                     json!({
                         "turn_number": ctx.turn.turn_number,
                         "agent_id": agent_id_str,
-                        "message_count": ctx.state.messages.len(),
+                        "message_count": ctx.state.messages.read().len(),
                         "trigger": trigger.as_str(),
                     }),
                 )
@@ -457,17 +459,19 @@ async fn compress(
         None
     };
 
+    // Clone messages before potential .await to avoid holding RwLockReadGuard across await point
+    let messages = ctx.state.messages.read().clone();
     let analysis = ctx
         .snapshot
         .compression_pipeline
-        .analyze(&ctx.state.messages, &*ctx.snapshot.token_budget_policy);
+        .analyze(&messages, &*ctx.snapshot.token_budget_policy);
 
     tracing::debug!(
         estimated = analysis.estimated_tokens,
         available = analysis.available_tokens,
         ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
         severity = ?analysis.severity,
-        msg_count = ctx.state.messages.len(),
+        msg_count = messages.len(),
         "compression analysis"
     );
 
@@ -498,13 +502,15 @@ async fn compress(
         return Ok(());
     }
 
-    let msg_count_before = ctx.state.messages.len();
+    let msg_count_before = ctx.state.messages.read().len();
 
+    // Clone messages before .await to avoid holding RwLockReadGuard across await point
+    let messages = ctx.state.messages.read().clone();
     let view = ctx
         .snapshot
         .compression_pipeline
         .compress(
-            &ctx.state.messages,
+            &messages,
             &*ctx.snapshot.token_budget_policy,
             &ctx.state.compression_meta,
         )
@@ -544,7 +550,7 @@ async fn compress(
                     .await;
             }
 
-            ctx.state.messages = view.messages.clone();
+            *ctx.state.messages.write() = view.messages.clone();
             ctx.state.compression_meta = view.updated_meta.clone();
             ctx.turn.compression_output = Some(view);
 
@@ -564,10 +570,12 @@ async fn compress(
 
 #[allow(dead_code)]
 fn microcompact(ctx: &mut LoopContext<'_>) {
+    let messages = ctx.state.messages.read();
     let result = ctx
         .snapshot
         .compression_pipeline
-        .microcompact(&ctx.state.messages, now_ms());
+        .microcompact(&messages, now_ms());
+    drop(messages);
 
     if result.applied {
         tracing::info!(
@@ -576,7 +584,7 @@ fn microcompact(ctx: &mut LoopContext<'_>) {
             token_delta = result.token_delta,
             "microcompact applied"
         );
-        ctx.state.messages = result.messages;
+        *ctx.state.messages.write() = result.messages;
     }
 }
 
@@ -610,7 +618,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
 
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         visible_tools: ctx.input.visible_tools.clone(),
         skill_summaries,
         memory_snippets: Vec::new(),
@@ -984,6 +992,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             // corrected tool call, but do not keep that synthetic message in history.
             ctx.state
                 .messages
+                .write()
                 .push(build_invalid_tool_call_result(invalid_call));
             let retry_result = async {
                 build_messages(ctx).await.map_err(|e| {
@@ -992,7 +1001,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 llm_call_with_context_limit_recovery(ctx).await
             }
             .await;
-            ctx.state.messages.pop();
+            ctx.state.messages.write().pop();
             retry_result?;
 
             let retry_tool_calls: Vec<ToolUseBlock> = ctx
@@ -1057,7 +1066,6 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     // Execute valid tool calls (original logic).
-    let agent_id = ctx.input.agent_id.as_ref().unwrap();
     let runtime_view = ctx.input.runtime_view.as_ref().unwrap();
 
     for tc in &valid_calls {
@@ -1072,7 +1080,10 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             input: raw_tool_call.input.clone(),
         };
 
-        let per_call_filter = ctx.snapshot.tool_registry.filter_for(agent_id);
+        let per_call_filter = tool_filter_from_specs(
+            &ctx.input.visible_tools,
+            ctx.snapshot.tool_registry.as_ref(),
+        );
 
         let tool_call = match ToolCallBuilderImpl::new()
             .with_raw_llm_tool_call(raw_tool_call)
@@ -1087,7 +1098,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 );
                 emit_tool_result_event(ctx, &result);
                 let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.push(tool_result_message);
+                ctx.state.messages.write().push(tool_result_message);
                 ctx.turn.tool_results.push(result);
                 continue;
             }
@@ -1100,11 +1111,12 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                     build_framework_failed_tool_result(fallback_final_call, error.to_string());
                 emit_tool_result_event(ctx, &result);
                 let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.push(tool_result_message);
+                ctx.state.messages.write().push(tool_result_message);
                 ctx.turn.tool_results.push(result);
                 continue;
             }
         };
+        let should_stop_after_result = should_stop_after_tool_result(ctx, &result);
         emit_tool_result_event(ctx, &result);
 
         if let Some(suspended_call) = SuspendedToolCall::from_tool_result(&result) {
@@ -1113,8 +1125,13 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         }
 
         let tool_result_message = build_tool_result_message(&result);
-        ctx.state.messages.push(tool_result_message);
+        ctx.state.messages.write().push(tool_result_message);
         ctx.turn.tool_results.push(result);
+
+        if should_stop_after_result {
+            ctx.turn.force_return_complete = true;
+            break;
+        }
     }
 
     Ok(None)
@@ -1222,8 +1239,8 @@ fn decide(ctx: &mut LoopContext<'_>) {
         return;
     }
 
-    if ctx.state.turn_count + 1 >= ctx.snapshot.max_turns {
-        ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
+    if ctx.turn.force_return_complete {
+        ctx.turn.decision = Some(LoopDecision::ReturnComplete);
         return;
     }
 
@@ -1237,12 +1254,39 @@ fn decide(ctx: &mut LoopContext<'_>) {
             && ctx.input.runtime_view.is_some();
 
         if msg.has_tool_calls() && can_execute_tool_calls {
+            if ctx.turn.turn_number >= ctx.snapshot.max_turns {
+                ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
+                return;
+            }
+
             ctx.turn.decision = Some(LoopDecision::Continue);
             return;
         }
     }
 
     ctx.turn.decision = Some(LoopDecision::ReturnComplete);
+}
+
+fn should_stop_after_tool_result(ctx: &LoopContext<'_>, result: &ToolExecutionResult) -> bool {
+    ctx.input
+        .stop_rules
+        .iter()
+        .any(|rule| stop_rule_matches_tool_result(rule, result))
+}
+
+fn stop_rule_matches_tool_result(rule: &LoopStopRule, result: &ToolExecutionResult) -> bool {
+    match rule {
+        LoopStopRule::AfterSuccessfulTool { tool_name } => {
+            result.tool_name() == tool_name
+                && matches!(
+                    result,
+                    ToolExecutionResult::Completed {
+                        raw_outcome: RawToolOutcome::Success { .. },
+                        ..
+                    }
+                )
+        }
+    }
 }
 
 fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
@@ -1265,7 +1309,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         });
     }
 
-    ctx.state.messages.push(ChatMessage {
+    ctx.state.messages.write().push(ChatMessage {
         role: MessageRole::Assistant,
         blocks,
         message_id: None,
@@ -1417,7 +1461,7 @@ fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
@@ -1431,7 +1475,7 @@ fn build_outcome_budget(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
@@ -1445,7 +1489,7 @@ fn build_outcome_cancelled(ctx: &LoopContext<'_>) -> AgentOutcome {
             .assistant_message
             .as_ref()
             .and_then(|m| m.text.clone()),
-        messages: ctx.state.messages.clone(),
+        messages: ctx.state.messages.read().clone(),
         turn_count: ctx.state.turn_count,
         token_usage: ctx.state.token_usage.clone(),
         estimated_input_tokens: current_turn_estimated_input_tokens(ctx),
@@ -1825,6 +1869,13 @@ mod tests {
     }
 
     fn test_runtime(provider: Arc<LlmProviderWrapper>) -> AgentRuntime {
+        test_runtime_with_max_turns(provider, 4)
+    }
+
+    fn test_runtime_with_max_turns(
+        provider: Arc<LlmProviderWrapper>,
+        max_turns: u32,
+    ) -> AgentRuntime {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(FixedPromptBuilder);
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             Arc::new(compact::PassthroughCompressionPipeline::new());
@@ -1847,7 +1898,7 @@ mod tests {
             .tool_registry(tool_registry)
             .skill_registry(skill_registry)
             .feature_flags(FeatureFlags::default())
-            .max_turns(4)
+            .max_turns(max_turns)
             .token_budget_config(budget_config)
             .token_budget_policy(budget_policy)
             .build()
@@ -1976,10 +2027,85 @@ mod tests {
         assert_eq!(
             loop_state
                 .messages
+                .read()
                 .last()
                 .and_then(ChatMessage::text_content),
             Some("Hello world")
         );
+    }
+
+    #[tokio::test]
+    async fn run_agent_loop_applies_max_turns_per_run_not_session_total() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime_with_max_turns(provider, 2);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        loop_state.turn_count = 10;
+
+        let outcome = run_agent_loop(
+            &runtime,
+            &mut loop_state,
+            AgentLoopInput::new("revise plan"),
+        )
+        .await
+        .expect("loop should complete despite prior session turns");
+
+        assert!(matches!(
+            outcome,
+            LoopRunResult::Complete(AgentOutcome::Complete { .. })
+        ));
+        assert_eq!(loop_state.turn_count, 11);
+    }
+
+    #[test]
+    fn loop_stop_rule_matches_only_configured_successful_tool() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let input =
+            AgentLoopInput::new("plan").with_stop_rules([LoopStopRule::AfterSuccessfulTool {
+                tool_name: "todo_write".to_string(),
+            }]);
+        let ctx = LoopContext {
+            snapshot: runtime.snapshot(),
+            state: &mut loop_state,
+            input,
+            turn: TurnState::new(1),
+        };
+        let result = ToolExecutionResult::Completed {
+            final_call: agent_types::tool::FinalToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "todo_write".to_string(),
+                input: serde_json::json!({}),
+            },
+            raw_outcome: RawToolOutcome::Success {
+                output: "ok".to_string(),
+            },
+            pre_hook_results: Vec::new(),
+            post_hook_results: Vec::new(),
+        };
+        let failed_result = ToolExecutionResult::Completed {
+            final_call: agent_types::tool::FinalToolCall {
+                call_id: "call_2".to_string(),
+                tool_name: "todo_write".to_string(),
+                input: serde_json::json!({}),
+            },
+            raw_outcome: RawToolOutcome::Error {
+                message: "bad input".to_string(),
+            },
+            pre_hook_results: Vec::new(),
+            post_hook_results: Vec::new(),
+        };
+
+        assert!(should_stop_after_tool_result(&ctx, &result));
+        assert!(!should_stop_after_tool_result(&ctx, &failed_result));
     }
 
     #[tokio::test]
@@ -2101,17 +2227,18 @@ mod tests {
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
         assert_eq!(loop_state.turn_count, 1);
-        assert_eq!(loop_state.messages.len(), 2);
+        assert_eq!(loop_state.messages.read().len(), 2);
         assert_eq!(
-            loop_state.messages[1].text_content(),
+            loop_state.messages.read()[1].text_content(),
             Some("trying to use a tool")
         );
-        assert!(!loop_state.messages[1]
+        assert!(!loop_state.messages.read()[1]
             .blocks
             .iter()
             .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
         assert!(!loop_state
             .messages
+            .read()
             .iter()
             .any(|message| matches!(message.role, MessageRole::Tool)));
     }

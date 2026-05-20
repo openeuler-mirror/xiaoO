@@ -10,13 +10,15 @@ Step 2: Allow → 查缓存 / 生成 policy
   ├── 缓存命中 → 使用缓存 policy
   └── 缓存未命中 → LLM 生成 policy + 写入缓存
   → 返回 Allow + policy
+
+优化：白名单只读工具（whitelist_bypass）跳过 Step 2 LLM 调用，使用预定义的最小权限 Policy。
 """
 
 import tempfile
 import time
 from pathlib import Path
 
-from .config import Config, get_default_config
+from .config import Config, get_default_config, is_policy_gen_enabled
 from .llm_client import call_llm
 from .parsers import parse_policy_from_llm
 from .policy_cache import PolicyCache, get_default_cache
@@ -26,6 +28,34 @@ from .security import judge_security
 
 # Policy 临时文件输出目录
 POLICY_OUTPUT_DIR = Path(tempfile.gettempdir()) / "audit_policy_checker"
+
+# 白名单只读工具的默认最小权限 Policy（与 xiaoO Policy.minimal() 保持一致）
+# 参考: crates/cerberus/cerberus-core/src/policy/policy.rs
+DEFAULT_READONLY_POLICY = """landlock_optional = false
+mount_isolation_fallback = false
+
+[path_groups]
+system_binaries = true
+system_libraries = true
+temp_directories = true
+device_files = false
+proc_filesystem = false
+network_config = false
+wsl_paths = false
+
+[namespaces]
+mount = true
+pid = false
+network = true
+user = false
+
+[resources]
+timeout_secs = 30
+max_memory_bytes = 268435456
+
+[environment]
+whitelist = ["PATH", "LANG", "HOME", "USER", "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"]
+"""
 
 
 def audit_action(
@@ -96,14 +126,52 @@ def audit_action(
         # ==================== Step 2: Allow → 查缓存 / 生成 policy ====================
         policy_cache = cache or get_default_cache()
 
+        # 检查是否启用 LLM Policy 生成（默认关闭，通过配置或环境变量开启）
+        enable_policy_gen = is_policy_gen_enabled()
+
         audit_log.start_step("step2_cache_lookup")
         cached_policy = policy_cache.get(session_id, prompt_session)
+
+        # 使用缓存或生成 policy
         if cached_policy is not None:
             audit_log.end_step("step2_cache_lookup", detail="缓存命中")
             policy_a_next = cached_policy
             _ = _save_policy_to_file(session_id, policy_a_next)
+        elif not enable_policy_gen:
+            # Policy 生成已禁用，使用默认 Policy
+            audit_log.end_step("step2_cache_lookup", detail="缓存未命中，Policy 生成已禁用")
+            audit_log.start_step("step2_default_policy")
+            policy_a_next = DEFAULT_READONLY_POLICY
+            policy_cache.put(session_id, prompt_session, policy_a_next)
+            _ = _save_policy_to_file(session_id, policy_a_next)
+            audit_log.end_step("step2_default_policy", detail="使用默认最小权限 Policy")
+            result = {
+                "decision": "Allow",
+                "policy": policy_a_next,
+                "reason": judgment.reason,
+                "violated_policy": "",
+            }
+            audit_log.log_result("Allow", result["reason"], policy_a_next)
+            return result
         else:
-            audit_log.end_step("step2_cache_lookup", detail="缓存未命中")
+            audit_log.end_step("step2_cache_lookup", detail="缓存未命中，启用 LLM 生成")
+
+            # 白名单只读工具：跳过 LLM 调用，使用预定义的最小权限 Policy
+            if judgment.source == "whitelist_bypass":
+                audit_log.start_step("step2_whitelist_policy")
+                policy_a_next = DEFAULT_READONLY_POLICY
+                # 写入缓存供后续使用
+                policy_cache.put(session_id, prompt_session, policy_a_next)
+                _ = _save_policy_to_file(session_id, policy_a_next)
+                audit_log.end_step("step2_whitelist_policy", detail="白名单工具使用预定义最小权限 Policy")
+                result = {
+                    "decision": "Allow",
+                    "policy": policy_a_next,
+                    "reason": judgment.reason,
+                    "violated_policy": "",
+                }
+                audit_log.log_result("Allow", result["reason"], policy_a_next)
+                return result
 
             # Step1 与 Step2 之间的间隔（避免 API 限流）
             if cfg.timeout.step_interval > 0:
