@@ -161,13 +161,16 @@ fn extract_description_from_body(body: &str) -> String {
 }
 
 /// Minimal YAML-like to JSON converter for simple key: value frontmatter.
-/// Handles: strings, booleans, simple inline arrays `[a, b, c]`.
+/// Handles: strings, booleans, simple inline arrays `[a, b, c]`, and multiline strings (`>` or `|`).
 fn yaml_like_to_json(yaml: &str) -> String {
     let mut entries = Vec::new();
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut i = 0;
 
-    for line in yaml.lines() {
-        let line = line.trim();
+    while i < lines.len() {
+        let line = lines[i].trim();
         if line.is_empty() || line.starts_with('#') {
+            i += 1;
             continue;
         }
 
@@ -175,8 +178,65 @@ fn yaml_like_to_json(yaml: &str) -> String {
             let key = key.trim().trim_matches('"');
             let value = value.trim();
 
-            let json_value = if value.starts_with('[') && value.ends_with(']') {
-                // inline array: [a, b, c]
+            let json_value = if value == ">" || value == "|" {
+                let fold = value == ">";
+                let mut multiline_content = String::new();
+                let base_indent = if i + 1 < lines.len() {
+                    lines[i + 1].chars().take_while(|c| *c == ' ').count()
+                } else {
+                    0
+                };
+
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let next_line = lines[j];
+                    let trimmed_next = next_line.trim();
+
+                     if trimmed_next.is_empty() {
+                        if fold {
+                            if !multiline_content.is_empty() && !multiline_content.ends_with(' ') {
+                                multiline_content.push(' ');
+                            }
+                        } else {
+                            multiline_content.push('\n');
+                        }
+                        j += 1;
+                        continue;
+                    }
+
+                    let current_indent = next_line.chars().take_while(|c| *c == ' ').count();
+
+                     if current_indent < base_indent && !next_line.starts_with(' ') {
+                        break;
+                    }
+
+                    let content = if current_indent >= base_indent {
+                        &next_line[base_indent.min(next_line.len())..]
+                    } else {
+                        trimmed_next
+                    };
+
+                    if fold {
+                        if !multiline_content.is_empty() && !multiline_content.ends_with(' ') {
+                            multiline_content.push(' ');
+                        }
+                        multiline_content.push_str(content);
+                    } else {
+                        if !multiline_content.is_empty() {
+                            multiline_content.push('\n');
+                        }
+                        multiline_content.push_str(content);
+                    }
+                    j += 1;
+                }
+                i = j - 1;
+
+                let content = multiline_content.trim();
+                format!(
+                    "\"{}\"",
+                    content.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            } else if value.starts_with('[') && value.ends_with(']') {
                 let inner = &value[1..value.len() - 1];
                 let items: Vec<String> = inner
                     .split(',')
@@ -200,6 +260,7 @@ fn yaml_like_to_json(yaml: &str) -> String {
 
             entries.push(format!("\"{}\":{}", key, json_value));
         }
+        i += 1;
     }
 
     format!("{{{}}}", entries.join(","))
@@ -268,5 +329,23 @@ mod tests {
         assert_eq!(v["version"], "1.0");
         assert_eq!(v["user-invocable"], true);
         assert_eq!(v["tags"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn yaml_like_to_json_multiline_folded() {
+        let yaml = "name: test\ndescription: >\n  Line one.\n  Line two.\n  Line three.";
+        let json = yaml_like_to_json(yaml);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "test");
+        assert_eq!(v["description"], "Line one. Line two. Line three.");
+    }
+
+    #[test]
+    fn yaml_like_to_json_multiline_literal() {
+        let yaml = "name: test\ndescription: |\n  Line one.\n  Line two.";
+        let json = yaml_like_to_json(yaml);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["name"], "test");
+        assert_eq!(v["description"], "Line one.\nLine two.");
     }
 }

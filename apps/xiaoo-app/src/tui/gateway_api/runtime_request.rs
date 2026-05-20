@@ -132,6 +132,7 @@ impl GatewayRuntime {
             hooker: state.agent_config.hooker.clone(),
             operation_backend: state.agent_config.operation_backend.clone(),
             lsp_registry: state.agent_config.build_lsp_registry(),
+            skills_config: state.agent_config.resolve_skills_config(),
         })
     }
 
