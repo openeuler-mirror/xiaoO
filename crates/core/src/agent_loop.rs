@@ -22,6 +22,8 @@ use crate::runtime::AgentRuntime;
 use crate::snapshot::RuntimeSnapshot;
 use crate::suspend::{LoopRunResult, SuspendedToolCall};
 
+use crate::spawn_evict;
+
 pub enum LoopDecision {
     Continue,
     ReturnComplete,
@@ -769,95 +771,107 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
 
     ctx.turn.assistant_message = Some(response.message);
 
-    ctx.state.kv_cache_map.clear();
-    for chunk_hash in &response.kv_cache_chunk_hashes {
-        if let Some(ref text) = ctx.turn.assistant_message.as_ref().and_then(|m| m.text.as_ref()) {
-            ctx.state
-                .kv_cache_map
-                .insert(chunk_hash.clone(), text.to_string());
-        }
-    }
+    if ctx.snapshot.feature_flags.kvcache_enabled {
+        let deleted_hashes = ctx
+            .state
+            .kv_cache_map
+            .diff_deleted(&response.kv_cache_chunk_hashes);
+        spawn_evict(deleted_hashes);
 
-    if !response.kv_cache_chunk_hashes.is_empty() {
-        let cumulative_turn = ctx.state.turn_count + 1;
-        let messages: Vec<serde_json::Value> = build_result
-            .request
-            .messages
-            .iter()
-            .map(|m| {
-                let blocks: Vec<serde_json::Value> = m
-                    .blocks
-                    .iter()
-                    .map(|b| match b {
-                        ContentBlock::Text { text } => {
-                            serde_json::json!({"type": "text", "text": text})
-                        }
-                        ContentBlock::ToolUse {
-                            call_id,
-                            tool_name,
-                            input,
-                        } => {
-                            serde_json::json!({
-                                "type": "tool_use",
-                                "call_id": call_id,
-                                "tool_name": tool_name,
-                                "input": input,
-                            })
-                        }
-                        ContentBlock::ToolResult {
-                            call_id,
-                            tool_name,
-                            output,
-                            is_error,
-                        } => {
-                            serde_json::json!({
-                                "type": "tool_result",
-                                "call_id": call_id,
-                                "tool_name": tool_name,
-                                "output": output,
-                                "is_error": is_error,
-                            })
-                        }
-                        ContentBlock::Image { description } => {
-                            serde_json::json!({"type": "image", "description": description})
-                        }
-                        ContentBlock::Document { description } => {
-                            serde_json::json!({"type": "document", "description": description})
-                        }
-                    })
-                    .collect();
-                let mut msg_json = serde_json::json!({
-                    "role": m.role.as_str(),
-                    "blocks": blocks,
-                });
-                if let Some(ref rc) = m.reasoning_content {
-                    msg_json["reasoning_content"] = serde_json::json!(rc);
-                }
-                msg_json
-            })
-            .collect();
-        let debug_entry = serde_json::json!({
-            "session_id": ctx.state.session_id.to_string(),
-            "turn": cumulative_turn,
-            "messages": messages,
-            "chunk_hashes": response.kv_cache_chunk_hashes,
-            "timing": {
-                "ttft_ms": ctx.turn.ttft_ms,
-                "total_time_ms": ctx.turn.total_time_ms,
-                "tpot_ms": ctx.turn.tpot_ms,
-            },
-        });
-        let dir = std::path::Path::new("kvcache_debug");
-        let _ = std::fs::create_dir_all(dir);
-        let filename = format!(
-            "kvcache_debug_{}_{}.json",
-            ctx.state.session_id,
-            cumulative_turn
-        );
-        let path = dir.join(&filename);
-        if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
-            let _ = std::fs::write(&path, json);
-            tracing::info!(path = %path.display(), "kvcache debug file written");
+        let assistant_text = ctx
+            .turn
+            .assistant_message
+            .as_ref()
+            .and_then(|m| m.text.as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        ctx.state
+            .kv_cache_map
+            .replace(&response.kv_cache_chunk_hashes, assistant_text);
+
+        if !response.kv_cache_chunk_hashes.is_empty()
+            && ctx.snapshot.feature_flags.kvcache_debug_enabled
+        {
+            let cumulative_turn = ctx.state.turn_count + 1;
+            let messages: Vec<serde_json::Value> = build_result
+                .request
+                .messages
+                .iter()
+                .map(|m| {
+                    let blocks: Vec<serde_json::Value> = m
+                        .blocks
+                        .iter()
+                        .map(|b| match b {
+                            ContentBlock::Text { text } => {
+                                serde_json::json!({"type": "text", "text": text})
+                            }
+                            ContentBlock::ToolUse {
+                                call_id,
+                                tool_name,
+                                input,
+                            } => {
+                                serde_json::json!({
+                                    "type": "tool_use",
+                                    "call_id": call_id,
+                                    "tool_name": tool_name,
+                                    "input": input,
+                                })
+                            }
+                            ContentBlock::ToolResult {
+                                call_id,
+                                tool_name,
+                                output,
+                                is_error,
+                            } => {
+                                serde_json::json!({
+                                    "type": "tool_result",
+                                    "call_id": call_id,
+                                    "tool_name": tool_name,
+                                    "output": output,
+                                    "is_error": is_error,
+                                })
+                            }
+                            ContentBlock::Image { description } => {
+                                serde_json::json!({"type": "image", "description": description})
+                            }
+                            ContentBlock::Document { description } => {
+                                serde_json::json!({"type": "document", "description": description})
+                            }
+                        })
+                        .collect();
+                    let mut msg_json = serde_json::json!({
+                        "role": m.role.as_str(),
+                        "blocks": blocks,
+                    });
+                    if let Some(ref rc) = m.reasoning_content {
+                        msg_json["reasoning_content"] = serde_json::json!(rc);
+                    }
+                    msg_json
+                })
+                .collect();
+            let debug_entry = serde_json::json!({
+                "session_id": ctx.state.session_id.to_string(),
+                "turn": cumulative_turn,
+                "messages": messages,
+                "chunk_hashes": response.kv_cache_chunk_hashes,
+                "timing": {
+                    "ttft_ms": ctx.turn.ttft_ms,
+                    "total_time_ms": ctx.turn.total_time_ms,
+                    "tpot_ms": ctx.turn.tpot_ms,
+                },
+            });
+            let dir = std::path::Path::new("kvcache_debug");
+            let _ = std::fs::create_dir_all(dir);
+            let filename = format!(
+                "kvcache_debug_{}_{}.json",
+                ctx.state.session_id,
+                cumulative_turn
+            );
+            let path = dir.join(&filename);
+            if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
+                let _ = std::fs::write(&path, json);
+                tracing::info!(path = %path.display(), "kvcache debug file written");
+            }
         }
     }
 

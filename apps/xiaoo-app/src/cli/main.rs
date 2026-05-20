@@ -157,6 +157,8 @@ async fn main() {
                 enable_tools: !no_tools,
                 context_window,
                 reasoning_effort,
+                kvcache_enabled: llm.and_then(|l| l.kvcache_enabled).unwrap_or(false),
+                kvcache_debug_enabled: llm.and_then(|l| l.kvcache_debug_enabled).unwrap_or(false),
                 compact: file_cfg.compact.unwrap_or_default(),
                 hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
                     default: HookerDefaultMode::None,
@@ -418,6 +420,8 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             system_prompt: config.system_prompt.clone(),
             feature_flags: FeatureFlags {
                 tool_execution: config.enable_tools,
+                kvcache_enabled: config.kvcache_enabled,
+                kvcache_debug_enabled: config.kvcache_debug_enabled,
                 ..FeatureFlags::default()
             },
             token_budget: TokenBudgetConfig {

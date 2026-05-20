@@ -28,14 +28,14 @@ impl OpenAiFamilyModelCatalog {
 #[async_trait]
 impl ModelCatalog for OpenAiFamilyModelCatalog {
     async fn list_models(&self) -> Result<Vec<ModelSummary>, LlmError> {
-        let response = self
+        let mut req = self
             .client
             .get(&self.models_url())
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .header("Content-Type", "application/json");
+        if !self.api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", self.api_key));
+        }
+        let response = req.send().await.map_err(map_reqwest_error)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();

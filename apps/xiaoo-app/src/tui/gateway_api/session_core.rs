@@ -11,6 +11,7 @@ use super::session::{
     ChannelInteractionHandle, ChannelLoopEventSink, ChannelToolEventSink, SessionGateway,
     SessionTurnUpdate,
 };
+use xiaoo_core::spawn_prefetch;
 
 impl SessionGateway {
     pub fn new() -> Self {
@@ -67,73 +68,19 @@ impl SessionGateway {
 
     pub async fn import_session_snapshot(&self, record: SessionRecord) {
         let session_id = record.session_id.clone();
+        let kvcache_enabled = record.runtime.feature_flags.kvcache_enabled;
 
         let chunk_hashes: Vec<String> = record
             .loop_state
             .as_ref()
-            .map(|ls| ls.kv_cache_map.keys().cloned().collect())
+            .map(|ls| ls.kv_cache_map.chunk_hashes())
             .unwrap_or_default();
 
         self.session_store.save(record).await;
         self.active_session_ids.lock().await.insert(session_id.clone());
 
-        if !chunk_hashes.is_empty() {
-            let count = chunk_hashes.len();
-            let sid = session_id;
-            tokio::spawn(async move {
-                let payload = serde_json::json!({
-                    "chunk_hashes": chunk_hashes,
-                    "lookup_id": "snapshot_prefetch",
-                });
-                match reqwest::Client::new()
-                    .post("http://localhost:6999/memory/prefetch")
-                    .json(&payload)
-                    .send()
-                    .await
-                {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let body = resp.text().await.unwrap_or_default();
-                        let debug_entry = serde_json::json!({
-                            "session_id": sid,
-                            "request": payload,
-                            "response_status": status.as_u16(),
-                            "response_body": body,
-                        });
-                        let dir = std::path::Path::new("kvcache_debug");
-                        let _ = std::fs::create_dir_all(dir);
-                        let path = dir.join(format!("prefetch_debug_{}.json", sid));
-                        if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
-                            let _ = std::fs::write(&path, json);
-                            tracing::info!(path = %path.display(), "prefetch debug file written");
-                        }
-                        tracing::info!(
-                            status = %status,
-                            count = count,
-                            "kv cache prefetch completed"
-                        );
-                    }
-                    Err(e) => {
-                        let debug_entry = serde_json::json!({
-                            "session_id": sid,
-                            "request": payload,
-                            "error": e.to_string(),
-                        });
-                        let dir = std::path::Path::new("kvcache_debug");
-                        let _ = std::fs::create_dir_all(dir);
-                        let path = dir.join(format!("prefetch_debug_{}.json", sid));
-                        if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
-                            let _ = std::fs::write(&path, json);
-                            tracing::info!(path = %path.display(), "prefetch debug file written");
-                        }
-                        tracing::warn!(
-                            error = %e,
-                            count = count,
-                            "kv cache prefetch failed"
-                        );
-                    }
-                }
-            });
+        if kvcache_enabled && !chunk_hashes.is_empty() {
+            spawn_prefetch(chunk_hashes, "snapshot_prefetch".to_string());
         }
     }
 

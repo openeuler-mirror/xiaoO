@@ -549,6 +549,7 @@ impl App {
         let mut selection_to_apply = None;
         let mut need_api_key_dialog = None;
         let mut close_dialog = false;
+        let mut check_local_fetch = false;
 
         if let Some(dialog) = self.state.provider_dialog.as_mut() {
             match key.code {
@@ -580,8 +581,14 @@ impl App {
                     }
                     close_dialog = true;
                 }
-                KeyCode::Up => dialog.move_up(),
-                KeyCode::Down => dialog.move_down(),
+                KeyCode::Up => {
+                    dialog.move_up();
+                    check_local_fetch = true;
+                }
+                KeyCode::Down => {
+                    dialog.move_down();
+                    check_local_fetch = true;
+                }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
                 KeyCode::Tab => {
@@ -593,6 +600,10 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if check_local_fetch {
+            self.attempt_local_model_fetch();
         }
 
         if let Some(dialog) = need_api_key_dialog {
@@ -710,6 +721,32 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
+        self.attempt_local_model_fetch();
+    }
+
+    fn attempt_local_model_fetch(&mut self) {
+        let should_fetch = self
+            .state
+            .provider_dialog
+            .as_ref()
+            .map_or(false, |d| {
+                !d.local_models_loading
+                    && d.providers
+                        .get(d.selected_provider)
+                        .map_or(false, |p| {
+                            p.name == "local"
+                                && p.models.len() == 1
+                                && p.models[0].name.contains("(Local)")
+                        })
+            });
+        if !should_fetch {
+            return;
+        }
+        if let Some(dialog) = self.state.provider_dialog.as_mut() {
+            dialog.set_local_models_loading();
+        }
+        let api_base = crate::provider_service::default_api_base_for_provider("local");
+        self.start_local_model_fetch(api_base);
     }
 }
 

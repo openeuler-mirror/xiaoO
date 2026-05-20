@@ -91,6 +91,14 @@ pub struct LlmConfig {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    #[serde(default = "default_false")]
+    pub kvcache_enabled: bool,
+    #[serde(default = "default_false")]
+    pub kvcache_debug_enabled: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for LlmConfig {
@@ -103,6 +111,8 @@ impl Default for LlmConfig {
             max_tokens: default_llm_max_tokens(),
             context_window: None,
             reasoning_effort: ReasoningEffort::Off,
+            kvcache_enabled: false,
+            kvcache_debug_enabled: false,
         }
     }
 }

@@ -2,8 +2,9 @@ use agent_types::compression::CompressionMeta;
 use agent_types::outcome::TokenUsage;
 use agent_types::ChatMessage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tokio_util::sync::CancellationToken;
+
+use crate::kvcache::KvCacheMap;
 
 pub struct LoopState {
     pub session_id: uuid::Uuid,
@@ -11,7 +12,7 @@ pub struct LoopState {
     pub turn_count: u32,
     pub token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
-    pub kv_cache_map: HashMap<String, String>,
+    pub kv_cache_map: KvCacheMap,
     pub cancel: CancellationToken,
 }
 
@@ -22,7 +23,7 @@ pub struct LoopStateSnapshot {
     pub turn_count: u32,
     pub token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
-    pub kv_cache_map: HashMap<String, String>,
+    pub kv_cache_map: KvCacheMap,
 }
 
 impl LoopState {
@@ -33,7 +34,7 @@ impl LoopState {
             turn_count: 0,
             token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
-            kv_cache_map: HashMap::new(),
+            kv_cache_map: KvCacheMap::default(),
             cancel: CancellationToken::new(),
         }
     }
