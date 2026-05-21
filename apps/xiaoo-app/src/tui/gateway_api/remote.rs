@@ -162,6 +162,7 @@ impl GatewayRuntime {
         &mut self,
         state: &mut AppState,
         prompt: String,
+        append_user_message: bool,
     ) -> Result<(), String> {
         let remote = self
             .remote
@@ -188,8 +189,10 @@ impl GatewayRuntime {
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(std::time::Instant::now());
         self.first_token_latency_recorded = false;
-        state.chat_state.messages.push(Message::user(prompt));
-        state.chat_state.input.reset();
+        if append_user_message {
+            state.chat_state.messages.push(Message::user(prompt));
+            state.chat_state.input.reset();
+        }
         state.chat_state.is_loading = true;
         state
             .chat_state

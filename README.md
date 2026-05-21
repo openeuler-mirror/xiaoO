@@ -66,7 +66,7 @@ Create `~/.config/xiaoo/config.toml`:
 
 ```toml
 [llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, ...
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read the API key from this environment variable
 max_tokens = 128000                  # Optional, max output tokens per response

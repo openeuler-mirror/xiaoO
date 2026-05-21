@@ -62,6 +62,13 @@ impl GatewayRuntime {
                         tracing::warn!(error = %error, "TUI: failed to open interaction prompt");
                     }
                 }
+                SessionTurnUpdate::PendingUserMessagesConsumed { prompts } => {
+                    for prompt in prompts {
+                        state.chat_state.remove_pending_turn_prompt(&prompt);
+                        self.insert_aux_message(state, Message::user(prompt));
+                    }
+                    state.chat_state.stick_to_bottom = true;
+                }
                 SessionTurnUpdate::Done {
                     prompt_tokens,
                     completion_tokens,

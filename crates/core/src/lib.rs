@@ -11,7 +11,7 @@ pub mod suspend;
 
 pub use agent_loop::run_agent_loop;
 pub use error::BuildError;
-pub use input::{AgentLoopInput, LoopStopRule};
+pub use input::{AgentLoopInput, LoopStopRule, PendingUserMessageSource};
 pub use kvcache::{spawn_evict, spawn_prefetch, KvCacheMap};
 pub use loop_state::{LoopState, LoopStateSnapshot};
 pub use outcome::{AgentError, AgentOutcome};

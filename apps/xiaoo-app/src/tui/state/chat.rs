@@ -1,5 +1,6 @@
 use crate::input::Input;
 use ratatui::widgets::ScrollbarState;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionStatus {
@@ -79,6 +80,11 @@ pub struct ToolMessageState {
 pub struct TodoMessageState {
     pub title: String,
     pub items: Vec<(TodoDisplayStatus, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedTurn {
+    pub prompt: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -239,6 +245,7 @@ pub struct ChatState {
     pub input_history_cursor: Option<usize>,
     /// Draft text to restore after navigating back to the newest history edge.
     pub input_history_draft: String,
+    pub pending_turns: VecDeque<QueuedTurn>,
     /// Line-based scroll: number of lines skipped from the top of the message list.
     pub scroll_offset: usize,
     pub scrollbar_state: ScrollbarState,
@@ -401,6 +408,40 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
             ],
         },
         ProviderInfo {
+            name: "minimax".to_string(),
+            models: vec![
+                ModelInfo {
+                    id: "MiniMax-M2.7".to_string(),
+                    name: "MiniMax M2.7".to_string(),
+                },
+                ModelInfo {
+                    id: "MiniMax-M2.7-highspeed".to_string(),
+                    name: "MiniMax M2.7 Highspeed".to_string(),
+                },
+                ModelInfo {
+                    id: "MiniMax-M2.5".to_string(),
+                    name: "MiniMax M2.5".to_string(),
+                },
+                ModelInfo {
+                    id: "MiniMax-M2.5-highspeed".to_string(),
+                    name: "MiniMax M2.5 Highspeed".to_string(),
+                },
+            ],
+        },
+        ProviderInfo {
+            name: "kimi".to_string(),
+            models: vec![
+                ModelInfo {
+                    id: "kimi-k2-0905-preview".to_string(),
+                    name: "Kimi K2 0905 Preview".to_string(),
+                },
+                ModelInfo {
+                    id: "kimi-latest".to_string(),
+                    name: "Kimi Latest".to_string(),
+                },
+            ],
+        },
+        ProviderInfo {
             name: "ollama".to_string(),
             models: vec![
                 ModelInfo {
@@ -429,11 +470,41 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
                 name: "Qwen 3.5 (GitCode)".to_string(),
             }],
         },
+        // MiniMax Coding Plan — api.minimax.io OpenAI-compatible endpoint
+        ProviderInfo {
+            name: "minimax-coding-plan".to_string(),
+            models: vec![
+                ModelInfo {
+                    id: "MiniMax-M2.7".to_string(),
+                    name: "MiniMax M2.7 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "MiniMax-M2.7-highspeed".to_string(),
+                    name: "MiniMax M2.7 Highspeed (Coding Plan)".to_string(),
+                },
+            ],
+        },
+        // Kimi Coding Plan — api.kimi.com/coding/v1 OpenAI-compatible endpoint
+        ProviderInfo {
+            name: "kimi-coding-plan".to_string(),
+            models: vec![ModelInfo {
+                id: "kimi-for-coding".to_string(),
+                name: "Kimi for Coding".to_string(),
+            }],
+        },
         // Z.AI Coding Plan (Zhipu Coding Plan) — api.z.ai OpenAI-compatible
         // Models: glm-4.5, glm-4.5-air, glm-4.5-flash, glm-4.5v, glm-4.6, glm-4.6v, glm-4.7
         ProviderInfo {
             name: "zai-coding-plan".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "glm-5.1".to_string(),
+                    name: "GLM-5.1 (Coding Plan)".to_string(),
+                },
+                ModelInfo {
+                    id: "glm-5".to_string(),
+                    name: "GLM-5 (Coding Plan)".to_string(),
+                },
                 ModelInfo {
                     id: "glm-4.7".to_string(),
                     name: "GLM-4.7 (Coding Plan)".to_string(),
@@ -500,6 +571,7 @@ impl Default for ChatState {
             input: Input::default(),
             input_history_cursor: None,
             input_history_draft: String::new(),
+            pending_turns: VecDeque::new(),
             scroll_offset: 0,
             scrollbar_state: ScrollbarState::default(),
             is_loading: false,
@@ -529,6 +601,32 @@ impl ChatState {
     pub fn reset_input_history_navigation(&mut self) {
         self.input_history_cursor = None;
         self.input_history_draft.clear();
+    }
+
+    pub fn enqueue_pending_turn(&mut self, prompt: String) {
+        self.pending_turns.push_back(QueuedTurn { prompt });
+        self.input.reset();
+        self.stick_to_bottom = true;
+    }
+
+    pub fn pop_pending_turn(&mut self) -> Option<QueuedTurn> {
+        self.pending_turns.pop_front()
+    }
+
+    pub fn remove_pending_turn_prompt(&mut self, prompt: &str) -> bool {
+        let Some(index) = self
+            .pending_turns
+            .iter()
+            .position(|queued| queued.prompt == prompt)
+        else {
+            return false;
+        };
+        self.pending_turns.remove(index);
+        true
+    }
+
+    pub fn has_pending_turns(&self) -> bool {
+        !self.pending_turns.is_empty()
     }
 
     pub fn previous_input_history(&mut self) -> bool {
@@ -663,5 +761,23 @@ mod tests {
 
         assert!(!chat.previous_input_history());
         assert_eq!(chat.input.value(), "draft");
+    }
+
+    #[test]
+    fn enqueue_pending_turn_adds_fifo_item_without_transcript_message() {
+        let mut chat = ChatState::default();
+        chat.messages.clear();
+        chat.input = Input::from("queued");
+
+        chat.enqueue_pending_turn("queued".to_string());
+
+        assert_eq!(chat.input.value(), "");
+        assert!(chat.stick_to_bottom);
+        assert!(chat.messages.is_empty());
+        assert_eq!(
+            chat.pop_pending_turn().map(|queued| queued.prompt),
+            Some("queued".to_string())
+        );
+        assert!(!chat.has_pending_turns());
     }
 }

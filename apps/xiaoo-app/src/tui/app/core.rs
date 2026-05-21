@@ -111,9 +111,24 @@ impl App {
             }
 
             needs_redraw |= self.gateway.poll_stream_updates(&mut self.state);
-
             if self.state.should_quit {
                 break;
+            }
+
+            if !self.state.chat_state.is_loading && self.state.chat_state.has_pending_turns() {
+                match self.gateway.start_next_queued_turn(&mut self.state).await {
+                    Ok(started) => {
+                        needs_redraw |= started;
+                    }
+                    Err(error) => {
+                        self.state
+                            .chat_state
+                            .messages
+                            .push(crate::chat::Message::error(error));
+                        self.state.chat_state.stick_to_bottom = true;
+                        needs_redraw = true;
+                    }
+                }
             }
         }
         self.gateway.close_sessions(&self.state.session_id).await;

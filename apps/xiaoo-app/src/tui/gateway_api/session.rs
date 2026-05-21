@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::chat::ToolExecutionUpdate;
@@ -24,6 +25,9 @@ pub enum SessionTurnUpdate {
         update: ToolExecutionUpdate,
     },
     InteractionPrompt(PromptRequest),
+    PendingUserMessagesConsumed {
+        prompts: Vec<String>,
+    },
     Done {
         prompt_tokens: u64,
         completion_tokens: u64,
@@ -68,4 +72,42 @@ pub(super) struct ChannelInteractionHandle {
     pub(super) updates_tx: UnboundedSender<SessionTurnUpdate>,
     pub(super) interaction_rx:
         tokio::sync::Mutex<UnboundedReceiver<crate::interaction_prompt::UserPromptResult>>,
+}
+
+pub(super) struct ChannelPendingUserMessages {
+    pub(super) updates_tx: UnboundedSender<SessionTurnUpdate>,
+    pub(super) pending: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl ChannelPendingUserMessages {
+    pub(super) fn new(
+        updates_tx: UnboundedSender<SessionTurnUpdate>,
+        pending: Arc<Mutex<VecDeque<String>>>,
+    ) -> Self {
+        Self {
+            updates_tx,
+            pending,
+        }
+    }
+}
+
+#[async_trait]
+impl xiaoo_core::PendingUserMessageSource for ChannelPendingUserMessages {
+    async fn drain_pending_user_messages(&self) -> Vec<String> {
+        let prompts = self
+            .pending
+            .lock()
+            .map(|mut pending| pending.drain(..).collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        if !prompts.is_empty() {
+            let _ = self
+                .updates_tx
+                .send(SessionTurnUpdate::PendingUserMessagesConsumed {
+                    prompts: prompts.clone(),
+                });
+        }
+
+        prompts
+    }
 }

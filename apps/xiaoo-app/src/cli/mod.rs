@@ -291,6 +291,7 @@ mod tests {
 
     fn test_config() -> CliConfig {
         CliConfig {
+            kvcache_debug_enabled: false,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             api_key: None,

@@ -1,5 +1,6 @@
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -28,6 +29,7 @@ pub struct GatewayRuntime {
     pub(super) request_start: Option<Instant>,
     pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
+    pub(super) pending_user_messages: Arc<Mutex<VecDeque<String>>>,
     pub(super) remote: Option<RemoteRuntimeConfig>,
     pub(super) remote_session_open: bool,
 }
@@ -44,6 +46,7 @@ impl GatewayRuntime {
             request_start: None,
             first_token_latency_recorded: false,
             interaction_reply_tx: None,
+            pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
             remote: None,
             remote_session_open: false,
         }
@@ -64,6 +67,9 @@ impl GatewayRuntime {
         self.request_start = None;
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
+        if let Ok(mut pending) = self.pending_user_messages.lock() {
+            pending.clear();
+        }
         self.remote_session_open = false;
     }
 

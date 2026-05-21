@@ -383,12 +383,26 @@ impl App {
         }
 
         if self.state.chat_state.is_loading {
-            self.state
-                .chat_state
-                .messages
-                .push(crate::chat::Message::system(
-                    "当前任务仍在运行。请等待它结束，或先按 Esc 取消，再发送新消息。".to_string(),
-                ));
+            if let Some(body) = self.external_command_body(trimmed) {
+                self.gateway
+                    .enqueue_pending_user_message_for_running_turn(body.clone());
+                self.state.chat_state.enqueue_pending_turn(body);
+                return Ok(());
+            }
+
+            if trimmed.starts_with('/') || first_token_is_dir_command(trimmed) {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        "当前任务仍在运行。普通消息会进入待发送队列；控制命令请等待当前任务结束，或先按 Esc 取消。"
+                            .to_string(),
+                    ));
+            } else {
+                self.gateway
+                    .enqueue_pending_user_message_for_running_turn(user_input.clone());
+                self.state.chat_state.enqueue_pending_turn(user_input);
+            }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
         }
@@ -518,25 +532,16 @@ impl App {
         // if user_input.trim().starts_with("/create-skill") { ... }
 
         // External commands from ~/.xiaoo/command/
-        {
-            let cmd_name = trimmed.strip_prefix('/').unwrap_or("");
-            if let Some(cmd) = self
-                .state
-                .external_commands
-                .iter()
-                .find(|c| c.name.eq_ignore_ascii_case(cmd_name))
-            {
-                let body = cmd.body.clone();
-                self.state.chat_state.input.reset();
-                if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
-                    self.state
-                        .chat_state
-                        .messages
-                        .push(crate::chat::Message::error(error));
-                    self.state.chat_state.stick_to_bottom = true;
-                }
-                return Ok(());
+        if let Some(body) = self.external_command_body(trimmed) {
+            self.state.chat_state.input.reset();
+            if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(error));
+                self.state.chat_state.stick_to_bottom = true;
             }
+            return Ok(());
         }
 
         if let Err(error) = self.gateway.start_turn(&mut self.state, user_input).await {
@@ -547,6 +552,15 @@ impl App {
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())
+    }
+
+    fn external_command_body(&self, trimmed: &str) -> Option<String> {
+        let cmd_name = trimmed.strip_prefix('/')?;
+        self.state
+            .external_commands
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(cmd_name))
+            .map(|cmd| cmd.body.clone())
     }
 
     async fn handle_remote_command(&mut self, trimmed: &str) {
