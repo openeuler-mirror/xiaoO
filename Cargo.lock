@@ -4721,7 +4721,7 @@ dependencies = [
  "async-trait",
  "compact",
  "llm-client",
-"parking_lot",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",
