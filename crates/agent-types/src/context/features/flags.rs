@@ -8,6 +8,14 @@ pub struct FeatureFlags {
     pub cache_editing: bool,
     pub tool_execution: bool,
     pub skill_matching: bool,
+    #[serde(default = "default_false")]
+    pub kvcache_enabled: bool,
+    #[serde(default = "default_false")]
+    pub kvcache_debug_enabled: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for FeatureFlags {
@@ -19,6 +27,8 @@ impl Default for FeatureFlags {
             cache_editing: true,
             tool_execution: true,
             skill_matching: true,
+            kvcache_enabled: false,
+            kvcache_debug_enabled: false,
         }
     }
 }

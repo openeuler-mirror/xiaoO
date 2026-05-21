@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_app::channels::{
-    build_telegram_runtime, TelegramPollingMessageHandler, TelegramPollingService,
+    build_feishu_runtime, build_telegram_runtime, FeishuEventTransport,
+    FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramPollingMessageHandler,
+    TelegramPollingService,
 };
 use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
 use xiaoo_app::httpserver::{
@@ -40,26 +42,41 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let app =
         AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
     let interaction_timeout_secs = config.interaction_timeout_secs();
+    let session_service = app.session_service.clone();
+    let session_control_plane = app.session_control_plane.clone();
+
     if let Some(telegram_config) = config.telegram_polling_config()? {
         spawn_telegram_polling_service(
             telegram_config,
-            app.session_service.clone(),
+            session_service.clone(),
             interaction_timeout_secs,
         )
         .context("failed to start telegram polling service")?;
     }
+
+    if let Some(feishu_config) = config.feishu_config()? {
+        if feishu_config.event_transport == FeishuEventTransport::Websocket {
+            spawn_feishu_websocket_service(
+                feishu_config,
+                session_service.clone(),
+                interaction_timeout_secs,
+            )
+            .context("failed to start Feishu websocket service")?;
+        }
+    }
+
     let channel_runtimes = config.channel_runtimes()?;
     let router = if channel_runtimes.is_empty() {
         create_router_with_control_plane_and_auth(
-            app.session_service,
-            app.session_control_plane,
+            session_service,
+            session_control_plane,
             bearer_auth,
             rate_limit,
         )
     } else {
         create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
-            app.session_service,
-            app.session_control_plane,
+            session_service,
+            session_control_plane,
             channel_runtimes,
             interaction_timeout_secs,
             bearer_auth,
@@ -79,6 +96,31 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     axum::serve(listener, router)
         .await
         .context("axum server exited unexpectedly")
+}
+
+fn spawn_feishu_websocket_service(
+    feishu_config: xiaoo_app::channels::FeishuConfig,
+    session_service: Arc<dyn xiaoo_app::gateway::SessionService>,
+    interaction_timeout_secs: u64,
+) -> Result<()> {
+    let runtime = build_feishu_runtime(feishu_config.clone()).map_err(anyhow::Error::new)?;
+    let processor =
+        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let service = FeishuWebsocketService::new(feishu_config).map_err(anyhow::Error::new)?;
+    let handler: FeishuWebsocketMessageHandler = Arc::new(move |message| {
+        let processor = processor.clone();
+        let runtime = runtime.clone();
+        Box::pin(async move {
+            if let Err(error) = processor.process_message(runtime, message).await {
+                tracing::warn!("failed to process Feishu websocket message: {error}");
+            }
+        }) as BoxFuture<'static, ()>
+    });
+    tracing::info!("starting Feishu websocket transport");
+    tokio::spawn(async move {
+        service.run_forever(handler).await;
+    });
+    Ok(())
 }
 
 fn spawn_telegram_polling_service(

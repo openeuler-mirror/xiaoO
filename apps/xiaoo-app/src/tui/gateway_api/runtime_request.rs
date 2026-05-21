@@ -17,6 +17,7 @@ use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use tool::load_tool_sources;
 
 use super::runtime::GatewayRuntime;
+use xiaoo_core::spawn_prefetch;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_system_prompt.txt");
 
@@ -113,7 +114,21 @@ impl GatewayRuntime {
 
         let session_gateway = self.session_gateway.clone();
         let pending_user_messages = self.pending_user_messages.clone();
+        let prefetch_session_id = state.session_id.clone();
+        let kvcache_enabled = runtime_config.descriptor.feature_flags.kvcache_enabled;
         tokio::spawn(async move {
+            if kvcache_enabled {
+                if let Some(snapshot) = session_gateway.session_snapshot(&prefetch_session_id).await
+                {
+                    let chunk_hashes: Vec<String> = snapshot
+                        .loop_state
+                        .as_ref()
+                        .map(|ls| ls.kv_cache_map.chunk_hashes())
+                        .unwrap_or_default();
+                    spawn_prefetch(chunk_hashes, "turn_prefetch".to_string());
+                }
+            }
+
             if let Err(error) = session_gateway
                 .ensure_session_open(runtime_config.clone(), open_request)
                 .await
@@ -155,7 +170,12 @@ impl GatewayRuntime {
                 agent_id: AgentId(agent_id),
                 model: state.agent_config.llm.model.clone(),
                 system_prompt,
-                feature_flags: FeatureFlags::default(),
+                feature_flags: {
+                    let mut flags = FeatureFlags::default();
+                    flags.kvcache_enabled = state.agent_config.llm.kvcache_enabled;
+                    flags.kvcache_debug_enabled = state.agent_config.llm.kvcache_debug_enabled;
+                    flags
+                },
                 token_budget: TokenBudgetConfig {
                     total_budget,
                     reserved_for_output,

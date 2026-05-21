@@ -27,6 +27,7 @@ pub fn api_key_env_for_provider(provider: &str) -> &'static str {
         "kimi-coding-plan" | "kimi-code-plan" | "kimi-code" | "kimi-for-coding" => "KIMI_API_KEY",
         "gitcode" => "GITCODE_API_KEY",
         "ollama" => "OLLAMA_HOST",
+        "local" => "API_KEY",
         _ => "API_KEY",
     }
 }
@@ -59,6 +60,7 @@ pub fn default_api_base_for_provider(provider: &str) -> String {
             "https://api.kimi.com/coding/v1".to_string()
         }
         "ollama" => "http://localhost:11434".to_string(),
+        "local" => "http://localhost:8080/v1".to_string(),
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => {
             "https://api.z.ai/api/coding/paas/v4".to_string()
         }

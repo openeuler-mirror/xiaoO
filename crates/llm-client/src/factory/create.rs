@@ -76,9 +76,13 @@ fn create_provider_by_protocol(
 ) -> Result<LlmProviderWrapper, LlmError> {
     match protocol {
         ProtocolFamily::OpenAiCompatible => {
-            let api_key = api_key.ok_or_else(|| {
-                LlmError::ConfigError(format!("{} API key required", profile.display_name))
-            })?;
+            let api_key = if profile.api_key_required {
+                api_key.ok_or_else(|| {
+                    LlmError::ConfigError(format!("{} API key required", profile.display_name))
+                })?
+            } else {
+                api_key.unwrap_or_default()
+            };
             Ok(LlmProviderWrapper::new(
                 Arc::new(OpenAiFamilyProvider::new(
                     api_key,

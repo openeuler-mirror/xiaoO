@@ -11,7 +11,7 @@ pub use adapter::{
 pub use feishu::{
     capabilities as feishu_capabilities, meta as feishu_meta, FeishuAdapter, FeishuCardRequest,
     FeishuChatInfo, FeishuChatMember, FeishuClient, FeishuConfig, FeishuConfigError,
-    FeishuSendRequest,
+    FeishuEventTransport, FeishuSendRequest, FeishuWebsocketMessageHandler, FeishuWebsocketService,
 };
 pub use telegram::{
     capabilities as telegram_capabilities, meta as telegram_meta, TelegramAdapter, TelegramClient,
