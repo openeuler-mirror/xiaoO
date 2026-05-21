@@ -27,19 +27,10 @@ pub fn find_actual_string(content: &str, search_string: &str) -> Option<String> 
     if content.contains(&normalized) {
         return Some(normalized);
     }
-    // Salvage: collapse whitespace per line and try to find a unique
-    // whitespace-equivalent occurrence in the file. Returns the actual
-    // substring from `content` so callers (`apply_edit_to_file`,
-    // `validate_ambiguous_match`) keep working unchanged. Triggers when
-    // the model emits an old_string whose indent or trailing whitespace
-    // does not exactly match the file (recurring DeepSeek failure mode).
-    if let Some(s) = find_whitespace_tolerant_match(content, &normalized) {
-        return Some(s);
-    }
-    find_whitespace_tolerant_match(content, search_string)
+    find_whitespace_tolerant_match(content, &normalized)
 }
 
-fn normalize_run_whitespace(s: &str) -> String {
+fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -47,14 +38,9 @@ fn find_whitespace_tolerant_match(content: &str, search: &str) -> Option<String>
     if search.is_empty() {
         return None;
     }
-    let search_lines: Vec<&str> = search.split('\n').collect();
-    let m = search_lines.len();
-    let search_norm: Vec<String> = search_lines
-        .iter()
-        .map(|l| normalize_run_whitespace(l))
-        .collect();
-    // Bail on degenerate searches: every line normalizes to empty (would match
-    // arbitrary blank-line runs in the file with no semantic anchor).
+    let search_norm: Vec<String> =
+        search.split('\n').map(collapse_whitespace).collect();
+    let m = search_norm.len();
     if search_norm.iter().all(|l| l.is_empty()) {
         return None;
     }
@@ -62,8 +48,8 @@ fn find_whitespace_tolerant_match(content: &str, search: &str) -> Option<String>
     let bytes = content.as_bytes();
     let mut lines: Vec<(usize, usize)> = Vec::new();
     let mut line_start = 0usize;
-    for i in 0..bytes.len() {
-        if bytes[i] == b'\n' {
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
             lines.push((line_start, i));
             line_start = i + 1;
         }
@@ -74,23 +60,18 @@ fn find_whitespace_tolerant_match(content: &str, search: &str) -> Option<String>
         return None;
     }
 
+    let lines_norm: Vec<String> = lines
+        .iter()
+        .map(|&(s, e)| collapse_whitespace(&content[s..e]))
+        .collect();
+
     let mut found: Option<(usize, usize)> = None;
     for start in 0..=lines.len() - m {
-        let mut ok = true;
-        for j in 0..m {
-            let (ls, le) = lines[start + j];
-            if normalize_run_whitespace(&content[ls..le]) != search_norm[j] {
-                ok = false;
-                break;
-            }
-        }
-        if ok {
-            let first = lines[start].0;
-            let last = lines[start + m - 1].1;
+        if (0..m).all(|j| lines_norm[start + j] == search_norm[j]) {
             if found.is_some() {
                 return None;
             }
-            found = Some((first, last));
+            found = Some((lines[start].0, lines[start + m - 1].1));
         }
     }
 
@@ -238,9 +219,6 @@ mod tests {
 
     #[test]
     fn find_actual_string_whitespace_tolerant_internal_spacing() {
-        // model emitted "x = 1" but the file has "x  =  1" (extra spaces).
-        // exact-match fails => salvage returns the actual line with the file's
-        // own leading indent so the downstream `replace` operates in place.
         let content = "def f():\n    x  =  1\n    return x\n";
         let search = "x = 1";
         assert_eq!(
@@ -251,8 +229,6 @@ mod tests {
 
     #[test]
     fn find_actual_string_whitespace_tolerant_trailing_whitespace() {
-        // file lines have stray trailing spaces; model's search does not.
-        // Exact match fails => salvage recovers.
         let content = "if cond:   \n    pass  \n";
         let search = "if cond:\n    pass";
         let got = find_actual_string(content, search).expect("should salvage");
@@ -262,8 +238,6 @@ mod tests {
 
     #[test]
     fn find_actual_string_whitespace_tolerant_returns_findable_substring() {
-        // Returned string must be findable in `content` so the downstream
-        // `apply_edit_to_file` (uses `content.find`) succeeds.
         let content = "    foo  ()\n    bar()\n";
         let search = "foo ()\nbar()";
         let actual = find_actual_string(content, search).expect("should salvage");
@@ -272,8 +246,6 @@ mod tests {
 
     #[test]
     fn find_actual_string_whitespace_tolerant_ambiguous_returns_none() {
-        // Two whitespace-equivalent lines, neither matches exactly. Salvage
-        // must bail to avoid editing the wrong site.
         let content = "    foo  ()\nfunc:\n    foo   ()\n";
         let search = "foo ()";
         assert_eq!(find_actual_string(content, search), None);
@@ -281,7 +253,6 @@ mod tests {
 
     #[test]
     fn find_actual_string_whitespace_tolerant_blank_only_search_rejected() {
-        // A whitespace-only search must not match arbitrary blank runs.
         let content = "line1\n\n\nline2\n";
         let search = "  \n  ";
         assert_eq!(find_actual_string(content, search), None);
@@ -294,11 +265,12 @@ mod tests {
 
     #[test]
     fn apply_edit_uses_whitespace_salvaged_string() {
-        let content = "def f():\n    x = 1\n";
+        let content = "def f():\n    x  =  1\n";
         let search = "x = 1";
+        assert!(!content.contains(search), "test must exercise salvage path");
         let actual = find_actual_string(content, search).expect("should salvage");
         let updated =
-            apply_edit_to_file(content, &actual, "x = 2", false).expect("replace");
+            apply_edit_to_file(content, &actual, "    x = 2", false).expect("replace");
         assert_eq!(updated, "def f():\n    x = 2\n");
     }
 }
