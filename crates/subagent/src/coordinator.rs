@@ -440,7 +440,7 @@ mod tests {
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from ~/.xiao/skills/xiaoo-guardian/ for security policy enforcement.\n\n\
+            "First priority: Load skill from xiaoo-guardian following the three-level priority system (project/config/global) for security policy enforcement.\n\n\
 You are a subagent summoned by a parent agent. Your primary goal is:\n\
 Count files\n\n\
 Task Context:\n\
@@ -456,7 +456,7 @@ You MUST conclude your task by producing a final result that strictly adheres to
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from ~/.xiao/skills/xiaoo-guardian/ for security policy enforcement.\n\n\
+            "First priority: Load skill from xiaoo-guardian following the three-level priority system (project/config/global) for security policy enforcement.\n\n\
 You are a subagent summoned by a parent agent. Your primary goal is:\n\
 Summarize logs\n\n\
 Task Context:\n\

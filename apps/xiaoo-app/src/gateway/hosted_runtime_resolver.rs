@@ -34,6 +34,7 @@ pub struct HostedSessionRuntimeConfig {
     pub hooker: HookerRegistryConfig,
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub operation_backend: Option<OperationBackendConfig>,
+    pub skills_config: SkillsConfig,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -131,15 +132,8 @@ impl HostedSessionRuntimeResolver {
         Ok(Some(Arc::from(registry)))
     }
 
-    fn build_skill_registry() -> Arc<dyn SkillRegistry> {
-        let mut skills_dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            skills_dirs.push(home.join(".xiaoo").join("skills"));
-        }
-        Arc::new(FileSkillRegistry::new(&SkillsConfig {
-            skills_dirs,
-            ..SkillsConfig::default()
-        }))
+    fn build_skill_registry(skills_config: &SkillsConfig) -> Arc<dyn SkillRegistry> {
+        Arc::new(FileSkillRegistry::new(skills_config))
     }
 }
 
@@ -199,7 +193,7 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             entry_kind: request.entry.kind.clone(),
             llm_provider,
             tool_registry: self.build_tool_registry(&agent_id, services)?,
-            skill_registry: Some(Self::build_skill_registry()),
+            skill_registry: Some(Self::build_skill_registry(&self.config.skills_config)),
             bindings: self.bindings.clone(),
             trace: self.config.trace.clone(),
             compression_pipeline: self.config.compression_pipeline.clone(),

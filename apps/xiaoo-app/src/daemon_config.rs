@@ -459,9 +459,11 @@ impl DaemonConfig {
 
     pub fn resolve_skills_config(&self) -> SkillsConfig {
         let mut skills_dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            skills_dirs.push(home.join(".xiaoo").join("skills"));
-        }
+
+        // Priority 1: Project level (highest)
+        skills_dirs.push(PathBuf::from(".xiaoo/skills"));
+
+        // Priority 2: Config file user dirs (medium)
         if let Some(skills) = self.app.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
@@ -469,8 +471,11 @@ impl DaemonConfig {
                 }
             }
         }
-        skills_dirs.sort();
-        skills_dirs.dedup();
+
+        // Priority 3: Global level (lowest)
+        if let Some(home) = dirs::home_dir() {
+            skills_dirs.push(home.join(".xiaoo").join("skills"));
+        }
 
         SkillsConfig {
             skills_dirs,

@@ -130,6 +130,7 @@ pub struct CliConfig {
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
+    pub skills_config: skill::SkillsConfig,
 }
 
 // ---------------------------------------------------------------------------
