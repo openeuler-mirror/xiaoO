@@ -2365,6 +2365,7 @@ mod tests {
 
             if call_number == 1 {
                 Ok(LlmResponse {
+                    kv_cache_chunk_hashes: vec![],
                     message: AssistantMessage {
                         text: Some("checking".to_string()),
                         reasoning_content: None,
@@ -2383,6 +2384,7 @@ mod tests {
                 })
             } else {
                 Ok(LlmResponse {
+                    kv_cache_chunk_hashes: vec![],
                     message: AssistantMessage {
                         text: Some("done".to_string()),
                         reasoning_content: None,
