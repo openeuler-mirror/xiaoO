@@ -623,6 +623,7 @@ fn extract_repo_name(url: &str) -> String {
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    reject_nested_copy(src, dest)?;
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -632,6 +633,26 @@ fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io:
         } else {
             std::fs::copy(entry.path(), dst)?;
         }
+    }
+    Ok(())
+}
+
+fn reject_nested_copy(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    let src = src.canonicalize()?;
+    let dest_parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let dest_name = dest.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no name")
+    })?;
+    let dest_abs = dest_parent
+        .canonicalize()
+        .unwrap_or_else(|_| dest_parent.to_path_buf())
+        .join(dest_name);
+
+    if dest_abs.starts_with(&src) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination must not be inside source directory",
+        ));
     }
     Ok(())
 }
@@ -772,5 +793,24 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             eprintln!("[error] {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_dir_recursive;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn copy_dir_rejects_destination_inside_source() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("skills");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("SKILL.md"), "test").unwrap();
+
+        let err = copy_dir_recursive(&src, &src.join("nested")).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
