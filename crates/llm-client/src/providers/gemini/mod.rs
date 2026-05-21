@@ -141,6 +141,7 @@ impl LlmProvider for GeminiProvider {
                 },
                 stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 
@@ -254,6 +255,7 @@ impl LlmProvider for GeminiProvider {
                     finish_reason,
                     usage,
                     tool_calls: tool_call_deltas,
+                    kv_transfer_params: None,
                 };
 
                 super::openai_family::accumulate_tool_call_deltas_pub(
@@ -285,6 +287,7 @@ impl LlmProvider for GeminiProvider {
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 

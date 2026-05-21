@@ -362,21 +362,30 @@ impl App {
         frame.render_widget(provider_list, left);
 
         let models = dialog.current_models();
-        let model_lines: Vec<Line> = models
-            .iter()
-            .enumerate()
-            .map(|(index, model)| {
-                let style = if index == dialog.selected_model {
-                    Style::default()
-                        .fg(self.state.theme.foreground)
-                        .bg(self.state.theme.selection)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.state.theme.foreground)
-                };
-                Line::from(Span::styled(model.name.clone(), style))
-            })
-            .collect();
+        let model_lines: Vec<Line> = if dialog.local_models_loading {
+            vec![Line::from(Span::styled(
+                "Loading models...",
+                Style::default()
+                    .fg(self.state.theme.foreground)
+                    .add_modifier(Modifier::ITALIC),
+            ))]
+        } else {
+            models
+                .iter()
+                .enumerate()
+                .map(|(index, model)| {
+                    let style = if index == dialog.selected_model {
+                        Style::default()
+                            .fg(self.state.theme.foreground)
+                            .bg(self.state.theme.selection)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.state.theme.foreground)
+                    };
+                    Line::from(Span::styled(model.name.clone(), style))
+                })
+                .collect()
+        };
 
         let model_list = List::new(model_lines).block(
             Block::default()

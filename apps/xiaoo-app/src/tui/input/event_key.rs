@@ -265,7 +265,6 @@ impl App {
                 }
                 self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
-                self.maybe_open_load_snapshot_dialog();
             } else {
                 self.state.cycle_agent_role(false);
             }
@@ -301,7 +300,6 @@ impl App {
                 KeyCode::Enter => {
                     self.state.apply_slash_selection();
                     self.state.dismiss_current_slash_menu();
-                    self.maybe_open_load_snapshot_dialog();
                     return Ok(());
                 }
                 KeyCode::Esc => {
@@ -335,7 +333,6 @@ impl App {
                     self.state.chat_state.reset_input_history_navigation();
                 }
                 self.state.note_input_changed();
-                self.maybe_open_load_snapshot_dialog();
             }
         }
         Ok(())
@@ -596,6 +593,7 @@ impl App {
         let mut selection_to_apply = None;
         let mut need_api_key_dialog = None;
         let mut close_dialog = false;
+        let mut check_local_fetch = false;
 
         if let Some(dialog) = self.state.provider_dialog.as_mut() {
             match key.code {
@@ -627,8 +625,14 @@ impl App {
                     }
                     close_dialog = true;
                 }
-                KeyCode::Up => dialog.move_up(),
-                KeyCode::Down => dialog.move_down(),
+                KeyCode::Up => {
+                    dialog.move_up();
+                    check_local_fetch = true;
+                }
+                KeyCode::Down => {
+                    dialog.move_down();
+                    check_local_fetch = true;
+                }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
                 KeyCode::Tab => {
@@ -640,6 +644,10 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        if check_local_fetch {
+            self.attempt_local_model_fetch();
         }
 
         if let Some(dialog) = need_api_key_dialog {
@@ -659,30 +667,6 @@ impl App {
             self.state.provider_dialog = None;
         }
         Ok(())
-    }
-
-    fn maybe_open_load_snapshot_dialog(&mut self) {
-        if self.state.input_mode != InputMode::Editing
-            || self.state.chat_state.is_loading
-            || self.state.provider_dialog.is_some()
-            || self.state.api_key_dialog.is_some()
-            || self.state.interaction_prompt.is_some()
-            || self.state.session_snapshot_dialog.is_some()
-        {
-            return;
-        }
-        if !self
-            .state
-            .chat_state
-            .input
-            .value()
-            .trim()
-            .eq_ignore_ascii_case("/load")
-        {
-            return;
-        }
-        self.state.chat_state.input.reset();
-        self.open_load_snapshot_dialog();
     }
 
     fn open_load_snapshot_dialog(&mut self) {
@@ -781,6 +765,32 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
+        self.attempt_local_model_fetch();
+    }
+
+    fn attempt_local_model_fetch(&mut self) {
+        let should_fetch = self
+            .state
+            .provider_dialog
+            .as_ref()
+            .map_or(false, |d| {
+                !d.local_models_loading
+                    && d.providers
+                        .get(d.selected_provider)
+                        .map_or(false, |p| {
+                            p.name == "local"
+                                && p.models.len() == 1
+                                && p.models[0].name.contains("(Local)")
+                        })
+            });
+        if !should_fetch {
+            return;
+        }
+        if let Some(dialog) = self.state.provider_dialog.as_mut() {
+            dialog.set_local_models_loading();
+        }
+        let api_base = crate::provider_service::default_api_base_for_provider("local");
+        self.start_local_model_fetch(api_base);
     }
 
     async fn handle_turn_delete_key(&mut self, key: KeyEvent) -> Result<()> {

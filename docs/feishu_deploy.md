@@ -41,6 +41,15 @@ nginx bridges the two.
 
 This distinction is important. If you configure Feishu with the internal route directly, but your reverse proxy only exposes the public route, URL verification will fail.
 
+In other words, in the standard webhook deployment:
+
+- Feishu should call:
+  - `http://<your-domain-or-ip>/api/v1/channels/xiaoo/events`
+- Feishu should **not** call:
+  - `http://<your-domain-or-ip>/api/v1/channels/feishu/events`
+
+unless you intentionally exposed `/api/v1/channels/feishu/events` as the public route.
+
 ### 1.2 Persistent connection flow
 
 ```text
@@ -435,6 +444,17 @@ In **Events & Callbacks**:
 http://<your-domain-or-ip>/api/v1/channels/xiaoo/events
 ```
 
+If your server is listening on the default HTTP port, writing `:80` is usually unnecessary.
+
+For example, these two URLs are equivalent in most deployments:
+
+```text
+http://<your-domain-or-ip>/api/v1/channels/xiaoo/events
+http://<your-domain-or-ip>:80/api/v1/channels/xiaoo/events
+```
+
+What matters is not whether `:80` is written explicitly, but whether that public URL is actually reachable from the public internet.
+
 This address can be either:
 
 - a public server address in production
@@ -470,6 +490,38 @@ After verification succeeds:
 7. Publish a new app version if Feishu shows the callback or permission changes as draft-only
 
 Without publishing, URL verification may pass, but real user messages may still never be delivered.
+
+#### 8.1.1 Common callback URL mistakes
+
+The following mistakes are extremely common:
+
+1. Filling the **internal** route instead of the **public** route
+
+Wrong in the standard deployment:
+
+```text
+http://<your-domain-or-ip>/api/v1/channels/feishu/events
+```
+
+Right in the standard deployment:
+
+```text
+http://<your-domain-or-ip>/api/v1/channels/xiaoo/events
+```
+
+2. Assuming nginx alone is enough
+
+`nginx` can only proxy traffic if:
+
+- the xiaoO daemon is actually running
+- nginx has the correct `location`
+- nginx has been reloaded after config changes
+- port `80` or `443` is reachable from the public internet
+- the cloud security group / firewall allows inbound traffic
+
+3. Testing only from the server itself
+
+If `curl http://127.0.0.1:18080/api/v1/health` works but `curl http://<your-domain-or-ip>/api/v1/health` from another machine times out, the problem is still in public ingress, not in Feishu.
 
 ### 8.2 If you use persistent-connection mode
 
@@ -519,6 +571,26 @@ This is recommended because:
 - you can add TLS at the nginx layer
 
 If you use persistent-connection mode, this section does not apply to Feishu message ingress.
+
+### 9.1 nginx alone is not enough
+
+This is the part that new deployments most often miss.
+
+Even if nginx is installed and the config file looks correct, webhook mode still will not work unless **all** of the following are true:
+
+1. xiaoO daemon is running and healthy
+2. xiaoO is listening on `127.0.0.1:18080`
+3. nginx has the correct `location = /api/v1/channels/xiaoo/events`
+4. nginx has been reloaded after editing the config
+5. the server's public `80` or `443` port is reachable from the internet
+6. cloud security groups / firewalls allow inbound traffic
+
+If Feishu says the callback request timed out, the most common root causes are:
+
+- nginx never reloaded the new route
+- the public port is blocked
+- the daemon is down
+- the public route is wrong
 
 ## 10. Example nginx Routing
 
@@ -807,6 +879,46 @@ If someone else wants to reproduce webhook deployment, these are the exact layer
 12. the daemon can reach Feishu OpenAPI and the model provider over outbound network
 13. the Feishu app version has been published after adding callback/event changes
 
+### 13.1.1 Minimum webhook smoke checklist for a borrowed server
+
+If you are using a borrowed server for the first time, validate webhook mode in this exact order:
+
+1. Check local daemon health on the server:
+
+```bash
+curl http://127.0.0.1:18080/api/v1/health
+```
+
+2. Check public health from another machine:
+
+```bash
+curl http://<your-domain-or-ip>/api/v1/health
+```
+
+3. If step 2 times out, stop here and fix public ingress before touching Feishu:
+   - nginx config
+   - nginx reload
+   - cloud security group
+   - firewall
+
+4. Only after public health works, verify the Feishu challenge route:
+
+```bash
+curl -X POST http://<your-domain-or-ip>/api/v1/channels/xiaoo/events \
+  -H 'Content-Type: application/json' \
+  --data '{"type":"url_verification","token":"YOUR_VERIFICATION_TOKEN","challenge":"probe"}'
+```
+
+5. Only after the challenge route works, configure the same public URL in the Feishu backend
+
+If you skip this order and start from the Feishu console first, a plain timeout error usually gives too little information to know whether the problem is:
+
+- xiaoO daemon
+- nginx route
+- public port exposure
+- firewall
+- or the Feishu callback URL itself
+
 ### 13.2 Persistent-connection mode
 
 If someone else wants to reproduce persistent-connection deployment, these are the exact layers that must line up:
@@ -865,6 +977,10 @@ Expected:
 ```bash
 curl http://<your-domain-or-ip>/api/v1/health
 ```
+
+If this request times out from another machine, Feishu webhook configuration will also time out.
+
+Do **not** continue to the Feishu console until this request succeeds.
 
 ### 14.3 Check Feishu challenge response (Webhook mode only)
 
@@ -985,6 +1101,7 @@ In direct messages, plain text is usually enough.
 | Symptom | Likely Cause | What to Check |
 |---|---|---|
 | Feishu says challenge failed | public URL does not route correctly | nginx path, daemon health, verification token |
+| Feishu callback configuration times out | public ingress is not reachable at all | public `/api/v1/health`, nginx reload, security group, firewall |
 | No request reaches xiaoO logs | callback never entered app | Feishu URL, public firewall, nginx access log |
 | `invalid verification token` | token mismatch | `channels.feishu.verification_token` |
 | local websocket mode starts but receives no messages | app still uses webhook subscription mode | Feishu subscription method, app publish status |
@@ -996,6 +1113,41 @@ In direct messages, plain text is usually enough.
 | bot replies fail after message is received | OpenAPI call failure | app permissions, App Secret, outbound network |
 | Feishu says callback configured successfully but real messages still do not arrive | draft config not published | publish a new app version in Feishu Open Platform |
 | challenge succeeds but browser access works while Feishu still fails | firewall/security group issue | check public ingress on port 80/443 |
+
+## 16.1 Common Feishu Console Feedback and How to Fix It
+
+When configuring Feishu for the first time, the console error message is often too short to directly tell you which layer is broken.
+
+Use the table below as a practical decoding guide.
+
+| Feishu console feedback | What it usually means | Most likely layers to check first | Recommended fix order |
+|---|---|---|---|
+| `请求超时` / timeout while verifying callback URL | Feishu could not reach your public callback endpoint at all within the allowed time | public ingress, nginx route, daemon health, firewall, cloud security group | 1. `curl http://127.0.0.1:18080/api/v1/health` on the server 2. `curl http://<your-domain-or-ip>/api/v1/health` from another machine 3. `nginx -t` and reload 4. verify inbound `80/443` is open 5. retry in Feishu console |
+| `challenge 校验失败` / challenge verification failed | Feishu reached your service, but xiaoO did not return the expected challenge payload | callback route, verification token, wrong public/internal path mapping | 1. confirm Feishu uses `/api/v1/channels/xiaoo/events` 2. run manual challenge curl 3. verify `channels.feishu.verification_token` matches the app config |
+| `verification token` invalid | The token in Feishu console and the token in xiaoO config do not match | `config.toml`, deployment config consistency | 1. compare Feishu Verification Token with `channels.feishu.verification_token` 2. restart service after config change 3. retest challenge |
+| callback URL configured successfully but real messages do not arrive | URL challenge worked, but real event delivery is still not active | Feishu event subscription, app publish status, wrong subscription mode | 1. confirm `im.message.receive_v1` is enabled 2. publish a new app version 3. verify webhook vs websocket mode matches daemon config |
+| persistent connection mode enabled but the bot receives no messages | The daemon did not establish or maintain the Feishu long connection, or Feishu app is still on webhook mode | daemon logs, outbound network, Feishu subscription mode, app publish status | 1. check daemon logs for websocket connection 2. verify outbound access to `open.feishu.cn` 3. confirm Feishu app is set to persistent connection 4. publish the app changes |
+| bot receives messages but cannot reply | Message ingress worked, but reply path failed when calling Feishu OpenAPI | App Secret, bot permissions, outbound network | 1. verify `FEISHU_APP_SECRET` 2. verify bot send/reply permissions 3. confirm outbound access to Feishu OpenAPI |
+
+### 16.1.1 The single most useful rule for webhook debugging
+
+If this request still fails from outside the server:
+
+```bash
+curl http://<your-domain-or-ip>/api/v1/health
+```
+
+then Feishu webhook configuration is not ready yet.
+
+Do not continue debugging the Feishu console until public health is reachable.
+
+### 16.1.2 The single most useful rule for websocket debugging
+
+If Feishu is configured for persistent connection, but xiaoO logs never show websocket session activity, the first three places to check are:
+
+1. Feishu app subscription mode is really set to persistent connection
+2. the app version has been published
+3. the daemon can reach `https://open.feishu.cn` outbound
 
 ## 17. Recommended Production Layout
 
@@ -1048,6 +1200,10 @@ Before handing the deployment to someone else, make sure they can answer **yes**
 - Can the daemon reach both Feishu OpenAPI and the model provider?
 
 If all of the above are correct, the Feishu deployment should be reproducible.
+
+For webhook mode specifically, one more practical rule is worth remembering:
+
+- If `curl http://<your-domain-or-ip>/api/v1/health` still times out from outside the server, Feishu callback configuration will not succeed yet.
 
 For local websocket-only usage, the equivalent short checklist is:
 

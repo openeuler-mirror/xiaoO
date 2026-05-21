@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::response::WireUsage;
+use super::response::{KvTransferParams, WireUsage};
 use super::tool::WireToolCallDelta;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,6 +12,8 @@ pub(crate) struct ChatCompletionChunk {
     pub choices: Vec<ChunkChoice>,
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    #[serde(default)]
+    pub kv_transfer_params: Option<KvTransferParams>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,7 @@ pub(crate) struct ParsedChunk {
     pub finish_reason: Option<String>,
     pub usage: Option<WireUsage>,
     pub tool_calls: Option<Vec<WireToolCallDelta>>,
+    pub kv_transfer_params: Option<KvTransferParams>,
 }
 
 #[cfg(test)]
@@ -66,6 +69,7 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             usage: Some(usage),
             tool_calls: None,
+            kv_transfer_params: None,
         };
         assert_eq!(chunk.content, Some("Hello".to_string()));
         assert_eq!(chunk.finish_reason, Some("stop".to_string()));
@@ -90,6 +94,7 @@ mod tests {
             finish_reason: None,
             usage: None,
             tool_calls: Some(vec![tool_call_delta]),
+            kv_transfer_params: None,
         };
 
         assert!(chunk.tool_calls.is_some());

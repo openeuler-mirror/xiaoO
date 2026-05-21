@@ -19,6 +19,7 @@ pub fn api_key_env_for_provider(provider: &str) -> &'static str {
         "glm" | "glm-global" => "GLM_API_KEY",
         "gitcode" => "GITCODE_API_KEY",
         "ollama" => "OLLAMA_HOST",
+        "local" => "API_KEY",
         _ => "API_KEY",
     }
 }
@@ -42,6 +43,7 @@ pub fn default_api_base_for_provider(provider: &str) -> String {
         "deepseek" => "https://api.deepseek.com".to_string(),
         "gitcode" => "https://api-ai.gitcode.com/v1".to_string(),
         "ollama" => "http://localhost:11434".to_string(),
+        "local" => "http://localhost:8080/v1".to_string(),
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => {
             "https://api.z.ai/api/coding/paas/v4".to_string()
         }

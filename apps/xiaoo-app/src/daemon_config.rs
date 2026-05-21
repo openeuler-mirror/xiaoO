@@ -59,6 +59,10 @@ pub struct LlmConfig {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub context_window: Option<usize>,
+    #[serde(default)]
+    pub kvcache_enabled: Option<bool>,
+    #[serde(default)]
+    pub kvcache_debug_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

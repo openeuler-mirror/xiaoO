@@ -6,6 +6,7 @@ pub struct ProviderDialog {
     pub selected_provider: usize,
     pub selected_model: usize,
     pub focus: DialogFocus,
+    pub local_models_loading: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +22,7 @@ impl ProviderDialog {
             selected_provider: 0,
             selected_model: 0,
             focus: DialogFocus::Providers,
+            local_models_loading: false,
         }
     }
 
@@ -107,6 +109,24 @@ impl ProviderDialog {
         let provider = self.providers.get(self.selected_provider)?;
         let model = provider.models.get(self.selected_model)?;
         Some((provider.name.clone(), model.id.clone()))
+    }
+
+    pub fn set_local_models_loading(&mut self) {
+        self.local_models_loading = true;
+    }
+
+    pub fn apply_fetched_local_models(&mut self, models: Vec<ModelInfo>) {
+        self.local_models_loading = false;
+        if let Some(provider) = self.providers.iter_mut().find(|p| p.name == "local") {
+            if !models.is_empty() {
+                provider.models = models;
+            } else {
+                provider.models = vec![ModelInfo {
+                    id: "glm4.7".to_string(),
+                    name: "glm4.7".to_string(),
+                }];
+            }
+        }
     }
 }
 
