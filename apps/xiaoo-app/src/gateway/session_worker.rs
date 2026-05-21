@@ -55,6 +55,7 @@ impl SessionWorker {
             resolved.bindings.loop_event_sink = None;
             resolved.bindings.tool_event_sink = None;
             resolved.bindings.interaction_handle = None;
+            resolved.bindings.pending_user_messages = None;
         } else {
             // Merge overrides: override takes precedence.
             if let Some(override_handle) = input.interaction_handle_override.clone() {
@@ -126,6 +127,9 @@ impl SessionWorker {
         }
         if let Some(runtime_view) = assembly.runtime_view.clone() {
             loop_input = loop_input.with_runtime_view(runtime_view);
+        }
+        if let Some(pending_user_messages) = resolved.bindings.pending_user_messages.clone() {
+            loop_input = loop_input.with_pending_user_messages(pending_user_messages);
         }
 
         let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input).await;

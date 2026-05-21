@@ -94,14 +94,16 @@ fn validate_input(input: &PromptBuildInput) -> Result<(), PromptBuildError> {
 }
 
 fn project_tools(visible_tools: &[std::sync::Arc<dyn ToolSpecView>]) -> Vec<Tool> {
-    visible_tools
+    let mut tools: Vec<Tool> = visible_tools
         .iter()
         .map(|tool| Tool {
             name: tool.name().0.clone(),
             description: tool.description().to_string(),
             parameters: tool.input_schema().schema.clone(),
         })
-        .collect()
+        .collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools
 }
 
 fn estimate_request_size(request: &LlmRequest) -> usize {

@@ -228,6 +228,40 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: false,
         }),
+        "kimi" | "moonshot" | "moonshot-ai" => Some(ProviderProfile {
+            provider_name: "kimi",
+            display_name: "Kimi",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.moonshot.cn/v1"),
+            default_api_key_env: Some("MOONSHOT_API_KEY"),
+            api_key_required: true,
+            api_base_style: ApiBaseStyle::ExpectV1,
+            supports_model_catalog: true,
+        }),
+        "minimax-coding-plan" | "minimax-code-plan" | "minimax-token-plan" => {
+            Some(ProviderProfile {
+                provider_name: "minimax-coding-plan",
+                display_name: "MiniMax Coding Plan",
+                protocol_family: ProtocolFamily::OpenAiCompatible,
+                default_base_url: Some("https://api.minimax.io/v1"),
+                default_api_key_env: Some("MINIMAX_API_KEY"),
+                api_key_required: true,
+                api_base_style: ApiBaseStyle::ExpectV1,
+                supports_model_catalog: true,
+            })
+        }
+        "kimi-coding-plan" | "kimi-code-plan" | "kimi-code" | "kimi-for-coding" => {
+            Some(ProviderProfile {
+                provider_name: "kimi-coding-plan",
+                display_name: "Kimi Coding Plan",
+                protocol_family: ProtocolFamily::OpenAiCompatible,
+                default_base_url: Some("https://api.kimi.com/coding/v1"),
+                default_api_key_env: Some("KIMI_API_KEY"),
+                api_key_required: true,
+                api_base_style: ApiBaseStyle::ExpectV1,
+                supports_model_catalog: true,
+            })
+        }
         "gitcode" => Some(ProviderProfile {
             provider_name: "gitcode",
             display_name: "GitCode AI",
@@ -248,6 +282,16 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_api_key_env: Some("ZHIPU_API_KEY"),
             api_key_required: true,
             api_base_style: ApiBaseStyle::Preserve,
+            supports_model_catalog: true,
+        }),
+        "local" => Some(ProviderProfile {
+            provider_name: "local",
+            display_name: "Local Model",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("http://localhost:8080/v1"),
+            default_api_key_env: None,
+            api_key_required: false,
+            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "other" => Some(ProviderProfile {
@@ -299,7 +343,18 @@ pub fn supported_providers() -> &'static [&'static str] {
         "minimax",
         "minimax-openai",
         "minimax-anthropic",
+        "kimi",
+        "moonshot",
+        "moonshot-ai",
+        "minimax-coding-plan",
+        "minimax-code-plan",
+        "minimax-token-plan",
+        "kimi-coding-plan",
+        "kimi-code-plan",
+        "kimi-code",
+        "kimi-for-coding",
         "gitcode",
+        "local",
         "zai-coding-plan",
         "zhipu-coding-plan",
         "zhipuai-coding-plan",
@@ -341,6 +396,27 @@ mod tests {
         let profile = resolve_provider_profile("ollama").unwrap();
         assert_eq!(profile.provider_name, "ollama");
         assert!(!profile.api_key_required);
+
+        let profile = resolve_provider_profile("kimi").unwrap();
+        assert_eq!(profile.provider_name, "kimi");
+        assert_eq!(profile.default_base_url, Some("https://api.moonshot.cn/v1"));
+        assert_eq!(profile.default_api_key_env, Some("MOONSHOT_API_KEY"));
+        assert_eq!(profile.protocol_family, ProtocolFamily::OpenAiCompatible);
+
+        let profile = resolve_provider_profile("minimax-coding-plan").unwrap();
+        assert_eq!(profile.provider_name, "minimax-coding-plan");
+        assert_eq!(profile.default_base_url, Some("https://api.minimax.io/v1"));
+        assert_eq!(profile.default_api_key_env, Some("MINIMAX_API_KEY"));
+        assert_eq!(profile.protocol_family, ProtocolFamily::OpenAiCompatible);
+
+        let profile = resolve_provider_profile("kimi-coding-plan").unwrap();
+        assert_eq!(profile.provider_name, "kimi-coding-plan");
+        assert_eq!(
+            profile.default_base_url,
+            Some("https://api.kimi.com/coding/v1")
+        );
+        assert_eq!(profile.default_api_key_env, Some("KIMI_API_KEY"));
+        assert_eq!(profile.protocol_family, ProtocolFamily::OpenAiCompatible);
 
         assert!(resolve_provider_profile("unknown").is_none());
     }

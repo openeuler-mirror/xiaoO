@@ -118,6 +118,7 @@ impl LlmProvider for OllamaProvider {
                 usage,
                 stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 
@@ -202,6 +203,7 @@ impl LlmProvider for OllamaProvider {
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 
@@ -263,6 +265,7 @@ fn parse_ollama_stream_line(line: &str) -> Result<Option<ParsedChunk>, LlmError>
         finish_reason,
         usage,
         tool_calls: None,
+        kv_transfer_params: None,
     }))
 }
 

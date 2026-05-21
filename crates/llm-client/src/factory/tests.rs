@@ -100,6 +100,7 @@ mod wrapper_tests {
                 },
                 stop_reason: StopReason::EndTurn,
             },
+            kv_cache_chunk_hashes: vec![],
         }
     }
 

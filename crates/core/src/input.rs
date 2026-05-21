@@ -6,6 +6,12 @@ use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::AgentId;
 use agent_types::ReasoningEffort;
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait PendingUserMessageSource: Send + Sync {
+    async fn drain_pending_user_messages(&self) -> Vec<String>;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LoopStopRule {
@@ -24,6 +30,8 @@ pub struct AgentLoopInput {
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub reasoning_effort: ReasoningEffort,
     pub stop_rules: Vec<LoopStopRule>,
+    // User messages from gateway.
+    pub pending_user_messages: Option<Arc<dyn PendingUserMessageSource>>,
 }
 
 impl AgentLoopInput {
@@ -38,6 +46,7 @@ impl AgentLoopInput {
             runtime_view: None,
             reasoning_effort: ReasoningEffort::Off,
             stop_rules: Vec::new(),
+            pending_user_messages: None,
         }
     }
 
@@ -73,6 +82,11 @@ impl AgentLoopInput {
 
     pub fn with_stop_rules(mut self, rules: impl IntoIterator<Item = LoopStopRule>) -> Self {
         self.stop_rules = rules.into_iter().collect();
+        self
+    }
+
+    pub fn with_pending_user_messages(mut self, source: Arc<dyn PendingUserMessageSource>) -> Self {
+        self.pending_user_messages = Some(source);
         self
     }
 

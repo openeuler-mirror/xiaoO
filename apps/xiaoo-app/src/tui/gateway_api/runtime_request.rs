@@ -17,13 +17,60 @@ use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use tool::load_tool_sources;
 
 use super::runtime::GatewayRuntime;
+use xiaoo_core::spawn_prefetch;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_system_prompt.txt");
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
+        self.start_turn_internal(state, prompt, true).await
+    }
+
+    pub async fn start_next_queued_turn(&mut self, state: &mut AppState) -> Result<bool, String> {
+        if state.chat_state.is_loading {
+            return Ok(false);
+        }
+        let Some(queued) = state.chat_state.pop_pending_turn() else {
+            return Ok(false);
+        };
+        self.discard_pending_user_message(&queued.prompt);
+        self.start_turn_internal(state, queued.prompt, true).await?;
+        Ok(true)
+    }
+
+    pub fn enqueue_pending_user_message_for_running_turn(&mut self, prompt: String) -> bool {
+        if self.remote.is_some() || self.stream_rx.is_none() {
+            return false;
+        }
+
+        if let Ok(mut pending) = self.pending_user_messages.lock() {
+            pending.push_back(prompt);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn discard_pending_user_message(&mut self, prompt: &str) {
+        let Ok(mut pending) = self.pending_user_messages.lock() else {
+            return;
+        };
+        let Some(index) = pending.iter().position(|queued| queued == prompt) else {
+            return;
+        };
+        pending.remove(index);
+    }
+
+    async fn start_turn_internal(
+        &mut self,
+        state: &mut AppState,
+        prompt: String,
+        append_user_message: bool,
+    ) -> Result<(), String> {
         if self.remote.is_some() {
-            return self.start_remote_turn(state, prompt).await;
+            return self
+                .start_remote_turn(state, prompt, append_user_message)
+                .await;
         }
 
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
@@ -46,8 +93,10 @@ impl GatewayRuntime {
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(Instant::now());
         self.first_token_latency_recorded = false;
-        state.chat_state.messages.push(Message::user(prompt));
-        state.chat_state.input.reset();
+        if append_user_message {
+            state.chat_state.messages.push(Message::user(prompt));
+            state.chat_state.input.reset();
+        }
         state.chat_state.is_loading = true;
         state
             .chat_state
@@ -64,7 +113,22 @@ impl GatewayRuntime {
         self.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
 
         let session_gateway = self.session_gateway.clone();
+        let pending_user_messages = self.pending_user_messages.clone();
+        let prefetch_session_id = state.session_id.clone();
+        let kvcache_enabled = runtime_config.descriptor.feature_flags.kvcache_enabled;
         tokio::spawn(async move {
+            if kvcache_enabled {
+                if let Some(snapshot) = session_gateway.session_snapshot(&prefetch_session_id).await
+                {
+                    let chunk_hashes: Vec<String> = snapshot
+                        .loop_state
+                        .as_ref()
+                        .map(|ls| ls.kv_cache_map.chunk_hashes())
+                        .unwrap_or_default();
+                    spawn_prefetch(chunk_hashes, "turn_prefetch".to_string());
+                }
+            }
+
             if let Err(error) = session_gateway
                 .ensure_session_open(runtime_config.clone(), open_request)
                 .await
@@ -72,7 +136,13 @@ impl GatewayRuntime {
                 let _ = updates_tx.send(crate::session_gateway::SessionTurnUpdate::Err(error));
                 return;
             }
-            session_gateway.spawn_turn(runtime_config, turn_request, updates_tx, interaction_rx);
+            session_gateway.spawn_turn(
+                runtime_config,
+                turn_request,
+                updates_tx,
+                interaction_rx,
+                pending_user_messages,
+            );
         });
 
         Ok(())
@@ -100,7 +170,12 @@ impl GatewayRuntime {
                 agent_id: AgentId(agent_id),
                 model: state.agent_config.llm.model.clone(),
                 system_prompt,
-                feature_flags: FeatureFlags::default(),
+                feature_flags: {
+                    let mut flags = FeatureFlags::default();
+                    flags.kvcache_enabled = state.agent_config.llm.kvcache_enabled;
+                    flags.kvcache_debug_enabled = state.agent_config.llm.kvcache_debug_enabled;
+                    flags
+                },
                 token_budget: TokenBudgetConfig {
                     total_budget,
                     reserved_for_output,
@@ -132,6 +207,7 @@ impl GatewayRuntime {
             hooker: state.agent_config.hooker.clone(),
             operation_backend: state.agent_config.operation_backend.clone(),
             lsp_registry: state.agent_config.build_lsp_registry(),
+            skills_config: state.agent_config.resolve_skills_config(),
         })
     }
 

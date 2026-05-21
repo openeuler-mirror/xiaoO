@@ -125,9 +125,12 @@ pub struct CliConfig {
     pub enable_tools: bool,
     pub context_window: Option<usize>,
     pub reasoning_effort: ReasoningEffort,
+    pub kvcache_enabled: bool,
+    pub kvcache_debug_enabled: bool,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
+    pub skills_config: skill::SkillsConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +291,7 @@ mod tests {
 
     fn test_config() -> CliConfig {
         CliConfig {
+            kvcache_debug_enabled: false,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
             api_key: None,
@@ -299,6 +303,7 @@ mod tests {
             enable_tools: false,
             context_window: None,
             reasoning_effort: Default::default(),
+            kvcache_enabled: true,
             compact: crate::cli::config::CompactSection::default(),
             hooker: Default::default(),
             operation_backend: None,

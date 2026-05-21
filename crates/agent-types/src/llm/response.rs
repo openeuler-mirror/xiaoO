@@ -36,6 +36,7 @@ pub struct AssistantMessage {
 #[derive(Clone, Debug)]
 pub struct LlmResponse {
     pub message: AssistantMessage,
+    pub kv_cache_chunk_hashes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
     Frame,
 };
 
@@ -11,8 +11,42 @@ use crate::app_state::{ApiKeyDialogState, InputMode};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
 use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
+use crate::services::turn_delete::DeleteDialog;
 
 use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
+
+/// Flatten newlines and truncate `text` to fit within `max_width` terminal columns,
+/// appending "..." when truncated.
+fn truncate_to_width(text: &str, max_width: u16) -> String {
+    let flattened = text.replace('\n', " ");
+    if flattened.is_empty() || max_width == 0 {
+        return String::new();
+    }
+    let max = max_width as usize;
+    if max <= 3 {
+        return ".".repeat(max);
+    }
+    let full_width: usize = flattened.chars().map(char_display_width).sum();
+    if full_width <= max {
+        return flattened;
+    }
+    let target = max - 3;
+    let mut width = 0;
+    let mut end = 0;
+    for (i, c) in flattened.char_indices() {
+        let cw = char_display_width(c);
+        if width + cw > target {
+            break;
+        }
+        width += cw;
+        end = i + c.len_utf8();
+    }
+    format!("{}...", &flattened[..end])
+}
+
+fn char_display_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
 
 fn expand_popup_area(area: Rect, bounds: Rect, margin: u16) -> Rect {
     let left = area.x.saturating_sub(margin).max(bounds.x);
@@ -43,6 +77,77 @@ fn render_popup_backdrop(frame: &mut Frame, area: Rect, bounds: Rect, bg: ratatu
 }
 
 impl App {
+    pub(crate) fn render_pending_turns(&self, frame: &mut Frame, input_area: Rect, bounds: Rect) {
+        let pending = &self.state.chat_state.pending_turns;
+        if pending.is_empty() || input_area.y <= bounds.y {
+            return;
+        }
+
+        let visible_count = if pending.len() > 3 { 2 } else { pending.len() };
+        let skipped = pending.len().saturating_sub(visible_count);
+        let line_count = visible_count + usize::from(skipped > 0);
+        let height = (line_count as u16 + 2).min(input_area.y.saturating_sub(bounds.y));
+        if height == 0 {
+            return;
+        }
+
+        let available_width = bounds.width.min(input_area.width).max(1);
+        let width = if available_width >= 32 {
+            available_width.min(56)
+        } else {
+            available_width
+        };
+        let x = bounds
+            .x
+            .saturating_add(bounds.width)
+            .saturating_sub(width.saturating_add(2))
+            .max(bounds.x);
+        let y = input_area
+            .y
+            .saturating_sub(height.saturating_add(1))
+            .max(bounds.y);
+        let area = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(self.state.theme.muted))
+            .title(" 待发送 ")
+            .style(Style::default().bg(self.state.theme.input_bg));
+
+        let inner_width = width.saturating_sub(4) as usize;
+        let mut lines = Vec::new();
+        if skipped > 0 {
+            lines.push(Line::styled(
+                format!("  ... 还有 {skipped} 条更早输入"),
+                Style::default().fg(self.state.theme.muted),
+            ));
+        }
+
+        for queued in pending.iter().skip(skipped) {
+            let prompt = one_line_preview(&queued.prompt, inner_width.saturating_sub(5));
+            lines.push(Line::from(vec![
+                Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+                Span::styled(prompt, Style::default().fg(self.state.theme.muted)),
+                Span::styled("  ", Style::default().fg(self.state.theme.muted)),
+                Span::styled(
+                    sanitize_terminal_text("●"),
+                    Style::default()
+                        .fg(self.state.theme.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+    }
+
     pub(crate) fn render_interaction_prompt_dialog(&mut self, frame: &mut Frame, area: Rect) {
         let Some(prompt) = self.state.interaction_prompt.as_ref() else {
             self.state.render_state.interaction_prompt_list_area = None;
@@ -181,7 +286,7 @@ impl App {
             .iter()
             .any(|message| message.tool_state.is_some());
         let title = if self.state.chat_state.is_loading {
-            " Esc 取消 "
+            " Enter 加入队列 | Esc 取消当前任务 "
         } else if self.state.input_mode == InputMode::InteractionPrompt {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 | Tab 切换补充 "
         } else if self.state.slash_menu_visible() {
@@ -190,6 +295,8 @@ impl App {
             " Enter 连接 | Esc 取消 "
         } else if self.state.session_snapshot_dialog.is_some() {
             " ↑↓ 选择快照 | Enter 读取 | Esc 取消 "
+        } else if self.state.delete_dialog.is_some() {
+            " ↑↓ 选择 | Enter 确认 | Esc 取消 "
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if has_tool_cards {
@@ -241,8 +348,7 @@ impl App {
         };
         frame.render_widget(paragraph, area);
 
-        if !self.state.chat_state.is_loading
-            && inner.width > 0
+        if inner.width > 0
             && inner.height > 0
             && self.state.interaction_prompt.is_none()
             && self.state.api_key_dialog.is_none()
@@ -326,21 +432,30 @@ impl App {
         frame.render_widget(provider_list, left);
 
         let models = dialog.current_models();
-        let model_lines: Vec<Line> = models
-            .iter()
-            .enumerate()
-            .map(|(index, model)| {
-                let style = if index == dialog.selected_model {
-                    Style::default()
-                        .fg(self.state.theme.foreground)
-                        .bg(self.state.theme.selection)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(self.state.theme.foreground)
-                };
-                Line::from(Span::styled(model.name.clone(), style))
-            })
-            .collect();
+        let model_lines: Vec<Line> = if dialog.local_models_loading {
+            vec![Line::from(Span::styled(
+                "Loading models...",
+                Style::default()
+                    .fg(self.state.theme.foreground)
+                    .add_modifier(Modifier::ITALIC),
+            ))]
+        } else {
+            models
+                .iter()
+                .enumerate()
+                .map(|(index, model)| {
+                    let style = if index == dialog.selected_model {
+                        Style::default()
+                            .fg(self.state.theme.foreground)
+                            .bg(self.state.theme.selection)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.state.theme.foreground)
+                    };
+                    Line::from(Span::styled(model.name.clone(), style))
+                })
+                .collect()
+        };
 
         let model_list = List::new(model_lines).block(
             Block::default()
@@ -441,6 +556,156 @@ impl App {
             height: 1,
         };
         frame.render_widget(hint, hint_area);
+    }
+
+    pub(crate) fn render_delete_dialog(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        dialog: &DeleteDialog,
+    ) {
+        match dialog {
+            DeleteDialog::Selecting { entries, selected } => {
+                let dialog_width = area.width.min(80).max(50);
+                let max_visible = 8u16;
+                let visible = (entries.len() as u16).min(max_visible);
+                let desired_height = visible + 3;
+                let dialog_height = area.height.min(desired_height).max(6);
+                let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+                let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+                let dialog_area = Rect {
+                    x: dialog_x,
+                    y: dialog_y,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
+
+                render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+                let block = Block::default()
+                    .title(" Select a turn to delete ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(self.state.theme.border_style(true))
+                    .style(Style::default().bg(self.state.theme.background))
+                    .padding(Padding::horizontal(1));
+                let inner = block.inner(dialog_area);
+
+                frame.render_widget(block, dialog_area);
+
+                // Separate list and hint areas to avoid overlap
+                let list_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height.saturating_sub(1),
+                };
+                let hint_area = Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height.saturating_sub(1),
+                    width: inner.width,
+                    height: 1,
+                };
+
+                let prefix_width = format!("{}. ", entries.len()).len() as u16;
+                let content_width = list_area.width.saturating_sub(prefix_width);
+
+                let items: Vec<ListItem> = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let is_selected = index == *selected;
+                        let style = if is_selected {
+                            Style::default()
+                                .fg(self.state.theme.foreground)
+                                .bg(self.state.theme.selection)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(self.state.theme.foreground)
+                        };
+                        let display = truncate_to_width(&entry.full_content, content_width);
+                        ListItem::new(Line::from(Span::styled(
+                            format!("{}. {}", entry.index, display),
+                            style,
+                        )))
+                    })
+                    .collect();
+
+                // Use ListState for automatic scrolling
+                let mut list_state = ListState::default();
+                list_state.select(Some(*selected));
+                let list = List::new(items);
+                frame.render_stateful_widget(list, list_area, &mut list_state);
+
+                let hint = Paragraph::new("↑↓ 选择  Enter 确认  Esc 取消")
+                    .style(Style::default().fg(self.state.theme.muted));
+                frame.render_widget(hint, hint_area);
+            }
+            DeleteDialog::Confirming {
+                turn,
+                subsequent_count,
+            } => {
+                let dialog_width = area.width.min(50).max(36);
+                let dialog_height = if *subsequent_count > 0 { 8 } else { 6 };
+                let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+                let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+                let dialog_area = Rect {
+                    x: dialog_x,
+                    y: dialog_y,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
+
+                render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+                let block = Block::default()
+                    .title(" 确认删除 ")
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(self.state.theme.border_active))
+                    .style(Style::default().bg(self.state.theme.background))
+                    .padding(Padding::horizontal(1));
+                let _inner = block.inner(dialog_area);
+                let label = "删除对话: ";
+                let content_width = _inner.width.saturating_sub(label.len() as u16);
+                let display = truncate_to_width(&turn.full_content, content_width);
+
+                let mut lines: Vec<Line<'_>> = vec![
+                    Line::from(Span::styled(
+                        format!("{}{}", label, display),
+                        Style::default().fg(self.state.theme.foreground),
+                    )),
+                    Line::from(""),
+                ];
+
+                if *subsequent_count > 0 {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "⚠ 该轮次之后还有 {} 轮对话，",
+                            subsequent_count
+                        ),
+                        Style::default().fg(self.state.theme.error),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        "删除后可能丢失相关上下文。".to_string(),
+                        Style::default().fg(self.state.theme.error),
+                    )));
+                }
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "Enter 确认",
+                        Style::default()
+                            .fg(self.state.theme.foreground)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled("Esc 取消", Style::default().fg(self.state.theme.muted)),
+                ]));
+
+                let paragraph = Paragraph::new(lines).block(block);
+                frame.render_widget(paragraph, dialog_area);
+            }
+        }
     }
 
     pub(crate) fn render_api_key_dialog(
@@ -549,6 +814,20 @@ impl App {
                 .wrap(Wrap { trim: true });
             frame.render_widget(error_paragraph, chunks[2]);
         }
+    }
+}
+
+fn one_line_preview(text: &str, max_chars: usize) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut chars = collapsed.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}...")
+    } else {
+        preview
     }
 }
 

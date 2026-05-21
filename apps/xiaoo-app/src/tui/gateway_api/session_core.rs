@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
@@ -8,9 +9,10 @@ use crate::gateway::{
 use crate::interaction_prompt::UserPromptResult;
 
 use super::session::{
-    ChannelInteractionHandle, ChannelLoopEventSink, ChannelToolEventSink, SessionGateway,
-    SessionTurnUpdate,
+    ChannelInteractionHandle, ChannelLoopEventSink, ChannelPendingUserMessages,
+    ChannelToolEventSink, SessionGateway, SessionTurnUpdate,
 };
+use xiaoo_core::spawn_prefetch;
 
 impl SessionGateway {
     pub fn new() -> Self {
@@ -67,8 +69,20 @@ impl SessionGateway {
 
     pub async fn import_session_snapshot(&self, record: SessionRecord) {
         let session_id = record.session_id.clone();
+        let kvcache_enabled = record.runtime.feature_flags.kvcache_enabled;
+
+        let chunk_hashes: Vec<String> = record
+            .loop_state
+            .as_ref()
+            .map(|ls| ls.kv_cache_map.chunk_hashes())
+            .unwrap_or_default();
+
         self.session_store.save(record).await;
-        self.active_session_ids.lock().await.insert(session_id);
+        self.active_session_ids.lock().await.insert(session_id.clone());
+
+        if kvcache_enabled && !chunk_hashes.is_empty() {
+            spawn_prefetch(chunk_hashes, "snapshot_prefetch".to_string());
+        }
     }
 
     pub fn spawn_turn(
@@ -77,6 +91,7 @@ impl SessionGateway {
         request: AppTurnRequest,
         updates_tx: tokio::sync::mpsc::UnboundedSender<SessionTurnUpdate>,
         interaction_rx: tokio::sync::mpsc::UnboundedReceiver<UserPromptResult>,
+        pending_user_messages: Arc<Mutex<VecDeque<String>>>,
     ) {
         let session_store: Arc<dyn SessionStore> = self.session_store.clone();
         // Track the session so close_all_sessions covers it even if
@@ -98,6 +113,10 @@ impl SessionGateway {
                     interaction_rx,
                 ))),
                 channel_file_sender: None,
+                pending_user_messages: Some(Arc::new(ChannelPendingUserMessages::new(
+                    updates_tx.clone(),
+                    pending_user_messages,
+                ))),
             };
 
             let hooker_config = runtime_config.hooker.clone();

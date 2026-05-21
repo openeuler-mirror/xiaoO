@@ -34,6 +34,12 @@ impl Warning {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct KvTransferParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chunk_hashes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WireResponse {
     pub id: String,
     pub model: String,
@@ -41,6 +47,8 @@ pub(crate) struct WireResponse {
     pub usage: WireUsage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<Warning>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<KvTransferParams>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +106,7 @@ mod tests {
                 "anthropic",
                 "ignored",
             )]),
+            kv_transfer_params: None,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -118,6 +127,7 @@ mod tests {
                 total_tokens: 15,
             },
             warnings: None,
+            kv_transfer_params: None,
         };
 
         let json = serde_json::to_string(&response_no_warnings).unwrap();

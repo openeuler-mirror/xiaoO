@@ -211,6 +211,7 @@ impl LlmProvider for AnthropicProvider {
                 usage,
                 stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 
@@ -324,6 +325,7 @@ impl LlmProvider for AnthropicProvider {
                 usage: final_usage.unwrap_or_default(),
                 stop_reason: final_stop_reason,
             },
+            kv_cache_chunk_hashes: vec![],
         })
     }
 
@@ -368,6 +370,7 @@ impl AnthropicProvider {
                     finish_reason: None,
                     usage,
                     tool_calls: None,
+                    kv_transfer_params: None,
                 }))
             }
             Some("content_block_delta") => {
@@ -395,6 +398,7 @@ impl AnthropicProvider {
                     finish_reason: None,
                     usage: None,
                     tool_calls,
+                    kv_transfer_params: None,
                 }))
             }
             Some("content_block_start") => {
@@ -415,6 +419,7 @@ impl AnthropicProvider {
                                 arguments: None,
                             }),
                         }]),
+                        kv_transfer_params: None,
                     }))
                 } else {
                     Ok(Some(ParsedChunk::default()))
@@ -435,6 +440,7 @@ impl AnthropicProvider {
                     finish_reason: stop_reason,
                     usage,
                     tool_calls: None,
+                    kv_transfer_params: None,
                 }))
             }
             Some("message_stop") => Ok(None),

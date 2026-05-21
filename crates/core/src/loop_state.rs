@@ -6,12 +6,15 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::kvcache::KvCacheMap;
+
 pub struct LoopState {
     pub session_id: uuid::Uuid,
     pub messages: Arc<RwLock<Vec<ChatMessage>>>,
     pub turn_count: u32,
     pub token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
+    pub kv_cache_map: KvCacheMap,
     pub cancel: CancellationToken,
 }
 
@@ -22,6 +25,7 @@ pub struct LoopStateSnapshot {
     pub turn_count: u32,
     pub token_usage: TokenUsage,
     pub compression_meta: CompressionMeta,
+    pub kv_cache_map: KvCacheMap,
 }
 
 impl LoopState {
@@ -32,6 +36,7 @@ impl LoopState {
             turn_count: 0,
             token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
+            kv_cache_map: KvCacheMap::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -43,6 +48,7 @@ impl LoopState {
             turn_count: self.turn_count,
             token_usage: self.token_usage.clone(),
             compression_meta: self.compression_meta.clone(),
+            kv_cache_map: self.kv_cache_map.clone(),
         }
     }
 
@@ -53,6 +59,7 @@ impl LoopState {
             turn_count: snapshot.turn_count,
             token_usage: snapshot.token_usage,
             compression_meta: snapshot.compression_meta,
+            kv_cache_map: snapshot.kv_cache_map,
             cancel,
         }
     }

@@ -91,6 +91,14 @@ pub struct LlmConfig {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    #[serde(default = "default_false")]
+    pub kvcache_enabled: bool,
+    #[serde(default = "default_false")]
+    pub kvcache_debug_enabled: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 impl Default for LlmConfig {
@@ -103,6 +111,8 @@ impl Default for LlmConfig {
             max_tokens: default_llm_max_tokens(),
             context_window: None,
             reasoning_effort: ReasoningEffort::Off,
+            kvcache_enabled: false,
+            kvcache_debug_enabled: false,
         }
     }
 }
@@ -222,9 +232,11 @@ impl Config {
 
     pub fn resolve_skills_config(&self) -> ResolvedSkillsConfig {
         let mut skills_dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            skills_dirs.push(home.join(".xiaoo").join("skills"));
-        }
+
+        // Priority 1: Project level (highest)
+        skills_dirs.push(PathBuf::from(".xiaoo/skills"));
+
+        // Priority 2: Config file user dirs (medium)
         if let Some(skills) = self.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
@@ -232,8 +244,11 @@ impl Config {
                 }
             }
         }
-        skills_dirs.sort();
-        skills_dirs.dedup();
+
+        // Priority 3: Global level (lowest)
+        if let Some(home) = dirs::home_dir() {
+            skills_dirs.push(home.join(".xiaoo").join("skills"));
+        }
 
         ResolvedSkillsConfig {
             skills_dirs,

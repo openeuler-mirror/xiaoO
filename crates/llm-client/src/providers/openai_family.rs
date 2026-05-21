@@ -171,6 +171,7 @@ impl LlmProvider for OpenAiFamilyProvider {
         let mut full_tool_calls = Vec::new();
         let mut final_usage = None;
         let mut final_finish_reason = None;
+        let mut final_kv_transfer_params = None;
 
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
@@ -202,6 +203,9 @@ impl LlmProvider for OpenAiFamilyProvider {
                     }
                     if let Some(ref reason) = parsed.finish_reason {
                         final_finish_reason = Some(reason.clone());
+                    }
+                    if parsed.kv_transfer_params.is_some() {
+                        final_kv_transfer_params = parsed.kv_transfer_params.clone();
                     }
                     accumulate_tool_call_deltas(&mut full_tool_calls, &parsed);
 
@@ -248,6 +252,9 @@ impl LlmProvider for OpenAiFamilyProvider {
                 usage,
                 stop_reason,
             },
+            kv_cache_chunk_hashes: final_kv_transfer_params
+                .map(|p| p.chunk_hashes)
+                .unwrap_or_default(),
         })
     }
 
@@ -294,6 +301,7 @@ pub(crate) fn parse_openai_family_stream_line(line: &str) -> Result<Option<Parse
             finish_reason: choice.finish_reason.clone(),
             usage: chunk.usage.clone(),
             tool_calls: choice.delta.tool_calls.clone(),
+            kv_transfer_params: chunk.kv_transfer_params.clone(),
         }
     } else {
         ParsedChunk {
@@ -302,6 +310,7 @@ pub(crate) fn parse_openai_family_stream_line(line: &str) -> Result<Option<Parse
             finish_reason: None,
             usage: chunk.usage.clone(),
             tool_calls: None,
+            kv_transfer_params: chunk.kv_transfer_params.clone(),
         }
     };
 

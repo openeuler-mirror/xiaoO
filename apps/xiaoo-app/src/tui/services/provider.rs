@@ -17,8 +17,17 @@ pub fn api_key_env_for_provider(provider: &str) -> &'static str {
         | "glm-cn" => "ZHIPU_API_KEY",
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => "ZHIPU_API_KEY",
         "glm" | "glm-global" => "GLM_API_KEY",
+        "minimax"
+        | "minimax-openai"
+        | "minimax-anthropic"
+        | "minimax-coding-plan"
+        | "minimax-code-plan"
+        | "minimax-token-plan" => "MINIMAX_API_KEY",
+        "kimi" | "moonshot" | "moonshot-ai" => "MOONSHOT_API_KEY",
+        "kimi-coding-plan" | "kimi-code-plan" | "kimi-code" | "kimi-for-coding" => "KIMI_API_KEY",
         "gitcode" => "GITCODE_API_KEY",
         "ollama" => "OLLAMA_HOST",
+        "local" => "API_KEY",
         _ => "API_KEY",
     }
 }
@@ -41,7 +50,17 @@ pub fn default_api_base_for_provider(provider: &str) -> String {
         "xai" | "xai-grok" => "https://api.x.ai/v1".to_string(),
         "deepseek" => "https://api.deepseek.com".to_string(),
         "gitcode" => "https://api-ai.gitcode.com/v1".to_string(),
+        "minimax" | "minimax-openai" => "https://api.minimaxi.com/v1".to_string(),
+        "minimax-anthropic" => "https://api.minimaxi.com/anthropic/v1".to_string(),
+        "minimax-coding-plan" | "minimax-code-plan" | "minimax-token-plan" => {
+            "https://api.minimax.io/v1".to_string()
+        }
+        "kimi" | "moonshot" | "moonshot-ai" => "https://api.moonshot.cn/v1".to_string(),
+        "kimi-coding-plan" | "kimi-code-plan" | "kimi-code" | "kimi-for-coding" => {
+            "https://api.kimi.com/coding/v1".to_string()
+        }
         "ollama" => "http://localhost:11434".to_string(),
+        "local" => "http://localhost:8080/v1".to_string(),
         "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => {
             "https://api.z.ai/api/coding/paas/v4".to_string()
         }
@@ -208,6 +227,42 @@ mod tests {
         assert_eq!(
             default_api_base_for_provider("openai"),
             "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn coding_plan_provider_defaults_are_explicit() {
+        assert_eq!(
+            default_api_key_env_for_provider("minimax").as_deref(),
+            Some("MINIMAX_API_KEY")
+        );
+        assert_eq!(
+            default_api_base_for_provider("minimax"),
+            "https://api.minimaxi.com/v1"
+        );
+        assert_eq!(
+            default_api_key_env_for_provider("kimi").as_deref(),
+            Some("MOONSHOT_API_KEY")
+        );
+        assert_eq!(
+            default_api_base_for_provider("kimi"),
+            "https://api.moonshot.cn/v1"
+        );
+        assert_eq!(
+            default_api_key_env_for_provider("minimax-coding-plan").as_deref(),
+            Some("MINIMAX_API_KEY")
+        );
+        assert_eq!(
+            default_api_base_for_provider("minimax-coding-plan"),
+            "https://api.minimax.io/v1"
+        );
+        assert_eq!(
+            default_api_key_env_for_provider("kimi-coding-plan").as_deref(),
+            Some("KIMI_API_KEY")
+        );
+        assert_eq!(
+            default_api_base_for_provider("kimi-coding-plan"),
+            "https://api.kimi.com/coding/v1"
         );
     }
 }

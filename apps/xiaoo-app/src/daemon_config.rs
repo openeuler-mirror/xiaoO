@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_app::channels::{
-    build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig, TelegramConfig,
-    TelegramEventTransport,
+    build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig,
+    FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
@@ -59,6 +59,10 @@ pub struct LlmConfig {
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub context_window: Option<usize>,
+    #[serde(default)]
+    pub kvcache_enabled: Option<bool>,
+    #[serde(default)]
+    pub kvcache_debug_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -75,6 +79,8 @@ pub struct ChannelsConfig {
 pub struct FeishuChannelConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default, rename = "transport")]
+    pub event_transport: FeishuEventTransport,
     #[serde(default)]
     pub channel_instance_id: Option<String>,
     #[serde(default)]
@@ -367,10 +373,18 @@ impl DaemonConfig {
             "channels.feishu.app_secret_env",
             feishu.app_secret_env.as_deref(),
         )?;
-        let verification_token = required_field(
-            "channels.feishu.verification_token",
-            feishu.verification_token.as_deref(),
-        )?;
+        let verification_token = match feishu.event_transport {
+            FeishuEventTransport::Webhook => Some(required_field(
+                "channels.feishu.verification_token",
+                feishu.verification_token.as_deref(),
+            )?),
+            FeishuEventTransport::Websocket => feishu
+                .verification_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        };
         let base_url = feishu
             .base_url
             .clone()
@@ -380,6 +394,7 @@ impl DaemonConfig {
             channel_instance_id: normalize_optional_string(feishu.channel_instance_id.clone()),
             app_id,
             app_secret_env,
+            event_transport: feishu.event_transport,
             verification_token,
             base_url,
             parse_file_messages: false,
@@ -430,7 +445,9 @@ impl DaemonConfig {
     pub fn channel_runtimes(&self) -> Result<Vec<ChannelRuntime>> {
         let mut runtimes = Vec::new();
         if let Some(feishu) = self.feishu_config()? {
-            runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
+            if feishu.event_transport == FeishuEventTransport::Webhook {
+                runtimes.push(build_feishu_runtime(feishu).map_err(anyhow::Error::new)?);
+            }
         }
         if let Some(telegram) = self.telegram_config()? {
             if telegram.event_transport == TelegramEventTransport::Webhook {
@@ -442,9 +459,11 @@ impl DaemonConfig {
 
     pub fn resolve_skills_config(&self) -> SkillsConfig {
         let mut skills_dirs = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            skills_dirs.push(home.join(".xiaoo").join("skills"));
-        }
+
+        // Priority 1: Project level (highest)
+        skills_dirs.push(PathBuf::from(".xiaoo/skills"));
+
+        // Priority 2: Config file user dirs (medium)
         if let Some(skills) = self.app.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
@@ -452,8 +471,11 @@ impl DaemonConfig {
                 }
             }
         }
-        skills_dirs.sort();
-        skills_dirs.dedup();
+
+        // Priority 3: Global level (lowest)
+        if let Some(home) = dirs::home_dir() {
+            skills_dirs.push(home.join(".xiaoo").join("skills"));
+        }
 
         SkillsConfig {
             skills_dirs,
@@ -621,6 +643,43 @@ mod tests {
             .expect("feishu should be enabled");
         assert_eq!(feishu.app_id, "cli_123");
         assert_eq!(feishu.base_url, "https://open.feishu.cn");
+    }
+
+    #[test]
+    fn parses_feishu_websocket_config_without_webhook_runtime() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [channels.feishu]
+            enabled = true
+            transport = "websocket"
+            channel_instance_id = "ops-feishu"
+            app_id = "cli_123"
+            app_secret_env = "FEISHU_APP_SECRET"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let feishu = daemon
+            .feishu_config()
+            .expect("feishu websocket config should validate")
+            .expect("feishu should be enabled");
+
+        assert_eq!(
+            feishu.event_transport,
+            super::FeishuEventTransport::Websocket
+        );
+        assert_eq!(feishu.channel_instance_id.as_deref(), Some("ops-feishu"));
+        assert!(feishu.verification_token.is_none());
+        assert!(daemon
+            .channel_runtimes()
+            .expect("webhook channel runtimes should resolve")
+            .is_empty());
     }
 
     #[test]

@@ -95,7 +95,12 @@ impl ConfiguredRuntimeResolver {
             agent_roles: config.app.agent.clone(),
             llm_provider,
             token_budget,
-            feature_flags: FeatureFlags::default(),
+            feature_flags: {
+            let mut flags = FeatureFlags::default();
+            flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
+            flags.kvcache_debug_enabled = config.app.llm.kvcache_debug_enabled.unwrap_or(false);
+            flags
+        },
             trace,
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),

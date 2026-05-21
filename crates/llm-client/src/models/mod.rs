@@ -104,9 +104,7 @@ pub async fn resolve_model_context_length(
 pub fn create_model_catalog(config: &ResolvedConfig) -> Result<Box<dyn ModelCatalog>, LlmError> {
     match config.protocol {
         ProtocolFamily::OpenAiCompatible => {
-            let api_key = config.api_key.clone().ok_or_else(|| {
-                LlmError::ConfigError("API key required for model catalog".to_string())
-            })?;
+            let api_key = config.api_key.clone().unwrap_or_default();
             Ok(Box::new(OpenAiFamilyModelCatalog::new(
                 api_key,
                 config.base_url.clone(),
