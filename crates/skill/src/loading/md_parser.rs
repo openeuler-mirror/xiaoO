@@ -192,7 +192,7 @@ fn yaml_like_to_json(yaml: &str) -> String {
                     let next_line = lines[j];
                     let trimmed_next = next_line.trim();
 
-                     if trimmed_next.is_empty() {
+                    if trimmed_next.is_empty() {
                         if fold {
                             if !multiline_content.is_empty() && !multiline_content.ends_with(' ') {
                                 multiline_content.push(' ');
@@ -206,7 +206,7 @@ fn yaml_like_to_json(yaml: &str) -> String {
 
                     let current_indent = next_line.chars().take_while(|c| *c == ' ').count();
 
-                     if current_indent < base_indent && !next_line.starts_with(' ') {
+                    if current_indent < base_indent && !next_line.starts_with(' ') {
                         break;
                     }
 
@@ -232,10 +232,7 @@ fn yaml_like_to_json(yaml: &str) -> String {
                 i = j - 1;
 
                 let content = multiline_content.trim();
-                format!(
-                    "\"{}\"",
-                    content.replace('\\', "\\\\").replace('"', "\\\"")
-                )
+                format!("\"{}\"", content.replace('\\', "\\\\").replace('"', "\\\""))
             } else if value.starts_with('[') && value.ends_with(']') {
                 let inner = &value[1..value.len() - 1];
                 let items: Vec<String> = inner

@@ -208,9 +208,10 @@ fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> skill::SkillsConfig
                 let path = PathBuf::from(dir);
                 // Avoid duplicates with default dirs
                 let dir_str = path.to_string_lossy();
-                if dir_str != ".xiaoo/skills" &&
-                   !dir_str.ends_with("/.xiaoo/skills") &&
-                   !dir_str.ends_with("\\.xiaoo\\skills") {
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                {
                     skills_dirs.push(path);
                 }
             }
@@ -247,9 +248,10 @@ fn resolve_all_skills_dirs() -> Vec<PathBuf> {
                 let path = PathBuf::from(dir);
                 // Avoid duplicates with project/global dirs
                 let dir_str = path.to_string_lossy();
-                if dir_str != ".xiaoo/skills" &&
-                   !dir_str.ends_with("/.xiaoo/skills") &&
-                   !dir_str.ends_with("\\.xiaoo\\skills") {
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                {
                     dirs.push(path);
                 }
             }
@@ -374,11 +376,7 @@ fn handle_skill_command(command: SkillCommands) {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .strip_suffix(".git")
-                    .unwrap_or(
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown"),
-                    )
+                    .unwrap_or(p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"))
                     .to_string()
             };
 
@@ -394,9 +392,15 @@ fn handle_skill_command(command: SkillCommands) {
             // Check config file directories
             let config_dests = {
                 let file_cfg = FileConfig::load(None, false);
-                file_cfg.skills.as_ref()
+                file_cfg
+                    .skills
+                    .as_ref()
                     .and_then(|s| s.dirs.as_ref())
-                    .map(|dirs| dirs.iter().map(|d| PathBuf::from(d).join(&skill_name)).collect::<Vec<_>>())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&skill_name))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
             };
 
@@ -471,7 +475,8 @@ fn handle_skill_command(command: SkillCommands) {
             };
 
             // Validate that source directory contains a valid skill (SKILL.md or SKILL.toml)
-            let has_manifest = src_dir.join("SKILL.md").exists() || src_dir.join("SKILL.toml").exists();
+            let has_manifest =
+                src_dir.join("SKILL.md").exists() || src_dir.join("SKILL.toml").exists();
             if !has_manifest {
                 eprintln!("Error: Source directory is not a valid skill directory.");
                 eprintln!("A valid skill directory must contain either SKILL.md or SKILL.toml.");
@@ -511,9 +516,15 @@ fn handle_skill_command(command: SkillCommands) {
             // Get config file directories
             let config_dirs = {
                 let file_cfg = FileConfig::load(None, false);
-                file_cfg.skills.as_ref()
+                file_cfg
+                    .skills
+                    .as_ref()
                     .and_then(|s| s.dirs.as_ref())
-                    .map(|dirs| dirs.iter().map(|d| PathBuf::from(d).join(&name)).collect::<Vec<_>>())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&name))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
             };
 
@@ -524,7 +535,11 @@ fn handle_skill_command(command: SkillCommands) {
                     eprintln!("Failed to remove from project: {}", e);
                     std::process::exit(1);
                 }
-                println!("Removed skill '{}' from {} (project level, highest priority).", name, project_dir.display());
+                println!(
+                    "Removed skill '{}' from {} (project level, highest priority).",
+                    name,
+                    project_dir.display()
+                );
 
                 // Warn if config dirs still exist
                 for config_dir in &config_dirs {
@@ -557,7 +572,11 @@ fn handle_skill_command(command: SkillCommands) {
                         eprintln!("Failed to remove from config directory: {}", e);
                         std::process::exit(1);
                     }
-                    println!("Removed skill '{}' from {} (config directory, medium priority).", name, config_dir.display());
+                    println!(
+                        "Removed skill '{}' from {} (config directory, medium priority).",
+                        name,
+                        config_dir.display()
+                    );
 
                     // Warn if other config dirs or global still exist
                     for other_config_dir in &config_dirs {
@@ -590,7 +609,11 @@ fn handle_skill_command(command: SkillCommands) {
                         eprintln!("Failed to remove from global: {}", e);
                         std::process::exit(1);
                     }
-                    println!("Removed skill '{}' from {} (global level, lowest priority).", name, global_d.display());
+                    println!(
+                        "Removed skill '{}' from {} (global level, lowest priority).",
+                        name,
+                        global_d.display()
+                    );
                     return;
                 }
             }

@@ -2,7 +2,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    },
     Frame,
 };
 
@@ -10,8 +12,8 @@ use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
-use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 use crate::services::turn_delete::DeleteDialog;
+use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
 use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
 
@@ -678,10 +680,7 @@ impl App {
 
                 if *subsequent_count > 0 {
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            "⚠ 该轮次之后还有 {} 轮对话，",
-                            subsequent_count
-                        ),
+                        format!("⚠ 该轮次之后还有 {} 轮对话，", subsequent_count),
                         Style::default().fg(self.state.theme.error),
                     )));
                     lines.push(Line::from(Span::styled(

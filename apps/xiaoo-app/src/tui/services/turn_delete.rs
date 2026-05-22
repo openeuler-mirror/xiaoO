@@ -211,7 +211,10 @@ mod tests {
         dialog.advance_to_confirm();
         assert!(!dialog.is_selecting());
         let (subsequent, content) = match &dialog {
-            DeleteDialog::Confirming { turn, subsequent_count } => (*subsequent_count, turn.full_content.clone()),
+            DeleteDialog::Confirming {
+                turn,
+                subsequent_count,
+            } => (*subsequent_count, turn.full_content.clone()),
             _ => panic!("expected Confirming"),
         };
         assert_eq!(subsequent, 1); // q2 is after q1
