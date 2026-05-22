@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
 
 [[bin]]
 name = "xiaoo"
@@ -24,12 +26,14 @@ base64.workspace = true
 async-trait.workspace = true
 axum = "0.7"
 regex = "1.11"
+glob = "0.3"
 reqwest.workspace = true
 mime_guess.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 prost = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

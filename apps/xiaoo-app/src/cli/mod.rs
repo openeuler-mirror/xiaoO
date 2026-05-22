@@ -129,7 +129,7 @@ pub struct CliConfig {
     pub kvcache_debug_enabled: bool,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
-    pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
+    pub operation_backend: Option<crate::gateway::backend::GatewayBackendConfig>,
     pub skills_config: skill::SkillsConfig,
 }
 

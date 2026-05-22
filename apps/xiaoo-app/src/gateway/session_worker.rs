@@ -1,8 +1,12 @@
 use crate::builtin_agent_roles::PLAN_AGENT_ID;
+use crate::gateway::backend::{
+    BackendAcquireRequest, BackendScope, ExternalBackendManager, GatewayBackendConfig,
+};
 use crate::gateway::{
     AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolver, SessionServiceError,
 };
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
@@ -42,6 +46,7 @@ pub struct SessionWorker;
 impl SessionWorker {
     pub async fn run(
         runtime_resolver: &dyn SessionRuntimeResolver,
+        backend_manager: Arc<ExternalBackendManager>,
         input: SessionWorkerInput,
     ) -> Result<SessionWorkerResult, SessionServiceError> {
         let is_root_lane = input.agent_id == input.session.runtime.agent_id;
@@ -85,11 +90,14 @@ impl SessionWorker {
 
         // Share message storage with runtime_view
         let messages = loop_state.messages_arc();
+        let operation_backend =
+            resolve_operation_backend(&resolved, &input.session, &backend_manager).await?;
         let assembly = AppRuntimeFactory::build(
             &resolved,
             &input.session,
             messages,
             input.tool_manifest.clone(),
+            operation_backend,
         )
         .await?;
         let tool_manifest = assembly.tool_manifest.clone();
@@ -167,6 +175,77 @@ impl SessionWorker {
             tool_manifest,
         })
     }
+}
+
+async fn resolve_operation_backend(
+    resolved: &crate::gateway::ResolvedSessionRuntime,
+    session: &SessionRecord,
+    backend_manager: &ExternalBackendManager,
+) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
+    match resolved.operation_backend.as_ref() {
+        Some(config) if config.kind == "conch" => {
+            let lease = backend_manager
+                .acquire(BackendAcquireRequest {
+                    config: config.clone(),
+                    scope: BackendScope::Session,
+                    workspace_root: resolved.descriptor.workspace_root.clone(),
+                    session_id: session.session_id.clone(),
+                })
+                .await
+                .map_err(|error| SessionServiceError::RuntimeBuild {
+                    message: format!("failed to acquire external backend: {error}"),
+                })?;
+            Ok(lease.backend())
+        }
+        Some(config) if config.kind == "local" => {
+            build_local_backend(Some(config), resolved.descriptor.workspace_root.clone())
+        }
+        Some(config) => Err(SessionServiceError::RuntimeBuild {
+            message: format!("unsupported operation backend kind: {}", config.kind),
+        }),
+        None => build_local_backend(None, resolved.descriptor.workspace_root.clone()),
+    }
+}
+
+fn build_local_backend(
+    config: Option<&GatewayBackendConfig>,
+    workspace_root: std::path::PathBuf,
+) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
+    #[derive(serde::Deserialize)]
+    struct LocalBackendOptions {
+        home_dir: Option<String>,
+        temp_root: Option<String>,
+        default_shell: Option<String>,
+    }
+
+    let (home_dir, temp_root, default_shell) = match config {
+        Some(config) => {
+            let options: LocalBackendOptions = serde_json::from_value(config.options.clone())
+                .map_err(|error| SessionServiceError::RuntimeBuild {
+                    message: format!("invalid local backend options: {error}"),
+                })?;
+            (
+                options.home_dir.map(std::path::PathBuf::from),
+                options.temp_root.map(std::path::PathBuf::from),
+                options.default_shell,
+            )
+        }
+        None => (
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+            Some(std::env::temp_dir()),
+            None,
+        ),
+    };
+
+    operation_backend::local_backend_for_workspace(
+        workspace_root,
+        home_dir,
+        temp_root,
+        default_shell,
+    )
+    .map_err(|error| SessionServiceError::RuntimeBuild {
+        message: format!("failed to build local operation backend: {error}"),
+    })
 }
 
 #[derive(Clone)]

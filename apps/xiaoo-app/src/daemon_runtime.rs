@@ -1,5 +1,4 @@
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
-use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -25,9 +24,9 @@ use std::{fs, path::Path};
 use tool::ToolRuntimeServices;
 use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
 use xiaoo_app::gateway::{
-    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
-    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
-    SessionRuntimeResolver,
+    backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
+    SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
+    SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
@@ -45,7 +44,7 @@ pub struct ConfiguredRuntimeResolver {
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
     lsp_registry: Option<Arc<LspServiceRegistry>>,
-    operation_backend: Option<OperationBackendConfig>,
+    operation_backend: Option<GatewayBackendConfig>,
 }
 
 impl ConfiguredRuntimeResolver {

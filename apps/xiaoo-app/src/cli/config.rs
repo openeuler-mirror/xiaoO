@@ -1,4 +1,4 @@
-use agent_contracts::backend::OperationBackendConfig;
+use crate::gateway::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;
@@ -18,7 +18,7 @@ pub struct FileConfig {
     pub trace: Option<Value>,
     pub hooker: Option<HookerRegistryConfig>,
     #[serde(default)]
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]

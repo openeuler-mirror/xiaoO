@@ -96,8 +96,8 @@ impl ToolExecutor for LspExecutor {
         // ── Explicit content sync ──────────────────────────────────────────────
         // For local backend, LspService also reads content from the host FS
         // inside prepare_file(). This explicit sync ensures the LSP server sees
-        // the current on-disk state and establishes the interface that future
-        // remote backends (conch) will use as their primary content delivery path.
+        // the current on-disk state and establishes the interface that non-local
+        // LSP-capable backends can use as their primary content delivery path.
         let file_content = backend
             .files()
             .read_bytes(ReadBytesRequest {
