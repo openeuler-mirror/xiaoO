@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use agent_contracts::backend::capability::filesystem::ReadBytesRequest;
 use agent_contracts::backend::capability::path::{ResolveBase, ResolvePathRequest};
-use agent_contracts::backend::OperationBackendKind;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
@@ -67,10 +66,10 @@ impl ToolExecutor for LspExecutor {
             ));
         };
 
-        if backend.backend_kind() != OperationBackendKind::Local {
+        if !backend.capabilities().supports_lsp {
             return Ok(error_output(&format!(
-                "lsp tool only supports local backend; {} backend is not supported",
-                backend.backend_kind().as_str(),
+                "lsp tool is not supported by backend '{}'",
+                backend.backend_id(),
             )));
         }
 
