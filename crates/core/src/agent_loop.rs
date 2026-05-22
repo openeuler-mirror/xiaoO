@@ -729,7 +729,10 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
-        ctx.snapshot.llm_provider.complete(&build_result.request).await?
+        ctx.snapshot
+            .llm_provider
+            .complete(&build_result.request)
+            .await?
     } else {
         let first_token_at = std::sync::Arc::clone(&first_token_at);
         ctx.snapshot
@@ -741,8 +744,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                let default_agent_id =
-                    agent_types::common::ids::AgentId(String::from("anonymous"));
+                let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
                 let agent_id = ctx
                     .input
                     .agent_id
@@ -889,8 +891,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             let _ = std::fs::create_dir_all(dir);
             let filename = format!(
                 "kvcache_debug_{}_{}.json",
-                ctx.state.session_id,
-                cumulative_turn
+                ctx.state.session_id, cumulative_turn
             );
             let path = dir.join(&filename);
             if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {

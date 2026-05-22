@@ -78,7 +78,10 @@ impl SessionGateway {
             .unwrap_or_default();
 
         self.session_store.save(record).await;
-        self.active_session_ids.lock().await.insert(session_id.clone());
+        self.active_session_ids
+            .lock()
+            .await
+            .insert(session_id.clone());
 
         if kvcache_enabled && !chunk_hashes.is_empty() {
             spawn_prefetch(chunk_hashes, "snapshot_prefetch".to_string());

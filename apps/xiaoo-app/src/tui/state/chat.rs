@@ -456,12 +456,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         },
         ProviderInfo {
             name: "local".to_string(),
-            models: vec![
-                ModelInfo {
-                    id: "glm4.7".to_string(),
-                    name: "GLM 4.7 (Local)".to_string(),
-                },
-            ],
+            models: vec![ModelInfo {
+                id: "glm4.7".to_string(),
+                name: "GLM 4.7 (Local)".to_string(),
+            }],
         },
         ProviderInfo {
             name: "gitcode".to_string(),
