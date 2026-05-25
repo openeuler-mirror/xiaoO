@@ -27,7 +27,55 @@ pub fn find_actual_string(content: &str, search_string: &str) -> Option<String> 
     if content.contains(&normalized) {
         return Some(normalized);
     }
-    None
+    find_whitespace_tolerant_match(content, &normalized)
+}
+
+fn collapse_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn find_whitespace_tolerant_match(content: &str, search: &str) -> Option<String> {
+    if search.is_empty() {
+        return None;
+    }
+    let search_norm: Vec<String> =
+        search.split('\n').map(collapse_whitespace).collect();
+    let m = search_norm.len();
+    if search_norm.iter().all(|l| l.is_empty()) {
+        return None;
+    }
+
+    let bytes = content.as_bytes();
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' {
+            lines.push((line_start, i));
+            line_start = i + 1;
+        }
+    }
+    lines.push((line_start, bytes.len()));
+
+    if lines.len() < m {
+        return None;
+    }
+
+    let lines_norm: Vec<String> = lines
+        .iter()
+        .map(|&(s, e)| collapse_whitespace(&content[s..e]))
+        .collect();
+
+    let mut found: Option<(usize, usize)> = None;
+    for start in 0..=lines.len() - m {
+        if (0..m).all(|j| lines_norm[start + j] == search_norm[j]) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some((lines[start].0, lines[start + m - 1].1));
+        }
+    }
+
+    found.map(|(s, e)| content[s..e].to_string())
 }
 
 pub fn preserve_quote_style(actual_old_string: &str, new_string: &str) -> String {
@@ -148,4 +196,81 @@ pub fn get_patch_for_edit(old_string: &str, new_string: &str) -> (StructuredPatc
 
     let updated_file = new_string.to_string();
     (hunks, updated_file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_actual_string_exact_match() {
+        assert_eq!(
+            find_actual_string("hello world\nfoo bar\n", "foo bar"),
+            Some("foo bar".to_string())
+        );
+    }
+
+    #[test]
+    fn find_actual_string_curly_quote_normalization() {
+        let content = "x = 'value'";
+        let search = "x = \u{2018}value\u{2019}";
+        assert_eq!(find_actual_string(content, search), Some("x = 'value'".to_string()));
+    }
+
+    #[test]
+    fn find_actual_string_whitespace_tolerant_internal_spacing() {
+        let content = "def f():\n    x  =  1\n    return x\n";
+        let search = "x = 1";
+        assert_eq!(
+            find_actual_string(content, search),
+            Some("    x  =  1".to_string())
+        );
+    }
+
+    #[test]
+    fn find_actual_string_whitespace_tolerant_trailing_whitespace() {
+        let content = "if cond:   \n    pass  \n";
+        let search = "if cond:\n    pass";
+        let got = find_actual_string(content, search).expect("should salvage");
+        assert!(content.contains(&got));
+        assert!(got.contains("pass"));
+    }
+
+    #[test]
+    fn find_actual_string_whitespace_tolerant_returns_findable_substring() {
+        let content = "    foo  ()\n    bar()\n";
+        let search = "foo ()\nbar()";
+        let actual = find_actual_string(content, search).expect("should salvage");
+        assert!(content.contains(&actual));
+    }
+
+    #[test]
+    fn find_actual_string_whitespace_tolerant_ambiguous_returns_none() {
+        let content = "    foo  ()\nfunc:\n    foo   ()\n";
+        let search = "foo ()";
+        assert_eq!(find_actual_string(content, search), None);
+    }
+
+    #[test]
+    fn find_actual_string_whitespace_tolerant_blank_only_search_rejected() {
+        let content = "line1\n\n\nline2\n";
+        let search = "  \n  ";
+        assert_eq!(find_actual_string(content, search), None);
+    }
+
+    #[test]
+    fn find_actual_string_no_match_returns_none() {
+        assert_eq!(find_actual_string("hello\n", "xyzzy"), None);
+    }
+
+    #[test]
+    fn apply_edit_uses_whitespace_salvaged_string() {
+        let content = "def f():\n    x  =  1\n";
+        let search = "x = 1";
+        assert!(!content.contains(search), "test must exercise salvage path");
+        let actual = find_actual_string(content, search).expect("should salvage");
+        let updated =
+            apply_edit_to_file(content, &actual, "    x = 2", false).expect("replace");
+        assert_eq!(updated, "def f():\n    x = 2\n");
+    }
 }
