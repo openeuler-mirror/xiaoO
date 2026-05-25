@@ -63,6 +63,7 @@ impl ToolCli {
         };
         let services = ToolRuntimeServices {
             lsp_registry,
+            workspace_root: std::env::current_dir().ok(),
             ..ToolRuntimeServices::default()
         };
         let sources = load_tool_sources_with_services(services);
