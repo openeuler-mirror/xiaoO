@@ -116,6 +116,7 @@ impl ConfiguredRuntimeResolver {
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let services = ToolRuntimeServices {
             lsp_registry: self.lsp_registry.clone(),
+            workspace_root: Some(self.agent.workspace_root.clone()),
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
