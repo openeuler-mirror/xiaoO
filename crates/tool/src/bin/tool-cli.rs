@@ -114,7 +114,7 @@ impl ToolCli {
 
         let execution_result = self
             .tokio_runtime
-            .block_on(tool_call.execute(&runtime, &[]))
+            .block_on(tool_call.execute(&runtime))
             .map_err(ToolCliError::ToolExecution)?;
 
         let trace_outcome = match &execution_result {
