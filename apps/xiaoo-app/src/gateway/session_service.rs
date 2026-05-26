@@ -23,6 +23,8 @@ pub enum SessionServiceError {
     Memory { message: String },
     #[error("unsupported capability: {capability}")]
     UnsupportedCapability { capability: String },
+    #[error("session not found: {session_id}")]
+    SessionNotFound { session_id: String },
 }
 
 #[async_trait]
@@ -72,7 +74,7 @@ pub trait SessionControlPlane: Send + Sync {
     async fn force_close_session(
         &self,
         _session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+    ) -> Result<SessionRecord, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
             capability: "force_close_session".to_string(),
         })
