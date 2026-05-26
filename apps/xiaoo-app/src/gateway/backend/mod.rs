@@ -86,8 +86,7 @@ impl ExternalBackendManager {
 
         let backend = match request.config.kind.as_str() {
             "conch" => {
-                let config =
-                    OperationBackendConfig::new(request.config.kind, request.config.options);
+                let config = operation_config_for_acquire(&request)?;
                 conch::build_backend(&config).await?
             }
             other => {
@@ -141,16 +140,29 @@ impl ExternalBackendManager {
     }
 }
 
+fn operation_config_for_acquire(
+    request: &BackendAcquireRequest,
+) -> Result<OperationBackendConfig, OperationBackendBuildError> {
+    let mut options = request.config.options.clone();
+    if request.config.kind == "conch" {
+        let workspace_root = workspace_root_string(&request.workspace_root)?;
+        let Some(options) = options.as_object_mut() else {
+            return Err(OperationBackendBuildError::InvalidConfig {
+                message: "conch backend options must be a table/object".to_string(),
+            });
+        };
+        options.insert("workspace_root".to_string(), Value::String(workspace_root));
+    }
+
+    Ok(OperationBackendConfig::new(
+        request.config.kind.clone(),
+        options,
+    ))
+}
+
 impl BackendInstanceKey {
     fn from_request(request: &BackendAcquireRequest) -> Result<Self, OperationBackendBuildError> {
-        let workspace_root = request.workspace_root.to_str().ok_or_else(|| {
-            OperationBackendBuildError::InvalidConfig {
-                message: format!(
-                    "workspace_root is not valid utf-8: {}",
-                    request.workspace_root.display()
-                ),
-            }
-        })?;
+        let workspace_root = workspace_root_string(&request.workspace_root)?;
         let scope = match request.scope {
             BackendScope::Session => "session",
         };
@@ -161,6 +173,14 @@ impl BackendInstanceKey {
             config_hash: hash_config(&request.config),
         })
     }
+}
+
+fn workspace_root_string(path: &PathBuf) -> Result<String, OperationBackendBuildError> {
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| OperationBackendBuildError::InvalidConfig {
+            message: format!("workspace_root is not valid utf-8: {}", path.display()),
+        })
 }
 
 fn hash_config(config: &GatewayBackendConfig) -> u64 {
@@ -238,5 +258,31 @@ mod tests {
 
         assert_ne!(base, other_session);
         assert_ne!(base, other_config);
+    }
+
+    #[test]
+    fn conch_backend_config_injects_workspace_root_from_request() {
+        let config = operation_config_for_acquire(&request(
+            "s1",
+            json!({"api_url": "http://conch", "image_name": "img"}),
+        ))
+        .expect("config");
+
+        assert_eq!(config.options["workspace_root"], "/workspace");
+    }
+
+    #[test]
+    fn conch_backend_config_overrides_user_workspace_root() {
+        let config = operation_config_for_acquire(&request(
+            "s1",
+            json!({
+                "api_url": "http://conch",
+                "image_name": "img",
+                "workspace_root": "/wrong"
+            }),
+        ))
+        .expect("config");
+
+        assert_eq!(config.options["workspace_root"], "/workspace");
     }
 }

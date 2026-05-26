@@ -63,6 +63,7 @@ impl ConchExec {
         shell: String,
         request: ExecRequest,
         timeout_ms: u64,
+        env: HashMap<String, String>,
     ) -> ConchStartProcess {
         let heredoc = format!("__XIAOO_TIMEOUT_SCRIPT_{}__", uuid::Uuid::new_v4().simple());
         let script = format!(
@@ -82,7 +83,7 @@ impl ConchExec {
                 .unwrap_or("/bin/sh")
                 .to_string(),
             args: Vec::new(),
-            env: HashMap::new(),
+            env,
             cwd: request.cwd.map(|path| path.0),
             content: Some(script),
         }
@@ -92,6 +93,7 @@ impl ConchExec {
         &self,
         request: ExecRequest,
         timeout_ms: u64,
+        env: HashMap<String, String>,
     ) -> ConchStartProcess {
         let mut args = vec![
             "--signal=TERM".to_string(),
@@ -103,7 +105,7 @@ impl ConchExec {
         ConchStartProcess {
             cmd: "timeout".to_string(),
             args,
-            env: HashMap::new(),
+            env,
             cwd: request.cwd.map(|path| path.0),
             content: None,
         }
@@ -127,7 +129,9 @@ impl OperationExec for ConchExec {
                 });
             }
             let process = match timeout_ms {
-                Some(timeout_ms) => self.timeout_wrapped_shell_request(shell, request, timeout_ms),
+                Some(timeout_ms) => {
+                    self.timeout_wrapped_shell_request(shell, request, timeout_ms, extra_env)
+                }
                 None => ConchStartProcess {
                     cmd: shell,
                     args: Vec::new(),
@@ -139,7 +143,9 @@ impl OperationExec for ConchExec {
             agent::start_process(&self.state, process).await?
         } else {
             let process = match timeout_ms {
-                Some(timeout_ms) => self.timeout_wrapped_exec_request(request, timeout_ms),
+                Some(timeout_ms) => {
+                    self.timeout_wrapped_exec_request(request, timeout_ms, extra_env)
+                }
                 None => ConchStartProcess {
                     cmd: request.command,
                     args: request.args,
@@ -159,5 +165,71 @@ impl OperationExec for ConchExec {
             exit_code: output.exit_code,
             timed_out: output.timed_out || timed_out,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::backend::conch::backend::{
+        ConchControlPlane, ConchControlTransport, ConchLifecycle, ConchSandboxHandle,
+    };
+    use agent_contracts::backend::BackendPath;
+    use std::sync::Mutex;
+
+    fn exec() -> ConchExec {
+        ConchExec::new(Arc::new(ConchBackendState {
+            backend_id: "conch:test".to_string(),
+            workspace_root: BackendPath("/workspace".to_string()),
+            home_dir: None,
+            temp_root: BackendPath("/tmp".to_string()),
+            default_shell: None,
+            control_plane: ConchControlPlane {
+                transport: ConchControlTransport::ApiUrl("http://conch".to_string()),
+                namespace: String::new(),
+            },
+            sandbox: ConchSandboxHandle {
+                sandbox_id: "sandbox".to_string(),
+                ip: "127.0.0.1".to_string(),
+                agent_port: 4064,
+            },
+            lifecycle: Mutex::new(ConchLifecycle::Active),
+        }))
+    }
+
+    fn request() -> ExecRequest {
+        ExecRequest {
+            command: "printenv XIAOO_ENV".to_string(),
+            args: Vec::new(),
+            shell: Some("/bin/sh".to_string()),
+            cwd: Some(BackendPath("/workspace".to_string())),
+            timeout_ms: Some(1000),
+            env: Some(vec![("XIAOO_ENV".to_string(), "kept".to_string())]),
+        }
+    }
+
+    #[test]
+    fn timeout_wrapped_shell_request_preserves_env() {
+        let exec = exec();
+        let mut env = HashMap::new();
+        env.insert("XIAOO_ENV".to_string(), "kept".to_string());
+
+        let process =
+            exec.timeout_wrapped_shell_request("/bin/sh".to_string(), request(), 1000, env);
+
+        assert_eq!(process.env.get("XIAOO_ENV"), Some(&"kept".to_string()));
+    }
+
+    #[test]
+    fn timeout_wrapped_exec_request_preserves_env() {
+        let exec = exec();
+        let mut env = HashMap::new();
+        env.insert("XIAOO_ENV".to_string(), "kept".to_string());
+        let mut request = request();
+        request.shell = None;
+
+        let process = exec.timeout_wrapped_exec_request(request, 1000, env);
+
+        assert_eq!(process.env.get("XIAOO_ENV"), Some(&"kept".to_string()));
     }
 }

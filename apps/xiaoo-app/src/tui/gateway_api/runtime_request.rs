@@ -255,15 +255,14 @@ fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
         return None;
     }
 
-    let all_tool_names: BTreeSet<String> =
-        load_tool_sources_with_services(ToolRuntimeServices {
-            workspace_root: Some(state.workspace.clone()),
-            ..ToolRuntimeServices::default()
-        })
-        .iter()
-        .flat_map(|source| source.discover())
-        .map(|tool| tool.spec.name().0.clone())
-        .collect();
+    let all_tool_names: BTreeSet<String> = load_tool_sources_with_services(ToolRuntimeServices {
+        workspace_root: Some(state.workspace.clone()),
+        ..ToolRuntimeServices::default()
+    })
+    .iter()
+    .flat_map(|source| source.discover())
+    .map(|tool| tool.spec.name().0.clone())
+    .collect();
     let mut visible_tool_names = all_tool_names.clone();
 
     for (configured_name, enabled) in &role.tools {
