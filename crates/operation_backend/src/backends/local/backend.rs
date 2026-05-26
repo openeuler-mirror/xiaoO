@@ -1,6 +1,6 @@
 use crate::backends::local::{
     exec::LocalExec, export::LocalExport, filesystem::LocalFileSystem, path::LocalPathResolver,
-    search::LocalSearch,
+    policy::LocalBackendPolicy, search::LocalSearch,
 };
 use agent_contracts::backend::{
     capability::{
@@ -22,6 +22,7 @@ pub(crate) struct LocalBackendState {
     pub(crate) home_dir_host: Option<PathBuf>,
     pub(crate) temp_root_host: PathBuf,
     pub(crate) default_shell: Option<String>,
+    pub(crate) policy: LocalBackendPolicy,
 }
 
 pub struct LocalOperationBackend {
@@ -68,6 +69,7 @@ impl LocalOperationBackend {
             home_dir_host,
             temp_root_host: std::env::temp_dir(),
             default_shell: None,
+            policy: LocalBackendPolicy::unrestricted(),
         }))
     }
 

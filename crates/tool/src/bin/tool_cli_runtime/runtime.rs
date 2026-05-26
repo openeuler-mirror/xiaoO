@@ -70,7 +70,7 @@ impl ToolCliRuntime {
                 message: format!("failed to resolve current directory: {error}"),
             })?;
         let operation_backend =
-            operation_backend::local_backend_for_workspace(workspace_root, None, None, None)
+            operation_backend::local_backend(workspace_root, None, None, None)
                 .map_err(|error| BuildError::InvalidConfig {
                     message: format!("failed to build local operation backend: {error}"),
                 })?;

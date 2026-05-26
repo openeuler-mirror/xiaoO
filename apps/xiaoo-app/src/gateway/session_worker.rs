@@ -216,9 +216,10 @@ fn build_local_backend(
         home_dir: Option<String>,
         temp_root: Option<String>,
         default_shell: Option<String>,
+        isolation: Option<serde_json::Value>,
     }
 
-    let (home_dir, temp_root, default_shell) = match config {
+    let (home_dir, temp_root, default_shell, isolation) = match config {
         Some(config) => {
             let options: LocalBackendOptions = serde_json::from_value(config.options.clone())
                 .map_err(|error| SessionServiceError::RuntimeBuild {
@@ -228,20 +229,23 @@ fn build_local_backend(
                 options.home_dir.map(std::path::PathBuf::from),
                 options.temp_root.map(std::path::PathBuf::from),
                 options.default_shell,
+                options.isolation,
             )
         }
         None => (
             std::env::var_os("HOME").map(std::path::PathBuf::from),
             Some(std::env::temp_dir()),
             None,
+            None,
         ),
     };
 
-    operation_backend::local_backend_for_workspace(
+    operation_backend::local_backend_with_isolation(
         workspace_root,
         home_dir,
         temp_root,
         default_shell,
+        isolation,
     )
     .map_err(|error| SessionServiceError::RuntimeBuild {
         message: format!("failed to build local operation backend: {error}"),
