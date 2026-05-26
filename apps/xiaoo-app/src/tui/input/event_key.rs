@@ -2,7 +2,10 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::App;
-use crate::app_state::{ApiKeyDialogState, InputMode};
+use crate::app_state::{
+    current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, InputMode,
+    SandboxDialog,
+};
 use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
@@ -85,6 +88,10 @@ impl App {
             return self.handle_session_snapshot_selection_key(key).await;
         }
 
+        if self.state.input_mode == InputMode::SandboxSelection {
+            return self.handle_sandbox_selection_key(key);
+        }
+
         if self.state.input_mode == InputMode::TurnDelete {
             return self.handle_turn_delete_key(key).await;
         }
@@ -92,6 +99,7 @@ impl App {
         match self.state.input_mode {
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
+            InputMode::SandboxSelection => Ok(()),
             InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
             InputMode::TurnDelete => Ok(()),
@@ -493,6 +501,12 @@ impl App {
             return Ok(());
         }
 
+        if trimmed.eq_ignore_ascii_case("/sandbox") {
+            self.state.chat_state.input.reset();
+            self.open_sandbox_selection_dialog();
+            return Ok(());
+        }
+
         if trimmed.eq_ignore_ascii_case("/skills") {
             self.state.chat_state.input.reset();
             self.state
@@ -575,10 +589,13 @@ impl App {
 
         let message = match arg {
             None | Some("status") => {
-                crate::chat::Message::system(self.gateway.remote_status().await)
+                crate::chat::Message::system(self.gateway.remote_status(&self.state).await)
             }
             Some("off") => match self.gateway.disconnect_remote(&mut self.state).await {
-                Ok(()) => crate::chat::Message::system("Remote backend disabled. Backend: Local."),
+                Ok(()) => crate::chat::Message::system(format!(
+                    "Remote backend disabled. Backend: {}.",
+                    sandbox_display_name(&self.state.agent_config.operation_backend)
+                )),
                 Err(error) => {
                     crate::chat::Message::error(format!("Remote disconnect failed: {error}"))
                 }
@@ -710,6 +727,68 @@ impl App {
                 ))),
         }
         self.state.chat_state.stick_to_bottom = true;
+    }
+
+    fn open_sandbox_selection_dialog(&mut self) {
+        if self.gateway.remote_base_url().is_some() {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(
+                    "Remote backend is active. Use /remote off before switching local sandbox."
+                        .to_string(),
+                ));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+        let current = current_sandbox_id(&self.state.agent_config);
+        self.state.input_mode = InputMode::SandboxSelection;
+        self.state.sandbox_dialog = Some(SandboxDialog::new(current));
+    }
+
+    fn handle_sandbox_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Editing;
+                self.state.sandbox_dialog = None;
+            }
+            KeyCode::Up => {
+                if let Some(dialog) = self.state.sandbox_dialog.as_mut() {
+                    dialog.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = self.state.sandbox_dialog.as_mut() {
+                    dialog.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .state
+                    .sandbox_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.selected())
+                    .map(|option| (option.id, option.name));
+                self.state.input_mode = InputMode::Editing;
+                self.state.sandbox_dialog = None;
+                if let Some((id, name)) = selected {
+                    self.state.agent_config.operation_backend =
+                        sandbox_backend_config(id, &self.state.agent_config.operation_backend);
+                    self.state.status_panel.set_backend(sandbox_display_name(
+                        &self.state.agent_config.operation_backend,
+                    ));
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(format!(
+                            "Sandbox backend: {name}. Applies from the next local turn."
+                        )));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     async fn handle_session_snapshot_selection_key(&mut self, key: KeyEvent) -> Result<()> {
