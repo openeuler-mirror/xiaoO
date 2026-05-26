@@ -1,9 +1,7 @@
 mod backends;
 mod builder;
 
-pub use backends::local::{
-    local_backend, local_backend_with_isolation,
-};
+pub use backends::local::{local_backend, local_backend_with_isolation};
 pub use builder::OperationBackendBuilderImpl;
 
 /// Build a minimal local backend for the LSP subsystem.

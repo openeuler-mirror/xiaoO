@@ -169,6 +169,7 @@ pub(crate) fn plan_pdf_parts_from_bytes(
     ))
 }
 
+#[allow(dead_code)]
 pub async fn extract_pdf_pages<P: AsRef<Path>>(
     file_path: P,
     pages: &str,

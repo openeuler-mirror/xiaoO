@@ -67,13 +67,7 @@ pub fn local_backend(
     temp_root: Option<PathBuf>,
     default_shell: Option<String>,
 ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
-    local_backend_with_isolation(
-        workspace_root,
-        home_dir,
-        temp_root,
-        default_shell,
-        None,
-    )
+    local_backend_with_isolation(workspace_root, home_dir, temp_root, default_shell, None)
 }
 
 pub fn local_backend_with_isolation(

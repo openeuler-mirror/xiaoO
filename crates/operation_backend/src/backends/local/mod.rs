@@ -8,6 +8,4 @@ mod path;
 mod policy;
 mod search;
 
-pub use factory::{
-    build_backend, local_backend, local_backend_with_isolation,
-};
+pub use factory::{build_backend, local_backend, local_backend_with_isolation};

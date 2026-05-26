@@ -26,13 +26,17 @@ pub(crate) struct LocalBackendPolicy {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum LocalIsolationOptions {
     MacosSeatbelt {
-        #[serde(default)]
+        #[serde(default = "default_allow_network")]
         allow_network: bool,
         #[serde(default)]
         readable_roots: Vec<String>,
         #[serde(default)]
         writable_roots: Vec<String>,
     },
+}
+
+fn default_allow_network() -> bool {
+    true
 }
 
 impl LocalBackendPolicy {
@@ -350,6 +354,15 @@ mod tests {
         assert!(text.contains("\"/workspace\""));
         assert!(text.contains("\"/workspace/tmp\""));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    #[test]
+    fn macos_seatbelt_defaults_to_allowing_network() {
+        let options: LocalIsolationOptions =
+            serde_json::from_value(serde_json::json!({"kind": "macos_seatbelt"})).unwrap();
+        let LocalIsolationOptions::MacosSeatbelt { allow_network, .. } = options;
+
+        assert!(allow_network);
     }
 
     #[cfg(not(target_os = "macos"))]
