@@ -1,4 +1,3 @@
-use crate::backends;
 use agent_contracts::backend::{
     OperationBackend, OperationBackendBuildError, OperationBackendBuildInput,
     OperationBackendBuilder, OperationBackendConfig,
@@ -29,10 +28,7 @@ impl OperationBackendBuilder for OperationBackendBuilderImpl {
     ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
         let config = resolve_backend_config(input)?;
         match config.kind.as_str() {
-            "conch" => backends::conch::build_backend(&config).await,
-            "local" => backends::local::build_backend(&config).await,
-            "docker" => backends::docker::build_backend(&config).await,
-            "remote" => backends::remote::build_backend(&config).await,
+            "local" => crate::backends::local::build_backend(&config).await,
             other => Err(OperationBackendBuildError::UnsupportedBackend {
                 kind: other.to_string(),
             }),

@@ -1,4 +1,4 @@
-use crate::backends::conch::backend::ConchBackendState;
+use crate::gateway::backend::conch::backend::ConchBackendState;
 use agent_contracts::backend::{
     capability::{path::ResolveBase, path::ResolvePathRequest, OperationPathResolver},
     BackendPath, OperationError,

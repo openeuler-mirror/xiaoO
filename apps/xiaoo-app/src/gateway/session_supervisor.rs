@@ -1,3 +1,4 @@
+use crate::gateway::backend::ExternalBackendManager;
 use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLifecycleStatus, SessionRecord,
@@ -49,6 +50,7 @@ struct LaneTerminal {
 pub struct SessionSupervisor {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+    backend_manager: Arc<ExternalBackendManager>,
     coordinator: SubagentCoordinator,
     session: Mutex<SessionRecord>,
     pending_joins: Mutex<HashMap<String, PendingJoinWaiter>>,
@@ -59,11 +61,13 @@ impl SessionSupervisor {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+        backend_manager: Arc<ExternalBackendManager>,
         session: SessionRecord,
     ) -> Self {
         Self {
             session_store,
             runtime_resolver,
+            backend_manager,
             coordinator: SubagentCoordinator::new(),
             session: Mutex::new(session),
             pending_joins: Mutex::new(HashMap::new()),
@@ -233,6 +237,7 @@ impl SessionSupervisor {
             let session_snapshot = self.snapshot().await;
             let worker_result = SessionWorker::run(
                 self.runtime_resolver.as_ref(),
+                Arc::clone(&self.backend_manager),
                 SessionWorkerInput {
                     runtime_input: input.runtime_input.clone(),
                     session: session_snapshot,

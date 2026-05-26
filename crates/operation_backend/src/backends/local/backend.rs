@@ -6,8 +6,8 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind,
-    OperationError, PathKind, PathStat,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError, PathKind,
+    PathStat,
 };
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
@@ -78,6 +78,7 @@ impl LocalOperationBackend {
                 supports_atomic_write: true,
                 supports_grep: true,
                 supports_export_file: true,
+                supports_lsp: true,
             },
             paths: LocalPathResolver::new(Arc::clone(&state)),
             files: LocalFileSystem::new(Arc::clone(&state)),
@@ -245,10 +246,6 @@ fn path_kind_from_metadata(metadata: &std::fs::Metadata) -> PathKind {
 impl OperationBackend for LocalOperationBackend {
     fn backend_id(&self) -> &str {
         self.backend_id.as_str()
-    }
-
-    fn backend_kind(&self) -> OperationBackendKind {
-        OperationBackendKind::Local
     }
 
     fn capabilities(&self) -> OperationBackendCapabilities {

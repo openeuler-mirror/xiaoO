@@ -99,5 +99,8 @@ impl GatewayRuntime {
     pub async fn close_sessions(&mut self, session_id: &str) {
         self.close_remote_session(session_id).await;
         self.session_gateway.close_all_sessions().await;
+        if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {
+            tracing::warn!(error = %error, "failed to shutdown TUI backend manager");
+        }
     }
 }

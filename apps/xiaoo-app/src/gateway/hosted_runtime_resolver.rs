@@ -1,9 +1,9 @@
+use crate::gateway::backend::GatewayBackendConfig;
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
-use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
@@ -33,7 +33,7 @@ pub struct HostedSessionRuntimeConfig {
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
     pub skills_config: SkillsConfig,
 }
 

@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod bootstrap;
 pub mod channel_interaction;
 pub mod core_session_service;

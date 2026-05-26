@@ -1,4 +1,4 @@
-use agent_contracts::backend::OperationBackendConfig;
+use crate::gateway::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
@@ -52,7 +52,7 @@ pub struct Config {
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
     #[serde(default)]
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
     #[serde(default)]

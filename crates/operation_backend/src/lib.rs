@@ -1,6 +1,7 @@
 mod backends;
 mod builder;
 
+pub use backends::local::local_backend_for_workspace;
 pub use builder::OperationBackendBuilderImpl;
 
 /// Build a minimal local backend for the LSP subsystem.

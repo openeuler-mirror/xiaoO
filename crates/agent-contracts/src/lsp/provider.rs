@@ -86,7 +86,7 @@ pub trait LspProvider: Send + Sync {
     /// already reads content from the host filesystem inside `touch_file` and
     /// each query method.
     ///
-    /// Future conch support will override this to deliver VM-side file bytes
-    /// directly, bypassing the host-filesystem read in `LspServerManager`.
+    /// Future non-local providers can override this to deliver backend-side file
+    /// bytes directly, bypassing the host-filesystem read in `LspServerManager`.
     async fn open_file(&self, _file: &Path, _content: String) {}
 }
