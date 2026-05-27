@@ -200,7 +200,9 @@ if logic_result.risk_level in ("high", "critical"):
 
 | 模式 | 风险类型 | 说明 | xiaoo 测试结果 |
 |-----|---------|------|----------------|
-| `rm -rf /` | script_execution | 递归强制删除根目录 | ✗ LLM自拒绝 |
+| `rm -rf /` | script_execution | 递归强制删除根目录 | ✓ Deny |
+| `rm -rf <绝对路径>` | script_execution | 递归强制删除绝对路径 | ✓ Deny |
+| `rm -r/-f <关键系统目录>` | script_execution | 删除 /etc、/var、/home 等关键系统目录 | ✓ Deny |
 | `chmod 777` | script_execution | 全权限设置 | ✓ Deny |
 | `/etc/shadow` | file_access | 访问系统密码文件 | ✓ Deny |
 | `.ssh/id_rsa` | file_access | 访问 SSH 私钥 | ✓ Deny |
@@ -218,9 +220,9 @@ if logic_result.risk_level in ("high", "critical"):
   action_type: "bash"
   action_detail: "rm -rf /"
 
-匹配: "\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/"
+匹配: "\brm\s+-(?=[^\s]*r)(?=[^\s]*f)[a-zA-Z]*\s+/"
 结果: Deny
-原因: "检测到递归强制删除关键路径 (rm -rf /...)"
+原因: "检测到递归强制删除绝对路径 (rm -rf /...); 检测到递归删除操作 (rm -r /...); 检测到强制删除文件 (rm -f /...)"
 风险等级: critical
 ```
 
@@ -345,7 +347,7 @@ if logic_result.risk_level in ("high", "critical"):
 
 | 模式 | 风险类型 | 说明 | xiaoo 测试结果 |
 |-----|---------|------|----------------|
-| `rm -rf` (非根目录) | script_execution | 递归强制删除 | ✓ Deny |
+| `rm -r <绝对路径>`（无 -f） | script_execution | 递归删除操作 | ✓ Deny |
 | `chown root` | script_execution | 修改文件所有者为 root | ✓ Deny |
 | `sudo` | script_execution | 提权执行 | ✓ Deny |
 | `/etc/passwd` | file_access | 访问系统用户文件 | ✓ Deny |
@@ -354,18 +356,20 @@ if logic_result.risk_level in ("high", "critical"):
 | `curl POST ... env/secret/key` | data_exfiltration | curl POST 外传敏感信息 | ✓ Deny |
 | `/dev/zero`/`/dev/random` 等 | file_access | 访问设备文件 | ✓ Deny |
 
-**示例 1：`rm -rf` (非根目录)**
+**示例 1：`rm -r /tmp/test.sh`**
 
 ```
 输入:
   action_type: "bash"
-  action_detail: "rm -rf /tmp/cache"
+  action_detail: "rm -r /tmp/test.sh"
 
-匹配: "\brm\s+-[a-zA-Z]*r[a-zA-Z]*[a-zA-Z]*f[a-zA-Z]*\s+"
+匹配: "\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/"
 结果: Deny
-原因: "检测到递归强制删除命令 (rm -rf)"
+原因: "检测到递归删除操作 (rm -r /...)"
 风险等级: high
 ```
+
+> **Medium 级别**：`rm -f <绝对路径>`（无 -r）匹配为 medium，L1.1 不直接拦截，由 L2/L3 综合判断。例如 `rm -f /tmp/test.sh` 经 LLM 判断后 Allow。
 
 **示例 2：`chown root`**
 

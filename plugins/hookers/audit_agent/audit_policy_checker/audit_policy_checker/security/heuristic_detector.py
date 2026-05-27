@@ -20,17 +20,41 @@ DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
 # ==================== 关键命令正则模式 ====================
 # 包含：递归删除根目录、全权限设置、提权执行、访问敏感文件等
 CRITICAL_COMMAND_PATTERNS: list[dict] = [
+    # rm 命令分级检测（规则从严格到宽松，先匹配的优先）
+    # 1. rm -rf 根目录 — critical（最高危）
     {
-        "pattern": r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/",
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\s",
         "risk_level": "critical",
         "risk_type": "script_execution",
-        "reason": "检测到递归强制删除关键路径 (rm -rf /...)",
+        "reason": "检测到递归强制删除根目录 (rm -rf /)",
     },
+    # 2. rm 同时带 -r 和 -f 且目标是绝对路径 — critical
     {
-        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*[a-zA-Z]*f[a-zA-Z]*\s+",
+        "pattern": r"\brm\s+-(?=[^\s]*r)(?=[^\s]*f)[a-zA-Z]*\s+/",
+        "risk_level": "critical",
+        "risk_type": "script_execution",
+        "reason": "检测到递归强制删除绝对路径 (rm -rf /...)",
+    },
+    # 3. rm 带 -r 或 -f 且目标是关键系统目录 — critical
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+/(etc|var|home|usr|boot|root|opt|srv|sys|proc)\b",
+        "risk_level": "critical",
+        "risk_type": "script_execution",
+        "reason": "检测到删除关键系统目录",
+    },
+    # 4. rm -r 后跟绝对路径（无 -f）— high
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/",
         "risk_level": "high",
         "risk_type": "script_execution",
-        "reason": "检测到递归强制删除命令 (rm -rf)",
+        "reason": "检测到递归删除操作 (rm -r /...)",
+    },
+    # 5. rm -f 后跟绝对路径（无 -r）— medium
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*f[a-zA-Z]*\s+/",
+        "risk_level": "medium",
+        "risk_type": "script_execution",
+        "reason": "检测到强制删除文件 (rm -f /...)",
     },
     {
         "pattern": r"chmod\s+[0-7]*777[0-7]*",
