@@ -6,8 +6,9 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError, PathKind,
-    PathStat,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
+    OperationPermissionControl, PathKind, PathStat, SandboxPermissionGrantId,
+    SandboxPermissionGrantRequest,
 };
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
@@ -28,6 +29,7 @@ pub(crate) struct LocalBackendState {
 pub struct LocalOperationBackend {
     backend_id: String,
     capabilities: OperationBackendCapabilities,
+    state: Arc<LocalBackendState>,
     paths: LocalPathResolver,
     files: LocalFileSystem,
     search: LocalSearch,
@@ -82,6 +84,7 @@ impl LocalOperationBackend {
                 supports_export_file: true,
                 supports_lsp: true,
             },
+            state: Arc::clone(&state),
             paths: LocalPathResolver::new(Arc::clone(&state)),
             files: LocalFileSystem::new(Arc::clone(&state)),
             search: LocalSearch::new(Arc::clone(&state)),
@@ -274,7 +277,24 @@ impl OperationBackend for LocalOperationBackend {
         &self.export as &dyn OperationExport
     }
 
+    fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
+        Some(self)
+    }
+
     async fn shutdown(&self) -> Result<(), OperationError> {
         Ok(())
+    }
+}
+
+impl OperationPermissionControl for LocalOperationBackend {
+    fn grant(
+        &self,
+        request: SandboxPermissionGrantRequest,
+    ) -> Result<SandboxPermissionGrantId, OperationError> {
+        self.state.policy.grant(request)
+    }
+
+    fn revoke(&self, id: SandboxPermissionGrantId) -> Result<(), OperationError> {
+        self.state.policy.revoke(id)
     }
 }

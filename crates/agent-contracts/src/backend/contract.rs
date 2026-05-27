@@ -1,7 +1,7 @@
 use crate::backend::capability::{
     OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
 };
-use crate::backend::OperationError;
+use crate::backend::{OperationError, OperationPermissionControl};
 use async_trait::async_trait;
 
 /// Capabilities advertised by an operation backend implementation.
@@ -27,5 +27,8 @@ pub trait OperationBackend: Send + Sync {
     fn search(&self) -> &dyn OperationSearch;
     fn exec(&self) -> &dyn OperationExec;
     fn export(&self) -> &dyn OperationExport;
+    fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
+        None
+    }
     async fn shutdown(&self) -> Result<(), OperationError>;
 }

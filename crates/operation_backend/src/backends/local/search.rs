@@ -28,7 +28,7 @@ impl OperationSearch for LocalSearch {
             Some(path) => self._state.backend_path_to_host(path)?,
             None => self._state.workspace_root_host.clone(),
         };
-        self._state.policy.check_read(base_dir.as_path())?;
+        self._state.policy.check_read(base_dir.as_path(), "glob")?;
         self._state.ensure_directory(base_dir.as_path())?;
         let pattern = Pattern::new(request.pattern.as_str()).map_err(|error| {
             OperationError::InvalidPath {
@@ -58,7 +58,9 @@ impl OperationSearch for LocalSearch {
 
     async fn grep(&self, request: GrepRequest) -> Result<GrepResult, OperationError> {
         let target_dir = self._state.backend_path_to_host(&request.base_dir)?;
-        self._state.policy.check_read(target_dir.as_path())?;
+        self._state
+            .policy
+            .check_read(target_dir.as_path(), "grep")?;
         self._state.ensure_directory(target_dir.as_path())?;
         let include_pattern = match request.include.as_deref() {
             Some(pattern) => {
@@ -89,7 +91,7 @@ impl OperationSearch for LocalSearch {
                 }
             }
 
-            self._state.policy.check_read(path.as_path())?;
+            self._state.policy.check_read(path.as_path(), "grep")?;
             let content = std::fs::read(path.as_path())
                 .map_err(|error| io_error_for_path(path.as_path(), error))?;
             let text = String::from_utf8_lossy(content.as_slice());
@@ -155,11 +157,11 @@ fn collect_paths(
     pattern: &Pattern,
     entries: &mut Vec<PathBuf>,
 ) -> Result<(), OperationError> {
-    state.policy.check_read(current)?;
+    state.policy.check_read(current, "glob")?;
     for entry in std::fs::read_dir(current).map_err(|error| io_error_for_path(current, error))? {
         let entry = entry.map_err(|error| io_error_for_path(current, error))?;
         let path = entry.path();
-        state.policy.check_read(path.as_path())?;
+        state.policy.check_read(path.as_path(), "glob")?;
         let relative = path
             .strip_prefix(root)
             .ok()
@@ -180,11 +182,11 @@ fn collect_files(
     current: &Path,
     entries: &mut Vec<PathBuf>,
 ) -> Result<(), OperationError> {
-    state.policy.check_read(current)?;
+    state.policy.check_read(current, "grep")?;
     for entry in std::fs::read_dir(current).map_err(|error| io_error_for_path(current, error))? {
         let entry = entry.map_err(|error| io_error_for_path(current, error))?;
         let path = entry.path();
-        state.policy.check_read(path.as_path())?;
+        state.policy.check_read(path.as_path(), "grep")?;
         if path.is_dir() {
             collect_files(state, path.as_path(), entries)?;
         } else if path.is_file() {
@@ -242,7 +244,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(OperationError::PermissionDenied { .. })
+            Err(OperationError::SandboxPolicyDenied { .. })
         ));
         let _ = std::fs::remove_dir_all(root.as_path());
     }

@@ -4,6 +4,7 @@ pub mod channel_interaction;
 pub mod core_session_service;
 pub mod hosted_runtime_resolver;
 pub mod pending_interaction;
+pub mod permission_backend;
 pub mod progress_updates;
 pub mod runtime_bindings;
 pub mod runtime_factory;

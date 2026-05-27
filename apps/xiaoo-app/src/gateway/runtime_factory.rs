@@ -28,6 +28,7 @@ use xiaoo_core::{
     NoopInteractionHandle, NoopToolEventSink,
 };
 
+use crate::gateway::permission_backend::PermissionAwareOperationBackend;
 use crate::gateway::{GatewayEntryKind, ResolvedSessionRuntime, SessionRecord};
 use llm_client::LlmProviderWrapper;
 use parking_lot::RwLock;
@@ -144,6 +145,14 @@ impl AppRuntimeFactory {
                 .from_json(trace_config)?
                 .build()
                 .await?;
+            let interaction_handle: Arc<dyn InteractionHandle> = Arc::new(
+                SharedInteractionHandle::new(resolved.bindings.interaction_handle.clone()),
+            );
+            let operation_backend: Arc<dyn OperationBackend> =
+                Arc::new(PermissionAwareOperationBackend::new(
+                    operation_backend,
+                    Arc::clone(&interaction_handle),
+                ));
             let inner = BasicRuntimeView::new(
                 ToolStateStoreBuilderImpl::new()
                     .with_config(tool_state_store_config_for_entry_kind(
@@ -155,9 +164,7 @@ impl AppRuntimeFactory {
                 )),
                 trace_recorder,
                 Box::new(agent_context),
-                Box::new(SharedInteractionHandle::new(
-                    resolved.bindings.interaction_handle.clone(),
-                )),
+                Box::new(ArcInteractionHandle::new(interaction_handle)),
                 hookers,
                 Some(operation_backend.clone()),
             );
@@ -252,6 +259,23 @@ impl InteractionHandle for SharedInteractionHandle {
             return inner.ask(request).await;
         }
         NoopInteractionHandle::new().ask(request).await
+    }
+}
+
+struct ArcInteractionHandle {
+    inner: Arc<dyn InteractionHandle>,
+}
+
+impl ArcInteractionHandle {
+    fn new(inner: Arc<dyn InteractionHandle>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl InteractionHandle for ArcInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        self.inner.ask(request).await
     }
 }
 

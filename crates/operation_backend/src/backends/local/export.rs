@@ -31,7 +31,9 @@ impl ExportedFileHandle for LocalExportedFileHandle {
     }
 
     async fn open_read(&self) -> Result<ExportedFileReader, OperationError> {
-        self.state.policy.check_read(self.host_path.as_path())?;
+        self.state
+            .policy
+            .check_read(self.host_path.as_path(), "export")?;
         let file = tokio::fs::File::open(self.host_path.as_path())
             .await
             .map_err(|error| io_error_for_path(self.host_path.as_path(), error))?;
@@ -46,7 +48,9 @@ impl OperationExport for LocalExport {
         request: ExportFileRequest,
     ) -> Result<SharedExportedFileHandle, OperationError> {
         let host_path = self._state.backend_path_to_host(&request.path)?;
-        self._state.policy.check_read(host_path.as_path())?;
+        self._state
+            .policy
+            .check_read(host_path.as_path(), "export")?;
         self._state.ensure_file(host_path.as_path())?;
         let metadata = std::fs::metadata(host_path.as_path())
             .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
@@ -115,7 +119,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(OperationError::PermissionDenied { .. })
+            Err(OperationError::SandboxPolicyDenied { .. })
         ));
         let _ = std::fs::remove_dir_all(root.as_path());
     }

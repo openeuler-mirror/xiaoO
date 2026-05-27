@@ -1,6 +1,10 @@
-use agent_contracts::backend::{OperationBackendBuildError, OperationError};
+use agent_contracts::backend::{
+    OperationBackendBuildError, OperationError, SandboxPermissionCapability,
+    SandboxPermissionGrantId, SandboxPermissionGrantRequest, SandboxPolicyDenial,
+};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use super::backend::normalize_absolute_host_path;
 
@@ -20,6 +24,20 @@ pub(crate) struct MacosSeatbeltConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct LocalBackendPolicy {
     isolation: LocalIsolationConfig,
+    grants: Arc<Mutex<GrantStore>>,
+}
+
+#[derive(Debug, Default)]
+struct GrantStore {
+    next_id: u64,
+    grants: Vec<SandboxPermissionGrant>,
+}
+
+#[derive(Debug, Clone)]
+struct SandboxPermissionGrant {
+    id: SandboxPermissionGrantId,
+    capability: SandboxPermissionCapability,
+    path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +61,7 @@ impl LocalBackendPolicy {
     pub(crate) fn unrestricted() -> Self {
         Self {
             isolation: LocalIsolationConfig::None,
+            grants: Arc::new(Mutex::new(GrantStore::default())),
         }
     }
 
@@ -93,6 +112,7 @@ impl LocalBackendPolicy {
                         readable_roots: readable,
                         writable_roots: writable,
                     }),
+                    grants: Arc::new(Mutex::new(GrantStore::default())),
                 })
             }
         }
@@ -106,7 +126,7 @@ impl LocalBackendPolicy {
         }
     }
 
-    pub(crate) fn check_read(&self, path: &Path) -> Result<(), OperationError> {
+    pub(crate) fn check_read(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
         let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
             return Ok(());
         };
@@ -115,15 +135,18 @@ impl LocalBackendPolicy {
             .readable_roots
             .iter()
             .any(|root| path_is_within(path.as_path(), root.as_path()))
+            || self.is_granted(path.as_path(), SandboxPermissionCapability::Read)?
         {
             return Ok(());
         }
-        Err(OperationError::PermissionDenied {
-            path: path.display().to_string(),
-        })
+        Err(sandbox_denial(
+            operation,
+            SandboxPermissionCapability::Read,
+            path.as_path(),
+        ))
     }
 
-    pub(crate) fn check_write(&self, path: &Path) -> Result<(), OperationError> {
+    pub(crate) fn check_write(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
         let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
             return Ok(());
         };
@@ -132,25 +155,106 @@ impl LocalBackendPolicy {
             .writable_roots
             .iter()
             .any(|root| path_is_within(path.as_path(), root.as_path()))
+            || self.is_granted(path.as_path(), SandboxPermissionCapability::Write)?
         {
             return Ok(());
         }
-        Err(OperationError::PermissionDenied {
-            path: path.display().to_string(),
-        })
+        Err(sandbox_denial(
+            operation,
+            SandboxPermissionCapability::Write,
+            path.as_path(),
+        ))
     }
 
     pub(crate) fn check_exec_cwd(&self, path: &Path) -> Result<(), OperationError> {
-        self.check_read(path)
+        let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
+            return Ok(());
+        };
+        let path = normalize_for_read(path)?;
+        if config
+            .readable_roots
+            .iter()
+            .any(|root| path_is_within(path.as_path(), root.as_path()))
+            || self.is_granted(path.as_path(), SandboxPermissionCapability::ExecCwd)?
+        {
+            return Ok(());
+        }
+        Err(sandbox_denial(
+            "bash",
+            SandboxPermissionCapability::ExecCwd,
+            path.as_path(),
+        ))
     }
 
     pub(crate) fn seatbelt_profile(&self) -> Option<MacosSeatbeltProfile> {
         match &self.isolation {
             LocalIsolationConfig::None => None,
             LocalIsolationConfig::MacosSeatbelt(config) => {
-                Some(MacosSeatbeltProfile::from_config(config))
+                let grants = self.active_grants();
+                if grants
+                    .iter()
+                    .any(|grant| grant.capability == SandboxPermissionCapability::ExecRuntime)
+                {
+                    return None;
+                }
+                Some(MacosSeatbeltProfile::from_config_and_grants(config, grants))
             }
         }
+    }
+
+    pub(crate) fn grant(
+        &self,
+        request: SandboxPermissionGrantRequest,
+    ) -> Result<SandboxPermissionGrantId, OperationError> {
+        let path = match request.denial.capability {
+            SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
+                normalize_for_read(Path::new(request.denial.path.as_str()))?
+            }
+            SandboxPermissionCapability::ExecRuntime => PathBuf::new(),
+            SandboxPermissionCapability::Write => write_grant_root(
+                normalize_for_write(Path::new(request.denial.path.as_str()))?.as_path(),
+            ),
+        };
+        let mut store = self.lock_grants()?;
+        store.next_id += 1;
+        let id = SandboxPermissionGrantId(store.next_id);
+        store.grants.push(SandboxPermissionGrant {
+            id,
+            capability: request.denial.capability,
+            path,
+        });
+        Ok(id)
+    }
+
+    pub(crate) fn revoke(&self, id: SandboxPermissionGrantId) -> Result<(), OperationError> {
+        let mut store = self.lock_grants()?;
+        store.grants.retain(|grant| grant.id != id);
+        Ok(())
+    }
+
+    fn is_granted(
+        &self,
+        path: &Path,
+        capability: SandboxPermissionCapability,
+    ) -> Result<bool, OperationError> {
+        let store = self.lock_grants()?;
+        Ok(store
+            .grants
+            .iter()
+            .any(|grant| grant.allows(capability) && path_is_within(path, grant.path.as_path())))
+    }
+
+    fn active_grants(&self) -> Vec<SandboxPermissionGrant> {
+        self.grants
+            .lock()
+            .map(|store| store.grants.clone())
+            .unwrap_or_default()
+    }
+
+    fn lock_grants(&self) -> Result<std::sync::MutexGuard<'_, GrantStore>, OperationError> {
+        self.grants.lock().map_err(|_| OperationError::Transport {
+            message: "local sandbox grant store lock poisoned".to_string(),
+        })
     }
 
     #[cfg(test)]
@@ -165,6 +269,17 @@ impl LocalBackendPolicy {
                 readable_roots,
                 writable_roots,
             }),
+            grants: Arc::new(Mutex::new(GrantStore::default())),
+        }
+    }
+}
+
+impl SandboxPermissionGrant {
+    fn allows(&self, requested: SandboxPermissionCapability) -> bool {
+        match (self.capability, requested) {
+            (SandboxPermissionCapability::Write, SandboxPermissionCapability::Read) => true,
+            (SandboxPermissionCapability::ExecCwd, SandboxPermissionCapability::Read) => true,
+            (granted, requested) => granted == requested,
         }
     }
 }
@@ -177,12 +292,28 @@ pub(crate) struct MacosSeatbeltProfile {
 }
 
 impl MacosSeatbeltProfile {
-    fn from_config(config: &MacosSeatbeltConfig) -> Self {
-        Self {
+    fn from_config_and_grants(
+        config: &MacosSeatbeltConfig,
+        grants: Vec<SandboxPermissionGrant>,
+    ) -> Self {
+        let mut profile = Self {
             readable_roots: config.readable_roots.clone(),
             writable_roots: config.writable_roots.clone(),
             allow_network: config.allow_network,
+        };
+        for grant in grants {
+            match grant.capability {
+                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
+                    push_unique_path(&mut profile.readable_roots, grant.path);
+                }
+                SandboxPermissionCapability::ExecRuntime => {}
+                SandboxPermissionCapability::Write => {
+                    push_unique_path(&mut profile.readable_roots, grant.path.clone());
+                    push_unique_path(&mut profile.writable_roots, grant.path);
+                }
+            }
         }
+        profile
     }
 
     pub(crate) fn to_profile_text(&self) -> String {
@@ -203,13 +334,25 @@ impl MacosSeatbeltProfile {
 
         for root in &self.readable_roots {
             lines.push(format!(
+                "(allow file-read* (literal {}))",
+                profile_string(root)
+            ));
+            lines.push(format!(
                 "(allow file-read* (subpath {}))",
                 profile_string(root)
             ));
         }
         for root in &self.writable_roots {
             lines.push(format!(
+                "(allow file-read* (literal {}))",
+                profile_string(root)
+            ));
+            lines.push(format!(
                 "(allow file-read* (subpath {}))",
+                profile_string(root)
+            ));
+            lines.push(format!(
+                "(allow file-write* (literal {}))",
                 profile_string(root)
             ));
             lines.push(format!(
@@ -279,14 +422,49 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+fn write_grant_root(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        return path.to_path_buf();
+    }
+    match path.parent() {
+        Some(parent) if parent != Path::new(std::path::MAIN_SEPARATOR_STR) => parent.to_path_buf(),
+        _ => path.to_path_buf(),
+    }
+}
+
 fn profile_string(path: &Path) -> String {
     let value = path.to_string_lossy();
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+}
+
+fn sandbox_denial(
+    operation: &str,
+    capability: SandboxPermissionCapability,
+    path: &Path,
+) -> OperationError {
+    OperationError::SandboxPolicyDenied {
+        denial: SandboxPolicyDenial {
+            backend_id: "local".to_string(),
+            isolation: "macos_seatbelt".to_string(),
+            operation: operation.to_string(),
+            capability,
+            path: path.display().to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_contracts::backend::{
+        SandboxPermissionGrantRequest, SandboxPermissionScope, SandboxPolicyDenial,
+    };
 
     fn policy() -> LocalBackendPolicy {
         LocalBackendPolicy::from_isolation_options(
@@ -304,48 +482,126 @@ mod tests {
                 readable_roots: vec![PathBuf::from("/workspace"), PathBuf::from("/workspace/tmp")],
                 writable_roots: vec![PathBuf::from("/workspace/tmp")],
             }),
+            grants: Arc::new(Mutex::new(GrantStore::default())),
         })
     }
 
     #[test]
     fn workspace_read_is_allowed() {
         assert!(policy()
-            .check_read(Path::new("/workspace/src/lib.rs"))
+            .check_read(Path::new("/workspace/src/lib.rs"), "file_read")
             .is_ok());
     }
 
     #[test]
     fn outside_workspace_read_is_denied() {
         assert!(matches!(
-            policy().check_read(Path::new("/etc/passwd")),
-            Err(OperationError::PermissionDenied { .. })
+            policy().check_read(Path::new("/etc/passwd"), "file_read"),
+            Err(OperationError::SandboxPolicyDenied { .. })
         ));
     }
 
     #[test]
     fn escaped_path_is_denied_after_normalization() {
         assert!(matches!(
-            policy().check_read(Path::new("/workspace/../etc/passwd")),
-            Err(OperationError::PermissionDenied { .. })
+            policy().check_read(Path::new("/workspace/../etc/passwd"), "file_read"),
+            Err(OperationError::SandboxPolicyDenied { .. })
         ));
     }
 
     #[test]
     fn writable_root_is_also_readable() {
         assert!(policy()
-            .check_read(Path::new("/workspace/tmp/result.txt"))
+            .check_read(Path::new("/workspace/tmp/result.txt"), "file_read")
             .is_ok());
         assert!(policy()
-            .check_write(Path::new("/workspace/tmp/result.txt"))
+            .check_write(Path::new("/workspace/tmp/result.txt"), "file_write")
             .is_ok());
     }
 
     #[test]
     fn write_outside_writable_root_is_denied() {
         assert!(matches!(
-            policy().check_write(Path::new("/workspace/src/lib.rs")),
-            Err(OperationError::PermissionDenied { .. })
+            policy().check_write(Path::new("/workspace/src/lib.rs"), "file_write"),
+            Err(OperationError::SandboxPolicyDenied { .. })
         ));
+    }
+
+    #[test]
+    fn granted_read_root_is_allowed() {
+        let granted_policy = policy();
+        let request = grant_request(
+            SandboxPermissionCapability::Read,
+            "/outside",
+            SandboxPermissionScope::Session,
+        );
+
+        granted_policy.grant(request).unwrap();
+
+        assert!(policy()
+            .check_read(Path::new("/outside/secret.txt"), "file_read")
+            .is_err());
+        assert!(granted_policy
+            .check_read(Path::new("/outside/secret.txt"), "file_read")
+            .is_ok());
+    }
+
+    #[test]
+    fn granted_write_root_is_also_readable_and_revocable() {
+        let policy = policy();
+        let id = policy
+            .grant(grant_request(
+                SandboxPermissionCapability::Write,
+                "/outside/result.txt",
+                SandboxPermissionScope::Once,
+            ))
+            .unwrap();
+
+        assert!(policy
+            .check_write(Path::new("/outside/result.txt"), "file_write")
+            .is_ok());
+        assert!(policy
+            .check_read(Path::new("/outside/result.txt"), "file_read")
+            .is_ok());
+
+        policy.revoke(id).unwrap();
+
+        assert!(matches!(
+            policy.check_write(Path::new("/outside/result.txt"), "file_write"),
+            Err(OperationError::SandboxPolicyDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn profile_includes_granted_roots() {
+        let policy = policy();
+        policy
+            .grant(grant_request(
+                SandboxPermissionCapability::Read,
+                "/granted",
+                SandboxPermissionScope::Session,
+            ))
+            .unwrap();
+
+        let text = policy.seatbelt_profile().unwrap().to_profile_text();
+
+        assert!(text.contains("\"/granted\""));
+    }
+
+    #[test]
+    fn exec_runtime_grant_disables_seatbelt_profile_for_exec() {
+        let policy = policy();
+        assert!(policy.seatbelt_profile().is_some());
+
+        policy
+            .grant(grant_request(
+                SandboxPermissionCapability::ExecRuntime,
+                "<runtime path not reported by macOS Seatbelt>",
+                SandboxPermissionScope::Once,
+            ))
+            .unwrap();
+
+        assert!(policy.seatbelt_profile().is_none());
     }
 
     #[test]
@@ -363,6 +619,23 @@ mod tests {
         let LocalIsolationOptions::MacosSeatbelt { allow_network, .. } = options;
 
         assert!(allow_network);
+    }
+
+    fn grant_request(
+        capability: SandboxPermissionCapability,
+        path: &str,
+        scope: SandboxPermissionScope,
+    ) -> SandboxPermissionGrantRequest {
+        SandboxPermissionGrantRequest {
+            denial: SandboxPolicyDenial {
+                backend_id: "local".to_string(),
+                isolation: "macos_seatbelt".to_string(),
+                operation: "test".to_string(),
+                capability,
+                path: path.to_string(),
+            },
+            scope,
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
