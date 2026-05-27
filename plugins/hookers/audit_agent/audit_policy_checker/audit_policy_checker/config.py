@@ -192,6 +192,16 @@ PROVIDER_BASE_URLS: dict[str, str] = {
     "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
     "zhipu-coding-plan": "https://api.z.ai/api/coding/paas/v4",
     "zhipuai-coding-plan": "https://api.z.ai/api/coding/paas/v4",
+    # Zhipu/Z.AI 主站（与 xiaoo provider_registry.rs 保持一致）
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "bigmodel": "https://open.bigmodel.cn/api/paas/v4",
+    "zai": "https://open.bigmodel.cn/api/paas/v4",
+    "z-ai": "https://open.bigmodel.cn/api/paas/v4",
+    "z.ai": "https://open.bigmodel.cn/api/paas/v4",
+    "zai-cn": "https://open.bigmodel.cn/api/paas/v4",
+    "zai-china": "https://open.bigmodel.cn/api/paas/v4",
+    "zai-global": "https://open.bigmodel.cn/api/paas/v4",
+    "glm-cn": "https://open.bigmodel.cn/api/paas/v4",
 }
 
 # Provider 默认 api_key_env 映射（与 xiaoo-app 保持一致）
