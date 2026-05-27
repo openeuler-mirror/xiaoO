@@ -10,7 +10,7 @@ agent-llm = { path = "../agent-llm" }
 tool = { path = "../tool" }
 agent-contracts = { path = "../agent-contracts" }
 llm-client = { path = "../llm-client" }
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tokio-util.workspace = true
 async-trait.workspace = true
 uuid.workspace = true
