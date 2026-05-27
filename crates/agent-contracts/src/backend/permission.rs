@@ -5,6 +5,7 @@ use std::fmt;
 pub enum SandboxPermissionCapability {
     Read,
     Write,
+    ReadWrite,
     ExecCwd,
     ExecRuntime,
 }
@@ -14,6 +15,7 @@ impl fmt::Display for SandboxPermissionCapability {
         match self {
             Self::Read => f.write_str("read"),
             Self::Write => f.write_str("write"),
+            Self::ReadWrite => f.write_str("read/write"),
             Self::ExecCwd => f.write_str("exec_cwd"),
             Self::ExecRuntime => f.write_str("exec_runtime"),
         }

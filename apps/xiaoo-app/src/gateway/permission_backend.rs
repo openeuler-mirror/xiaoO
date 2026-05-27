@@ -200,7 +200,7 @@ impl OperationExec for PermissionAwareExec {
             async move { inner.exec().exec(request).await }
         })
         .await?;
-        if let Some(denial) = runtime_seatbelt_denial(&result, &request) {
+        if let Some(denial) = runtime_seatbelt_denial(&result) {
             result = retry_after_permission(&self.inner, &self.interaction, denial, || {
                 let inner = Arc::clone(&self.inner);
                 let request = request.clone();
@@ -331,11 +331,7 @@ async fn request_permission(
                 "macOS Seatbelt blocked {}\n\n{} access requested:\n{}",
                 denial.operation, denial.capability, denial.path
             ),
-            options: vec![
-                ALLOW_ONCE.to_string(),
-                ALLOW_SESSION.to_string(),
-                DENY.to_string(),
-            ],
+            options: permission_options(denial),
             allow_custom_input: false,
             source: None,
         })
@@ -345,13 +341,27 @@ async fn request_permission(
         InteractionResponse::Choice { value: Some(value) } if value == ALLOW_ONCE => {
             Ok(SandboxPermissionScope::Once)
         }
-        InteractionResponse::Choice { value: Some(value) } if value == ALLOW_SESSION => {
+        InteractionResponse::Choice { value: Some(value) }
+            if value == ALLOW_SESSION
+                && denial.capability != SandboxPermissionCapability::ExecRuntime =>
+        {
             Ok(SandboxPermissionScope::Session)
         }
         _ => Err(OperationError::SandboxPolicyDenied {
             denial: denial.clone(),
         }),
     }
+}
+
+fn permission_options(denial: &SandboxPolicyDenial) -> Vec<String> {
+    if denial.capability == SandboxPermissionCapability::ExecRuntime {
+        return vec![ALLOW_ONCE.to_string(), DENY.to_string()];
+    }
+    vec![
+        ALLOW_ONCE.to_string(),
+        ALLOW_SESSION.to_string(),
+        DENY.to_string(),
+    ]
 }
 
 fn annotate_seatbelt_stderr(result: &mut ExecResult) {
@@ -369,17 +379,14 @@ fn annotate_seatbelt_stderr(result: &mut ExecResult) {
     result.stderr = annotated;
 }
 
-fn runtime_seatbelt_denial(
-    result: &ExecResult,
-    request: &ExecRequest,
-) -> Option<SandboxPolicyDenial> {
+fn runtime_seatbelt_denial(result: &ExecResult) -> Option<SandboxPolicyDenial> {
     let stderr = String::from_utf8_lossy(result.stderr.as_slice());
     let path = denied_path_from_stderr(stderr.as_ref())?;
     Some(SandboxPolicyDenial {
         backend_id: "local".to_string(),
         isolation: "macos_seatbelt".to_string(),
         operation: "bash".to_string(),
-        capability: infer_exec_denial_capability(request),
+        capability: SandboxPermissionCapability::ReadWrite,
         path,
     })
 }
@@ -434,21 +441,6 @@ fn clean_denied_path_candidate(value: &str) -> Option<String> {
     }
 }
 
-fn infer_exec_denial_capability(request: &ExecRequest) -> SandboxPermissionCapability {
-    let command = request.command.trim_start().to_ascii_lowercase();
-    let writes_by_redirection = command.contains('>');
-    let writes_by_program = [
-        "touch ", "mkdir ", "rm ", "rmdir ", "mv ", "cp ", "install ", "tee ", "sed -i", "perl -pi",
-    ]
-    .iter()
-    .any(|prefix| command.starts_with(prefix));
-    if writes_by_redirection || writes_by_program {
-        SandboxPermissionCapability::Write
-    } else {
-        SandboxPermissionCapability::Read
-    }
-}
-
 fn is_silent_seatbelt_exec_denial(result: &ExecResult) -> bool {
     result.exit_code.is_none()
         && !result.timed_out
@@ -481,19 +473,17 @@ mod tests {
     }
 
     #[test]
-    fn infers_write_for_redirection() {
-        let request = ExecRequest {
-            command: "echo hi > /Users/me/out.txt".to_string(),
-            args: vec![],
-            shell: Some("bash".to_string()),
-            cwd: None,
-            timeout_ms: None,
-            env: None,
+    fn runtime_denial_uses_read_write_instead_of_guessing_from_command() {
+        let result = ExecResult {
+            stdout: vec![],
+            stderr: b"cat: /Users/me/.ssh/config: Operation not permitted\n".to_vec(),
+            exit_code: Some(1),
+            timed_out: false,
         };
 
         assert_eq!(
-            infer_exec_denial_capability(&request),
-            SandboxPermissionCapability::Write
+            runtime_seatbelt_denial(&result).map(|denial| denial.capability),
+            Some(SandboxPermissionCapability::ReadWrite)
         );
     }
 
@@ -515,6 +505,16 @@ mod tests {
 
         assert_eq!(denial.capability, SandboxPermissionCapability::ExecRuntime);
         assert_eq!(denial.path, "<runtime path not reported by macOS Seatbelt>");
+    }
+
+    #[test]
+    fn exec_runtime_denial_only_offers_once_or_deny() {
+        let denial = silent_runtime_denial("local");
+
+        assert_eq!(
+            permission_options(&denial),
+            vec![ALLOW_ONCE.to_string(), DENY.to_string()]
+        );
     }
 
     #[test]
