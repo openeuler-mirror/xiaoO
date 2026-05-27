@@ -13,6 +13,9 @@ pub struct SpawnSubagentRequest {
     pub task_goal: String,
     pub task_context: String,
     pub output_schema: Option<serde_json::Value>,
+    pub subagent_role_id: Option<String>,
+    pub predefined_prompt: Option<String>,
+    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

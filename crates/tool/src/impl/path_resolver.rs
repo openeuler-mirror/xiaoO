@@ -6,6 +6,7 @@ pub fn runtime_workspace_root(runtime: &dyn RuntimeView) -> &Path {
     runtime.agent_context().workspace().root.as_path()
 }
 
+#[allow(dead_code)]
 pub fn expand_path_from_base(path: &str, base_dir: &Path) -> String {
     let path = path.trim();
 

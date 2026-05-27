@@ -3,6 +3,7 @@ use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionOpenRequest, SessionRecord,
     SessionRuntimeBindings,
 };
+use crate::gateway::session_record::SubagentRoleRecord;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -11,6 +12,7 @@ use async_trait::async_trait;
 use llm_client::LlmProviderWrapper;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use subagent::SubagentControl;
@@ -26,6 +28,8 @@ pub struct SessionRuntimeDescriptor {
     pub workspace_root: PathBuf,
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub subagent_roles: BTreeMap<String, SubagentRoleRecord>,
 }
 
 pub struct ResolvedSessionRuntime {
@@ -51,6 +55,7 @@ pub struct SessionRuntimeBuildInput {
     pub channel_identity_prompt: Option<String>,
     pub entry: GatewayEntryContext,
     pub agent_id_override: Option<AgentId>,
+    pub max_turns_override: Option<u32>,
 }
 
 impl SessionRuntimeBuildInput {
@@ -64,6 +69,7 @@ impl SessionRuntimeBuildInput {
             channel_identity_prompt: request.channel_identity_prompt.clone(),
             entry: request.entry.clone(),
             agent_id_override: None,
+            max_turns_override: None,
         }
     }
 
@@ -77,6 +83,7 @@ impl SessionRuntimeBuildInput {
             channel_identity_prompt: None,
             entry: request.entry.clone(),
             agent_id_override: None,
+            max_turns_override: None,
         }
     }
 }

@@ -1,4 +1,5 @@
-use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig, SubagentRoleConfig};
+use xiaoo_app::gateway::prompt_utils::compose_subagent_delegation_rules;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -21,13 +22,13 @@ use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::ToolRuntimeServices;
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
+use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices, SubagentRoleInfo};
 use xiaoo_app::gateway::{
     backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
     SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
+use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
@@ -36,6 +37,7 @@ const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
     agent_roles: BTreeMap<String, AgentRoleConfig>,
+    subagent_roles: BTreeMap<String, SubagentRoleConfig>,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
     feature_flags: FeatureFlags,
@@ -92,6 +94,7 @@ impl ConfiguredRuntimeResolver {
         Ok(Self {
             agent,
             agent_roles: config.app.agent.clone(),
+            subagent_roles: config.app.subagent.clone(),
             llm_provider,
             token_budget,
             feature_flags: {
@@ -113,9 +116,20 @@ impl ConfiguredRuntimeResolver {
         &self,
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
+        let subagent_roles: BTreeMap<String, SubagentRoleInfo> = self
+            .subagent_roles
+            .iter()
+            .map(|(role_id, config)| {
+                (role_id.clone(), SubagentRoleInfo {
+                    role_id: role_id.clone(),
+                    description: config.description.clone(),
+                })
+            })
+            .collect();
         let services = ToolRuntimeServices {
             lsp_registry: self.lsp_registry.clone(),
             workspace_root: Some(self.agent.workspace_root.clone()),
+            subagent_roles,
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
@@ -192,6 +206,24 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .filter(|prompt| !prompt.trim().is_empty())
             .unwrap_or(self.agent.system_prompt.as_str());
 
+        let subagent_roles: BTreeMap<String, SubagentRoleRecord> = self
+            .subagent_roles
+            .iter()
+            .map(|(role_id, config)| {
+                (role_id.clone(), SubagentRoleRecord {
+                    role_id: role_id.clone(),
+                    description: config.description.clone(),
+                    prompt: config.prompt.clone(),
+                    max_turns: config.max_turns,
+                    tools: config.tools.clone(),
+                })
+            })
+            .collect();
+
+        let is_subagent = request.agent_id_override.as_ref()
+            .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
+            .unwrap_or(false);
+
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(self.agent.id.clone()),
@@ -200,12 +232,15 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                     system_prompt,
                     &self.agent.workspace_root,
                     request,
+                    &subagent_roles,
+                    is_subagent,
                 ),
                 feature_flags: self.feature_flags.clone(),
 
                 token_budget: self.token_budget.clone(),
                 workspace_root: self.agent.workspace_root.clone(),
                 max_turns: agent_role.and_then(|role| role.max_turns),
+                subagent_roles,
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: Arc::clone(&self.llm_provider),
@@ -306,9 +341,18 @@ fn build_system_prompt(
     base_prompt: &str,
     workspace_root: &Path,
     request: &SessionRuntimeBuildInput,
+    subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
+    is_subagent: bool,
 ) -> String {
-    let base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
-    let base_prompt = base_prompt.trim();
+    let mut base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
+    base_prompt = base_prompt.trim().to_string();
+
+    if !is_subagent {
+        if let Some(rules) = compose_subagent_delegation_rules(&subagent_roles) {
+            base_prompt.push_str(&rules);
+        }
+    }
+
     let channel_prompt = request.channel.as_deref().map(|channel| {
         let mut prompt = compose_channel_system_prompt(ChannelPromptSections {
             memory_prompt: "",
@@ -324,7 +368,7 @@ fn build_system_prompt(
     match (base_prompt.is_empty(), channel_prompt) {
         (true, Some(channel_prompt)) => channel_prompt,
         (false, Some(channel_prompt)) => format!("{base_prompt}\n\n{channel_prompt}"),
-        (false, None) => base_prompt.to_string(),
+        (false, None) => base_prompt,
         (true, None) => String::new(),
     }
 }
@@ -433,9 +477,10 @@ mod tests {
             channel_identity_prompt: None,
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
+            max_turns_override: None,
         };
 
-        let prompt = build_system_prompt("base rules", temp.path(), &request);
+        let prompt = build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false);
 
         assert!(prompt.contains("base rules"));
         assert!(prompt.contains("repo rules"));
@@ -490,6 +535,7 @@ mod tests {
                 ..GatewayEntryContext::channel(None)
             },
             agent_id_override: None,
+            max_turns_override: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)

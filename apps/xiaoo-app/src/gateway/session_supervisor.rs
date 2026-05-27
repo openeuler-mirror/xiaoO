@@ -121,6 +121,21 @@ impl SessionSupervisor {
 
         let child_agent_id = AgentId(uuid::Uuid::new_v4().to_string());
         let now_ms = current_time_ms();
+
+        let mut request = request;
+        if let Some(role_id) = &request.subagent_role_id {
+            let session = self.session.lock().await;
+            if let Some(role) = session.runtime.subagent_roles.get(role_id) {
+                request.predefined_prompt = role.prompt.clone();
+                request.max_turns = role.max_turns;
+                request.description = if request.description.is_empty() {
+                    role.description.clone()
+                } else {
+                    request.description.clone()
+                };
+            }
+        }
+
         let mut session = self.session.lock().await;
         let decision = self.coordinator.spawn(
             &mut session.subagent_state,
@@ -367,8 +382,9 @@ impl SessionSupervisor {
                     description: _,
                     prompt,
                     output_schema: _,
+                    max_turns,
                 } => {
-                    self.spawn_subagent_task(agent_id, prompt);
+                    self.spawn_subagent_task(agent_id, prompt, max_turns);
                 }
                 HostAction::SuspendWaiter {
                     join_id,
@@ -398,12 +414,12 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    fn spawn_subagent_task(self: &Arc<Self>, agent_id: AgentId, prompt: String) {
+    fn spawn_subagent_task(self: &Arc<Self>, agent_id: AgentId, prompt: String, max_turns: Option<u32>) {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             let runtime_input = {
                 let session = supervisor.snapshot().await;
-                runtime_input_from_session(&session)
+                runtime_input_from_session(&session, agent_id.clone(), max_turns)
             };
             let result = supervisor
                 .run_lane_until_terminal(LaneRunInput {
@@ -664,7 +680,8 @@ impl SessionSupervisor {
     }
 }
 
-fn runtime_input_from_session(session: &SessionRecord) -> SessionRuntimeBuildInput {
+fn runtime_input_from_session(session: &SessionRecord, agent_id: AgentId, max_turns_override: Option<u32>) -> SessionRuntimeBuildInput {
+    let is_subagent = agent_id != session.runtime.agent_id;
     SessionRuntimeBuildInput {
         session_id: session.session_id.clone(),
         conversation_id: session.conversation_id.clone(),
@@ -673,7 +690,8 @@ fn runtime_input_from_session(session: &SessionRecord) -> SessionRuntimeBuildInp
         channel_instance_id: session.channel_instance_id.clone(),
         channel_identity_prompt: None,
         entry: session.entry.clone(),
-        agent_id_override: None,
+        agent_id_override: if is_subagent { Some(agent_id) } else { None },
+        max_turns_override,
     }
 }
 

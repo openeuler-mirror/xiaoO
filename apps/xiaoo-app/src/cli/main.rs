@@ -13,9 +13,9 @@ use xiaoo_app::cli::{
     CliEventSink,
 };
 use xiaoo_app::gateway::{
-    AppBootstrap, AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, InMemorySessionStore, SessionRuntimeBindings,
-    SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
+    session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
+    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
+    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -184,6 +184,7 @@ async fn main() {
                 }),
                 operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
+                subagent: file_cfg.subagent.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -730,6 +731,22 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             },
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             max_turns: Some(config.max_turns),
+            subagent_roles: config
+                .subagent
+                .iter()
+                .map(|(role_id, cfg)| {
+                    (
+                        role_id.clone(),
+                        SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: cfg.description.clone(),
+                            prompt: cfg.prompt.clone(),
+                            max_turns: cfg.max_turns,
+                            tools: cfg.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         },
         trace: config.trace.clone(),
         provider: config.provider.clone(),

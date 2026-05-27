@@ -48,6 +48,8 @@ pub struct Config {
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
+    pub subagent: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
@@ -134,6 +136,18 @@ pub struct AgentConfig {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SubagentRoleConfig {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
