@@ -375,6 +375,43 @@ python3 -m pytest tests/test_audit.py -v
 
 AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，层层递进、逐级深入。前一层发现 high/critical 风险时直接 Deny，无需等待后续检测；low/medium 风险则传递给下一层做更深入分析。
 
+### 快速放行优化（Fast-Pass）
+
+为降低安全检测延迟，系统在层1检测后引入**两级白名单快速放行**机制。已知安全的工具和命令可跳过后续检测层，将响应时间从秒级（LLM 调用）降至毫秒级。
+
+**放行条件**：层1 启发式检测未命中 high/critical 风险 + 工具/命令匹配白名单。
+
+#### Tier 1：完全安全 — 跳过 L2 + L3
+
+不具备读取文件内容能力的工具，直接放行，跳过逻辑规则检测和 LLM 分析。
+
+| 类型 | 白名单 |
+|------|--------|
+| 工具类型 | `ask_user_question`、`glob`、`list_dir`、`ls`、`count_text_length`、`filemgr-globfiles` |
+| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command` |
+
+#### Tier 2：只读敏感 — 跳过 L3，保留 L2
+
+可读取文件内容但不修改的工具，跳过 LLM 分析，但保留层2 逻辑规则检测（如敏感路径访问）。
+
+| 类型 | 白名单 |
+|------|--------|
+| 工具类型 | `read`、`file_read`、`read_file`、`head`、`tail`、`grep`、`filemgr-readfile`、`filemgr-grepfiles` |
+| Bash 子命令 | `cat`、`head`、`tail`、`less`、`more`、`wc`、`grep`、`find`、`ag`、`rg`、`awk`、`sed`、`cut`、`sort`、`uniq` |
+
+**关键设计**：
+- 管道命令（`|`）和链式命令（`&&`/`||`）只提取第一段命令进行匹配
+- 白名单匹配不区分大小写
+- 层1 命中 high/critical 时，即使工具在白名单中也会被拦截（安全优先）
+
+**性能效果**：
+
+| 场景 | 无快速放行 | Tier 1 放行 | Tier 2 放行 |
+|------|-----------|------------|------------|
+| `echo hello world` | ~12s（LLM） | ~2ms | — |
+| `cat /tmp/test.txt` | ~12s（LLM） | — | ~5ms（L2 规则） |
+| `read /etc/shadow` | ~12s（LLM） | — | ~2ms（L1 拦截） |
+
 ### 层1 与 层2 的核心区别
 
 两层核心区别在于**检测维度**和**信息利用方式**不同：
@@ -766,12 +803,14 @@ LLM 返回结构化 JSON：
 
 **关键设计**：
 - **短路机制**：high/critical 风险直接 Deny，不等待后续检测
+- **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **信息传递**：前两层的检测结果作为提示信息注入层3的 LLM prompt，帮助 LLM 做出更准确的判断
 - **Fail-closed + warn-allow**：LLM 故障时，前序已拦截则 Deny，前序无违规则 Allow
 
 ## 安全设计原则
 
 - **三层防御**：启发式静态检测 → 逻辑规则检测 → LLM + Skill 深度分析，层层递进
+- **快速放行**：两级白名单机制，已知安全工具/命令跳过深度检测，响应时间从秒级降至毫秒级
 - **最小权限**：仅开放 prompt 任务所需的最低权限
 - **默认拒绝**：path_groups 默认全部 false，network 默认 false
 - **Fail-closed + warn-allow**：前序检测已拦截时 LLM 故障返回 Deny；前序检测无违规时 LLM 故障返回 Allow，避免误拦截

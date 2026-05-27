@@ -28,6 +28,71 @@ if logic_result.risk_level in ("high", "critical"):
 
 ---
 
+## 快速放行规则（Fast-Pass）
+
+在层1检测之后、层2/层3检测之前，系统检查当前工具/命令是否在白名单中。白名单分为两级：
+
+### Tier 1：完全安全工具 — 跳过 L2 + L3
+
+| 工具类型 | 说明 |
+|---------|------|
+| `ask_user_question` | 用户交互 |
+| `glob` | 文件模式匹配 |
+| `list_dir` | 目录列表 |
+| `ls` | 目录列表 |
+| `count_text_length` | 文本长度统计 |
+| `filemgr-globfiles` | OpenDesk 文件管理器 glob |
+
+| Bash 子命令 | 说明 |
+|------------|------|
+| `ls`、`dir` | 目录列表 |
+| `pwd` | 当前路径 |
+| `which`、`whereis`、`realpath` | 命令/路径查找 |
+| `basename`、`dirname` | 路径组件提取 |
+| `file`、`stat`、`du` | 文件信息 |
+| `echo`、`printf` | 输出 |
+| `type`、`command` | 命令类型查询 |
+
+### Tier 2：只读敏感工具 — 跳过 L3，保留 L2
+
+| 工具类型 | 说明 |
+|---------|------|
+| `read`、`file_read`、`read_file` | 文件读取 |
+| `head`、`tail` | 文件头尾读取 |
+| `grep` | 文本搜索 |
+| `filemgr-readfile` | OpenDesk 文件管理器读取 |
+| `filemgr-grepfiles` | OpenDesk 文件管理器搜索 |
+
+| Bash 子命令 | 说明 |
+|------------|------|
+| `cat`、`head`、`tail`、`less`、`more`、`wc` | 文件读取/统计 |
+| `grep`、`find`、`ag`、`rg` | 搜索 |
+| `awk`、`sed`、`cut`、`sort`、`uniq` | 文本处理 |
+
+### 放行逻辑
+
+```
+层1 检测
+  ↓
+命中 high/critical? → Yes → Deny（不走快速放行）
+  ↓ No
+工具/命令在 Tier 1 白名单? → Yes → Allow（跳过 L2+L3）
+  ↓ No
+工具/命令在 Tier 2 白名单? → Yes → 标记 skip_llm=True
+  ↓ No
+继续正常流程
+  ↓
+层2 检测（Tier 2 工具也执行层2）
+  ↓
+命中 high/critical? → Yes → Deny
+  ↓ No
+skip_llm=True? → Yes → Allow（跳过 L3）
+  ↓ No
+层3 LLM 分析
+```
+
+---
+
 ## 层1：启发式静态检测
 
 ### 1.1 用户敏感规则匹配
@@ -1609,6 +1674,12 @@ LLM 判断: Deny
                              No
                               │
 ┌─────────────────────────────▼───────────────────────────────┐
+│              快速放行检查（Fast-Pass）                         │
+│  Tier 1 白名单? → Yes → Allow（跳过 L2+L3）                 │
+│  Tier 2 白名单? → Yes → 标记 skip_llm → 继续 L2            │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────┐
 │                   层2: 逻辑规则检测                           │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ 2.1 read_before_write 原则                             │  │
@@ -1618,6 +1689,10 @@ LLM 判断: Deny
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────┬───────────────────────────────┘
                   high/critical? ──── Yes ────→ Deny
+                              │
+                             No
+                              │
+                    skip_llm=True? ──── Yes ────→ Allow（跳过 L3）
                               │
                              No
                               │
@@ -1639,6 +1714,7 @@ LLM 判断: Deny
 
 **关键设计**：
 - **短路机制**：层1/层2 检测到 high/critical 风险直接 Deny，不等待后续检测
+- **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **低风险传递**：层1/层2 检测到 medium/low 风险不拦截，传递到层3 由 LLM 决定
 - **信息传递**：前两层结果（含 low/medium）+ 脚本分析注入层3 prompt
 - **Fail-closed + warn-allow**：LLM 故障时，前序已拦截则 Deny，前序无违规则 Allow

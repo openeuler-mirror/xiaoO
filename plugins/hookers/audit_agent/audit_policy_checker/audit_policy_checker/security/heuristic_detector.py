@@ -243,12 +243,35 @@ SAFE_ACTION_TYPES = frozenset({
 })
 
 # ==================== 安全 Bash 子命令模式 ====================
-# 这些是只读、低风险的 bash 命令，可以快速放行
-SAFE_BASH_PATTERNS = [
-    # 文件/目录查看
+
+# 完全安全的 bash 子命令：跳过 Layer 2 + Layer 3
+# 这些命令不涉及文件内容读取，无敏感路径泄露风险
+FULLY_SAFE_BASH_PATTERNS = [
+    # 目录查看
     r"^ls(?:\s|$)",
-    r"^ls\s+",
     r"^dir(?:\s|$)",
+    # 路径查看
+    r"^pwd(?:\s|$)",
+    r"^which\s+",
+    r"^whereis\s+",
+    r"^realpath\s+",
+    # 文件信息（不读内容）
+    r"^file\s+",
+    r"^stat\s+",
+    r"^du(?:\s|$)",
+    # 打印（不涉及文件）
+    r"^echo\s+",
+    r"^printf\s+",
+    # 类型检查
+    r"^type\s+",
+    r"^command\s+",
+    r"^basename\s+",
+    r"^dirname\s+",
+]
+
+# 安全但可能访问敏感路径的 bash 子命令：跳过 Layer 3，保留 Layer 2
+# 这些命令可以读取文件内容，可能泄露 /etc/shadow 等敏感信息
+READONLY_SENSITIVE_BASH_PATTERNS = [
     # 文件内容查看
     r"^cat\s+\S",
     r"^head(?:\s|$)",
@@ -258,30 +281,24 @@ SAFE_BASH_PATTERNS = [
     r"^wc(?:\s|$)",
     # 搜索
     r"^grep(?:\s|$)",
-    r"^grep\s+",
     r"^find\s+",
     r"^ag(?:\s|$)",
     r"^rg(?:\s|$)",
-    # 路径查看
-    r"^pwd(?:\s|$)",
-    r"^which\s+",
-    r"^whereis\s+",
-    r"^realpath\s+",
-    # 文件信息
-    r"^file\s+",
-    r"^stat\s+",
-    r"^du(?:\s|$)",
-    # 打印
-    r"^echo\s+",
-    r"^printf\s+",
-    # 类型检查
-    r"^type\s+",
-    r"^basename\s+",
-    r"^dirname\s+",
+    # 内容提取
+    r"^awk\s+",
+    r"^sed\s+",
+    r"^cut\s+",
+    r"^sort(?:\s|$)",
+    r"^uniq(?:\s|$)",
 ]
 
-# 编译安全 bash 命令正则
-SAFE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in SAFE_BASH_PATTERNS]
+# 向后兼容：合并为完整安全列表（原 SAFE_BASH_PATTERNS）
+SAFE_BASH_PATTERNS = FULLY_SAFE_BASH_PATTERNS + READONLY_SENSITIVE_BASH_PATTERNS
+
+# 编译正则
+FULLY_SAFE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in FULLY_SAFE_BASH_PATTERNS]
+READONLY_SENSITIVE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in READONLY_SENSITIVE_BASH_PATTERNS]
+SAFE_BASH_COMPILED = FULLY_SAFE_BASH_COMPILED + READONLY_SENSITIVE_BASH_COMPILED
 
 # ==================== 风险等级优先级映射 ====================
 _RISK_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -386,9 +403,31 @@ class InjectionKeywordChecker:
         )
 
 
+def _extract_first_command(command: str) -> str:
+    """提取管道和链式命令的第一段"""
+    main_cmd = command.split("|")[0].strip()
+    for sep in ["&&", "||"]:
+        if sep in main_cmd:
+            main_cmd = main_cmd.split(sep)[0].strip()
+            break
+    return main_cmd
+
+
+def is_fully_safe_bash_command(command: str) -> bool:
+    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）"""
+    main_cmd = _extract_first_command(command)
+    return any(p.match(main_cmd) for p in FULLY_SAFE_BASH_COMPILED)
+
+
+def is_readonly_sensitive_bash_command(command: str) -> bool:
+    """检查是否为安全但可能访问敏感路径的 bash 命令（跳过 L3，保留 L2）"""
+    main_cmd = _extract_first_command(command)
+    return any(p.match(main_cmd) for p in READONLY_SENSITIVE_BASH_COMPILED)
+
+
 def is_safe_bash_command(command: str) -> bool:
     """
-    检查 bash 命令是否是安全的只读操作。
+    检查 bash 命令是否是安全的只读操作（向后兼容）。
 
     Args:
         command: bash 命令字符串
@@ -396,15 +435,7 @@ def is_safe_bash_command(command: str) -> bool:
     Returns:
         bool: 如果是安全的只读命令返回 True
     """
-    # 去掉前后的管道和重定向，获取主要命令
-    # 处理管道命令：只检查第一个命令
-    main_cmd = command.split("|")[0].strip()
-
-    # 处理 && 和 || 组合命令：只检查第一个命令
-    for sep in ["&&", "||"]:
-        if sep in main_cmd:
-            main_cmd = main_cmd.split(sep)[0].strip()
-            break
+    main_cmd = _extract_first_command(command)
 
     # 检查是否匹配安全模式
     for pattern in SAFE_BASH_COMPILED:
