@@ -79,6 +79,9 @@ impl ToolExecutor for SpawnSubagentExecutor {
                 task_goal: input.task_goal,
                 task_context: input.task_context,
                 output_schema: input.output_schema,
+                subagent_role_id: input.subagent_role_id,
+                predefined_prompt: None,
+                max_turns: None,
             })
             .await
             .map_err(|error| ToolExecutionError::ExecutionFailed {

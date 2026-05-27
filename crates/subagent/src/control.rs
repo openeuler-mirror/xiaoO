@@ -12,6 +12,7 @@ pub enum HostAction {
         description: String,
         prompt: String,
         output_schema: Option<serde_json::Value>,
+        max_turns: Option<u32>,
     },
     SuspendWaiter {
         join_id: String,

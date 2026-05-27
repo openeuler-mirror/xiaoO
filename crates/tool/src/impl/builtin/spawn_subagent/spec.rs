@@ -1,6 +1,9 @@
 use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
+use std::collections::BTreeMap;
+
+use crate::r#impl::SubagentRoleInfo;
 
 #[derive(Debug, Clone)]
 pub struct SpawnSubagentToolSpec {
@@ -14,6 +17,43 @@ pub struct SpawnSubagentToolSpec {
 
 impl SpawnSubagentToolSpec {
     pub fn new() -> Self {
+        Self::with_subagent_roles(BTreeMap::new())
+    }
+
+    pub fn with_subagent_roles(subagent_roles: BTreeMap<String, SubagentRoleInfo>) -> Self {
+        let roles_section = if subagent_roles.is_empty() {
+            String::new()
+        } else {
+            let roles_list = subagent_roles
+                .values()
+                .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "\n\nAvailable predefined subagent roles:\n{}",
+                roles_list
+            )
+        };
+
+        let description = format!(
+            "Spawns an asynchronous subagent inside the current session. Use it when the request explicitly asks for subagents or parallel work, or when the work cleanly splits into multiple independent read-only branches whose results will later be compared, sorted, or aggregated. Do not use it for tiny single-step lookups, and do not attempt nested delegation from inside an already delegated subtask. When subagent_role_id is provided, the subagent uses a predefined role with fixed prompt and permissions from config.{}",
+            roles_section
+        );
+
+        let roles_field = if subagent_roles.is_empty() {
+            String::new()
+        } else {
+            let roles_list = subagent_roles
+                .values()
+                .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "\n\nCurrently available roles:\n{}",
+                roles_list
+            )
+        };
+
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -21,6 +61,10 @@ impl SpawnSubagentToolSpec {
                     "type": "string",
                     "description": "A short label for the delegated branch or subtask",
                     "examples": ["Calculate total token usage"]
+                },
+                "subagent_role_id": {
+                    "type": "string",
+                    "description": format!("Optional predefined subagent role ID from config. When specified, the subagent uses the role's fixed prompt, tool permissions, and max_turns. If not specified, a dynamic subagent is created using task_goal and task_context.{}", roles_field)
                 },
                 "task_goal": {
                     "type": "string",
@@ -51,7 +95,7 @@ impl SpawnSubagentToolSpec {
         Self {
             id: ToolId("builtin_spawn_subagent".to_string()),
             name: ToolName("spawn_subagent".to_string()),
-            description: "Spawns an asynchronous subagent inside the current session. Use it when the request explicitly asks for subagents or parallel work, or when the work cleanly splits into multiple independent read-only branches whose results will later be compared, sorted, or aggregated. Do not use it for tiny single-step lookups, and do not attempt nested delegation from inside an already delegated subtask.".to_string(),
+            description,
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
                 description: "Serialized JSON containing the spawned subagent agent_id".to_string(),

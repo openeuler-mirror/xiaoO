@@ -4,6 +4,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use super::super::output::TextOutput;
 
+#[allow(dead_code)]
 pub async fn read_text_file<P: AsRef<Path>>(
     file_path: P,
     offset: Option<u64>,

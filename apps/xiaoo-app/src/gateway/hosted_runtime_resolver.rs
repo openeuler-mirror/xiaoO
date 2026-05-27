@@ -1,4 +1,5 @@
 use crate::gateway::backend::GatewayBackendConfig;
+use crate::gateway::prompt_utils::compose_subagent_delegation_rules;
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -17,7 +18,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices};
+use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices, SubagentRoleInfo};
 
 #[derive(Clone)]
 pub struct HostedSessionRuntimeConfig {
@@ -45,9 +46,21 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
+        let subagent_roles: std::collections::BTreeMap<String, SubagentRoleInfo> = config
+            .descriptor
+            .subagent_roles
+            .iter()
+            .map(|(role_id, record)| {
+                (role_id.clone(), SubagentRoleInfo {
+                    role_id: role_id.clone(),
+                    description: record.description.clone(),
+                })
+            })
+            .collect();
         let initial_services = ToolRuntimeServices {
             lsp_registry: config.lsp_registry.clone(),
             workspace_root: Some(config.descriptor.workspace_root.clone()),
+            subagent_roles,
             ..ToolRuntimeServices::default()
         };
         Self {
@@ -189,6 +202,17 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
         descriptor.agent_id = agent_id.clone();
         descriptor.system_prompt =
             compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
+        if request.max_turns_override.is_some() {
+            descriptor.max_turns = request.max_turns_override;
+        }
+
+        let is_subagent = agent_id != self.config.descriptor.agent_id;
+
+        if !is_subagent {
+            if let Some(rules) = compose_subagent_delegation_rules(&descriptor.subagent_roles) {
+                descriptor.system_prompt.push_str(&rules);
+            }
+        }
 
         Ok(ResolvedSessionRuntime {
             descriptor,
