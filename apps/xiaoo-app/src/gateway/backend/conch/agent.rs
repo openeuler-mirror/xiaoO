@@ -1,8 +1,8 @@
-use crate::backends::conch::backend::ConchBackendState;
-use crate::backends::conch::backend::ConchExecOutput;
-use crate::backends::conch::backend::ConchSandboxHandle;
-use crate::backends::conch::backend::ConchStartProcess;
-use crate::backends::conch::backend::ConchUploadFile;
+use crate::gateway::backend::conch::backend::ConchBackendState;
+use crate::gateway::backend::conch::backend::ConchExecOutput;
+use crate::gateway::backend::conch::backend::ConchSandboxHandle;
+use crate::gateway::backend::conch::backend::ConchStartProcess;
+use crate::gateway::backend::conch::backend::ConchUploadFile;
 use agent_contracts::backend::OperationError;
 use tonic::transport::{Channel, Endpoint};
 

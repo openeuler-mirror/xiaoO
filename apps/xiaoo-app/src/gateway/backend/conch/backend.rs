@@ -1,12 +1,11 @@
-use crate::backends::conch::{
+use crate::gateway::backend::conch::{
     exec::ConchExec, filesystem::ConchFileSystem, path::ConchPathResolver, search::ConchSearch,
 };
 use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind,
-    OperationError,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -87,6 +86,7 @@ impl ConchOperationBackend {
                 supports_atomic_write: false,
                 supports_grep: true,
                 supports_export_file: true,
+                supports_lsp: false,
             },
             paths: ConchPathResolver::new(Arc::clone(&state)),
             files: ConchFileSystem::new(Arc::clone(&state)),
@@ -213,10 +213,6 @@ impl OperationBackend for ConchOperationBackend {
         self.backend_id.as_str()
     }
 
-    fn backend_kind(&self) -> OperationBackendKind {
-        OperationBackendKind::Conch
-    }
-
     fn capabilities(&self) -> OperationBackendCapabilities {
         self.capabilities
     }
@@ -245,7 +241,7 @@ impl OperationBackend for ConchOperationBackend {
         if !self.exec.state().begin_shutdown()? {
             return Ok(());
         }
-        match crate::backends::conch::control::delete_sandbox(self.exec.state()).await {
+        match crate::gateway::backend::conch::control::delete_sandbox(self.exec.state()).await {
             Ok(()) => {
                 self.exec.state().finish_shutdown()?;
                 Ok(())

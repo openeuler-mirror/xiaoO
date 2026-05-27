@@ -3,7 +3,7 @@ use agent_contracts::backend::{
     BackendPath, OperationBackend, OperationBackendBuildError, OperationBackendConfig,
 };
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +51,54 @@ pub async fn build_backend(
     }));
 
     Ok(Arc::new(backend))
+}
+
+pub fn local_backend_for_workspace(
+    workspace_root: PathBuf,
+    home_dir: Option<PathBuf>,
+    temp_root: Option<PathBuf>,
+    default_shell: Option<String>,
+) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
+    let workspace_root_host = absolute_dir(
+        "workspace_root",
+        workspace_root
+            .to_str()
+            .ok_or_else(|| OperationBackendBuildError::InvalidConfig {
+                message: format!(
+                    "workspace_root is not valid utf-8: {}",
+                    workspace_root.display()
+                ),
+            })?,
+    )?;
+    let workspace_root = backend_path_from_host_path(workspace_root_host.as_path())?;
+
+    let home_dir_host = home_dir
+        .map(|path| {
+            let text = path
+                .to_str()
+                .ok_or_else(|| OperationBackendBuildError::InvalidConfig {
+                    message: format!("home_dir is not valid utf-8: {}", path.display()),
+                })?;
+            absolute_dir("home_dir", text)
+        })
+        .transpose()?;
+    let home_dir = home_dir_host
+        .as_ref()
+        .map(|path| backend_path_from_host_path(path.as_path()))
+        .transpose()?;
+    let temp_root_host = temp_root.unwrap_or_else(std::env::temp_dir);
+
+    Ok(Arc::new(LocalOperationBackend::new(Arc::new(
+        LocalBackendState {
+            backend_id: "local".to_string(),
+            workspace_root,
+            workspace_root_host,
+            home_dir,
+            home_dir_host,
+            temp_root_host,
+            default_shell,
+        },
+    ))))
 }
 
 fn absolute_dir(

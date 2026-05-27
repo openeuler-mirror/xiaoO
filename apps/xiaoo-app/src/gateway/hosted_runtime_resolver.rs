@@ -1,9 +1,9 @@
+use crate::gateway::backend::GatewayBackendConfig;
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
-use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
@@ -33,7 +33,7 @@ pub struct HostedSessionRuntimeConfig {
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
     pub skills_config: SkillsConfig,
 }
 
@@ -47,6 +47,7 @@ impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
         let initial_services = ToolRuntimeServices {
             lsp_registry: config.lsp_registry.clone(),
+            workspace_root: Some(config.descriptor.workspace_root.clone()),
             ..ToolRuntimeServices::default()
         };
         Self {
@@ -178,11 +179,12 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
                 )
             }
         };
-        let services = self
+        let mut services = self
             .tool_runtime_services
             .read()
             .expect("tool runtime services lock should not be poisoned")
             .clone();
+        services.workspace_root = Some(self.config.descriptor.workspace_root.clone());
         let mut descriptor = self.config.descriptor.clone();
         descriptor.agent_id = agent_id.clone();
         descriptor.system_prompt =

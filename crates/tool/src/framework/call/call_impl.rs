@@ -70,9 +70,11 @@ impl ToolCall for ToolCallImpl {
                     .await;
             }
             Err(error) => {
-                eprintln!(
-                    "pre-hook phase failed for tool call '{}' (tool='{}'): {}",
-                    state.final_call.call_id, state.final_call.tool_name, error
+                tracing::warn!(
+                    call_id = %state.final_call.call_id,
+                    tool = %state.final_call.tool_name,
+                    error = %error,
+                    "pre-hook phase failed"
                 );
             }
         }
@@ -124,11 +126,11 @@ impl ToolCall for ToolCallImpl {
                         state.error_hook_results = error_hook_results;
                     }
                     Err(error_hook_failure) => {
-                        eprintln!(
-                            "error-hook phase failed for tool call '{}' (tool='{}') after lifecycle begin failure: {}",
-                            state.final_call.call_id,
-                            state.final_call.tool_name,
-                            error_hook_failure
+                        tracing::warn!(
+                            call_id = %state.final_call.call_id,
+                            tool = %state.final_call.tool_name,
+                            error = %error_hook_failure,
+                            "error-hook phase failed after lifecycle begin failure"
                         );
                     }
                 }

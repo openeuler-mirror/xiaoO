@@ -1,4 +1,3 @@
-use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
@@ -15,6 +14,7 @@ use xiaoo_app::channels::{
     build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig,
     FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
+use xiaoo_app::gateway::backend::GatewayBackendConfig;
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 128000;
@@ -44,7 +44,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub lsp: Option<LspConfig>,
     #[serde(default)]
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

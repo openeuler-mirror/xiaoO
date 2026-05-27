@@ -16,7 +16,9 @@ use xiaoo_app::channels::{
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramPollingMessageHandler,
     TelegramPollingService,
 };
-use xiaoo_app::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
+use xiaoo_app::gateway::{
+    backend::ExternalBackendManager, AppBootstrap, InMemorySessionStore, SessionStore,
+};
 use xiaoo_app::httpserver::{
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
     create_router_with_control_plane_and_auth, ChannelRuntimeProcessor, HttpBearerAuthConfig,
@@ -39,8 +41,13 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let app =
-        AppBootstrap::from_session_components_with_hooks(session_store, resolver, hooker_config)?;
+    let backend_manager = Arc::new(ExternalBackendManager::new());
+    let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+        session_store,
+        resolver,
+        hooker_config,
+        backend_manager.clone(),
+    )?;
     let interaction_timeout_secs = config.interaction_timeout_secs();
     let session_service = app.session_service.clone();
     let session_control_plane = app.session_control_plane.clone();
@@ -93,9 +100,13 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!(config = %config_path.display(), %addr, "starting rebuild daemon");
-    axum::serve(listener, router)
+    let serve_result = axum::serve(listener, router)
         .await
-        .context("axum server exited unexpectedly")
+        .context("axum server exited unexpectedly");
+    if let Err(error) = backend_manager.shutdown_all().await {
+        tracing::warn!(error = %error, "failed to shutdown daemon backend manager");
+    }
+    serve_result
 }
 
 fn spawn_feishu_websocket_service(

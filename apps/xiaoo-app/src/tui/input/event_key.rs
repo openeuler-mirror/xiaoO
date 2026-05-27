@@ -3,6 +3,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode};
+use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
@@ -11,7 +12,6 @@ use crate::provider_service::{
     validate_and_connect_api_key,
 };
 use crate::services::turn_delete::DeleteDialog;
-use crate::gateway::SessionStore;
 use crate::session_snapshot_service::{
     apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, save_snapshot,
     snapshot_name_from_command, SessionSnapshotDialog,
@@ -350,18 +350,22 @@ impl App {
         if trimmed.eq_ignore_ascii_case("/delete") {
             self.state.chat_state.input.reset();
             if self.state.chat_state.is_loading {
-                self.state.chat_state.messages.push(
-                    crate::chat::Message::system(
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
                         "当前任务仍在运行。请等待它结束，或先按 Esc 取消。".to_string(),
-                    ),
-                );
+                    ));
             } else if let Some(dialog) = DeleteDialog::new(&self.state.chat_state.messages) {
                 self.state.input_mode = InputMode::TurnDelete;
                 self.state.delete_dialog = Some(dialog);
             } else {
-                self.state.chat_state.messages.push(
-                    crate::chat::Message::system("当前会话没有可删除的对话。".to_string()),
-                );
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        "当前会话没有可删除的对话。".to_string(),
+                    ));
             }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
@@ -783,20 +787,12 @@ impl App {
     }
 
     fn attempt_local_model_fetch(&mut self) {
-        let should_fetch = self
-            .state
-            .provider_dialog
-            .as_ref()
-            .map_or(false, |d| {
-                !d.local_models_loading
-                    && d.providers
-                        .get(d.selected_provider)
-                        .map_or(false, |p| {
-                            p.name == "local"
-                                && p.models.len() == 1
-                                && p.models[0].name.contains("(Local)")
-                        })
-            });
+        let should_fetch = self.state.provider_dialog.as_ref().map_or(false, |d| {
+            !d.local_models_loading
+                && d.providers.get(d.selected_provider).map_or(false, |p| {
+                    p.name == "local" && p.models.len() == 1 && p.models[0].name.contains("(Local)")
+                })
+        });
         if !should_fetch {
             return;
         }
@@ -839,8 +835,7 @@ impl App {
                             dialog.advance_to_confirm();
                             None
                         } else {
-                            dialog.selected_turn()
-                                .map(|t| (t.msg_range, t.turn_index))
+                            dialog.selected_turn().map(|t| (t.msg_range, t.turn_index))
                         }
                     }
                     None => None,

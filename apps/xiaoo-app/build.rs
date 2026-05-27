@@ -4,6 +4,23 @@ use std::io;
 use std::path::Path;
 
 fn main() {
+    compile_conch_proto();
+    install_guardian_skill();
+}
+
+fn compile_conch_proto() {
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("find vendored protoc");
+    std::env::set_var("PROTOC", protoc);
+    tonic_build::configure()
+        .build_server(false)
+        .compile_protos(
+            &["src/gateway/backend/conch/proto/agent.proto"],
+            &["src/gateway/backend/conch/proto"],
+        )
+        .expect("compile conch agent proto");
+}
+
+fn install_guardian_skill() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let src = Path::new(&manifest_dir)
         .parent()

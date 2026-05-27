@@ -1910,6 +1910,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tower-http 0.5.2",
+ "tracing",
  "ulid",
 ]
 
@@ -2151,16 +2152,10 @@ dependencies = [
  "agent-contracts",
  "async-trait",
  "glob",
- "prost",
- "protoc-bin-vendored",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
- "tonic",
- "tonic-build",
- "uuid",
 ]
 
 [[package]]
@@ -2535,7 +2530,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2572,9 +2567,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3676,7 +3671,9 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
  "trace",
+ "tracing",
  "uuid",
 ]
 
@@ -4674,6 +4671,7 @@ dependencies = [
  "crossterm",
  "dirs 6.0.0",
  "futures-util",
+ "glob",
  "governor",
  "hook",
  "llm-client",
@@ -4684,6 +4682,7 @@ dependencies = [
  "parking_lot",
  "prompt",
  "prost",
+ "protoc-bin-vendored",
  "ratatui",
  "regex",
  "reqwest",
@@ -4698,6 +4697,8 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "tonic",
+ "tonic-build",
  "tool",
  "tower 0.5.3",
  "tower_governor",

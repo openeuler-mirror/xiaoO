@@ -32,7 +32,7 @@ impl SessionGateway {
             return Ok(cp.clone());
         }
         let store: Arc<dyn SessionStore> = self.session_store.clone();
-        let deps = AppBootstrap::lifecycle_only(store, hooker_config)
+        let deps = AppBootstrap::lifecycle_only(store, hooker_config, self.backend_manager.clone())
             .map_err(|error| error.to_string())?;
         let cp = deps.session_control_plane;
         *lock = Some(cp.clone());
@@ -78,7 +78,10 @@ impl SessionGateway {
             .unwrap_or_default();
 
         self.session_store.save(record).await;
-        self.active_session_ids.lock().await.insert(session_id.clone());
+        self.active_session_ids
+            .lock()
+            .await
+            .insert(session_id.clone());
 
         if kvcache_enabled && !chunk_hashes.is_empty() {
             spawn_prefetch(chunk_hashes, "snapshot_prefetch".to_string());
@@ -97,6 +100,7 @@ impl SessionGateway {
         // Track the session so close_all_sessions covers it even if
         // ensure_session_open was not called first.
         let active_session_ids = Arc::clone(&self.active_session_ids);
+        let backend_manager = self.backend_manager.clone();
         let session_id = request.session_id.clone();
         tokio::spawn(async move {
             active_session_ids.lock().await.insert(session_id);
@@ -121,17 +125,19 @@ impl SessionGateway {
 
             let hooker_config = runtime_config.hooker.clone();
             let resolver = Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-            let dependencies = match AppBootstrap::from_session_components_with_hooks(
-                session_store,
-                resolver,
-                hooker_config,
-            ) {
-                Ok(dependencies) => dependencies,
-                Err(error) => {
-                    let _ = updates_tx.send(SessionTurnUpdate::Err(error.to_string()));
-                    return;
-                }
-            };
+            let dependencies =
+                match AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+                    session_store,
+                    resolver,
+                    hooker_config,
+                    backend_manager,
+                ) {
+                    Ok(dependencies) => dependencies,
+                    Err(error) => {
+                        let _ = updates_tx.send(SessionTurnUpdate::Err(error.to_string()));
+                        return;
+                    }
+                };
 
             let result = dependencies.session_service.run_turn(request).await;
             match result {
@@ -174,10 +180,11 @@ impl SessionGateway {
     ) -> Result<AppDependencies, String> {
         let hooker_config = runtime_config.hooker.clone();
         let resolver = Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-        AppBootstrap::from_session_components_with_hooks(
+        AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             self.session_store.clone(),
             resolver,
             hooker_config,
+            self.backend_manager.clone(),
         )
         .map_err(|error| error.to_string())
     }

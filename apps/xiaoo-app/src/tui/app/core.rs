@@ -137,10 +137,7 @@ impl App {
         Ok(())
     }
 
-    pub fn start_local_model_fetch(
-        &mut self,
-        api_base: String,
-    ) {
+    pub fn start_local_model_fetch(&mut self, api_base: String) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.pending_local_model_fetch = Some(rx);
         tokio::spawn(async move {
@@ -162,9 +159,7 @@ async fn wait_for_local_models(
     }
 }
 
-async fn fetch_models_from_local_api(
-    api_base: &str,
-) -> Vec<crate::chat::ModelInfo> {
+async fn fetch_models_from_local_api(api_base: &str) -> Vec<crate::chat::ModelInfo> {
     let url = format!("{}/models", api_base.trim_end_matches('/'));
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

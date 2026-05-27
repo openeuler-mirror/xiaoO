@@ -18,12 +18,14 @@ use tokio::sync::Mutex;
 use xiaoo_core::NoopRuntimeView;
 
 use super::session_supervisor::SessionSupervisor;
+use crate::gateway::backend::ExternalBackendManager;
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     supervisors: Mutex<HashMap<String, Arc<SessionSupervisor>>>,
     hooker_registry: Arc<dyn HookerRegistry>,
+    backend_manager: Arc<ExternalBackendManager>,
 }
 
 impl CoreBackedSessionService {
@@ -31,12 +33,14 @@ impl CoreBackedSessionService {
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
+        backend_manager: Arc<ExternalBackendManager>,
     ) -> Self {
         Self {
             session_store,
             runtime_resolver,
             supervisors: Mutex::new(HashMap::new()),
             hooker_registry,
+            backend_manager,
         }
     }
 
@@ -73,6 +77,7 @@ impl CoreBackedSessionService {
         let supervisor = Arc::new(SessionSupervisor::new(
             self.session_store.clone(),
             self.runtime_resolver.clone(),
+            Arc::clone(&self.backend_manager),
             session.clone(),
         ));
         supervisors.insert(session.session_id.clone(), supervisor.clone());
@@ -278,18 +283,27 @@ impl SessionControlPlane for CoreBackedSessionService {
     async fn force_close_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+    ) -> Result<SessionRecord, SessionServiceError> {
         let closed = if let Some(supervisor) = self.supervisor_for_session(session_id).await {
             supervisor.force_close().await
         } else {
             let Some(mut existing) = self.session_store.load(session_id).await else {
-                return Ok(None);
+                return Err(SessionServiceError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                });
             };
             existing.status = SessionLifecycleStatus::Closed;
             existing.updated_at_ms = current_time_ms();
             self.session_store.save(existing.clone()).await;
             existing
         };
+        if let Err(error) = self.backend_manager.release_session(session_id).await {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to release session backends"
+            );
+        }
 
         let hook_point = HookPointId(format!(
             "{}.Session.lifecycle.closed",
@@ -307,7 +321,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         )
         .await;
 
-        Ok(Some(closed))
+        Ok(closed)
     }
 }
 
