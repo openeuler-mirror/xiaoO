@@ -84,16 +84,6 @@ Set your provider credential:
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-Setup custom api url for local LLM:
-
-```toml
-[llm]
-provider = "deepseek-local"
-model = "deepseek-v4-flash"
-api_base = "http://localhost:8000/v1/"
-api_key_env = "LLM_API_KEY"
-```
-
 Run xiaoO:
 
 ```bash
