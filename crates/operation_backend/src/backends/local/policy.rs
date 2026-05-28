@@ -224,9 +224,6 @@ impl LocalBackendPolicy {
             SandboxPermissionCapability::Write => write_grant_root(
                 normalize_for_write(Path::new(request.denial.path.as_str()))?.as_path(),
             ),
-            SandboxPermissionCapability::ReadWrite => {
-                read_write_grant_path(Path::new(request.denial.path.as_str()))?
-            }
         };
         let mut store = self.lock_grants()?;
         store.next_id += 1;
@@ -291,8 +288,6 @@ impl SandboxPermissionGrant {
     fn allows(&self, requested: SandboxPermissionCapability) -> bool {
         match (self.capability, requested) {
             (SandboxPermissionCapability::Write, SandboxPermissionCapability::Read) => true,
-            (SandboxPermissionCapability::ReadWrite, SandboxPermissionCapability::Read)
-            | (SandboxPermissionCapability::ReadWrite, SandboxPermissionCapability::Write) => true,
             (SandboxPermissionCapability::ExecCwd, SandboxPermissionCapability::Read) => true,
             (granted, requested) => granted == requested,
         }
@@ -322,10 +317,6 @@ impl MacosSeatbeltProfile {
                     push_unique_path(&mut profile.readable_roots, grant.path);
                 }
                 SandboxPermissionCapability::ExecRuntime => {}
-                SandboxPermissionCapability::ReadWrite => {
-                    push_unique_path(&mut profile.readable_roots, grant.path.clone());
-                    push_unique_path(&mut profile.writable_roots, grant.path);
-                }
                 SandboxPermissionCapability::Write => {
                     push_unique_path(&mut profile.readable_roots, grant.path.clone());
                     push_unique_path(&mut profile.writable_roots, grant.path);
@@ -448,15 +439,6 @@ fn write_grant_root(path: &Path) -> PathBuf {
     match path.parent() {
         Some(parent) if parent != Path::new(std::path::MAIN_SEPARATOR_STR) => parent.to_path_buf(),
         _ => path.to_path_buf(),
-    }
-}
-
-fn read_write_grant_path(path: &Path) -> Result<PathBuf, OperationError> {
-    let normalized = normalize_for_write(path)?;
-    if normalized.exists() {
-        Ok(normalized)
-    } else {
-        Ok(write_grant_root(normalized.as_path()))
     }
 }
 
@@ -601,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn granted_read_write_path_allows_read_and_write() {
+    fn granted_write_path_allows_read_write_and_atomic_temp() {
         let root =
             std::env::temp_dir().join(format!("xiaoo-local-policy-rw-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(root.as_path());
@@ -611,7 +593,7 @@ mod tests {
         let policy = policy();
         let id = policy
             .grant(grant_request(
-                SandboxPermissionCapability::ReadWrite,
+                SandboxPermissionCapability::Write,
                 file.to_string_lossy().as_ref(),
                 SandboxPermissionScope::Once,
             ))
@@ -619,6 +601,9 @@ mod tests {
 
         assert!(policy.check_read(file.as_path(), "bash").is_ok());
         assert!(policy.check_write(file.as_path(), "bash").is_ok());
+        assert!(policy
+            .check_write(root.join(".runtime.txt.tmp").as_path(), "file_write")
+            .is_ok());
 
         policy.revoke(id).unwrap();
         let _ = std::fs::remove_dir_all(root.as_path());

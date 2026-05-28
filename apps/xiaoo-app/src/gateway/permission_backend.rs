@@ -13,8 +13,8 @@ use agent_contracts::backend::capability::search::{
 use agent_contracts::backend::{
     BackendPath, ExportedFileHandle, ExportedFileMeta, ExportedFileReader, OperationBackend,
     OperationBackendCapabilities, OperationError, OperationPermissionControl, PathStat,
-    SandboxPermissionCapability, SandboxPermissionGrantRequest, SandboxPermissionScope,
-    SandboxPolicyDenial, SharedExportedFileHandle,
+    SandboxPermissionCapability, SandboxPermissionGrantId, SandboxPermissionGrantRequest,
+    SandboxPermissionScope, SandboxPolicyDenial, SharedExportedFileHandle,
 };
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -23,6 +23,7 @@ use async_trait::async_trait;
 const ALLOW_ONCE: &str = "Allow once";
 const ALLOW_SESSION: &str = "Allow for this session";
 const DENY: &str = "Deny";
+const MAX_SANDBOX_PERMISSION_RETRIES: usize = 6;
 
 pub(crate) struct PermissionAwareOperationBackend {
     inner: Arc<dyn OperationBackend>,
@@ -200,26 +201,25 @@ impl OperationExec for PermissionAwareExec {
             async move { inner.exec().exec(request).await }
         })
         .await?;
-        if let Some(denial) = runtime_seatbelt_denial(&result) {
+        let mut retries = 0;
+        loop {
+            let denial = runtime_seatbelt_denial(&result).or_else(|| {
+                is_silent_seatbelt_exec_denial(&result)
+                    .then(|| silent_runtime_denial(self.inner.backend_id()))
+            });
+            let Some(denial) = denial else {
+                break;
+            };
+            if retries >= MAX_SANDBOX_PERMISSION_RETRIES {
+                return Err(OperationError::SandboxPolicyDenied { denial });
+            }
             result = retry_after_permission(&self.inner, &self.interaction, denial, || {
                 let inner = Arc::clone(&self.inner);
                 let request = request.clone();
                 async move { inner.exec().exec(request).await }
             })
             .await?;
-        }
-        if is_silent_seatbelt_exec_denial(&result) {
-            result = retry_after_permission(
-                &self.inner,
-                &self.interaction,
-                silent_runtime_denial(self.inner.backend_id()),
-                || {
-                    let inner = Arc::clone(&self.inner);
-                    let request = request.clone();
-                    async move { inner.exec().exec(request).await }
-                },
-            )
-            .await?;
+            retries += 1;
         }
         annotate_seatbelt_stderr(&mut result);
         Ok(result)
@@ -287,12 +287,32 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, OperationError>>,
 {
-    match operation().await {
-        Ok(value) => Ok(value),
-        Err(OperationError::SandboxPolicyDenied { denial }) => {
-            retry_after_permission(backend, interaction, denial, operation).await
+    let mut cleanup = PermissionGrantCleanup::default();
+    let mut retries = 0;
+    loop {
+        match operation().await {
+            Ok(value) => {
+                cleanup.revoke_all();
+                return Ok(value);
+            }
+            Err(OperationError::SandboxPolicyDenied { denial }) => {
+                if retries >= MAX_SANDBOX_PERMISSION_RETRIES {
+                    cleanup.revoke_all();
+                    return Err(OperationError::SandboxPolicyDenied { denial });
+                }
+                if let Err(error) =
+                    grant_after_permission(backend, interaction, &denial, &mut cleanup).await
+                {
+                    cleanup.revoke_all();
+                    return Err(error);
+                }
+                retries += 1;
+            }
+            Err(error) => {
+                cleanup.revoke_all();
+                return Err(error);
+            }
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -306,31 +326,80 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, OperationError>>,
 {
-    let scope = request_permission(interaction, &denial).await?;
+    let mut cleanup = PermissionGrantCleanup::default();
+    let mut retries = 0;
+    let mut current_denial = denial;
+    loop {
+        if let Err(error) =
+            grant_after_permission(backend, interaction, &current_denial, &mut cleanup).await
+        {
+            cleanup.revoke_all();
+            return Err(error);
+        }
+        match operation().await {
+            Ok(value) => {
+                cleanup.revoke_all();
+                return Ok(value);
+            }
+            Err(OperationError::SandboxPolicyDenied { denial }) => {
+                if retries >= MAX_SANDBOX_PERMISSION_RETRIES {
+                    cleanup.revoke_all();
+                    return Err(OperationError::SandboxPolicyDenied { denial });
+                }
+                current_denial = denial;
+                retries += 1;
+            }
+            Err(error) => {
+                cleanup.revoke_all();
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn grant_after_permission(
+    backend: &Arc<dyn OperationBackend>,
+    interaction: &Arc<dyn InteractionHandle>,
+    denial: &SandboxPolicyDenial,
+    cleanup: &mut PermissionGrantCleanup,
+) -> Result<(), OperationError> {
+    let scope = match tool::current_sandbox_permission_scope() {
+        Some(scope) => scope,
+        None => {
+            let scope = request_permission(interaction, denial).await?;
+            let _ = tool::approve_current_sandbox_permission(scope);
+            scope
+        }
+    };
+    let grant_scope = if denial.capability == SandboxPermissionCapability::ExecRuntime {
+        SandboxPermissionScope::Once
+    } else {
+        scope
+    };
     let Some(control) = backend.permission_control() else {
-        return Err(OperationError::SandboxPolicyDenied { denial });
+        return Err(OperationError::SandboxPolicyDenied {
+            denial: denial.clone(),
+        });
     };
     let grant_id = control.grant(SandboxPermissionGrantRequest {
         denial: denial.clone(),
-        scope,
+        scope: grant_scope,
     })?;
-    let result = operation().await;
-    if scope == SandboxPermissionScope::Once {
-        control.revoke(grant_id)?;
+    if grant_scope == SandboxPermissionScope::Once
+        && !tool::register_once_sandbox_grant(Arc::clone(backend), grant_id)
+    {
+        cleanup.add(Arc::clone(backend), grant_id);
     }
-    result
+    Ok(())
 }
 
 async fn request_permission(
     interaction: &Arc<dyn InteractionHandle>,
-    denial: &agent_contracts::backend::SandboxPolicyDenial,
+    denial: &SandboxPolicyDenial,
 ) -> Result<SandboxPermissionScope, OperationError> {
     let response = interaction
         .ask(&InteractionRequest::Choice {
-            prompt: format!(
-                "macOS Seatbelt blocked {}\n\n{} access requested:\n{}",
-                denial.operation, denial.capability, denial.path
-            ),
+            prompt: permission_prompt(denial),
             options: permission_options(denial),
             allow_custom_input: false,
             source: None,
@@ -353,6 +422,14 @@ async fn request_permission(
     }
 }
 
+fn permission_prompt(denial: &SandboxPolicyDenial) -> String {
+    let tool_name = tool::current_tool_name().unwrap_or_else(|| denial.operation.clone());
+    format!(
+        "macOS Seatbelt blocked {tool_name}\n\nAllow this tool call to continue with additional sandbox permissions?\nBlocked operation: {} {}\n{}",
+        denial.capability, denial.operation, denial.path
+    )
+}
+
 fn permission_options(denial: &SandboxPolicyDenial) -> Vec<String> {
     if denial.capability == SandboxPermissionCapability::ExecRuntime {
         return vec![ALLOW_ONCE.to_string(), DENY.to_string()];
@@ -362,6 +439,25 @@ fn permission_options(denial: &SandboxPolicyDenial) -> Vec<String> {
         ALLOW_SESSION.to_string(),
         DENY.to_string(),
     ]
+}
+
+#[derive(Default)]
+struct PermissionGrantCleanup {
+    once_grants: Vec<(Arc<dyn OperationBackend>, SandboxPermissionGrantId)>,
+}
+
+impl PermissionGrantCleanup {
+    fn add(&mut self, backend: Arc<dyn OperationBackend>, id: SandboxPermissionGrantId) {
+        self.once_grants.push((backend, id));
+    }
+
+    fn revoke_all(&mut self) {
+        for (backend, id) in self.once_grants.drain(..) {
+            if let Some(control) = backend.permission_control() {
+                let _ = control.revoke(id);
+            }
+        }
+    }
 }
 
 fn annotate_seatbelt_stderr(result: &mut ExecResult) {
@@ -386,7 +482,7 @@ fn runtime_seatbelt_denial(result: &ExecResult) -> Option<SandboxPolicyDenial> {
         backend_id: "local".to_string(),
         isolation: "macos_seatbelt".to_string(),
         operation: "bash".to_string(),
-        capability: SandboxPermissionCapability::ReadWrite,
+        capability: SandboxPermissionCapability::Write,
         path,
     })
 }
@@ -473,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_denial_uses_read_write_instead_of_guessing_from_command() {
+    fn runtime_denial_uses_write_grant_to_cover_unknown_path_access() {
         let result = ExecResult {
             stdout: vec![],
             stderr: b"cat: /Users/me/.ssh/config: Operation not permitted\n".to_vec(),
@@ -483,7 +579,7 @@ mod tests {
 
         assert_eq!(
             runtime_seatbelt_denial(&result).map(|denial| denial.capability),
-            Some(SandboxPermissionCapability::ReadWrite)
+            Some(SandboxPermissionCapability::Write)
         );
     }
 
