@@ -131,6 +131,7 @@ pub struct CliConfig {
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<crate::gateway::backend::GatewayBackendConfig>,
     pub skills_config: skill::SkillsConfig,
+    pub subagent: std::collections::BTreeMap<String, config::SubagentRoleConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +309,7 @@ mod tests {
             compact: crate::cli::config::CompactSection::default(),
             hooker: Default::default(),
             operation_backend: None,
+            subagent: Default::default(),
         }
     }
 

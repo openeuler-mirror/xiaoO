@@ -186,6 +186,20 @@ impl GatewayRuntime {
                 max_turns: state
                     .active_agent_role_config()
                     .and_then(|role| role.max_turns),
+                subagent_roles: state
+                    .agent_config
+                    .subagent
+                    .iter()
+                    .map(|(role_id, config)| {
+                        (role_id.clone(), crate::gateway::session_record::SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: config.description.clone(),
+                            prompt: config.prompt.clone(),
+                            max_turns: config.max_turns,
+                            tools: config.tools.clone(),
+                        })
+                    })
+                    .collect(),
             },
             provider: state.agent_config.llm.provider.clone(),
             model: state.agent_config.llm.model.clone(),

@@ -73,6 +73,19 @@ max_tokens = 128000                  # Optional, max output tokens per response
 context_window = 128000              # Optional, explicit total context budget override
 reasoning_effort = "off"             # Optional: off, high, or max
 
+# Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
+# Note: tools configuration supports two formats - see docs/config_file_guide.md
+[subagent.code_reviewer]
+description = "Code review specialist"
+prompt = "You are a code review specialist focusing on quality and best practices."
+max_turns = 5
+
+[subagent.code_reviewer.tools]
+bash = true
+read = true
+glob = true
+grep = true
+
 [trace]
 storage_backend = "moirai-sqlite"    # noop, stdout, or moirai-sqlite
 db_path = "~/.xiaoo/traces.db"       # Used when storage_backend is moirai-sqlite
@@ -82,6 +95,16 @@ Set your provider credential:
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Setup custom api url for local LLM:
+
+```toml
+[llm]
+provider = "deepseek-local"
+model = "deepseek-v4-flash"
+api_base = "http://localhost:8000/v1/"
+api_key_env = "LLM_API_KEY"
 ```
 
 Run xiaoO:
@@ -99,6 +122,12 @@ Example CLI output:
 ```text
 "hello world" has 11 characters.
 ```
+
+> **Configuration Documentation**:
+> - [General Configuration Guide](docs/config_file_guide.md) - Shared configuration for all modes (llm, subagent, skills, etc.)
+> - [CLI Configuration](docs/cli_config.md) - CLI basic usage and supported configuration
+> - [TUI Configuration](docs/tui_config.md) - TUI-specific configuration (remote, LSP, agent roles)
+> - [Daemon Configuration](docs/daemon_config.md) - Daemon-specific configuration (channels, HTTP API)
 
 ## Context Window
 

@@ -5,6 +5,7 @@ pub mod core_session_service;
 pub mod hosted_runtime_resolver;
 pub mod pending_interaction;
 pub mod progress_updates;
+pub mod prompt_utils;
 pub mod runtime_bindings;
 pub mod runtime_factory;
 pub mod runtime_resolver;

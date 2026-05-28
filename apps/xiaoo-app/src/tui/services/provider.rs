@@ -128,17 +128,44 @@ pub fn validate_and_connect_api_key(
 }
 
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    // Try arboard (native GUI clipboard) first.
-    match arboard::Clipboard::new() {
-        Ok(mut ctx) => {
-            ctx.set_text(text)?;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    // Wayland: wl-copy
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if Command::new("wl-copy").arg(text).output().ok().map(|o| o.status.success()) == Some(true) {
             return Ok(());
         }
-        Err(err) => {
-            tracing::debug!(
-                "arboard clipboard unavailable ({}), falling back to OSC 52",
-                err
-            );
+    }
+    // X11: xclip
+    if let Ok(mut child) = Command::new("xclip")
+        .args(["-selection", "clipboard"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        if child.wait().ok().map(|s| s.success()) == Some(true) {
+            return Ok(());
+        }
+    }
+    // X11: xsel
+    if let Ok(mut child) = Command::new("xsel")
+        .args(["--clipboard", "--input"])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        if child.wait().ok().map(|s| s.success()) == Some(true) {
+            return Ok(());
+        }
+    }
+    // Fallback: arboard
+    if let Ok(mut clip) = arboard::Clipboard::new() {
+        if clip.set_text(text).is_ok() {
+            return Ok(());
         }
     }
 
@@ -147,7 +174,6 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     // Write directly to stdout while still in raw mode.
-    use std::io::Write as _;
     let mut out = std::io::stdout().lock();
     // When running inside tmux, wrap with a DCS passthrough so the outer
     // terminal receives the OSC 52 sequence (mirrors opencode's behaviour).

@@ -30,6 +30,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
+    pub subagent: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
     pub agents: AgentsConfig,
@@ -156,6 +158,19 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentRoleConfig {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SubagentRoleConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub description: String,

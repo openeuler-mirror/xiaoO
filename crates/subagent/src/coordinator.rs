@@ -53,6 +53,18 @@ impl SubagentPromptBuilder {
             .replace("{{task_context}}", task_context)
             .replace("{{output_schema_section}}", &schema_section)
     }
+
+    pub fn build_with_predefined_prompt(
+        predefined_prompt: &str,
+        task_context: &str,
+    ) -> String {
+        let context_section = if task_context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nAdditional Task Context:\n{}", task_context)
+        };
+        format!("{}{}", predefined_prompt, context_section)
+    }
 }
 
 /// Configuration options for controlling subagent boundaries and quotas.
@@ -123,11 +135,15 @@ impl SubagentCoordinator {
             });
         }
 
-        let built_prompt = SubagentPromptBuilder::build(
-            &request.task_goal,
-            &request.task_context,
-            request.output_schema.as_ref(),
-        );
+        let built_prompt = if let Some(predefined) = &request.predefined_prompt {
+            SubagentPromptBuilder::build_with_predefined_prompt(predefined, &request.task_context)
+        } else {
+            SubagentPromptBuilder::build(
+                &request.task_goal,
+                &request.task_context,
+                request.output_schema.as_ref(),
+            )
+        };
 
         state.agents.insert(
             child_agent_id.0.clone(),
@@ -154,6 +170,7 @@ impl SubagentCoordinator {
                 description: request.description.clone(),
                 prompt: built_prompt,
                 output_schema: request.output_schema.clone(),
+                max_turns: request.max_turns,
             }],
         })
     }
@@ -297,10 +314,13 @@ mod tests {
         SpawnSubagentRequest {
             session_id: "test-session".to_string(),
             parent_agent_id: parent_id.clone(),
+            description: desc.to_string(),
             task_goal: desc.to_string(),
             task_context: String::new(),
             output_schema: None,
-            description: desc.to_string(),
+            subagent_role_id: None,
+            predefined_prompt: None,
+            max_turns: None,
         }
     }
 

@@ -66,22 +66,45 @@ cargo install --path apps/xiaoo-app
 
 ```toml
 [llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, ...
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
-api_key_env = "OPENROUTER_API_KEY"   # 从该环境变量读取 API Key
-max_tokens = 128000                  # 可选：单次响应最大输出 token 数
-context_window = 128000              # 可选：显式指定总上下文预算
-reasoning_effort = "off"             # 可选：off、high 或 max
+api_key_env = "OPENROUTER_API_KEY"   # 从这个环境变量读取 API 密钥
+max_tokens = 128000                  # 可选，每次响应的最大输出 token 数
+context_window = 128000              # 可选，显式指定总上下文预算上限
+reasoning_effort = "off"             # 可选: off, high, 或 max
+
+# 预定义 subagent 角色（CLI/TUI/Daemon 均支持） ⭐
+# 注意：tools 配置支持两种格式，详见 docs/config_file_guide.md
+[subagent.code_reviewer]
+description = "代码审查专家"
+prompt = "你是代码审查专家，专注于代码质量和最佳实践。"
+max_turns = 5
+
+[subagent.code_reviewer.tools]
+bash = true
+read = true
+glob = true
+grep = true
 
 [trace]
-storage_backend = "moirai-sqlite"    # noop、stdout 或 moirai-sqlite
-db_path = "~/.xiaoo/traces.db"       # storage_backend 为 moirai-sqlite 时使用
+storage_backend = "moirai-sqlite"    # noop, stdout, 或 moirai-sqlite
+db_path = "~/.xiaoo/traces.db"       # 当 storage_backend 为 moirai-sqlite 时使用
 ```
 
 设置 provider 凭证：
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
+```
+
+为本地 LLM 设置自定义 API url:
+
+```toml
+[llm]
+provider = "deepseek-local"
+model = "deepseek-v4-flash"
+api_base = "http://localhost:8000/v1/"
+api_key_env = "LLM_API_KEY"
 ```
 
 运行 xiaoO：
@@ -99,6 +122,12 @@ CLI 输出示例：
 ```text
 "hello world" has 11 characters.
 ```
+
+> **配置文档**:
+> - [通用配置指南](docs/config_file_guide.md) - 所有模式共用的配置项（llm、subagent、skills等）
+> - [CLI配置](docs/cli_config.md) - CLI基础用法和支持的配置
+> - [TUI配置](docs/tui_config.md) - TUI专用配置（remote、LSP、agent角色）
+> - [Daemon配置](docs/daemon_config.md) - Daemon专用配置（channels、HTTP API）
 
 ## 上下文窗口
 
