@@ -1,6 +1,5 @@
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -9,7 +8,7 @@ use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use crate::r#impl::reqwest_util::format_reqwest_error;
+use crate::r#impl::reqwest_util::{build_http_client, format_reqwest_error};
 
 use super::constants::{default_timeout_ms, max_timeout_ms, MAX_RESPONSE_BYTES};
 use super::input::{WebFetchFormat, WebFetchInput};
@@ -57,10 +56,7 @@ impl WebFetchExecutor {
             }
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(timeout_ms))
-            .build()
-            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+        let client = build_http_client(timeout_ms)?;
 
         let response = client
             .get(&input.url)

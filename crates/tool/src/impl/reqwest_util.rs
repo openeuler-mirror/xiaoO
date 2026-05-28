@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::time::Duration;
 
 pub fn format_reqwest_error(e: reqwest::Error, context: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -22,4 +23,20 @@ pub fn format_reqwest_error(e: reqwest::Error, context: &str) -> String {
     }
 
     parts.join("\n")
+}
+
+pub fn build_http_client(timeout_ms: u64) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms));
+
+    let native_certs = rustls_native_certs::load_native_certs();
+    for cert in native_certs.certs {
+        if let Ok(c) = reqwest::tls::Certificate::from_der(cert.as_ref()) {
+            builder = builder.add_root_certificate(c);
+        }
+    }
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }

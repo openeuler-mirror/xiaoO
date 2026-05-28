@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -9,7 +8,7 @@ use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use crate::r#impl::reqwest_util::format_reqwest_error;
+use crate::r#impl::reqwest_util::{build_http_client, format_reqwest_error};
 
 use super::constants::{
     BASE_URL, DEFAULT_NUM_RESULTS, DEFAULT_TIMEOUT_MS, MCP_TOOL_NAME, SEARCH_ENDPOINT,
@@ -77,10 +76,7 @@ impl WebSearchExecutor {
     }
 
     async fn search(input: &WebSearchInput) -> Result<WebSearchOutput, String> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS))
-            .build()
-            .map_err(|e| format_reqwest_error(e, "building HTTP client"))?;
+        let client = build_http_client(DEFAULT_TIMEOUT_MS)?;
 
         let search_type = input
             .search_type
