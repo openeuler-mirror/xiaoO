@@ -208,7 +208,7 @@ PROVIDER_BASE_URLS: dict[str, str] = {
 PROVIDER_API_KEY_ENVS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
-    "cludae": "ANTHROPIC_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "google": "GEMINI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
