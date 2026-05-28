@@ -9,6 +9,8 @@ use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
+use crate::r#impl::reqwest_util::format_reqwest_error;
+
 use super::constants::{
     BASE_URL, DEFAULT_NUM_RESULTS, DEFAULT_TIMEOUT_MS, MCP_TOOL_NAME, SEARCH_ENDPOINT,
 };
@@ -78,7 +80,7 @@ impl WebSearchExecutor {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(DEFAULT_TIMEOUT_MS))
             .build()
-            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+            .map_err(|e| format_reqwest_error(e, "building HTTP client"))?;
 
         let search_type = input
             .search_type
@@ -117,7 +119,7 @@ impl WebSearchExecutor {
             .json(&request_body)
             .send()
             .await
-            .map_err(|e| format!("Search request failed: {}", e))?;
+            .map_err(|e| format_reqwest_error(e, &format!("POST {}", url)))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -131,7 +133,7 @@ impl WebSearchExecutor {
         let response_text = response
             .text()
             .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
+            .map_err(|e| format_reqwest_error(e, "reading search response body"))?;
 
         // Parse SSE response: each event line starts with "data: "
         for line in response_text.lines() {

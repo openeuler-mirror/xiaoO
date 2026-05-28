@@ -9,6 +9,8 @@ use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
+use crate::r#impl::reqwest_util::format_reqwest_error;
+
 use super::constants::{default_timeout_ms, max_timeout_ms, MAX_RESPONSE_BYTES};
 use super::input::{WebFetchFormat, WebFetchInput};
 use super::output::WebFetchOutput;
@@ -34,8 +36,6 @@ impl WebFetchExecutor {
         // This prevents DNS rebinding attacks where a hostname resolves to safe IP
         // during validation but to a blocked IP during actual request.
         let host = extract_host_for_dns(&input.url);
-        // Infer default port from URL scheme so that to_socket_addrs() receives a
-        // valid "host:port" string (Rust's ToSocketAddrs requires a port number).
         let port = if input.url.starts_with("https://") {
             443
         } else {
@@ -77,7 +77,7 @@ impl WebFetchExecutor {
             .header("Accept-Language", "en-US,en;q=0.9")
             .send()
             .await
-            .map_err(|e| format!("Request failed: {}", e))?;
+            .map_err(|e| format_reqwest_error(e, &format!("fetching {}", &input.url)))?;
 
         if !response.status().is_success() {
             return Err(format!(

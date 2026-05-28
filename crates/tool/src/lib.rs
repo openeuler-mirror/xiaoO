@@ -9,4 +9,5 @@ pub use framework::ToolStateStoreBuilderImpl;
 pub use framework::{
     snapshot_tool_specs, tool_filter_from_specs, tool_specs_from_snapshot, ToolSpecSnapshot,
 };
+pub use r#impl::reqwest_util;
 pub use r#impl::{load_tool_sources, load_tool_sources_with_services, SubagentRoleInfo, ToolRuntimeServices};
