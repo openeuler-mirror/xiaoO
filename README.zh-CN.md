@@ -66,16 +66,28 @@ cargo install --path apps/xiaoo-app
 
 ```toml
 [llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, ...
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan
 model = "z-ai/glm-5"
-api_key_env = "OPENROUTER_API_KEY"   # 从该环境变量读取 API Key
-max_tokens = 128000                  # 可选：单次响应最大输出 token 数
-context_window = 128000              # 可选：显式指定总上下文预算
-reasoning_effort = "off"             # 可选：off、high 或 max
+api_key_env = "OPENROUTER_API_KEY"   # 从这个环境变量读取 API 密钥
+max_tokens = 128000                  # 可选，每次响应的最大输出 token 数
+context_window = 128000              # 可选，显式指定总上下文预算上限
+reasoning_effort = "off"             # 可选: off, high, 或 max
+
+# 预定义 subagent 角色（CLI/TUI/Daemon 均支持） ⭐
+[subagent.code_reviewer]
+description = "代码审查专家"
+prompt = "你是代码审查专家，专注于代码质量和最佳实践。"
+max_turns = 5
+
+[subagent.code_reviewer.tools]
+bash = true
+read = true
+glob = true
+grep = true
 
 [trace]
-storage_backend = "moirai-sqlite"    # noop、stdout 或 moirai-sqlite
-db_path = "~/.xiaoo/traces.db"       # storage_backend 为 moirai-sqlite 时使用
+storage_backend = "moirai-sqlite"    # noop, stdout, 或 moirai-sqlite
+db_path = "~/.xiaoo/traces.db"       # 当 storage_backend 为 moirai-sqlite 时使用
 ```
 
 设置 provider 凭证：
