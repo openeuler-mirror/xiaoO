@@ -735,7 +735,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 **规则**：写入文件前，必须在 `action_history` 中存在对该文件的读取操作。
 
 **豁免条件**：
-- 新文件创建（包含 "创建"、"新建"、"create"、"new file"、"touch"）
+- 目标文件不存在于磁盘（视为新建文件，自动豁免）
+- 新文件创建关键词（`reason` 或 `action_detail` 包含 "创建"、"新建"、"create"、"new file"、"touch"）
 - 非写入工具（`ask_user_question`、`glob`、`grep`、`list_dir`、`count_text_length`、`search`）
 
 **示例 1：违规 - 未读取直接写入**
@@ -828,6 +829,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 ### 2.3 敏感路径访问检测
 
 **规则**：检查 `action_detail` 中是否包含对系统关键文件/目录的访问。
+
+> **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
 #### Critical 级别敏感路径
 
