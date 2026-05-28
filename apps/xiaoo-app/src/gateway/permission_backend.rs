@@ -1,5 +1,7 @@
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use agent_contracts::backend::capability::exec::{ExecRequest, ExecResult, OperationExec};
 use agent_contracts::backend::capability::export::{ExportFileRequest, OperationExport};
@@ -22,6 +24,7 @@ use async_trait::async_trait;
 
 const ALLOW_ONCE: &str = "Allow once";
 const ALLOW_SESSION: &str = "Allow for this session";
+const ALLOW_SIMILAR_BASH_SESSION: &str = "Allow similar bash commands for this path";
 const DENY: &str = "Deny";
 const MAX_SANDBOX_PERMISSION_RETRIES: usize = 6;
 
@@ -38,10 +41,15 @@ impl PermissionAwareOperationBackend {
         inner: Arc<dyn OperationBackend>,
         interaction: Arc<dyn InteractionHandle>,
     ) -> Self {
+        let bash_rules = Arc::new(BashSandboxApprovalRules::default());
         Self {
             files: PermissionAwareFileSystem::new(Arc::clone(&inner), Arc::clone(&interaction)),
             search: PermissionAwareSearch::new(Arc::clone(&inner), Arc::clone(&interaction)),
-            exec: PermissionAwareExec::new(Arc::clone(&inner), Arc::clone(&interaction)),
+            exec: PermissionAwareExec::new(
+                Arc::clone(&inner),
+                Arc::clone(&interaction),
+                Arc::clone(&bash_rules),
+            ),
             export: PermissionAwareExport::new(Arc::clone(&inner), interaction),
             inner,
         }
@@ -184,11 +192,20 @@ impl OperationSearch for PermissionAwareSearch {
 struct PermissionAwareExec {
     inner: Arc<dyn OperationBackend>,
     interaction: Arc<dyn InteractionHandle>,
+    bash_rules: Arc<BashSandboxApprovalRules>,
 }
 
 impl PermissionAwareExec {
-    fn new(inner: Arc<dyn OperationBackend>, interaction: Arc<dyn InteractionHandle>) -> Self {
-        Self { inner, interaction }
+    fn new(
+        inner: Arc<dyn OperationBackend>,
+        interaction: Arc<dyn InteractionHandle>,
+        bash_rules: Arc<BashSandboxApprovalRules>,
+    ) -> Self {
+        Self {
+            inner,
+            interaction,
+            bash_rules,
+        }
     }
 }
 
@@ -213,11 +230,21 @@ impl OperationExec for PermissionAwareExec {
             if retries >= MAX_SANDBOX_PERMISSION_RETRIES {
                 return Err(OperationError::SandboxPolicyDenied { denial });
             }
-            result = retry_after_permission(&self.inner, &self.interaction, denial, || {
-                let inner = Arc::clone(&self.inner);
-                let request = request.clone();
-                async move { inner.exec().exec(request).await }
-            })
+            let context = PermissionRequestContext::Bash {
+                command: request.command.clone(),
+                rules: Arc::clone(&self.bash_rules),
+            };
+            result = retry_after_permission(
+                &self.inner,
+                &self.interaction,
+                denial,
+                Some(&context),
+                || {
+                    let inner = Arc::clone(&self.inner);
+                    let request = request.clone();
+                    async move { inner.exec().exec(request).await }
+                },
+            )
             .await?;
             retries += 1;
         }
@@ -301,7 +328,7 @@ where
                     return Err(OperationError::SandboxPolicyDenied { denial });
                 }
                 if let Err(error) =
-                    grant_after_permission(backend, interaction, &denial, &mut cleanup).await
+                    grant_after_permission(backend, interaction, &denial, None, &mut cleanup).await
                 {
                     cleanup.revoke_all();
                     return Err(error);
@@ -320,6 +347,7 @@ async fn retry_after_permission<T, F, Fut>(
     backend: &Arc<dyn OperationBackend>,
     interaction: &Arc<dyn InteractionHandle>,
     denial: SandboxPolicyDenial,
+    context: Option<&PermissionRequestContext>,
     mut operation: F,
 ) -> Result<T, OperationError>
 where
@@ -331,7 +359,8 @@ where
     let mut current_denial = denial;
     loop {
         if let Err(error) =
-            grant_after_permission(backend, interaction, &current_denial, &mut cleanup).await
+            grant_after_permission(backend, interaction, &current_denial, context, &mut cleanup)
+                .await
         {
             cleanup.revoke_all();
             return Err(error);
@@ -361,14 +390,26 @@ async fn grant_after_permission(
     backend: &Arc<dyn OperationBackend>,
     interaction: &Arc<dyn InteractionHandle>,
     denial: &SandboxPolicyDenial,
+    context: Option<&PermissionRequestContext>,
     cleanup: &mut PermissionGrantCleanup,
 ) -> Result<(), OperationError> {
-    let scope = match tool::current_sandbox_permission_scope() {
-        Some(scope) => scope,
-        None => {
-            let scope = request_permission(interaction, denial).await?;
-            let _ = tool::approve_current_sandbox_permission(scope);
-            scope
+    let scope = if context_matches_auto_approval(context, denial) {
+        SandboxPermissionScope::Once
+    } else {
+        match tool::current_sandbox_permission_scope() {
+            Some(scope) => scope,
+            None => match request_permission(interaction, denial, context).await? {
+                PermissionDecision::Grant(scope) => {
+                    let _ = tool::approve_current_sandbox_permission(scope);
+                    scope
+                }
+                PermissionDecision::AllowSimilarBashForSession => {
+                    if let Some(PermissionRequestContext::Bash { command, rules }) = context {
+                        rules.add(command, denial);
+                    }
+                    SandboxPermissionScope::Once
+                }
+            },
         }
     };
     let grant_scope = if denial.capability == SandboxPermissionCapability::ExecRuntime {
@@ -393,14 +434,98 @@ async fn grant_after_permission(
     Ok(())
 }
 
+enum PermissionRequestContext {
+    Bash {
+        command: String,
+        rules: Arc<BashSandboxApprovalRules>,
+    },
+}
+
+enum PermissionDecision {
+    Grant(SandboxPermissionScope),
+    AllowSimilarBashForSession,
+}
+
+#[derive(Default)]
+struct BashSandboxApprovalRules {
+    rules: Mutex<Vec<BashSandboxApprovalRule>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BashSandboxApprovalRule {
+    command_prefix: String,
+    granted_root: PathBuf,
+}
+
+impl BashSandboxApprovalRules {
+    fn add(&self, command: &str, denial: &SandboxPolicyDenial) {
+        let Some(rule) = BashSandboxApprovalRule::from_denial(command, denial) else {
+            return;
+        };
+        if let Ok(mut rules) = self.rules.lock() {
+            if !rules.iter().any(|existing| existing == &rule) {
+                rules.push(rule);
+            }
+        }
+    }
+
+    fn matches(&self, command: &str, denial: &SandboxPolicyDenial) -> bool {
+        if denial.capability == SandboxPermissionCapability::ExecRuntime {
+            return false;
+        }
+        let path = Path::new(denial.path.as_str());
+        if !path.is_absolute() {
+            return false;
+        }
+        self.rules
+            .lock()
+            .map(|rules| {
+                rules.iter().any(|rule| {
+                    command.starts_with(rule.command_prefix.as_str())
+                        && path_is_within(path, rule.granted_root.as_path())
+                })
+            })
+            .unwrap_or(false)
+    }
+}
+
+impl BashSandboxApprovalRule {
+    fn from_denial(command: &str, denial: &SandboxPolicyDenial) -> Option<Self> {
+        if denial.capability == SandboxPermissionCapability::ExecRuntime {
+            return None;
+        }
+        let path = Path::new(denial.path.as_str());
+        if !path.is_absolute() {
+            return None;
+        }
+        let command_prefix = bash_command_prefix_for_denial(command, denial.path.as_str())?;
+        let granted_root = path.parent()?.to_path_buf();
+        Some(Self {
+            command_prefix,
+            granted_root,
+        })
+    }
+}
+
+fn context_matches_auto_approval(
+    context: Option<&PermissionRequestContext>,
+    denial: &SandboxPolicyDenial,
+) -> bool {
+    match context {
+        Some(PermissionRequestContext::Bash { command, rules }) => rules.matches(command, denial),
+        None => false,
+    }
+}
+
 async fn request_permission(
     interaction: &Arc<dyn InteractionHandle>,
     denial: &SandboxPolicyDenial,
-) -> Result<SandboxPermissionScope, OperationError> {
+    context: Option<&PermissionRequestContext>,
+) -> Result<PermissionDecision, OperationError> {
     let response = interaction
         .ask(&InteractionRequest::Choice {
-            prompt: permission_prompt(denial),
-            options: permission_options(denial),
+            prompt: permission_prompt(denial, context),
+            options: permission_options(denial, context),
             allow_custom_input: false,
             source: None,
         })
@@ -408,13 +533,19 @@ async fn request_permission(
 
     match response {
         InteractionResponse::Choice { value: Some(value) } if value == ALLOW_ONCE => {
-            Ok(SandboxPermissionScope::Once)
+            Ok(PermissionDecision::Grant(SandboxPermissionScope::Once))
         }
         InteractionResponse::Choice { value: Some(value) }
             if value == ALLOW_SESSION
                 && denial.capability != SandboxPermissionCapability::ExecRuntime =>
         {
-            Ok(SandboxPermissionScope::Session)
+            Ok(PermissionDecision::Grant(SandboxPermissionScope::Session))
+        }
+        InteractionResponse::Choice { value: Some(value) }
+            if value == ALLOW_SIMILAR_BASH_SESSION
+                && can_offer_similar_bash_approval(denial, context) =>
+        {
+            Ok(PermissionDecision::AllowSimilarBashForSession)
         }
         _ => Err(OperationError::SandboxPolicyDenied {
             denial: denial.clone(),
@@ -422,23 +553,74 @@ async fn request_permission(
     }
 }
 
-fn permission_prompt(denial: &SandboxPolicyDenial) -> String {
+fn permission_prompt(
+    denial: &SandboxPolicyDenial,
+    context: Option<&PermissionRequestContext>,
+) -> String {
     let tool_name = tool::current_tool_name().unwrap_or_else(|| denial.operation.clone());
+    if let Some(PermissionRequestContext::Bash { command, .. }) = context {
+        return format!(
+            "macOS Seatbelt blocked {tool_name}\n\nCommand:\n{command}\n\nBlocked operation: {} {}\n{}",
+            denial.capability, denial.operation, denial.path
+        );
+    }
     format!(
         "macOS Seatbelt blocked {tool_name}\n\nAllow this tool call to continue with additional sandbox permissions?\nBlocked operation: {} {}\n{}",
         denial.capability, denial.operation, denial.path
     )
 }
 
-fn permission_options(denial: &SandboxPolicyDenial) -> Vec<String> {
+fn permission_options(
+    denial: &SandboxPolicyDenial,
+    context: Option<&PermissionRequestContext>,
+) -> Vec<String> {
     if denial.capability == SandboxPermissionCapability::ExecRuntime {
         return vec![ALLOW_ONCE.to_string(), DENY.to_string()];
     }
-    vec![
-        ALLOW_ONCE.to_string(),
-        ALLOW_SESSION.to_string(),
-        DENY.to_string(),
-    ]
+    let mut options = vec![ALLOW_ONCE.to_string(), ALLOW_SESSION.to_string()];
+    if can_offer_similar_bash_approval(denial, context) {
+        options.push(ALLOW_SIMILAR_BASH_SESSION.to_string());
+    }
+    options.push(DENY.to_string());
+    options
+}
+
+fn can_offer_similar_bash_approval(
+    denial: &SandboxPolicyDenial,
+    context: Option<&PermissionRequestContext>,
+) -> bool {
+    match context {
+        Some(PermissionRequestContext::Bash { command, .. }) => {
+            BashSandboxApprovalRule::from_denial(command, denial).is_some()
+        }
+        None => false,
+    }
+}
+
+fn bash_command_prefix_for_denial(command: &str, denied_path: &str) -> Option<String> {
+    if let Some(index) = command.find(denied_path) {
+        let prefix = command[..index].to_string();
+        if !prefix.trim().is_empty() {
+            return Some(prefix);
+        }
+    }
+    let trimmed = command.trim_start();
+    let first_len = trimmed
+        .char_indices()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))
+        .unwrap_or(trimmed.len());
+    if first_len == 0 {
+        return None;
+    }
+    let leading_len = command.len() - trimmed.len();
+    let end = leading_len + first_len;
+    let mut prefix = command[..end].to_string();
+    prefix.push(' ');
+    Some(prefix)
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
 }
 
 #[derive(Default)]
@@ -608,9 +790,38 @@ mod tests {
         let denial = silent_runtime_denial("local");
 
         assert_eq!(
-            permission_options(&denial),
+            permission_options(&denial, None),
             vec![ALLOW_ONCE.to_string(), DENY.to_string()]
         );
+    }
+
+    #[test]
+    fn derives_bash_prefix_from_denied_path_position() {
+        assert_eq!(
+            bash_command_prefix_for_denial("cat \"/Users/me/a.txt\"", "/Users/me/a.txt").as_deref(),
+            Some("cat \"")
+        );
+    }
+
+    #[test]
+    fn bash_rule_matches_prefix_and_parent_path() {
+        let rules = BashSandboxApprovalRules::default();
+        let denial = SandboxPolicyDenial {
+            backend_id: "local".to_string(),
+            isolation: "macos_seatbelt".to_string(),
+            operation: "bash".to_string(),
+            capability: SandboxPermissionCapability::Write,
+            path: "/Users/me/docs/a.txt".to_string(),
+        };
+
+        rules.add("cat \"/Users/me/docs/a.txt\"", &denial);
+
+        let next_denial = SandboxPolicyDenial {
+            path: "/Users/me/docs/b.txt".to_string(),
+            ..denial
+        };
+        assert!(rules.matches("cat \"/Users/me/docs/b.txt\"", &next_denial));
+        assert!(!rules.matches("sed -n '1p' \"/Users/me/docs/b.txt\"", &next_denial));
     }
 
     #[test]
