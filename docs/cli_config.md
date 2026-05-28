@@ -112,6 +112,8 @@ xiaoo run --no-tools -p "Just answer this question"
 
 CLI supports `[subagent]` configuration, allowing the main agent to delegate tasks to specialized subagents.
 
+> **Note**: Tools configuration supports two formats. See [Configuration File Guide](./config_file_guide.md#subagent---predefined-subagent-roles-new) for details.
+
 ### Configuration Example
 
 ```toml

@@ -98,7 +98,16 @@ Through predefined subagent roles, the main agent can delegate specific tasks to
 description = "Role description (used to match user requests)"  # Required
 prompt = "Predefined system prompt"              # Optional
 max_turns = 5                                  # Optional: maximum turn count
-tools = { "bash" = true, "read" = true }      # Optional: tool permission restrictions
+
+# Tools configuration - two formats supported:
+
+# Format 1: Section format (recommended for clarity)
+[subagent.<role_id>.tools]
+bash = true
+read = true
+
+# Format 2: Inline format (compact)
+# tools = { "bash" = true, "read" = true }
 ```
 
 ### Configuration Example
@@ -120,10 +129,27 @@ glob = true
 grep = true
 
 # Documentation specialist
+# Example showing both format options for tools configuration:
 [subagent.doc_writer]
 description = "Documentation specialist"
 max_turns = 3
+
+# Option 1: Section format (shown above - no tools = uses global default)
+
+# Option 2: Section format with explicit tools
+# [subagent.doc_writer.tools]
+# bash = true
+# read = true
+# write = true
+
+# Option 3: Inline format
+# [subagent.doc_writer]
+# description = "Documentation specialist"
+# max_turns = 3
+# tools = { "bash" = true, "read" = true, "write" = true }
 ```
+
+> **Note**: If `[subagent.<role_id>.tools]` is not configured, the subagent uses the global default tool permissions.
 
 ### Working Mechanism
 

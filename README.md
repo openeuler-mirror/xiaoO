@@ -74,6 +74,7 @@ context_window = 128000              # Optional, explicit total context budget o
 reasoning_effort = "off"             # Optional: off, high, or max
 
 # Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
+# Note: tools configuration supports two formats - see docs/config_file_guide.md
 [subagent.code_reviewer]
 description = "Code review specialist"
 prompt = "You are a code review specialist focusing on quality and best practices."

@@ -217,6 +217,7 @@ api_key_env = "OPENROUTER_API_KEY"
 context_window = 128000
 
 # Predefined subagent roles (common configuration)
+# Note: Tools configuration supports two formats. See config_file_guide.md for details.
 [subagent.code_reviewer]
 description = "Code review specialist"
 prompt = "You are a code review specialist."
