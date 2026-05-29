@@ -46,7 +46,6 @@ The runtime also includes a layered memory and adaptive context-compression syst
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
 cd xiaoO
-cargo build --release
 cargo install --path apps/xiaoo-app
 ```
 
