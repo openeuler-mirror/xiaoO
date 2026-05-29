@@ -22,7 +22,7 @@ pub(crate) fn map_serde_error(err: serde_json::Error) -> LlmError {
 pub(crate) fn map_api_status_error(
     status: StatusCode,
     response_body: &str,
-    request_body: &str,
+    _request_body: &str,
     headers: Option<&reqwest::header::HeaderMap>,
 ) -> LlmError {
     if status.as_u16() == 529 {
@@ -55,16 +55,22 @@ pub(crate) fn map_api_status_error(
         };
     }
 
-    let message = format!(
-        "HTTP {}: {}\nRequest body: {}",
-        status, response_body, request_body
-    );
+    let message = format_api_status_message(status, response_body);
 
     if is_context_overflow(status, response_body) {
         return LlmError::ContextLengthExceeded { message };
     }
 
     LlmError::ApiError(message)
+}
+
+fn format_api_status_message(status: StatusCode, response_body: &str) -> String {
+    let body = if response_body.trim().is_empty() {
+        "no response body"
+    } else {
+        response_body
+    };
+    format!("HTTP {status}: {body}")
 }
 
 pub(crate) fn parse_stream_error(data: &str) -> Option<LlmError> {
@@ -187,11 +193,13 @@ mod tests {
         let error = map_api_status_error(
             StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"This model's maximum context length is 128000 tokens, however you requested 128500 tokens."}}"#,
-            "{}",
+            r#"{"messages":[{"content":"secret prompt"}]}"#,
             None,
         );
 
         assert!(matches!(error, LlmError::ContextLengthExceeded { .. }));
+        assert!(!error.to_string().contains("Request body"));
+        assert!(!error.to_string().contains("secret prompt"));
     }
 
     #[test]
@@ -218,11 +226,13 @@ mod tests {
         let error = map_api_status_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":{"message":"provider unavailable"}}"#,
-            "{}",
+            r#"{"messages":[{"content":"secret prompt"}]}"#,
             None,
         );
 
         assert!(matches!(error, LlmError::ApiError(_)));
+        assert!(!error.to_string().contains("Request body"));
+        assert!(!error.to_string().contains("secret prompt"));
     }
 
     #[test]

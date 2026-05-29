@@ -29,10 +29,7 @@ impl SpawnSubagentToolSpec {
                 .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!(
-                "\n\nAvailable predefined subagent roles:\n{}",
-                roles_list
-            )
+            format!("\n\nAvailable predefined subagent roles:\n{}", roles_list)
         };
 
         let description = format!(
@@ -48,10 +45,7 @@ impl SpawnSubagentToolSpec {
                 .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!(
-                "\n\nCurrently available roles:\n{}",
-                roles_list
-            )
+            format!("\n\nCurrently available roles:\n{}", roles_list)
         };
 
         let schema = serde_json::json!({

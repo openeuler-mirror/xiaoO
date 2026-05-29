@@ -191,13 +191,16 @@ impl GatewayRuntime {
                     .subagent
                     .iter()
                     .map(|(role_id, config)| {
-                        (role_id.clone(), crate::gateway::session_record::SubagentRoleRecord {
-                            role_id: role_id.clone(),
-                            description: config.description.clone(),
-                            prompt: config.prompt.clone(),
-                            max_turns: config.max_turns,
-                            tools: config.tools.clone(),
-                        })
+                        (
+                            role_id.clone(),
+                            crate::gateway::session_record::SubagentRoleRecord {
+                                role_id: role_id.clone(),
+                                description: config.description.clone(),
+                                prompt: config.prompt.clone(),
+                                max_turns: config.max_turns,
+                                tools: config.tools.clone(),
+                            },
+                        )
                     })
                     .collect(),
             },

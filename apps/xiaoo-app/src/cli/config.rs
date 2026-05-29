@@ -202,7 +202,10 @@ max_turns = 8
 
         let reviewer = config.subagent.get("code_reviewer").unwrap();
         assert_eq!(reviewer.description, "Code review specialist");
-        assert_eq!(reviewer.prompt, Some("You are a code review specialist.".to_string()));
+        assert_eq!(
+            reviewer.prompt,
+            Some("You are a code review specialist.".to_string())
+        );
         assert_eq!(reviewer.max_turns, Some(5));
 
         let writer = config.subagent.get("test_writer").unwrap();

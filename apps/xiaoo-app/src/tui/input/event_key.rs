@@ -539,20 +539,22 @@ impl App {
         if let Some(body) = self.external_command_body(trimmed) {
             self.state.chat_state.input.reset();
             if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+                let display_error = crate::error_log::record_tui_error("start_turn", &error);
                 self.state
                     .chat_state
                     .messages
-                    .push(crate::chat::Message::error(error));
+                    .push(crate::chat::Message::error(display_error));
                 self.state.chat_state.stick_to_bottom = true;
             }
             return Ok(());
         }
 
         if let Err(error) = self.gateway.start_turn(&mut self.state, user_input).await {
+            let display_error = crate::error_log::record_tui_error("start_turn", &error);
             self.state
                 .chat_state
                 .messages
-                .push(crate::chat::Message::error(error));
+                .push(crate::chat::Message::error(display_error));
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())

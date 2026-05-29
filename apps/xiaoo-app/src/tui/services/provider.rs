@@ -132,7 +132,13 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     use std::process::{Command, Stdio};
     // Wayland: wl-copy
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        if Command::new("wl-copy").arg(text).output().ok().map(|o| o.status.success()) == Some(true) {
+        if Command::new("wl-copy")
+            .arg(text)
+            .output()
+            .ok()
+            .map(|o| o.status.success())
+            == Some(true)
+        {
             return Ok(());
         }
     }

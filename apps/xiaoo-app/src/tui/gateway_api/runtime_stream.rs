@@ -86,9 +86,10 @@ impl GatewayRuntime {
                     self.stream_rx = None;
                 }
                 SessionTurnUpdate::Err(error) => {
+                    let display_error = crate::error_log::record_tui_error("turn_stream", &error);
                     self.stream_reveal_buffer.clear();
                     self.pending_stream_done = None;
-                    self.set_stream_message_content(state, format!("Error: {}", error), false);
+                    self.set_stream_message_content(state, display_error, false);
                     state.chat_state.is_loading = false;
                     self.stream_rx = None;
                     self.stream_message_index = None;
