@@ -96,13 +96,13 @@ db_path = "~/.xiaoo/traces.db"       # 当 storage_backend 为 moirai-sqlite 时
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-为本地 LLM 设置自定义 API url:
+为本地 LLM 设置自定义 API url: (以入口 http://localhost:8080/v1/chat/completions 为例)
 
 ```toml
 [llm]
-provider = "deepseek-local"
+provider = "local"
 model = "deepseek-v4-flash"
-api_base = "http://localhost:8000/v1/"
+api_base = "http://localhost:8000"
 api_key_env = "LLM_API_KEY"
 ```
 
