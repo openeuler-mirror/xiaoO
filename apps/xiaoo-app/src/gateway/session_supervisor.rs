@@ -414,7 +414,12 @@ impl SessionSupervisor {
         Ok(())
     }
 
-    fn spawn_subagent_task(self: &Arc<Self>, agent_id: AgentId, prompt: String, max_turns: Option<u32>) {
+    fn spawn_subagent_task(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        prompt: String,
+        max_turns: Option<u32>,
+    ) {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             let runtime_input = {
@@ -680,7 +685,11 @@ impl SessionSupervisor {
     }
 }
 
-fn runtime_input_from_session(session: &SessionRecord, agent_id: AgentId, max_turns_override: Option<u32>) -> SessionRuntimeBuildInput {
+fn runtime_input_from_session(
+    session: &SessionRecord,
+    agent_id: AgentId,
+    max_turns_override: Option<u32>,
+) -> SessionRuntimeBuildInput {
     let is_subagent = agent_id != session.runtime.agent_id;
     SessionRuntimeBuildInput {
         session_id: session.session_id.clone(),

@@ -37,6 +37,7 @@ pub(crate) use state::chat;
 pub(crate) use state::selection;
 pub(crate) use support::config;
 pub(crate) use support::debug_log;
+pub(crate) use support::error_log;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 

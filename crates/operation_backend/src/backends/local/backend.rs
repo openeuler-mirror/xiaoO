@@ -112,6 +112,17 @@ impl LocalBackendState {
         raw_path: &str,
         base: &Path,
     ) -> Result<PathBuf, OperationError> {
+        if raw_path == "~" || raw_path.starts_with("~/") {
+            let home_dir =
+                self.home_dir_host
+                    .as_ref()
+                    .ok_or_else(|| OperationError::Unsupported {
+                        message: "home_dir is not configured".to_string(),
+                    })?;
+            let suffix = raw_path.strip_prefix("~/").unwrap_or_default();
+            return normalize_absolute_host_path(home_dir.join(suffix).as_path());
+        }
+
         let candidate = Path::new(raw_path);
         let joined = if candidate.is_absolute() {
             candidate.to_path_buf()
@@ -274,5 +285,49 @@ impl OperationBackend for LocalOperationBackend {
 
     async fn shutdown(&self) -> Result<(), OperationError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state(home_dir_host: Option<PathBuf>) -> LocalBackendState {
+        let workspace_root_host = std::env::current_dir().expect("current dir");
+        let workspace_root = BackendPath(workspace_root_host.to_string_lossy().into_owned());
+        let home_dir = home_dir_host
+            .as_ref()
+            .map(|path| BackendPath(path.to_string_lossy().into_owned()));
+
+        LocalBackendState {
+            backend_id: "test".to_string(),
+            workspace_root,
+            workspace_root_host,
+            home_dir,
+            home_dir_host,
+            temp_root_host: std::env::temp_dir(),
+            default_shell: None,
+        }
+    }
+
+    #[test]
+    fn resolves_tilde_paths_against_home_dir() {
+        let home = std::env::current_dir().expect("current dir").join("home");
+        let state = test_state(Some(home.clone()));
+        let resolved = state
+            .resolve_host_path("~/.xiaoo/tools/md_to_html.mjs", Path::new("/workspace"))
+            .expect("resolve");
+
+        assert_eq!(resolved, home.join(".xiaoo/tools/md_to_html.mjs"));
+    }
+
+    #[test]
+    fn tilde_requires_configured_home_dir() {
+        let state = test_state(None);
+        let error = state
+            .resolve_host_path("~/missing", Path::new("/workspace"))
+            .expect_err("tilde should require home");
+
+        assert!(matches!(error, OperationError::Unsupported { .. }));
     }
 }

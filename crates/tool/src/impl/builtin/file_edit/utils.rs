@@ -38,8 +38,7 @@ fn find_whitespace_tolerant_match(content: &str, search: &str) -> Option<String>
     if search.is_empty() {
         return None;
     }
-    let search_norm: Vec<String> =
-        search.split('\n').map(collapse_whitespace).collect();
+    let search_norm: Vec<String> = search.split('\n').map(collapse_whitespace).collect();
     let m = search_norm.len();
     if search_norm.iter().all(|l| l.is_empty()) {
         return None;
@@ -214,7 +213,10 @@ mod tests {
     fn find_actual_string_curly_quote_normalization() {
         let content = "x = 'value'";
         let search = "x = \u{2018}value\u{2019}";
-        assert_eq!(find_actual_string(content, search), Some("x = 'value'".to_string()));
+        assert_eq!(
+            find_actual_string(content, search),
+            Some("x = 'value'".to_string())
+        );
     }
 
     #[test]
@@ -269,8 +271,7 @@ mod tests {
         let search = "x = 1";
         assert!(!content.contains(search), "test must exercise salvage path");
         let actual = find_actual_string(content, search).expect("should salvage");
-        let updated =
-            apply_edit_to_file(content, &actual, "    x = 2", false).expect("replace");
+        let updated = apply_edit_to_file(content, &actual, "    x = 2", false).expect("replace");
         assert_eq!(updated, "def f():\n    x = 2\n");
     }
 }

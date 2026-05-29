@@ -54,10 +54,7 @@ impl SubagentPromptBuilder {
             .replace("{{output_schema_section}}", &schema_section)
     }
 
-    pub fn build_with_predefined_prompt(
-        predefined_prompt: &str,
-        task_context: &str,
-    ) -> String {
+    pub fn build_with_predefined_prompt(predefined_prompt: &str, task_context: &str) -> String {
         let context_section = if task_context.is_empty() {
             String::new()
         } else {

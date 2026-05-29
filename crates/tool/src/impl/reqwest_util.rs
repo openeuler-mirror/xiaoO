@@ -26,8 +26,7 @@ pub fn format_reqwest_error(e: reqwest::Error, context: &str) -> String {
 }
 
 pub fn build_http_client(timeout_ms: u64) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms));
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms));
 
     let native_certs = rustls_native_certs::load_native_certs();
     for cert in native_certs.certs {

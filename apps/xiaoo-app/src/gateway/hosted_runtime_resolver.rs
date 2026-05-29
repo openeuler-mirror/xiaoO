@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices, SubagentRoleInfo};
+use tool::{
+    load_tool_sources_with_services, SubagentRoleInfo, ToolRegistryBuilderImpl, ToolRuntimeServices,
+};
 
 #[derive(Clone)]
 pub struct HostedSessionRuntimeConfig {
@@ -51,10 +53,13 @@ impl HostedSessionRuntimeResolver {
             .subagent_roles
             .iter()
             .map(|(role_id, record)| {
-                (role_id.clone(), SubagentRoleInfo {
-                    role_id: role_id.clone(),
-                    description: record.description.clone(),
-                })
+                (
+                    role_id.clone(),
+                    SubagentRoleInfo {
+                        role_id: role_id.clone(),
+                        description: record.description.clone(),
+                    },
+                )
             })
             .collect();
         let initial_services = ToolRuntimeServices {

@@ -1,5 +1,6 @@
-use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig, SubagentRoleConfig};
-use xiaoo_app::gateway::prompt_utils::compose_subagent_delegation_rules;
+use crate::daemon_config::{
+    AgentRoleConfig, DaemonConfig, ResolvedAgentConfig, SubagentRoleConfig,
+};
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -22,13 +23,16 @@ use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices, SubagentRoleInfo};
+use tool::{
+    load_tool_sources_with_services, SubagentRoleInfo, ToolRegistryBuilderImpl, ToolRuntimeServices,
+};
+use xiaoo_app::gateway::prompt_utils::compose_subagent_delegation_rules;
+use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 use xiaoo_app::gateway::{
     backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
     SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
-use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
@@ -120,10 +124,13 @@ impl ConfiguredRuntimeResolver {
             .subagent_roles
             .iter()
             .map(|(role_id, config)| {
-                (role_id.clone(), SubagentRoleInfo {
-                    role_id: role_id.clone(),
-                    description: config.description.clone(),
-                })
+                (
+                    role_id.clone(),
+                    SubagentRoleInfo {
+                        role_id: role_id.clone(),
+                        description: config.description.clone(),
+                    },
+                )
             })
             .collect();
         let services = ToolRuntimeServices {
@@ -210,17 +217,22 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .subagent_roles
             .iter()
             .map(|(role_id, config)| {
-                (role_id.clone(), SubagentRoleRecord {
-                    role_id: role_id.clone(),
-                    description: config.description.clone(),
-                    prompt: config.prompt.clone(),
-                    max_turns: config.max_turns,
-                    tools: config.tools.clone(),
-                })
+                (
+                    role_id.clone(),
+                    SubagentRoleRecord {
+                        role_id: role_id.clone(),
+                        description: config.description.clone(),
+                        prompt: config.prompt.clone(),
+                        max_turns: config.max_turns,
+                        tools: config.tools.clone(),
+                    },
+                )
             })
             .collect();
 
-        let is_subagent = request.agent_id_override.as_ref()
+        let is_subagent = request
+            .agent_id_override
+            .as_ref()
             .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
             .unwrap_or(false);
 
@@ -480,7 +492,8 @@ mod tests {
             max_turns_override: None,
         };
 
-        let prompt = build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false);
+        let prompt =
+            build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false);
 
         assert!(prompt.contains("base rules"));
         assert!(prompt.contains("repo rules"));
