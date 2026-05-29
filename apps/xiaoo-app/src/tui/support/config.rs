@@ -42,6 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
+    pub vault: VaultConfig,
+    #[serde(default)]
     pub trace: Option<Value>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
@@ -75,6 +77,23 @@ pub struct RemoteConfig {
     pub bearer_token_env: Option<String>,
     #[serde(default)]
     pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_sdf: bool,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            use_sdf: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -364,8 +383,31 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     xiaoo_app::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
-pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    xiaoo_app::llm_secrets::inject_llm_secrets_into_env(config_path)
+pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
+    let config = match Config::load_from(config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    if !config.vault.enabled {
+        tracing::debug!("vault.enabled=false, skipping secrets loading");
+        return Ok(());
+    }
+
+    let secrets_path = xiaoo_app::llm_secrets::llm_secrets_path(config_path);
+    let file_existed_before = secrets_path.exists();
+
+    xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
+
+    if !file_existed_before {
+        if secrets_path.exists() {
+            tracing::info!("secrets file created this run, skipping load (will load on next startup)");
+        }
+        return Ok(());
+    }
+
+    xiaoo_app::llm_secrets::load_llm_secrets_to_memory(config_path)?;
+    Ok(())
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {

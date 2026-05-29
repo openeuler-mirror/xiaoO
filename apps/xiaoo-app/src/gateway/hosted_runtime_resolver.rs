@@ -71,24 +71,30 @@ impl HostedSessionRuntimeResolver {
     }
 
     fn resolve_api_key(&self) -> Result<Option<String>, SessionRuntimeResolveError> {
-        if let Some(api_key) = self.config.api_key.clone() {
-            return Ok(Some(api_key));
+        if let Some(api_key) = &self.config.api_key {
+            return Ok(Some(api_key.clone()));
         }
 
-        let Some(env_name) = self.config.api_key_env.as_deref() else {
-            return Ok(None);
-        };
-
-        match env::var(env_name) {
-            Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-            Ok(_) | Err(env::VarError::NotPresent) => {
-                Err(SessionRuntimeResolveError::ResolveFailed {
-                    message: format!("missing required API key environment variable: {env_name}"),
-                })
+        if let Some(env_name) = self.config.api_key_env.as_deref() {
+            if let Some(api_key) = crate::gateway::get_decrypted_api_key(env_name) {
+                return Ok(Some(api_key));
             }
-            Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
-                message: format!("API key environment variable is not valid unicode: {env_name}"),
-            }),
+        }
+
+        if let Some(env_name) = self.config.api_key_env.as_deref() {
+            match env::var(env_name) {
+                Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+                Ok(_) | Err(env::VarError::NotPresent) => {
+                    Err(SessionRuntimeResolveError::ResolveFailed {
+                        message: format!("missing required API key environment variable: {env_name}"),
+                    })
+                }
+                Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
+                    message: format!("API key environment variable is not valid unicode: {env_name}"),
+                }),
+            }
+        } else {
+            Ok(None)
         }
     }
 
