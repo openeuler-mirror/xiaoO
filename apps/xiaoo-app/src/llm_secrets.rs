@@ -105,7 +105,7 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
         .with_context(|| format!("failed to read secrets file {}", path.display()))?;
 
     let decrypted = if use_sdf {
-        use vault::tee::sdf::{init_sdf_provider, decrypt_secret};
+        use vault::sdf::{init_sdf_provider, decrypt_secret};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
@@ -124,7 +124,7 @@ fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Res
         .context("failed to serialize secrets")?;
 
     let encrypted = if use_sdf {
-        use vault::tee::sdf::{init_sdf_provider, encrypt_secret};
+        use vault::sdf::{init_sdf_provider, encrypt_secret};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
@@ -217,7 +217,7 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
     }
 
     let decrypted = if use_sdf {
-        use vault::tee::sdf::{init_sdf_provider, decrypt_secret};
+        use vault::sdf::{init_sdf_provider, decrypt_secret};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
@@ -227,20 +227,10 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
         decrypt_aes_gcm(&bytes)?
     };
 
-    let store: SecretsStore = serde_json::from_slice(&decrypted)
+    let _store: SecretsStore = serde_json::from_slice(&decrypted)
         .with_context(|| "failed to parse decrypted secrets")?;
 
-    let mut all_keys = std::collections::HashMap::new();
-    for (key, value) in store.api_keys {
-        all_keys.insert(key.clone(), value.clone());
-    }
-    for (key, value) in store.tokens {
-        all_keys.insert(key.clone(), value.clone());
-    }
-
-    crate::gateway::store_decrypted_api_keys(all_keys);
-
-    tracing::info!("successfully loaded and stored secrets from local encrypted file");
+    tracing::info!("successfully verified secrets decryption");
     Ok(())
 }
 
@@ -251,13 +241,22 @@ pub fn llm_secrets_path(config_path: &Path) -> PathBuf {
         .join(LLM_SECRETS_FILE)
 }
 
+pub fn init_on_demand_secret_provider(config_path: &Path) -> Result<()> {
+    let use_sdf = get_use_sdf_from_config(config_path);
+    let secrets_path = llm_secrets_path(config_path);
+
+    crate::gateway::init_secret_provider(secrets_path, use_sdf);
+    tracing::info!("on-demand secret provider initialized (use_sdf={})", use_sdf);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{load_llm_secrets_to_memory, save_llm_secret};
+    use super::{init_on_demand_secret_provider, save_llm_secret};
     use std::path::Path;
 
     #[test]
-    fn saved_secret_is_injected_from_config_directory() {
+    fn saved_secret_can_be_retrieved_on_demand() {
         let temp_dir = tempfile::TempDir::new().expect("create temp dir");
         let config_path = temp_dir.path().join("config.toml");
         let env_name = "XIAOO_TEST_DEEPSEEK_API_KEY";
@@ -265,10 +264,12 @@ mod tests {
         std::env::remove_var(env_name);
         std::env::set_var("USE_SDF", "false");
         save_llm_secret(&config_path, env_name, "test-secret").expect("save secret");
-        load_llm_secrets_to_memory(&config_path).expect("load secret");
 
-        assert_eq!(std::env::var(env_name).as_deref(), Ok("test-secret"));
-        std::env::remove_var(env_name);
+        init_on_demand_secret_provider(&config_path).expect("init provider");
+
+        let retrieved = crate::gateway::get_decrypted_api_key(env_name);
+        assert_eq!(retrieved, Some("test-secret".to_string()));
+
         std::env::remove_var("USE_SDF");
     }
 }

@@ -12,7 +12,12 @@ pub(crate) struct ZhipuProvider {
 }
 
 impl ZhipuProvider {
-    pub(crate) fn new(api_key: String, api_base: String, model: String) -> Self {
+    pub(crate) fn new(
+        api_key: Option<String>,
+        api_base: String,
+        model: String,
+        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
+    ) -> Self {
         Self {
             inner: OpenAiFamilyProvider::new(
                 api_key,
@@ -20,6 +25,7 @@ impl ZhipuProvider {
                 model,
                 OpenAiFamilyAuthStyle::Bearer,
                 vec![],
+                api_key_provider,
             ),
         }
     }

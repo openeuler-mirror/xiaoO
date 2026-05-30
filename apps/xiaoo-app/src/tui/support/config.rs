@@ -399,14 +399,15 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
 
     xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
 
+    crate::gateway::init_secret_provider(secrets_path.clone(), config.vault.use_sdf);
+    tracing::info!("secrets provider initialized for on-demand decryption (use_sdf={})", config.vault.use_sdf);
+
     if !file_existed_before {
         if secrets_path.exists() {
             tracing::info!("secrets file created this run, skipping load (will load on next startup)");
         }
-        return Ok(());
     }
 
-    xiaoo_app::llm_secrets::load_llm_secrets_to_memory(config_path)?;
     Ok(())
 }
 
