@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,10 +18,18 @@ const SNAPSHOT_VERSION: u32 = 1;
 const DEFAULT_SNAPSHOT_NAME: &str = "latest";
 
 #[derive(Debug, Clone)]
+pub struct SnapshotContext {
+    pub name: String,
+    pub parent_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionSnapshotListEntry {
     pub name: String,
+    pub snapshot_key: String,
     pub saved_at_ms: u64,
     pub parent_name: Option<String>,
+    pub parent_chain: Vec<String>,
     pub depth: usize,
 }
 
@@ -59,7 +67,7 @@ pub struct TuiSessionSnapshot {
     pub version: u32,
     pub saved_at_ms: u64,
     #[serde(default)]
-    pub parent_snapshot: Option<String>,
+    pub parent_chain: Vec<String>,
     pub session_id: String,
     pub workspace: PathBuf,
     #[serde(default)]
@@ -169,15 +177,26 @@ pub fn snapshot_name_from_command(trimmed: &str, command: &str) -> Result<String
     Ok(name.to_string())
 }
 
-pub fn snapshot_path(name: &str) -> Result<PathBuf> {
+pub fn snapshot_path(name: &str, parent_chain: Option<&[String]>) -> Result<PathBuf> {
     validate_snapshot_name(name)?;
-    Ok(snapshot_dir()?.join(format!("{name}.json")))
+    let dir = snapshot_dir()?;
+    let filename = if let Some(chain) = parent_chain {
+        if chain.is_empty() {
+            format!("{name}.json")
+        } else {
+            let prefix = chain.join("_");
+            format!("{prefix}_{name}.json")
+        }
+    } else {
+        format!("{name}.json")
+    };
+    Ok(dir.join(filename))
 }
 
 pub fn build_snapshot(
     state: &AppState,
     session_record: Option<SessionRecord>,
-    parent_snapshot: Option<String>,
+    parent_chain: Vec<String>,
 ) -> TuiSessionSnapshot {
     let status_metrics = SavedStatusMetrics {
         total_tokens: state.status_panel.total_tokens,
@@ -190,7 +209,7 @@ pub fn build_snapshot(
     TuiSessionSnapshot {
         version: SNAPSHOT_VERSION,
         saved_at_ms: current_time_ms(),
-        parent_snapshot,
+        parent_chain,
         session_id: state.session_id.clone(),
         workspace: state.workspace.clone(),
         active_agent_role: state.active_agent_role.clone(),
@@ -210,8 +229,12 @@ pub fn build_snapshot(
     }
 }
 
-pub fn save_snapshot(name: &str, snapshot: &TuiSessionSnapshot) -> Result<PathBuf> {
-    let path = snapshot_path(name)?;
+pub fn save_snapshot_with_chain(
+    name: &str,
+    snapshot: &TuiSessionSnapshot,
+    parent_chain: Option<&[String]>,
+) -> Result<PathBuf> {
+    let path = snapshot_path(name, parent_chain)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create snapshot directory {}", parent.display()))?;
@@ -221,10 +244,62 @@ pub fn save_snapshot(name: &str, snapshot: &TuiSessionSnapshot) -> Result<PathBu
     Ok(path)
 }
 
-pub fn load_snapshot(name: &str) -> Result<TuiSessionSnapshot> {
-    let path = snapshot_path(name)?;
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+pub fn load_snapshot_by_key(snapshot_key: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
+    let dir = snapshot_dir()?;
+    let path = dir.join(format!("{snapshot_key}.json"));
+
+    if !path.exists() {
+        bail!("snapshot '{}' not found", snapshot_key);
+    }
+
+    parse_snapshot_file(&path, snapshot_key)
+}
+
+pub fn load_snapshot(name: &str) -> Result<Vec<(String, TuiSessionSnapshot, Vec<String>)>> {
+    let dir = snapshot_dir()?;
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!("snapshot '{}' not found", name)
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", dir.display()));
+        }
+    };
+
+    let mut matching_snapshots = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let snapshot_name = extract_snapshot_name(file_stem);
+        if snapshot_name != name {
+            continue;
+        }
+
+        if let Ok((snapshot, parent_chain)) = parse_snapshot_file(&path, file_stem) {
+            matching_snapshots.push((file_stem.to_string(), snapshot, parent_chain));
+        }
+    }
+
+    if matching_snapshots.is_empty() {
+        bail!("snapshot '{}' not found", name)
+    }
+
+    matching_snapshots.sort_by(|a, b| {
+        b.1.saved_at_ms.cmp(&a.1.saved_at_ms).then(a.0.cmp(&b.0))
+    });
+
+    Ok(matching_snapshots)
+}
+
+fn parse_snapshot_file(path: &Path, file_stem: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     let snapshot: TuiSessionSnapshot = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     if snapshot.version != SNAPSHOT_VERSION {
@@ -234,7 +309,27 @@ pub fn load_snapshot(name: &str) -> Result<TuiSessionSnapshot> {
             SNAPSHOT_VERSION
         );
     }
-    Ok(snapshot)
+
+    let parent_chain = if snapshot.parent_chain.is_empty() {
+        extract_parent_chain(file_stem)
+    } else {
+        snapshot.parent_chain.clone()
+    };
+
+    Ok((snapshot, parent_chain))
+}
+
+fn extract_parent_chain(file_stem: &str) -> Vec<String> {
+    let parts: Vec<&str> = file_stem.rsplit('_').collect();
+    if parts.len() <= 1 {
+        Vec::new()
+    } else {
+        parts[1..].iter().rev().map(|s| s.to_string()).collect()
+    }
+}
+
+fn extract_snapshot_name(file_stem: &str) -> &str {
+    file_stem.rsplit('_').next().unwrap_or(file_stem)
 }
 
 pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
@@ -253,13 +348,10 @@ pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let Some(name) = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(ToOwned::to_owned)
-        else {
+        let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
+        let name = extract_snapshot_name(file_stem).to_string();
         if validate_snapshot_name(&name).is_err() {
             continue;
         }
@@ -268,10 +360,17 @@ pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
             .as_ref()
             .and_then(|header| header.saved_at_ms)
             .or_else(|| file_timestamp_ms(&path));
+        let parent_chain = header
+            .as_ref()
+            .map(|header| header.parent_chain.clone())
+            .unwrap_or_else(|| extract_parent_chain(file_stem));
+        let snapshot_key = file_stem.to_string();
         snapshots.push(SessionSnapshotListEntry {
             name,
+            snapshot_key,
             saved_at_ms: saved_at_ms.unwrap_or(0),
-            parent_name: header.and_then(|header| header.parent_snapshot),
+            parent_name: parent_chain.last().cloned(),
+            parent_chain,
             depth: 0,
         });
     }
@@ -296,7 +395,7 @@ pub fn apply_snapshot(
     state.workspace = snapshot.workspace;
     state.status_panel.set_workspace(&state.workspace);
     state.session_id = snapshot.session_id;
-    state.current_snapshot_name = None;
+    state.current_snapshot_context = None;
     state.active_agent_role = snapshot.active_agent_role;
     state.reasoning_effort = snapshot.reasoning_effort;
     state.session_messages = snapshot.session_messages;
@@ -367,7 +466,8 @@ fn snapshot_dir() -> Result<PathBuf> {
 #[derive(Deserialize)]
 struct SnapshotHeader {
     saved_at_ms: Option<u64>,
-    parent_snapshot: Option<String>,
+    #[serde(default)]
+    parent_chain: Vec<String>,
 }
 
 fn snapshot_header(path: &Path) -> Option<SnapshotHeader> {
@@ -386,17 +486,11 @@ fn file_timestamp_ms(path: &Path) -> Option<u64> {
 fn order_snapshots_by_parent(
     entries: Vec<SessionSnapshotListEntry>,
 ) -> Vec<SessionSnapshotListEntry> {
-    let names: HashSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
-    let mut by_parent: HashMap<Option<String>, Vec<SessionSnapshotListEntry>> = HashMap::new();
+    let mut by_parent: HashMap<Vec<String>, Vec<SessionSnapshotListEntry>> = HashMap::new();
 
-    for mut entry in entries {
-        let parent = entry
-            .parent_name
-            .as_ref()
-            .filter(|parent| names.contains(*parent))
-            .cloned();
-        entry.parent_name = parent.clone();
-        by_parent.entry(parent).or_default().push(entry);
+    for entry in entries {
+        let parent_key = entry.parent_chain.clone();
+        by_parent.entry(parent_key).or_default().push(entry);
     }
 
     for children in by_parent.values_mut() {
@@ -409,27 +503,28 @@ fn order_snapshots_by_parent(
     }
 
     let mut ordered = Vec::new();
-    append_snapshot_children(None, 0, &mut by_parent, &mut ordered);
-    while let Some(parent) = by_parent.keys().next().cloned() {
-        append_snapshot_children(parent, 0, &mut by_parent, &mut ordered);
+    append_snapshot_children_by_chain(Vec::new(), 0, &mut by_parent, &mut ordered);
+    while let Some(parent_key) = by_parent.keys().next().cloned() {
+        append_snapshot_children_by_chain(parent_key, 0, &mut by_parent, &mut ordered);
     }
     ordered
 }
 
-fn append_snapshot_children(
-    parent: Option<String>,
+fn append_snapshot_children_by_chain(
+    parent_key: Vec<String>,
     depth: usize,
-    by_parent: &mut HashMap<Option<String>, Vec<SessionSnapshotListEntry>>,
+    by_parent: &mut HashMap<Vec<String>, Vec<SessionSnapshotListEntry>>,
     ordered: &mut Vec<SessionSnapshotListEntry>,
 ) {
-    let Some(children) = by_parent.remove(&parent) else {
+    let Some(children) = by_parent.remove(&parent_key) else {
         return;
     };
     for mut child in children {
-        let child_name = child.name.clone();
+        let mut child_key = child.parent_chain.clone();
+        child_key.push(child.name.clone());
         child.depth = depth;
         ordered.push(child);
-        append_snapshot_children(Some(child_name), depth + 1, by_parent, ordered);
+        append_snapshot_children_by_chain(child_key, depth + 1, by_parent, ordered);
     }
 }
 
@@ -599,4 +694,58 @@ impl From<SavedTodoDisplayStatus> for TodoDisplayStatus {
 #[allow(dead_code)]
 fn _snapshot_dir_for_tests(path: &Path) -> PathBuf {
     path.join(".xiaoo").join("session")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_snapshot_path_without_parent() {
+        let path = snapshot_path("test", None).unwrap();
+        assert_eq!(path.file_name().unwrap(), "test.json");
+    }
+
+    #[test]
+    fn test_snapshot_path_with_parent_chain() {
+        let chain = vec!["parent".to_string()];
+        let path = snapshot_path("child", Some(&chain)).unwrap();
+        assert_eq!(path.file_name().unwrap(), "parent_child.json");
+
+        let chain = vec!["grandparent".to_string(), "parent".to_string()];
+        let path = snapshot_path("child", Some(&chain)).unwrap();
+        assert_eq!(path.file_name().unwrap(), "grandparent_parent_child.json");
+    }
+
+    #[test]
+    fn test_extract_snapshot_name() {
+        assert_eq!(extract_snapshot_name("test"), "test");
+        assert_eq!(extract_snapshot_name("parent_test"), "test");
+        assert_eq!(extract_snapshot_name("grandparent_parent_test"), "test");
+        assert_eq!(extract_snapshot_name("a_b_c_d"), "d");
+    }
+
+    #[test]
+    fn test_validate_snapshot_name() {
+        assert!(validate_snapshot_name("test123").is_ok());
+        assert!(validate_snapshot_name("test-123").is_ok());
+        assert!(validate_snapshot_name("test_123").is_ok());
+        assert!(validate_snapshot_name("test.123").is_ok());
+        assert!(validate_snapshot_name("").is_err());
+        assert!(validate_snapshot_name(".").is_err());
+        assert!(validate_snapshot_name("..").is_err());
+        assert!(validate_snapshot_name("test 123").is_err());
+        assert!(validate_snapshot_name("test/123").is_err());
+    }
+
+    #[test]
+    fn test_extract_parent_chain() {
+        assert_eq!(extract_parent_chain("test"), Vec::<String>::new());
+        assert_eq!(extract_parent_chain("parent_test"), vec!["parent"]);
+        assert_eq!(
+            extract_parent_chain("grandparent_parent_test"),
+            vec!["grandparent", "parent"]
+        );
+        assert_eq!(extract_parent_chain("a_b_c_d"), vec!["a", "b", "c"]);
+    }
 }
