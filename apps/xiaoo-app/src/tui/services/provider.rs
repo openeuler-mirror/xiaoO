@@ -142,36 +142,38 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
             return Ok(());
         }
     }
-    // X11: xclip
-    if let Ok(mut child) = Command::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
+    // X11: xclip (only if DISPLAY is set)
+    if std::env::var("DISPLAY").is_ok() {
+        if let Ok(mut child) = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            if child.wait().ok().map(|s| s.success()) == Some(true) {
+                return Ok(());
+            }
         }
-        if child.wait().ok().map(|s| s.success()) == Some(true) {
-            return Ok(());
+        // X11: xsel
+        if let Ok(mut child) = Command::new("xsel")
+            .args(["--clipboard", "--input"])
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            if child.wait().ok().map(|s| s.success()) == Some(true) {
+                return Ok(());
+            }
         }
-    }
-    // X11: xsel
-    if let Ok(mut child) = Command::new("xsel")
-        .args(["--clipboard", "--input"])
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
-        if child.wait().ok().map(|s| s.success()) == Some(true) {
-            return Ok(());
-        }
-    }
-    // Fallback: arboard
-    if let Ok(mut clip) = arboard::Clipboard::new() {
-        if clip.set_text(text).is_ok() {
-            return Ok(());
+        // Fallback: arboard (only makes sense with a display server)
+        if let Ok(mut clip) = arboard::Clipboard::new() {
+            if clip.set_text(text).is_ok() {
+                return Ok(());
+            }
         }
     }
 
