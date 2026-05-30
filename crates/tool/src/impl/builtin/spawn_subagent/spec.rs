@@ -3,7 +3,7 @@ use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
 use std::collections::BTreeMap;
 
-use crate::r#impl::SubagentRoleInfo;
+use crate::r#impl::SubagentRoleConfig;
 
 #[derive(Debug, Clone)]
 pub struct SpawnSubagentToolSpec {
@@ -20,13 +20,13 @@ impl SpawnSubagentToolSpec {
         Self::with_subagent_roles(BTreeMap::new())
     }
 
-    pub fn with_subagent_roles(subagent_roles: BTreeMap<String, SubagentRoleInfo>) -> Self {
+    pub fn with_subagent_roles(subagent_roles: BTreeMap<String, SubagentRoleConfig>) -> Self {
         let roles_section = if subagent_roles.is_empty() {
             String::new()
         } else {
             let roles_list = subagent_roles
-                .values()
-                .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
+                .iter()
+                .map(|(role_id, role)| format!("- \"{}\": {}", role_id, role.description))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("\n\nAvailable predefined subagent roles:\n{}", roles_list)
@@ -41,8 +41,8 @@ impl SpawnSubagentToolSpec {
             String::new()
         } else {
             let roles_list = subagent_roles
-                .values()
-                .map(|role| format!("- \"{}\": {}", role.role_id, role.description))
+                .iter()
+                .map(|(role_id, role)| format!("- \"{}\": {}", role_id, role.description))
                 .collect::<Vec<_>>()
                 .join("\n");
             format!("\n\nCurrently available roles:\n{}", roles_list)

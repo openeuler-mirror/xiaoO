@@ -765,6 +765,21 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         lsp_registry: None,
         operation_backend: config.operation_backend.clone(),
         skills_config: config.skills_config.clone(),
+        subagent_roles: config
+            .subagent
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    xiaoo_app::gateway::SubagentRoleConfigEntry {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
+            })
+            .collect(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

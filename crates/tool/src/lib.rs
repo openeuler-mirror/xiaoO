@@ -11,5 +11,5 @@ pub use framework::{
 };
 pub use r#impl::reqwest_util;
 pub use r#impl::{
-    load_tool_sources, load_tool_sources_with_services, SubagentRoleInfo, ToolRuntimeServices,
+    load_tool_sources, load_tool_sources_with_services, SubagentRoleConfig, ToolRuntimeServices,
 };

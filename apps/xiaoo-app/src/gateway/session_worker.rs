@@ -59,7 +59,7 @@ impl SessionWorker {
         if !is_root_lane {
             resolved.bindings.loop_event_sink = None;
             resolved.bindings.tool_event_sink = None;
-            resolved.bindings.interaction_handle = None;
+            resolved.bindings.interaction_handle = input.interaction_handle_override.clone();
             resolved.bindings.pending_user_messages = None;
         } else {
             // Merge overrides: override takes precedence.
