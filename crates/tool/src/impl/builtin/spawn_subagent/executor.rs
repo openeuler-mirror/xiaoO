@@ -71,13 +71,30 @@ impl ToolExecutor for SpawnSubagentExecutor {
         let parent_agent_id =
             agent_types::common::ids::AgentId(runtime.agent_context().metadata().agent_id.clone());
 
+        let (description, task_goal, task_context) = if let Some(role_id) = &input.subagent_role_id {
+            let role_config = self.services.subagent_roles.get(role_id);
+            if let Some(config) = role_config {
+                let goal = config.prompt.clone().unwrap_or(input.task_goal.clone());
+                let context = if config.description.is_empty() {
+                    input.task_context.clone()
+                } else {
+                    format!("{}\n\n{}", config.description, input.task_context)
+                };
+                (input.description.clone(), goal, context)
+            } else {
+                (input.description.clone(), input.task_goal.clone(), input.task_context.clone())
+            }
+        } else {
+            (input.description.clone(), input.task_goal.clone(), input.task_context.clone())
+        };
+
         let result = subagent_control
             .spawn(SpawnSubagentRequest {
                 session_id,
                 parent_agent_id,
-                description: input.description,
-                task_goal: input.task_goal,
-                task_context: input.task_context,
+                description,
+                task_goal,
+                task_context,
                 output_schema: input.output_schema,
                 subagent_role_id: input.subagent_role_id,
                 predefined_prompt: None,

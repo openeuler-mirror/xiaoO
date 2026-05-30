@@ -16,13 +16,16 @@ pub mod session_service;
 pub mod session_store;
 pub mod session_supervisor;
 pub mod session_worker;
+pub mod subagent_interaction;
 pub mod turn_request;
 pub mod turn_result;
 pub mod workspace_prompt;
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use core_session_service::CoreBackedSessionService;
-pub use hosted_runtime_resolver::{HostedSessionRuntimeConfig, HostedSessionRuntimeResolver};
+pub use hosted_runtime_resolver::{
+    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
+};
 pub use progress_updates::ChannelProgressRelayHandle;
 pub use runtime_bindings::SessionRuntimeBindings;
 pub use runtime_factory::{AppRuntimeAssembly, AppRuntimeFactory, AppRuntimeFactoryError};

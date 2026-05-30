@@ -225,6 +225,22 @@ impl GatewayRuntime {
             operation_backend: state.agent_config.operation_backend.clone(),
             lsp_registry: state.agent_config.build_lsp_registry(),
             skills_config: state.agent_config.resolve_skills_config(),
+            subagent_roles: state
+                .agent_config
+                .subagent
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        crate::gateway::SubagentRoleConfigEntry {
+                            description: v.description.clone(),
+                            prompt: v.prompt.clone(),
+                            max_turns: v.max_turns,
+                            tools: v.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 

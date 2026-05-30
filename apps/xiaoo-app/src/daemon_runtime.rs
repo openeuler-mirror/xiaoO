@@ -1,6 +1,5 @@
-use crate::daemon_config::{
-    AgentRoleConfig, DaemonConfig, ResolvedAgentConfig, SubagentRoleConfig,
-};
+use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use crate::daemon_config::SubagentRoleConfig as ConfigSubagentRole;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -24,7 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
 use tool::{
-    load_tool_sources_with_services, SubagentRoleInfo, ToolRegistryBuilderImpl, ToolRuntimeServices,
+    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl, ToolRuntimeServices,
 };
 use xiaoo_app::gateway::prompt_utils::compose_subagent_delegation_rules;
 use xiaoo_app::gateway::session_record::SubagentRoleRecord;
@@ -41,7 +40,7 @@ const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
     agent_roles: BTreeMap<String, AgentRoleConfig>,
-    subagent_roles: BTreeMap<String, SubagentRoleConfig>,
+    subagent_roles: BTreeMap<String, ConfigSubagentRole>,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
     feature_flags: FeatureFlags,
@@ -120,17 +119,16 @@ impl ConfiguredRuntimeResolver {
         &self,
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
-        let subagent_roles: BTreeMap<String, SubagentRoleInfo> = self
+        let subagent_roles: BTreeMap<String, SubagentRoleConfig> = self
             .subagent_roles
             .iter()
             .map(|(role_id, config)| {
-                (
-                    role_id.clone(),
-                    SubagentRoleInfo {
-                        role_id: role_id.clone(),
-                        description: config.description.clone(),
-                    },
-                )
+                (role_id.clone(), SubagentRoleConfig {
+                    description: config.description.clone(),
+                    prompt: config.prompt.clone(),
+                    max_turns: config.max_turns,
+                    tools: config.tools.clone(),
+                })
             })
             .collect();
         let services = ToolRuntimeServices {

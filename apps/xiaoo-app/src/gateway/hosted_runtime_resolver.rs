@@ -14,13 +14,21 @@ use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
 use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
 use tool::{
-    load_tool_sources_with_services, SubagentRoleInfo, ToolRegistryBuilderImpl, ToolRuntimeServices,
+    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl, ToolRuntimeServices,
 };
+
+#[derive(Clone)]
+pub struct SubagentRoleConfigEntry {
+    pub description: String,
+    pub prompt: Option<String>,
+    pub max_turns: Option<u32>,
+    pub tools: BTreeMap<String, bool>,
+}
 
 #[derive(Clone)]
 pub struct HostedSessionRuntimeConfig {
@@ -38,6 +46,7 @@ pub struct HostedSessionRuntimeConfig {
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub operation_backend: Option<GatewayBackendConfig>,
     pub skills_config: SkillsConfig,
+    pub subagent_roles: BTreeMap<String, SubagentRoleConfigEntry>,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -48,20 +57,14 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
-        let subagent_roles: std::collections::BTreeMap<String, SubagentRoleInfo> = config
-            .descriptor
-            .subagent_roles
-            .iter()
-            .map(|(role_id, record)| {
-                (
-                    role_id.clone(),
-                    SubagentRoleInfo {
-                        role_id: role_id.clone(),
-                        description: record.description.clone(),
-                    },
-                )
+        let subagent_roles = config.subagent_roles.iter().map(|(k, v)| {
+            (k.clone(), SubagentRoleConfig {
+                description: v.description.clone(),
+                prompt: v.prompt.clone(),
+                max_turns: v.max_turns,
+                tools: v.tools.clone(),
             })
-            .collect();
+        }).collect();
         let initial_services = ToolRuntimeServices {
             lsp_registry: config.lsp_registry.clone(),
             workspace_root: Some(config.descriptor.workspace_root.clone()),
