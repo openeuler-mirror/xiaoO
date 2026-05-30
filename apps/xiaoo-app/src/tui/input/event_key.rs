@@ -13,8 +13,9 @@ use crate::provider_service::{
 };
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{
-    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, save_snapshot,
-    snapshot_name_from_command, SessionSnapshotDialog,
+    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
+    save_snapshot_with_chain, snapshot_name_from_command, SessionSnapshotDialog,
+    SessionSnapshotListEntry,
 };
 use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
@@ -416,16 +417,26 @@ impl App {
             match snapshot_name_from_command(trimmed, "/save") {
                 Ok(name) => {
                     let record = self.gateway.session_snapshot(&self.state.session_id).await;
-                    let parent_snapshot = self
+                    let parent_chain = self
                         .state
-                        .current_snapshot_name
+                        .current_snapshot_context
                         .as_ref()
-                        .filter(|parent| !parent.eq_ignore_ascii_case(&name))
-                        .cloned();
-                    let snapshot = build_snapshot(&self.state, record, parent_snapshot);
-                    match save_snapshot(&name, &snapshot) {
+                        .filter(|ctx| !ctx.name.eq_ignore_ascii_case(&name))
+                        .map(|ctx| {
+                            let mut chain = ctx.parent_chain.clone();
+                            chain.push(ctx.name.clone());
+                            chain
+                        })
+                        .unwrap_or_default();
+                    let snapshot = build_snapshot(&self.state, record, parent_chain.clone());
+                    match save_snapshot_with_chain(&name, &snapshot, Some(&parent_chain)) {
                         Ok(path) => {
-                            self.state.current_snapshot_name = Some(name.clone());
+                            self.state.current_snapshot_context = Some(
+                                crate::session_snapshot_service::SnapshotContext {
+                                    name: name.clone(),
+                                    parent_chain,
+                                },
+                            );
                             self.state
                                 .chat_state
                                 .messages
@@ -463,11 +474,36 @@ impl App {
                 self.open_load_snapshot_dialog();
             } else {
                 match snapshot_name_from_command(trimmed, "/load").and_then(|name| {
-                    let snapshot = load_snapshot(&name)?;
-                    Ok((name, snapshot))
+                    let matches = load_snapshot(&name)?;
+                    Ok((name, matches))
                 }) {
-                    Ok((name, snapshot)) => {
-                        self.load_snapshot_into_state(&name, snapshot).await;
+                    Ok((name, matches)) => {
+                        if matches.len() == 1 {
+                            let (_, snapshot, parent_chain) = matches.into_iter().next().unwrap();
+                            self.load_snapshot_into_state(&name, snapshot, parent_chain).await;
+                        } else {
+                            let entries: Vec<SessionSnapshotListEntry> = matches
+                                .into_iter()
+                                .map(|(snapshot_key, _, parent_chain)| {
+                                    SessionSnapshotListEntry {
+                                        name: name.clone(),
+                                        snapshot_key,
+                                        saved_at_ms: 0,
+                                        parent_name: parent_chain.last().cloned(),
+                                        parent_chain,
+                                        depth: 0,
+                                    }
+                                })
+                                .collect();
+                            self.state.session_snapshot_dialog = Some(SessionSnapshotDialog::new(entries));
+                            self.state.input_mode = InputMode::SessionSnapshotSelection;
+                            self.state.chat_state.messages.push(
+                                crate::chat::Message::system(format!(
+                                    "Multiple snapshots named '{}' found. Please select one.",
+                                    name
+                                ))
+                            );
+                        }
                     }
                     Err(error) => self
                         .state
@@ -731,17 +767,20 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let selected_name = self
+                let selected = self
                     .state
                     .session_snapshot_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.selected_entry())
-                    .map(|entry| entry.name.clone());
+                    .map(|entry| (entry.name.clone(), entry.snapshot_key.clone()));
                 self.state.input_mode = InputMode::Editing;
                 self.state.session_snapshot_dialog = None;
-                if let Some(name) = selected_name {
-                    match load_snapshot(&name) {
-                        Ok(snapshot) => self.load_snapshot_into_state(&name, snapshot).await,
+                if let Some((name, snapshot_key)) = selected {
+                    match load_snapshot_by_key(&snapshot_key) {
+                        Ok((snapshot, parent_chain)) => {
+                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
+                                .await
+                        }
                         Err(error) => {
                             self.state
                                 .chat_state
@@ -763,10 +802,21 @@ impl App {
         &mut self,
         name: &str,
         snapshot: crate::session_snapshot_service::TuiSessionSnapshot,
+        parent_chain: Vec<String>,
     ) {
         self.gateway.reset_for_new_session(&mut self.state);
         let record = apply_snapshot(&mut self.state, snapshot);
-        self.state.current_snapshot_name = Some(name.to_string());
+        let chain_display = if parent_chain.is_empty() {
+            name.to_string()
+        } else {
+            format!("{} → {}", parent_chain.join(" → "), name)
+        };
+        self.state.current_snapshot_context = Some(
+            crate::session_snapshot_service::SnapshotContext {
+                name: name.to_string(),
+                parent_chain,
+            },
+        );
         if let Some(record) = record {
             self.gateway.import_session_snapshot(record).await;
         }
@@ -774,7 +824,7 @@ impl App {
             .chat_state
             .messages
             .push(crate::chat::Message::system(format!(
-                "Session snapshot loaded: {name}"
+                "Session snapshot loaded: {chain_display}"
             )));
     }
 
