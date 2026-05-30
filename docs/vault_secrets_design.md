@@ -50,7 +50,7 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 #### 数据保存方法
 
 1. **首次启动**：从环境变量读取 API Key → 加密 → 保存到 `llm_secrets.json`
-2. **后续启动**：从 `llm_secrets.json` 加载 → 解密 → 存入进程内存
+2. **后续启动**：从 `llm_secrets.json` 加载 → 解密 → 按需提供给调用方
 
 #### 数据存储位置
 
@@ -74,6 +74,13 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 
 文件内容为加密后的二进制数据。
 
+#### 数据获取方式
+
+**按需获取，用完即销毁**：
+- 发起 LLM 请求时从加密文件解密获取 API key
+- 请求完成后立即销毁，不在内存中长期驻留
+- 每次请求都会重新解密（除非文件不存在才 fallback 到环境变量）
+
 ### 2.3 vault.enabled = false 时
 
 #### 数据保存方法
@@ -88,7 +95,7 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 
 | 配置 | 数据保存 | 数据获取 | 安全性 |
 |------|---------|---------|--------|
-| `vault.enabled=true` | 加密保存到 `llm_secrets.json` | 加载到进程内存 | 高 |
+| `vault.enabled=true` | 加密保存到 `llm_secrets.json` | 按需解密获取，用完即销毁 | 高 |
 | `vault.enabled=false` | 不保存 | 直接使用环境变量 | 低 |
 
 ---
@@ -118,7 +125,7 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 解密流程
+#### 解密流程（按需获取，用完即销毁）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -132,7 +139,8 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 │     │  从代码碎片重建 32 字节 master key                              │
 │     ▼                                                                │
 │  4. AES-256-GCM 解密                                               │
-│  5. 存入 DECRYPTED_API_KEYS 全局变量                                │
+│  5. 发起 LLM 请求时按需获取密钥                                      │
+│  6. 请求完成后立即销毁（不驻留内存）                                  │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -145,7 +153,7 @@ use_sdf = false  # false=WhiteBox+AES-GCM, true=SDF国密
 >
 > **生产环境请使用 SDF 国密 (`use_sdf=true`) 或 HSM 方案。**
 
-**文件位置**: `apps/vault/src/whitebox/mod.rs`
+**文件位置**: `apps/vault/src/whitebox.rs`
 
 **当前配置**:
 ```rust
@@ -211,16 +219,17 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 │  2. SDF_OpenDevice() → device_handle                               │
 │  3. SDF_OpenSession() → session_handle                            │
 │  4. SDF_GetKEKAccessRight() → 获取 KEK 权限                        │
-│  5. SDF_Encrypt() → 国密加密                                       │
-│  6. 写入 llm_secrets.json                                          │
-│  7. SDF_ReleaseKEKAccessRight() → 释放权限                         │
-│  8. SDF_CloseSession()                                             │
-│  9. SDF_CloseDevice()                                              │
+│  5. SDF_GenerateKeyWithKEK() → 生成会话密钥并用 KEK 加密导出        │
+│  6. SDF_Encrypt() → 使用会话密钥进行国密加密                        │
+│  7. 写入 llm_secrets.json (包含加密后的会话密钥 + 密文)             │
+│  8. SDF_ReleaseKEKAccessRight() → 释放权限                         │
+│  9. SDF_CloseSession()                                             │
+│  10. SDF_CloseDevice()                                             │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 解密流程
+#### 解密流程（按需获取，用完即销毁）
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -232,32 +241,37 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 │  3. SDF_OpenDevice() → device_handle                               │
 │  4. SDF_OpenSession() → session_handle                            │
 │  5. SDF_GetKEKAccessRight() → 获取 KEK 权限                        │
-│  6. SDF_Decrypt() → 国密解密                                       │
-│  7. 存入 DECRYPTED_API_KEYS 全局变量                               │
-│  8. SDF_ReleaseKEKAccessRight() → 释放权限                         │
-│  9. SDF_CloseSession()                                             │
-│  10. SDF_CloseDevice()                                             │
+│  6. SDF_ImportKeyWithKEK() → 导入加密的会话密钥                     │
+│  7. SDF_Decrypt() → 使用会话密钥进行国密解密                        │
+│  8. 发起 LLM 请求时按需获取密钥                                      │
+│  9. 请求完成后立即销毁（不驻留内存）                                  │
+│  10. SDF_ReleaseKEKAccessRight() → 释放权限                         │
+│  11. SDF_CloseSession()                                            │
+│  12. SDF_CloseDevice()                                             │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.3 进程内存存储
+### 3.4 按需密钥获取机制
 
-解密后的 Secrets 不注入环境变量，存入进程全局变量：
+解密后的 Secrets 不驻留内存，采用按需获取方式：
 
 ```rust
-static DECRYPTED_API_KEYS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
-
-pub fn store_decrypted_api_keys(api_keys: HashMap<String, String>)
 pub fn get_decrypted_api_key(env_name: &str) -> Option<String>
+pub fn init_secret_provider(secrets_path: PathBuf, use_sdf: bool)
 ```
 
-### 3.4 API Key 解析优先级
+**特点**：
+- 每次 LLM 请求时按需解密获取 API key
+- 请求完成后立即销毁，不在内存中长期驻留
+- 通过 `SecretProvider` 统一管理解密逻辑
+
+### 3.5 API Key 解析优先级
 
 ```
 1. config.api_key (直接配置)
        ↓
-2. DECRYPTED_API_KEYS (进程内存)
+2. llm_secrets.json (按需解密获取)
        ↓
 3. 环境变量 (fallback)
 ```
@@ -276,15 +290,9 @@ apps/vault/src/
 ├── key_provider.rs                 # KeyProvider trait 定义
 ├── types.rs                        # KeyMaterial, KeyProviderConfig
 ├── key_provider_error.rs           # KeyProviderError
-├── whitebox/
-│   └── mod.rs                     # WhiteBoxKeyProvider 实现
-├── hsm/
-│   └── mod.rs                     # HsmKeyProvider 实现
-└── tee/
-    ├── mod.rs                     # TeeKeyProvider, TeeType
-    ├── tee_impl.rs                # Tee 实现
-    └── sdf/
-        └── mod.rs                # SDF 国密实现
+├── whitebox.rs                     # WhiteBoxKeyProvider 实现
+├── sdf.rs                          # SDF 国密接口封装 + TeeKeyProvider
+└── hsm.rs                          # HSM PKCS#11 接口（预留）
 ```
 
 ### 4.2 apps/xiaoo-app
@@ -300,7 +308,8 @@ apps/xiaoo-app/src/
 ├── secrets.rs                     # SecretsManager (Daemon 使用)
 ├── gateway/
 │   ├── mod.rs                    # 导出
-│   └── decrypted_api_keys.rs     # DECRYPTED_API_KEYS 全局变量
+│   ├── decrypted_api_keys.rs     # SecretProvider 按需解密
+│   └── ...                      # 其他 gateway 模块
 └── tui/support/
     └── config.rs                 # TUI 配置集成
 ```
@@ -309,12 +318,12 @@ apps/xiaoo-app/src/
 
 | 文件 | 作用 |
 |------|------|
-| `vault/src/whitebox/mod.rs` | 白盒密钥，从代码碎片重建 master key |
-| `vault/src/tee/sdf/mod.rs` | SDF 国密接口封装 |
-| `vault/src/hsm/mod.rs` | HSM PKCS#11 接口（预留） |
+| `vault/src/whitebox.rs` | 白盒密钥，从代码碎片重建 master key |
+| `vault/src/sdf.rs` | SDF 国密接口封装，包含 `encrypt_secret`/`decrypt_secret` |
+| `vault/src/hsm.rs` | HSM PKCS#11 接口（预留） |
 | `llm_secrets.rs` | 加密/解密，加密文件读写 |
-| `decrypted_api_keys.rs` | 进程内存存储，解密后 Secrets |
-| `config.rs` | TUI 启动时调用 `load_llm_secrets_to_memory()` |
+| `decrypted_api_keys.rs` | `SecretProvider` 按需解密机制 |
+| `config.rs` | TUI 启动时初始化 `SecretProvider` |
 
 ---
 
@@ -412,8 +421,8 @@ api_key_env = "OPENROUTER_API_KEY"
 | 配置 | 首次启动 | 后续启动 |
 |------|---------|---------|
 | `enabled=false` | 不保存，直接用环境变量 | 不保存，直接用环境变量 |
-| `enabled=true, use_sdf=false` | 环境变量→AES-GCM加密保存(仅测试) | 从文件加载到内存(仅测试) |
-| `enabled=true, use_sdf=true` | 环境变量→SDF加密保存(仅鲲鹏) | 从文件SDF解密到内存(仅鲲鹏) |
+| `enabled=true, use_sdf=false` | 环境变量→AES-GCM加密保存(仅测试) | 从文件按需解密(仅测试) |
+| `enabled=true, use_sdf=true` | 环境变量→SDF加密保存(仅鲲鹏) | 从文件按需解密(仅鲲鹏) |
 
 ### 5.3 环境变量
 
@@ -486,13 +495,13 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
 pub fn save_token(config_path: &Path, token_name: &str, token: &str) -> Result<()>;
 ```
 
-### 6.2 进程内存 API
+### 6.2 按需密钥获取 API
 
 ```rust
-// 存储到全局变量
-pub fn store_decrypted_api_keys(api_keys: HashMap<String, String>);
+// 初始化 SecretProvider
+pub fn init_secret_provider(secrets_path: PathBuf, use_sdf: bool);
 
-// 获取
+// 按需获取密钥（每次解密，用完即销毁）
 pub fn get_decrypted_api_key(env_name: &str) -> Option<String>;
 ```
 
@@ -507,6 +516,10 @@ impl KeyProvider for WhiteBoxKeyProvider { ... }
 pub fn init_sdf_provider(path: &str) -> Result<()>;
 pub fn encrypt_secret(data: &[u8]) -> Result<Vec<u8>>;
 pub fn decrypt_secret(encrypted: &[u8]) -> Result<Vec<u8>>;
+
+// TEE 密钥提供者
+pub struct TeeKeyProvider { ... }
+impl KeyProvider for TeeKeyProvider { ... }
 
 // HSM (预留)
 pub struct HsmKeyProvider { ... }
