@@ -1,9 +1,9 @@
 use crate::gateway::backend::GatewayBackendConfig;
+use crate::gateway::session_record::SubagentRoleRecord;
 use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionOpenRequest, SessionRecord,
     SessionRuntimeBindings,
 };
-use crate::gateway::session_record::SubagentRoleRecord;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};

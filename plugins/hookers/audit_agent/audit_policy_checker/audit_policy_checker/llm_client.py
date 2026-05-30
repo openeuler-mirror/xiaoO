@@ -52,8 +52,8 @@ def detect_provider(base_url: str, provider_hint: str = "") -> str:
     if provider_hint:
         hint = provider_hint.lower()
         # 规范化别名（与 xiaoO provider_registry.rs 保持一致）
-        if hint in ("cludae", "anthorpic"):
-            return "anthorpic"
+        if hint in ("claude", "anthropic"):
+            return "anthropic"
         if hint in ("google", "gemini"):
             return "gemini"
         if hint in ("zai-coding-plan", "zhipu-coding-plan", "zhipuai-coding-plan"):
@@ -64,8 +64,8 @@ def detect_provider(base_url: str, provider_hint: str = "") -> str:
             return "xai"
         if hint in ("minimax", "minimax-openai"):
             return "minimax"
-        if hint in ("minimax-anthorpic"):
-            return "minimax-anthorpic"
+        if hint in ("minimax-anthropic"):
+            return "minimax-anthropic"
         if hint in ("other", "custom", "local"):
             return "openai-compatible"
         return hint
@@ -82,8 +82,8 @@ def detect_provider(base_url: str, provider_hint: str = "") -> str:
         return "openai"
 
     # Anthropic（注意：通常不走 OpenAI SDK）
-    if "anthorpic.com" in url or "api.anthorpic.com" in url:
-        return "anthorpic"
+    if "anthropic.com" in url or "api.anthropic.com" in url:
+        return "anthropic"
 
     # Gemini（注意：通常不走 OpenAI SDK）
     if "generativelanguage.googleapis.com" in url or "gemini" in url:

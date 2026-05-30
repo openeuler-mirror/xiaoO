@@ -11,13 +11,13 @@ use crate::types::{
     SubagentControlError,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SpawnDecision {
     pub result: SpawnSubagentResult,
     pub actions: Vec<HostAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JoinDecision {
     Immediate {
         result: JoinSubagentResult,
@@ -54,10 +54,7 @@ impl SubagentPromptBuilder {
             .replace("{{output_schema_section}}", &schema_section)
     }
 
-    pub fn build_with_predefined_prompt(
-        predefined_prompt: &str,
-        task_context: &str,
-    ) -> String {
+    pub fn build_with_predefined_prompt(predefined_prompt: &str, task_context: &str) -> String {
         let context_section = if task_context.is_empty() {
             String::new()
         } else {

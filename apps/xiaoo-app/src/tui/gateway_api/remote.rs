@@ -631,7 +631,9 @@ mod tests {
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {
-        let mut buffer = String::from("event: text_delta\ndata: {\"type\":\"text_delta\",\"delta\":\"he\",\"snapshot\":\"he\"}\n\nrest");
+        let mut buffer = String::from(
+            "event: text_delta\ndata: {\"type\":\"text_delta\",\"delta\":\"he\",\"snapshot\":\"he\"}\n\nrest",
+        );
         let frame = take_sse_frame(&mut buffer).expect("frame");
         let parsed = parse_sse_frame(&frame).expect("parse").expect("event");
         match parsed {
