@@ -22,14 +22,20 @@ use convert::{
 
 pub(crate) struct AnthropicProvider {
     client: reqwest::Client,
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
     capabilities: ProviderCapabilities,
     current_event: Mutex<Option<String>>,
+    api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl AnthropicProvider {
-    pub(crate) fn new(api_key: String, base_url: String, model: String) -> Self {
+    pub(crate) fn new(
+        api_key: Option<String>,
+        base_url: String,
+        model: String,
+        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
@@ -45,6 +51,15 @@ impl AnthropicProvider {
                 model_name: model,
             },
             current_event: Mutex::new(None),
+            api_key_provider,
+        }
+    }
+
+    fn get_api_key(&self) -> String {
+        if let Some(provider) = &self.api_key_provider {
+            provider()
+        } else {
+            self.api_key.clone().unwrap_or_default()
         }
     }
 
@@ -133,7 +148,7 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", self.get_api_key())
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&body)
@@ -227,7 +242,7 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
+            .header("x-api-key", self.get_api_key())
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&body)
@@ -465,9 +480,10 @@ mod tests {
 
     fn make_provider() -> AnthropicProvider {
         AnthropicProvider::new(
-            "test-key".to_string(),
+            Some("test-key".to_string()),
             "https://api.anthropic.com/v1".to_string(),
             "claude-sonnet-4-6".to_string(),
+            None,
         )
     }
 

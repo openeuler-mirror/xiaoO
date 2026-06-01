@@ -129,7 +129,7 @@ async fn main() {
             reasoning_effort,
         } => {
             if let Some(path) = config_path.as_ref() {
-                if let Err(error) = xiaoo_app::llm_secrets::inject_llm_secrets_into_env(path) {
+                if let Err(error) = xiaoo_app::llm_secrets::init_on_demand_secret_provider(path) {
                     eprintln!(
                         "Failed to initialize LLM secrets from {}: {}",
                         path.display(),
@@ -150,12 +150,14 @@ async fn main() {
             let model = model
                 .or_else(|| llm.and_then(|l| l.model.clone()))
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-            let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
+            let api_key = api_key.or_else(|| {
+                llm.and_then(|l| l.api_key_env.clone())
+                    .and_then(|env_name| xiaoo_app::gateway::get_decrypted_api_key(env_name.as_str()))
+            });
             let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let context_window = llm.and_then(|l| l.context_window);
             let reasoning_effort = reasoning_effort
-                .or_else(|| llm.and_then(|l| l.reasoning_effort))
                 .unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
@@ -182,7 +184,7 @@ async fn main() {
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
-                operation_backend: file_cfg.operation_backend.clone(),
+                operation_backend: None,
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
             };
@@ -763,7 +765,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
         lsp_registry: None,
-        operation_backend: config.operation_backend.clone(),
+        operation_backend: None,
         skills_config: config.skills_config.clone(),
         subagent_roles: config
             .subagent

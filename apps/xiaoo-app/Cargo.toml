@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+tee_sdf = ["vault/tee_sdf"]
+
 [build-dependencies]
 protoc-bin-vendored = "3"
 tonic-build = "0.12"
@@ -66,6 +70,10 @@ subagent = { path = "../../crates/subagent" }
 lsp = { path = "../../crates/lsp" }
 trace = { path = "../../crates/trace" }
 operation_backend = { path = "../../crates/operation_backend" }
+vault = { path = "../vault" }
+aes-gcm.workspace = true
+rand.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

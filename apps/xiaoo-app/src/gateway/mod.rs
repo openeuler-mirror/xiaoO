@@ -2,6 +2,7 @@ pub mod backend;
 pub mod bootstrap;
 pub mod channel_interaction;
 pub mod core_session_service;
+pub mod decrypted_api_keys;
 pub mod hosted_runtime_resolver;
 pub mod pending_interaction;
 pub mod progress_updates;
@@ -20,6 +21,8 @@ pub mod subagent_interaction;
 pub mod turn_request;
 pub mod turn_result;
 pub mod workspace_prompt;
+
+pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use core_session_service::CoreBackedSessionService;

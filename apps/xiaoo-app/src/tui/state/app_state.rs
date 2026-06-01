@@ -241,7 +241,7 @@ impl AppState {
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.current_snapshot_context = None;
         self.slash = SlashState::default();
-        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
+        self.reasoning_effort = ReasoningEffort::default();
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;
