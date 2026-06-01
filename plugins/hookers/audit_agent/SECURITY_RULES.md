@@ -108,13 +108,13 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `wget *--post-data*` | high | wget 发送 POST 数据 | ✓ Deny |
 | `crontab -e` | high | 编辑定时任务 | ✓ Deny |
 | `crontab -r` | high | 删除定时任务 | ✗ LLM自拦截 |
-| `crontab * \| crontab` | high | 管道方式修改定时任务 | ✗ 模式不匹配 |
+| `* \| crontab` | high | 管道方式安装/修改定时任务 | ✓ Deny |
 | `iptables -` | high | 修改防火墙规则 | ✓ Deny (iptables -A) |
 | `ssh * -o StrictHostKeyChecking=no` | high | SSH 跳过主机密钥验证 | ✓ Deny |
 | `base64 -d * bash` | high | Base64 解码后执行 | ✓ Deny |
 | `curl * \| bash` | critical | 下载远程脚本并执行 | ✓ Deny |
 
-> **测试说明**：`crontab * | crontab` 模式要求以 `crontab` 开头，但实际管道命令如 `echo '...' | crontab -` 以其他命令开头，导致模式不匹配。建议修改为 `* | crontab` 或在逻辑规则层检测。
+> **说明**：`* | crontab` 模式已替代原 `crontab * | crontab`，可匹配所有管道方式修改 crontab 的操作（如 `echo '...' | crontab -`、`(crontab -l; echo '...') | crontab -` 等）。
 
 **示例 1：`curl * -d *`**
 
