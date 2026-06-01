@@ -48,6 +48,7 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": "credentials.yaml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
     {"path": "secrets.yml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
     {"path": "secrets.yaml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
+    {"path": ".env", "risk_level": "high", "desc": "环境变量/凭据配置文件", "credential": True},
 ]
 
 # ==================== 写入操作关键词 ====================
@@ -245,9 +246,13 @@ class LogicRulesChecker:
 
             # 检查路径是否在操作中出现
             if is_credential:
-                # 凭据文件使用 \b 边界匹配，避免部分匹配（如 something_credentials_yml）误报
-                # 凭据文件：使用 \b 边界匹配避免非文件名拼接（如 something_credentials_yml）误报
-                path_match = bool(re.search(rf"\b{re.escape(path)}\b", action_detail))
+                # 凭据文件使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
+                # 以 . 开头的文件（如 .env）在 . 前 \b 不匹配，用 (?:^|[\s/\\]) 替代
+                escaped = re.escape(path)
+                if path.startswith("."):
+                    path_match = bool(re.search(rf"(?:^|[\s/\\]){escaped}\b", action_detail))
+                else:
+                    path_match = bool(re.search(rf"\b{escaped}\b", action_detail))
             else:
                 path_match = path in action_detail
 

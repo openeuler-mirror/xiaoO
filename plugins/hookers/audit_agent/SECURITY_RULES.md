@@ -914,7 +914,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `/sys/` | sysfs 内核接口 |
 | `/dev/zero` | 零设备 |
 | `/dev/kmsg` | 内核消息缓冲区 |
-| `credentials.yml` / `secrets.yml` 等 | 凭据/密钥配置文件（无论读写均拦截） |
+| `credentials.yml` / `secrets.yml` / `.env` 等 | 凭据/密钥/环境变量配置文件（无论读写均拦截） |
 
 **示例 1：`/etc/passwd`**
 
