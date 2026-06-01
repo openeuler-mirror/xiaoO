@@ -183,6 +183,13 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "data_exfiltration",
         "reason": "检测到通过 curl POST 外传可能包含敏感信息的请求",
     },
+    # Shell 配置文件追加写入检测 — 追加比覆盖更隐蔽（混入现有内容），是持久化的典型手法
+    {
+        "pattern": r">>\s*(~|/home/[^/]+)/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile)",
+        "risk_level": "high",
+        "risk_type": "persistence",
+        "reason": "检测到修改 Shell 配置文件（~/.bashrc 等），可能用于持久化后门",
+    },
     # 注意：/dev/null 已从检测列表移除，因为它通常只用于 shell 重定向（如 2>/dev/null），
     # 不是真正的安全风险。真正的攻击不会通过读取 /dev/null 来实现。
 ]

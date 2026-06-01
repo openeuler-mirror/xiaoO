@@ -109,6 +109,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `crontab -e` | high | 编辑定时任务 | ✓ Deny |
 | `crontab -r` | high | 删除定时任务 | ✗ LLM自拦截 |
 | `* \| crontab` | high | 管道方式安装/修改定时任务 | ✓ Deny |
+| `>> ~/.bashrc` | high | 追加写入 Shell 配置文件 | ✓ Deny |
 | `iptables -` | high | 修改防火墙规则 | ✓ Deny (iptables -A) |
 | `ssh * -o StrictHostKeyChecking=no` | high | SSH 跳过主机密钥验证 | ✓ Deny |
 | `base64 -d * bash` | high | Base64 解码后执行 | ✓ Deny |
@@ -420,6 +421,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `git push --force` | script_execution | 强制推送 | ✗ LLM询问用户 |
 | `curl POST ... env/secret/key` | data_exfiltration | curl POST 外传敏感信息 | ✓ Deny |
 | `/dev/zero`/`/dev/random` 等 | file_access | 访问设备文件 | ✓ Deny |
+| `>> ~/.bashrc` | persistence | 追加写入 Shell 配置文件 | ✓ Deny |
 
 **示例 1：`rm -r /tmp/test.sh`**
 
@@ -524,6 +526,19 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 匹配: "/dev/(zero|random|urandom|full|core|loop|sd|hd|nvme|vd|mem|kmsg|port)"
 结果: Deny
 原因: "检测到访问设备文件 (/dev/*)"
+风险等级: high
+```
+
+**示例 9：`>> ~/.bashrc`**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "echo alias ll=ls -la >> ~/.bashrc"
+
+匹配: ">>\s*(~|/home/[^/]+)/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile)"
+结果: Deny
+原因: "检测到修改 Shell 配置文件（~/.bashrc 等），可能用于持久化后门"
 风险等级: high
 ```
 
