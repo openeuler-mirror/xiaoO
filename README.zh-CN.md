@@ -26,7 +26,7 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 - 完整工具能力：文件操作、Shell 执行、Git、Web 搜索/浏览、补丁应用、子 Agent 和可扩展工具清单。
 - 自适应上下文管理：Token 预算跟踪、配置化压缩、上下文超限后的强制恢复和 prefix-cache 遥测。
 - 流式推理展示：在模型工作时展示 provider 返回的 reasoning/thinking 增量。
-- 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Shift+Tab` 循环切换。
+- 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Ctrl+T` 循环切换。
 - 会话管理：支持保存和恢复长时间运行的任务。
 - LSP 诊断：编辑后通过 `rust-analyzer`、`pyright`、`typescript-language-server`、`gopls`、`clangd` 等服务展示错误和警告。
 - Skills 技能系统：从本地目录或 Git 来源安装可复用的指令包。
@@ -151,7 +151,7 @@ CLI 输出示例：
 | `high` | 使用更强的推理/思考设置 | 黄色 |
 | `max` | 使用最强的推理/思考设置 | 红色 |
 
-TUI 状态栏会显示当前值：`Think off/high/max`。按 `Shift+Tab` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
+TUI 状态栏会显示当前值：`Think off/high/max`。按 `Ctrl+T` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
 
 ```bash
 xiaoo run --reasoning-effort high -p "Explain this repository"
