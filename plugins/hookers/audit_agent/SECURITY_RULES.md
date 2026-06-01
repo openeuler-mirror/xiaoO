@@ -847,6 +847,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 > **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
+> **凭据文件处理说明**：`credentials.yml`、`secrets.yml` 等凭据文件使用 `\b` 边界匹配避免非文件名拼接误报，且**无论读写均拦截**（读取凭据文件同样危险）。其他系统路径只拦截写入/删除操作，读取操作放行。
+
 #### Critical 级别敏感路径
 
 | 路径 | 说明 |
@@ -912,6 +914,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `/sys/` | sysfs 内核接口 |
 | `/dev/zero` | 零设备 |
 | `/dev/kmsg` | 内核消息缓冲区 |
+| `credentials.yml` / `secrets.yml` 等 | 凭据/密钥配置文件（无论读写均拦截） |
 
 **示例 1：`/etc/passwd`**
 
@@ -949,6 +952,19 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 匹配: "/etc/crontab"
 结果: Deny
 原因: "访问敏感路径: 系统定时任务 (/etc/crontab)"
+风险等级: high
+```
+
+**示例 4：凭据文件 `credentials.yml`（读操作也拦截）**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "head -n 5 ../../config/credentials.yml"
+
+匹配: "\bcredentials\.yml\b"
+结果: Deny
+原因: "访问敏感路径: 凭据配置文件 (credentials.yml)"
 风险等级: high
 ```
 

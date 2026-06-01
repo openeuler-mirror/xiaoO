@@ -43,6 +43,11 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": "/usr/lib/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 系统级安全防护 Skill 目录"},
     # xiaoO 用户级安全 Skill（用户级路径 - 兼容旧版本）
     {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 用户级安全防护 Skill 目录"},
+    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免部分匹配误报）
+    {"path": "credentials.yml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
+    {"path": "credentials.yaml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
+    {"path": "secrets.yml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
+    {"path": "secrets.yaml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
 ]
 
 # ==================== 写入操作关键词 ====================
@@ -236,9 +241,15 @@ class LogicRulesChecker:
         for sp in SENSITIVE_PATHS:
             raw_path = sp["path"]
             path = raw_path.lower()
+            is_credential = sp.get("credential", False)
 
             # 检查路径是否在操作中出现
-            path_match = path in action_detail
+            if is_credential:
+                # 凭据文件使用 \b 边界匹配，避免部分匹配（如 something_credentials_yml）误报
+                # 凭据文件：使用 \b 边界匹配避免非文件名拼接（如 something_credentials_yml）误报
+                path_match = bool(re.search(rf"\b{re.escape(path)}\b", action_detail))
+            else:
+                path_match = path in action_detail
 
             # 如果路径以 ~ 开头， also 检查展开后的绝对路径
             if not path_match and raw_path.startswith("~"):
@@ -254,6 +265,15 @@ class LogicRulesChecker:
                             path_match = True
 
             if path_match:
+                # 凭据文件：无论读写都拦截（读凭据文件同样危险）
+                if is_credential:
+                    return LogicRuleResult(
+                        hit=True,
+                        violated_rule="sensitive_path_access",
+                        risk_level=sp["risk_level"],
+                        reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
+                        risk_type="file_access",
+                    )
                 # 对于 xiaoo-guardian 保护目录：只拦截写入/删除操作，读取操作放行
                 if raw_path.startswith("~") and not is_write_op:
                     continue  # 允许读取操作
