@@ -40,7 +40,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-stream.workspace = true
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-util.workspace = true
 tower = { workspace = true }
 tower_governor = "0.4"
