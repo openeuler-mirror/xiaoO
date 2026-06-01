@@ -272,16 +272,9 @@ impl App {
             return Ok(());
         }
 
-        if key.code == KeyCode::BackTab {
-            if crate::slash_complete::slash_typed_prefix(
-                self.state.chat_state.input.value(),
-                self.state.chat_state.input.cursor(),
-            )
-            .is_none()
-            {
-                self.state.cycle_reasoning_effort();
-                return Ok(());
-            }
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            self.state.cycle_reasoning_effort();
+            return Ok(());
         }
 
         if self.state.slash_menu_visible() {
