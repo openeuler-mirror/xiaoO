@@ -153,7 +153,7 @@ fn resolve_api_base(
             profile.display_name
         )));
     }
-    Ok(normalize_api_base(api_base, profile.api_base_style))
+    Ok(normalize_api_base(api_base))
 }
 
 fn resolve_api_key(
@@ -191,7 +191,6 @@ fn default_profile(protocol: ProtocolFamily) -> ProviderProfile {
         default_base_url: None,
         default_api_key_env: None,
         api_key_required: true,
-        api_base_style: crate::provider_registry::ApiBaseStyle::Preserve,
         supports_model_catalog: false,
     }
 }

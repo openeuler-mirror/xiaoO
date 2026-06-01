@@ -36,33 +36,8 @@ impl std::fmt::Display for ProtocolFamily {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiBaseStyle {
-    Preserve,
-    ExpectV1,
-    ExpectNoV1,
-}
-
-pub fn normalize_api_base(api_base: &str, style: ApiBaseStyle) -> String {
-    let trimmed = api_base.trim().trim_end_matches('/');
-
-    match style {
-        ApiBaseStyle::Preserve => trimmed.to_string(),
-        ApiBaseStyle::ExpectV1 => {
-            if trimmed.ends_with("/v1") {
-                trimmed.to_string()
-            } else {
-                format!("{trimmed}/v1")
-            }
-        }
-        ApiBaseStyle::ExpectNoV1 => {
-            if let Some(prefix) = trimmed.strip_suffix("/v1") {
-                prefix.to_string()
-            } else {
-                trimmed.to_string()
-            }
-        }
-    }
+pub fn normalize_api_base(api_base: &str) -> String {
+    api_base.trim().trim_end_matches('/').to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +48,6 @@ pub struct ProviderProfile {
     pub default_base_url: Option<&'static str>,
     pub default_api_key_env: Option<&'static str>,
     pub api_key_required: bool,
-    pub api_base_style: ApiBaseStyle,
     pub supports_model_catalog: bool,
 }
 
@@ -94,7 +68,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.openai.com/v1"),
             default_api_key_env: Some("OPENAI_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "anthropic" | "claude" => Some(ProviderProfile {
@@ -104,7 +77,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.anthropic.com/v1"),
             default_api_key_env: Some("ANTHROPIC_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "gemini" | "google" => Some(ProviderProfile {
@@ -114,7 +86,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://generativelanguage.googleapis.com"),
             default_api_key_env: Some("GEMINI_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
         "ollama" => Some(ProviderProfile {
@@ -124,7 +95,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("http://localhost:11434"),
             default_api_key_env: None,
             api_key_required: false,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
         "zai-cn" | "zai-china" | "zhipu" | "glm-cn" | "bigmodel" | "zai" | "z-ai" | "z.ai"
@@ -135,7 +105,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
             default_api_key_env: Some("ZHIPU_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
         "deepseek" => Some(ProviderProfile {
@@ -145,7 +114,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.deepseek.com"),
             default_api_key_env: Some("DEEPSEEK_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectNoV1,
             supports_model_catalog: true,
         }),
         "openrouter" => Some(ProviderProfile {
@@ -155,7 +123,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://openrouter.ai/api/v1"),
             default_api_key_env: Some("OPENROUTER_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "openai-compatible" => Some(ProviderProfile {
@@ -165,7 +132,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: None,
             default_api_key_env: Some("OPENAI_COMPATIBLE_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
         "groq" => Some(ProviderProfile {
@@ -175,7 +141,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.groq.com/openai/v1"),
             default_api_key_env: Some("GROQ_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "mistral" => Some(ProviderProfile {
@@ -185,7 +150,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.mistral.ai/v1"),
             default_api_key_env: Some("MISTRAL_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "together" => Some(ProviderProfile {
@@ -195,7 +159,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.together.xyz/v1"),
             default_api_key_env: Some("TOGETHER_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "xai" | "xai-grok" => Some(ProviderProfile {
@@ -205,7 +168,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.x.ai/v1"),
             default_api_key_env: Some("XAI_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "minimax" | "minimax-openai" => Some(ProviderProfile {
@@ -215,7 +177,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.minimaxi.com/v1"),
             default_api_key_env: Some("MINIMAX_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: false,
         }),
         "minimax-anthropic" => Some(ProviderProfile {
@@ -225,7 +186,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.minimaxi.com/anthropic/v1"),
             default_api_key_env: Some("MINIMAX_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: false,
         }),
         "kimi" | "moonshot" | "moonshot-ai" => Some(ProviderProfile {
@@ -235,7 +195,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.moonshot.cn/v1"),
             default_api_key_env: Some("MOONSHOT_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "minimax-coding-plan" | "minimax-code-plan" | "minimax-token-plan" => {
@@ -246,7 +205,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
                 default_base_url: Some("https://api.minimax.io/v1"),
                 default_api_key_env: Some("MINIMAX_API_KEY"),
                 api_key_required: true,
-                api_base_style: ApiBaseStyle::ExpectV1,
                 supports_model_catalog: true,
             })
         }
@@ -258,7 +216,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
                 default_base_url: Some("https://api.kimi.com/coding/v1"),
                 default_api_key_env: Some("KIMI_API_KEY"),
                 api_key_required: true,
-                api_base_style: ApiBaseStyle::ExpectV1,
                 supports_model_catalog: true,
             })
         }
@@ -269,7 +226,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api-ai.gitcode.com/v1"),
             default_api_key_env: Some("GITCODE_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: false,
         }),
         // Z.AI Coding Plan (zhipu coding plan) — OpenAI-compatible endpoint at api.z.ai
@@ -281,7 +237,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://api.z.ai/api/coding/paas/v4"),
             default_api_key_env: Some("ZHIPU_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::Preserve,
             supports_model_catalog: true,
         }),
         "local" => Some(ProviderProfile {
@@ -291,7 +246,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("http://localhost:8080/v1"),
             default_api_key_env: None,
             api_key_required: false,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         "other" => Some(ProviderProfile {
@@ -301,7 +255,6 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             default_base_url: Some("https://openrouter.ai/api/v1"),
             default_api_key_env: Some("OPENROUTER_API_KEY"),
             api_key_required: true,
-            api_base_style: ApiBaseStyle::ExpectV1,
             supports_model_catalog: true,
         }),
         _ => None,
@@ -424,19 +377,23 @@ mod tests {
     #[test]
     fn test_normalize_api_base() {
         assert_eq!(
-            normalize_api_base("https://api.example.com", ApiBaseStyle::Preserve),
+            normalize_api_base("https://api.example.com"),
             "https://api.example.com"
         );
         assert_eq!(
-            normalize_api_base("https://api.example.com/", ApiBaseStyle::ExpectV1),
+            normalize_api_base("https://api.example.com/v1"),
             "https://api.example.com/v1"
         );
         assert_eq!(
-            normalize_api_base("https://api.example.com/v1", ApiBaseStyle::ExpectV1),
+            normalize_api_base("https://api.example.com/v1/"),
             "https://api.example.com/v1"
         );
         assert_eq!(
-            normalize_api_base("https://api.example.com/v1", ApiBaseStyle::ExpectNoV1),
+            normalize_api_base("  https://api.example.com/v1/  "),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            normalize_api_base("https://api.example.com/"),
             "https://api.example.com"
         );
     }
