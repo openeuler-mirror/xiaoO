@@ -22,8 +22,8 @@ xiaoO 的安全审计插件，在 Agent 执行动作前进行权限校验：根�
 │                          │  │                                        │ │  │
 │                          │  │  层1: 启发式静态检测                    │ │  │
 │                          │  │    关键命令 + 注入检测 + 用户敏感规则     │ │  │
-│                          │  │    → high/critical + 置信度≥80 → Deny   │ │  │
-│                          │  │    → 内联脚本字符串脱敏后降置信度         │ │  │
+│                          │  │    → high/critical → Deny               │ │  │
+│                          │  │    → 内联脚本 file_access 转层3          │ │  │
 │                          │  │      （避免 'cat /etc/shadow' 假阳性）   │ │  │
 │                          │  │                                        │ │  │
 │                          │  │  层2: 逻辑规则检测                      │ │  │
@@ -375,7 +375,7 @@ python3 -m pytest tests/test_audit.py -v
 
 ## 三层防御体系详解
 
-AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，层层递进、逐级深入。前一层发现 high/critical 风险时直接 Deny（置信度≥80），无需等待后续检测；low/medium 风险则传递给下一层做更深入分析。内联脚本命令（`python -c` 等）中的敏感路径若仅出现在字符串字面量中，会被自动脱敏降置信度，避免假阳性。
+AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，层层递进、逐级深入。前一层发现 high/critical 风险时直接 Deny，无需等待后续检测；low/medium 风险则传递给下一层做更深入分析。内联脚本命令（`python -c` 等）中的 file_access 风险（如 `/etc/shadow`）不会在层1/层2 立即拦截，转交层3 LLM 做语义判断，避免字符串字面量中的敏感路径被误拦截。
 
 ### 快速放行优化（Fast-Pass）
 
@@ -807,7 +807,7 @@ LLM 返回结构化 JSON：
 ```
 
 **关键设计**：
-- **短路机制**：层1/层2 检测到 high/critical 风险且置信度 ≥ 80 时直接 Deny，不等待后续检测。内联脚本字符串脱敏后假阳性不拦截。
+- **短路机制**：层1/层2 检测到 high/critical 风险时直接 Deny（除非是内联脚本命令的 file_access 风险——此时转层3 LLM 语义判断，避免字符串字面量中的敏感路径被误拦截）。
 - **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **信息传递**：前两层的检测结果作为提示信息注入层3的 LLM prompt，帮助 LLM 做出更准确的判断
 - **Fail-closed + warn-allow**：LLM 故障时，前序已拦截则 Deny，前序无违规则 Allow

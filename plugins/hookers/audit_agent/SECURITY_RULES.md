@@ -10,21 +10,25 @@
 
 | 风险等级 | 层1/层2 处理方式 | 层3 处理方式 |
 |---------|-----------------|-------------|
-| **critical** | 置信度 ≥ 80 时直接 Deny（短路）；低置信度转层3 | — |
-| **high** | 置信度 ≥ 80 时直接 Deny（短路）；低置信度转层3 | — |
+| **critical** | high/critical → 直接 Deny（短路）；内联脚本 file_access 转层3 | — |
+| **high** | high/critical → 直接 Deny（短路）；内联脚本 file_access 转层3 | — |
 | **medium** | 不拦截，传递到层3 | 作为提示信息注入 LLM prompt，由 LLM 决定 |
 | **low** | 不拦截，传递到层3 | 作为提示信息注入 LLM prompt，由 LLM 决定 |
 
-**关键逻辑**：层1 的 `high`/`critical` 匹配默认立即拦截（置信度 100）。但对于内联脚本命令（`python -c`、`perl -e` 等），系统会先剥离字符串字面量和注释后再匹配：剥离后仍命中→置信度 80（仍拦截），剥离后不命中→假阳性不拦截。层2 的行为不变（接收脱敏文本后路径匹配也不命中假阳性路径）。
+**关键逻辑**：层1 的 `high`/`critical` 匹配默认立即拦截。但对于内联脚本命令（`python -c`、`perl -e` 等），如果命中的是 `file_access` 风险类型（如 `/etc/shadow` 出现在字符串字面量中），层1/层2 **不立即拦截**，转交层3 LLM 做语义判断。其他风险类型（`script_execution`、`data_exfiltration` 等）仍然立即拦截。
 
 ```python
 # audit_agent.py 核心逻辑
-# 层1：常规命令 high/critical → 直接 Deny；内联脚本低置信度 → 转层3
-if heuristic_result.risk_level in ("high", "critical") and heuristic_result.confidence >= 80:
+# 内联脚本命令的 file_access 风险 → 转层3（避免假阳性）
+if is_inline_script_command(action_detail) and heuristic_result.risk_type == "file_access":
+    skip_inline_file_access = True  # 不立即 Deny，转层3 语义判断
+
+# 层1：常规命令 high/critical → 直接 Deny；内联脚本 file_access → 转层3
+if heuristic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
     return SecurityJudgment(allowed=False, ...)  # 直接 Deny
 
-# 层2：行为不变
-if logic_result.risk_level in ("high", "critical"):
+# 层2：同样处理
+if logic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
     return SecurityJudgment(allowed=False, ...)  # 直接 Deny
 ```
 
@@ -320,7 +324,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 风险等级: critical
 ```
 
-> **内联脚本假阳性防护**：从 v2.8 起，对内联脚本命令（`python -c`、`perl -e` 等），系统在正则扫描前会先剥离字符串字面量和注释内容再匹配。例如 `python3 -c "text = 'cat /etc/shadow'; print(text)"` 的字符串 `'cat /etc/shadow'` 被剥离后不再匹配 `/etc/shadow` 模式，假阳性不拦截。真实威胁如 `python3 -c "import os; os.system('cat /etc/shadow')"` 则脱敏后仍命中（字符串剥离后 `os.system()` 调用仍含路径），由 LLM 层做语义判断。
+> **内联脚本假阳性防护**：从 v2.8 起，对内联脚本命令（`python -c`、`perl -e` 等），如果命中 `file_access` 风险类型（如 `/etc/shadow`、`.ssh/id_rsa`），层1/层2 不立即拦截，转交层3 LLM 做语义判断。例如 `python3 -c "text = 'cat /etc/shadow'; print(text)"` 中 `/etc/shadow` 仅是字符串字面量，不会被误拦。真实威胁如 `python3 -c "import os; os.system('cat /etc/shadow')"` 则由 LLM 识别出实际执行路径并拦截。
 
 **示例 4：`.ssh/id_rsa`**
 
@@ -1752,7 +1756,7 @@ LLM 判断: Deny
 ```
 
 **关键设计**：
-- **短路机制**：层1/层2 检测到 high/critical 风险且置信度 ≥ 80 时直接 Deny，不等待后续检测。内联脚本命令（`python -c` 等）命中敏感模式时，先剥离字符串字面量再匹配，剥离后不命中则不拦截（避免假阳性），剥离后仍命中则降置信度后转层3做语义分析。
+- **短路机制**：层1/层2 检测到 high/critical 风险时直接 Deny（除非是内联脚本命令的 file_access 风险——此时转层3 LLM 语义判断，避免字符串字面量中的敏感路径被误拦截）。
 - **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **低风险传递**：层1/层2 检测到 medium/low 风险不拦截，传递到层3 由 LLM 决定
 - **信息传递**：前两层结果（含 low/medium）+ 脚本分析注入层3 prompt
