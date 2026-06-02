@@ -1,9 +1,11 @@
 use crate::gateway::backend::ExternalBackendManager;
+use crate::gateway::session_backend::{lease_session_backend, sync_session_backend_instance};
 use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLifecycleStatus, SessionRecord,
     SessionRuntimeBuildInput, SessionRuntimeResolver, SessionServiceError, SessionStore,
 };
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -344,14 +346,15 @@ impl SessionSupervisor {
         let mut tool_manifest = self.load_lane_tool_manifest(&input.agent_id).await?;
 
         loop {
+            let operation_backend = self.lease_backend_for_lane(&input.runtime_input).await?;
             let session_snapshot = self.snapshot().await;
             let worker_result = SessionWorker::run(
                 self.runtime_resolver.as_ref(),
-                Arc::clone(&self.backend_manager),
                 SessionWorkerInput {
                     runtime_input: input.runtime_input.clone(),
                     session: session_snapshot,
                     agent_id: input.agent_id.clone(),
+                    operation_backend,
                     user_message,
                     append_user_message,
                     reasoning_effort: input.reasoning_effort,
@@ -473,6 +476,31 @@ impl SessionSupervisor {
                 }
             }
         }
+    }
+
+    async fn lease_backend_for_lane(
+        &self,
+        runtime_input: &SessionRuntimeBuildInput,
+    ) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
+        let session_snapshot = self.snapshot().await;
+        let resolved = self
+            .runtime_resolver
+            .resolve(runtime_input, Some(&session_snapshot))
+            .await?;
+        let lease =
+            lease_session_backend(self.backend_manager.as_ref(), &session_snapshot, &resolved)
+                .await?;
+
+        let operation_backend = lease.backend();
+        let mut session = self.session.lock().await;
+        if sync_session_backend_instance(&mut session, &lease) {
+            session.updated_at_ms = current_time_ms();
+            let snapshot = session.clone();
+            drop(session);
+            self.session_store.save(snapshot).await;
+        }
+
+        Ok(operation_backend)
     }
 
     async fn apply_host_actions_internal(
