@@ -387,11 +387,11 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 ```
 输入:
   action_type: "bash"
-  action_detail: "rm -rf ~/.xiaoo/skills/xiaoo-guardian/"
+  action_detail: "rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian/"
 
-匹配: "\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|...)\b"
+匹配: "/usr/lib/\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|...)\b"
 结果: Deny
-原因: "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录"
+原因: "检测到尝试修改或删除 xiaoO 系统级安全防护 Skill 目录"
 风险等级: critical
 ```
 
@@ -842,7 +842,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `.ssh/id_ed25519` | SSH 私钥 (ed25519) |
 | `/boot/` | 启动引导目录 |
 | `/dev/mem` | 物理内存访问设备 |
-| `~/.xiaoo/skills/xiaoo-guardian/` | xiaoO 安全防护 Skill 目录（仅写入/删除拦截） |
+| `/usr/lib/.xiaoo/skills/xiaoo-guardian/` | xiaoO 系统级安全防护 Skill 目录（仅写入/删除拦截） |
+| `~/.xiaoo/skills/xiaoo-guardian/` | xiaoO 用户级安全防护 Skill 目录（仅写入/删除拦截） |
 
 **示例 1：`/etc/shadow`**
 
