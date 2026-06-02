@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
@@ -141,7 +142,7 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
-        if let Err(error) = llm_call_with_context_limit_recovery(&mut ctx).await {
+        if let Err(error) = llm_call_with_recovery(&mut ctx).await {
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Error,
@@ -904,22 +905,64 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     Ok(())
 }
 
-async fn llm_call_with_context_limit_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
-    match llm_call(ctx).await {
-        Ok(()) => Ok(()),
-        Err(LlmError::ContextLengthExceeded { message }) => {
-            tracing::warn!(
-                turn = ctx.turn.turn_number,
-                "LLM request exceeded provider context limit; forcing compression retry: {message}"
-            );
+const MAX_TRANSIENT_RETRIES: u32 = 4;
+const TRANSIENT_BASE_DELAY_MS: u64 = 4_000;
+const TRANSIENT_MAX_DELAY_MS: u64 = 60_000;
 
-            compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
-            build_messages(ctx).await?;
-            llm_call(ctx)
-                .await
-                .map_err(|error| AgentError::LlmProvider(error.to_string()))
+fn is_transient(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RateLimited { .. } | LlmError::HttpError(_) | LlmError::Timeout
+    )
+}
+
+fn transient_backoff(attempt: u32, retry_after_ms: u64) -> Duration {
+    let millis = if retry_after_ms > 0 {
+        retry_after_ms
+    } else {
+        TRANSIENT_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(63))
+    };
+    Duration::from_millis(millis.min(TRANSIENT_MAX_DELAY_MS))
+}
+
+async fn llm_call_with_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+    let mut retry_attempts: u32 = 0;
+    loop {
+        match llm_call(ctx).await {
+            Ok(()) => return Ok(()),
+            Err(LlmError::ContextLengthExceeded { message }) => {
+                tracing::warn!(
+                    turn = ctx.turn.turn_number,
+                    "LLM request exceeded provider context limit; forcing compression retry: {message}"
+                );
+
+                compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
+                build_messages(ctx).await?;
+                return llm_call(ctx)
+                    .await
+                    .map_err(|error| AgentError::LlmProvider(error.to_string()));
+            }
+            Err(error) if retry_attempts < MAX_TRANSIENT_RETRIES && is_transient(&error) => {
+                let retry_after_ms = match &error {
+                    LlmError::RateLimited { retry_after_ms, .. } => *retry_after_ms,
+                    _ => 0,
+                };
+                let backoff = transient_backoff(retry_attempts, retry_after_ms);
+                retry_attempts += 1;
+                tracing::warn!(
+                    turn = ctx.turn.turn_number,
+                    attempt = retry_attempts,
+                    max_attempts = MAX_TRANSIENT_RETRIES,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "transient LLM error; backing off before retrying agent turn: {error}"
+                );
+                tokio::select! {
+                    _ = ctx.state.cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+            }
+            Err(error) => return Err(AgentError::LlmProvider(error.to_string())),
         }
-        Err(error) => Err(AgentError::LlmProvider(error.to_string())),
     }
 }
 
@@ -1016,7 +1059,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 build_messages(ctx).await.map_err(|e| {
                     AgentError::PromptBuild(format!("retry after invalid tool call: {e}"))
                 })?;
-                llm_call_with_context_limit_recovery(ctx).await
+                llm_call_with_recovery(ctx).await
             }
             .await;
             ctx.state.messages.write().pop();
@@ -1548,6 +1591,46 @@ mod tests {
     use tool::EmptyToolRegistry;
 
     use crate::runtime_support::{EmptySkillRegistry, NoopRuntimeView};
+
+    #[test]
+    fn transient_backoff_grows_exponentially_without_retry_after() {
+        assert_eq!(transient_backoff(0, 0), Duration::from_millis(4_000));
+        assert_eq!(transient_backoff(1, 0), Duration::from_millis(8_000));
+        assert_eq!(transient_backoff(2, 0), Duration::from_millis(16_000));
+        assert_eq!(transient_backoff(3, 0), Duration::from_millis(32_000));
+    }
+
+    #[test]
+    fn transient_backoff_is_clamped_to_the_ceiling() {
+        assert_eq!(transient_backoff(10, 0), Duration::from_millis(60_000));
+        assert_eq!(transient_backoff(u32::MAX, 0), Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn transient_backoff_honors_retry_after_within_the_ceiling() {
+        assert_eq!(transient_backoff(3, 5_000), Duration::from_millis(5_000));
+        assert_eq!(transient_backoff(0, 120_000), Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn is_transient_retries_network_and_throttle_errors_only() {
+        assert!(is_transient(&LlmError::HttpError(
+            "error sending request for url".into()
+        )));
+        assert!(is_transient(&LlmError::Timeout));
+        assert!(is_transient(&LlmError::RateLimited {
+            retry_after_ms: 0,
+            message: String::new(),
+        }));
+
+        assert!(!is_transient(&LlmError::AuthError {
+            message: String::new(),
+        }));
+        assert!(!is_transient(&LlmError::ApiError("HTTP 400".into())));
+        assert!(!is_transient(&LlmError::ContextLengthExceeded {
+            message: String::new(),
+        }));
+    }
 
     struct StreamingTestProvider {
         capabilities: ProviderCapabilities,
