@@ -18,6 +18,7 @@ from ..config import Config, is_llm_layer3_enabled
 from .heuristic_detector import (
     HeuristicDetector,
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
+    is_inline_script_command, sanitize_inline_script_action_detail,
 )
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
@@ -90,9 +91,21 @@ class xiaoOSecBot:
 
         violated_layers: list[str] = []
 
-        # ========== 层1: 启发式静态检测 ==========
+        # ========== 集中式脱敏：对内联脚本命令预处理 ==========
+        # 对内联脚本命令（python -c, perl -e 等），剥离字符串字面量和注释
+        # 后传给 Layer 1（启发式）和 Layer 2（逻辑规则）的字符串匹配，
+        # 避免 'cat /etc/shadow' 等非执行字符串导致的假阳性。
+        # Layer 3（LLM）始终使用原始文本做语义分析。
+        action_detail_raw = a_next.get("action_detail", "").lower()
+        if is_inline_script_command(action_detail_raw):
+            safe_detail = sanitize_inline_script_action_detail(action_detail_raw)
+            a_next_for_regex = {**a_next, "action_detail": safe_detail}
+        else:
+            a_next_for_regex = a_next  # 非内联脚本，行为不变
+
+        # ========== 层1: 启发式静态检测（使用脱敏文本） ==========
         if security_cfg.heuristic_enabled:
-            heuristic_result = self._heuristic_detector.detect(a_next, reason)
+            heuristic_result = self._heuristic_detector.detect(a_next_for_regex, reason)
             logger.debug(
                 "启发式检测结果: hit=%s, risk_level=%s, reason=%s",
                 heuristic_result.hit,
@@ -101,7 +114,9 @@ class xiaoOSecBot:
             )
             if heuristic_result.hit:
                 violated_layers.append("1.1")
-                if heuristic_result.risk_level in ("high", "critical"):
+                # 仅当置信度 >= 80 时立即拦截；低置信度（如 inline script 脱敏后命中）
+                # 转交 Layer 2/3 做深度分析，避免字符串字面量假阳性
+                if heuristic_result.risk_level in ("high", "critical") and heuristic_result.confidence >= 80:
                     logger.info(
                         "启发式检测拦截: risk_level=%s, reason=%s",
                         heuristic_result.risk_level,
@@ -176,7 +191,7 @@ class xiaoOSecBot:
         # ========== 层2: 逻辑规则检测 ==========
         if security_cfg.logic_rules_enabled:
             logic_result = self._logic_rules_checker.check(
-                prompt_session, action_history, a_next, reason
+                prompt_session, action_history, a_next_for_regex, reason
             )
             logger.debug(
                 "逻辑规则检测结果: hit=%s, risk_level=%s, reason=%s",

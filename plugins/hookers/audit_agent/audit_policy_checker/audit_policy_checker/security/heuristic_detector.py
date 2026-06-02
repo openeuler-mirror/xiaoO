@@ -376,7 +376,39 @@ class UserRuleMatcher:
 
 
 class CommandPatternScanner:
-    """子检测器：关键命令正则扫描"""
+    """子检测器：关键命令正则扫描
+
+    两轮检测策略消除假阳性：
+      Pass 1 — 原始文本匹配（命中时 confidence=100）
+      若 Pass 1 命中但属 inline script 命令（python -c 等），做 Pass 2：
+      Pass 2 — 剥离字符串/注释后再匹配（命中时 confidence=80，未命中 → 假阳性，返回 no-hit）
+
+    效果：
+      - python3 -c "text = 'cat /etc/shadow'; print(text)"  → Pass 2 不再命中 → no-hit
+      - python3 -c "import os; os.system('cat /etc/shadow')" → Pass 2 仍命中   → hit confidence=80
+      - cat /etc/shadow                                       → 非 inline script → hit confidence=100
+    """
+
+    # 内联脚本解释器 — -c / -e 后跟代码文本
+    _INLINE_SCRIPT_RE = re.compile(
+        r"(?:^|\s)(?:python|python3|python3\.\d+|perl|perl5|ruby|jruby|mruby|node|php|lua)\s+"
+        r"(?:-[a-zA-Z]*[ce][a-zA-Z]*\s+)",
+        re.IGNORECASE,
+    )
+
+    # 字符串字面量（从长到短优先匹配）
+    _STRING_PATTERNS = [
+        re.compile(r"'''.*?'''", re.DOTALL),
+        re.compile(r'""".*?"""', re.DOTALL),
+        re.compile(r"'(?:[^'\\]|\\.)*'", re.DOTALL),
+        re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL),
+    ]
+
+    # 注释
+    _COMMENT_PATTERNS = [
+        re.compile(r"#.*$", re.MULTILINE),
+        re.compile(r"//.*$", re.MULTILINE),
+    ]
 
     def __init__(self):
         all_patterns = CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
@@ -385,14 +417,26 @@ class CommandPatternScanner:
             for p in all_patterns
         ]
 
-    def scan(self, action_detail: str) -> HeuristicResult:
-        hits = [
-            p for p in self._compiled
-            if p["regex"].search(action_detail)
-        ]
-        if not hits:
-            return HeuristicResult(hit=False)
+    @staticmethod
+    def _strip_text(text: str) -> str:
+        """用等长空格替换字符串字面量和注释内容。"""
+        result = text
+        for pat in CommandPatternScanner._STRING_PATTERNS:
+            result = pat.sub(lambda m: " " * len(m.group()), result)
+        for pat in CommandPatternScanner._COMMENT_PATTERNS:
+            result = pat.sub(lambda m: " " * len(m.group()), result)
+        return result
 
+    @staticmethod
+    def _is_inline_script(action_detail: str) -> bool:
+        """判断是否为 inline script 命令（python -c, perl -e 等）"""
+        return bool(CommandPatternScanner._INLINE_SCRIPT_RE.search(action_detail))
+
+    def _scan_hits(self, text: str) -> list:
+        """对给定文本扫描所有正则，返回命中列表"""
+        return [p for p in self._compiled if p["regex"].search(text)]
+
+    def _make_result(self, hits: list, confidence: int = 100) -> HeuristicResult:
         top = max(hits, key=lambda p: _RISK_PRIORITY.get(p["risk_level"], 0))
         return HeuristicResult(
             hit=True,
@@ -400,7 +444,57 @@ class CommandPatternScanner:
             risk_level=top["risk_level"],
             reason="; ".join(p["reason"] for p in hits),
             risk_type=top["risk_type"],
+            confidence=confidence,
         )
+
+    def scan(self, action_detail: str) -> HeuristicResult:
+        # Pass 1: 原始文本匹配
+        hits = self._scan_hits(action_detail)
+        if not hits:
+            return HeuristicResult(hit=False)
+
+        # 非 inline script：原始命中就是真实威胁，直接返回
+        if not self._is_inline_script(action_detail):
+            return self._make_result(hits, confidence=100)
+
+        # inline script：剥离字符串/注释后二次检测
+        sanitized = self._strip_text(action_detail)
+        if sanitized == action_detail:
+            return self._make_result(hits, confidence=100)
+
+        hits2 = self._scan_hits(sanitized)
+
+        if hits2:
+            # 剥离后仍命中 → 确认真实威胁（如 os.system('cat /etc/shadow'）
+            return self._make_result(hits2, confidence=80)
+        else:
+            # 剥离后不再命中 → 假阳性（敏感词在字符串/注释中）
+            return HeuristicResult(hit=False)
+
+
+# ==================== 模块级便利函数 ====================
+# 供 audit_agent.py 的集中式脱敏流程调用
+
+
+def is_inline_script_command(action_detail: str) -> bool:
+    """判断命令是否为内联脚本解释器命令（python -c, perl -e 等）
+
+    用于 audit_agent.py 的集中式流程：
+    - 对内联脚本：向 Layer 1 / Layer 2 传递脱敏后的文本
+    - 向 Layer 3 传递原始文本做语义分析
+    """
+    return CommandPatternScanner._is_inline_script(action_detail)
+
+
+def sanitize_inline_script_action_detail(action_detail: str) -> str:
+    """对内联脚本命令，剥离字符串字面量和注释后返回
+
+    消除 'cat /etc/shadow' 等非执行字符串导致的假阳性路径匹配。
+    非内联脚本命令原样返回。
+    """
+    if not is_inline_script_command(action_detail):
+        return action_detail
+    return CommandPatternScanner._strip_text(action_detail)
 
 
 class InjectionKeywordChecker:
