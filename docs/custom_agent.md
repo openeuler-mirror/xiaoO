@@ -1,5 +1,8 @@
 # Custom Agent Development Guide
 
+> **Note**: This document focuses on Agent role development (TUI/Daemon multi-role switching).
+> For Subagent role configuration, please refer to the `[subagent]` section in [Configuration File Guide](./config_file_guide.md).
+
 This document describes how to configure custom Agents in xiaoo. An Agent configuration consists of two parts: **TOML configuration** (required, defines system prompt and permission control) and **command** (optional, defines custom quick command).
 
 ---

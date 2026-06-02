@@ -30,6 +30,7 @@ similar = "2.7"
 html2text = "0.16.7"
 htmd = "0.5.4"
 reqwest = { workspace = true, features = ["stream"] }
+rustls-native-certs = "0.8"
 tempfile.workspace = true
 tracing.workspace = true
 

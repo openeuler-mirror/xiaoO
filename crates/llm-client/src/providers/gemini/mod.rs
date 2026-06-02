@@ -22,13 +22,19 @@ use types::GeminiResponseBody;
 
 pub(crate) struct GeminiProvider {
     client: reqwest::Client,
-    api_key: String,
+    api_key: Option<String>,
     base_url: String,
     capabilities: ProviderCapabilities,
+    api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl GeminiProvider {
-    pub(crate) fn new(api_key: String, base_url: String, model: String) -> Self {
+    pub(crate) fn new(
+        api_key: Option<String>,
+        base_url: String,
+        model: String,
+        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
+    ) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
@@ -43,6 +49,15 @@ impl GeminiProvider {
                 max_context_window: 1000000,
                 model_name: model,
             },
+            api_key_provider,
+        }
+    }
+
+    fn get_api_key(&self) -> String {
+        if let Some(provider) = &self.api_key_provider {
+            provider()
+        } else {
+            self.api_key.clone().unwrap_or_default()
         }
     }
 }
@@ -51,9 +66,10 @@ impl GeminiProvider {
 impl LlmProvider for GeminiProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
         let model_name = normalize_model_name(&self.capabilities.model_name);
+        let api_key = self.get_api_key();
         let url = format!(
             "{}/v1beta/{}:generateContent?key={}",
-            self.base_url, model_name, self.api_key
+            self.base_url, model_name, api_key
         );
         let body = build_gemini_request_body(request, &self.capabilities.model_name);
         let body_str = serde_json::to_string(&body).unwrap_or_default();
@@ -151,9 +167,10 @@ impl LlmProvider for GeminiProvider {
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
         let model_name = normalize_model_name(&self.capabilities.model_name);
+        let api_key = self.get_api_key();
         let url = format!(
             "{}/v1beta/{}:streamGenerateContent?alt=sse&key={}",
-            self.base_url, model_name, self.api_key
+            self.base_url, model_name, api_key
         );
         let body = build_gemini_request_body(request, &self.capabilities.model_name);
         let body_str = serde_json::to_string(&body).unwrap_or_default();

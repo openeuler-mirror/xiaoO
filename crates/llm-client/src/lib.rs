@@ -27,7 +27,7 @@ pub use factory::{
 pub use models::{create_model_catalog, resolve_model_context_length, ModelCatalog, ModelSummary};
 pub use provider_registry::{
     normalize_api_base, resolve_protocol_family, resolve_provider_profile, supported_providers,
-    ApiBaseStyle, ProtocolFamily, ProviderProfile,
+    ProtocolFamily, ProviderProfile,
 };
 pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};

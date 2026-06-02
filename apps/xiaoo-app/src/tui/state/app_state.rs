@@ -190,7 +190,7 @@ pub struct AppState {
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
-    pub current_snapshot_name: Option<String>,
+    pub current_snapshot_context: Option<crate::session_snapshot_service::SnapshotContext>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
@@ -227,7 +227,7 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            current_snapshot_name: None,
+            current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -265,7 +265,7 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            current_snapshot_name: None,
+            current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -292,9 +292,9 @@ impl AppState {
         self.session_messages.clear();
         self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
-        self.current_snapshot_name = None;
+        self.current_snapshot_context = None;
         self.slash = SlashState::default();
-        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
+        self.reasoning_effort = ReasoningEffort::default();
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;

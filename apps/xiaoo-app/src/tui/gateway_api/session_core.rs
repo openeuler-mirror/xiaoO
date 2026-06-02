@@ -97,13 +97,10 @@ impl SessionGateway {
         pending_user_messages: Arc<Mutex<VecDeque<String>>>,
     ) {
         let session_store: Arc<dyn SessionStore> = self.session_store.clone();
-        // Track the session so close_all_sessions covers it even if
-        // ensure_session_open was not called first.
         let active_session_ids = Arc::clone(&self.active_session_ids);
         let backend_manager = self.backend_manager.clone();
-        let session_id = request.session_id.clone();
         tokio::spawn(async move {
-            active_session_ids.lock().await.insert(session_id);
+            active_session_ids.lock().await.insert(request.session_id.clone());
 
             let loop_summary = Arc::new(Mutex::new(None));
             let bindings = SessionRuntimeBindings {

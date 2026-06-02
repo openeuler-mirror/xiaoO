@@ -4,7 +4,7 @@ use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 use async_trait::async_trait;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -57,15 +57,59 @@ impl DeclarativeToolExecutor {
         })
     }
 
+    fn expand_tilde_path(value: &str) -> Option<PathBuf> {
+        if value == "~" {
+            return std::env::var_os("HOME").map(PathBuf::from);
+        }
+
+        value.strip_prefix("~/").and_then(|suffix| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(suffix))
+        })
+    }
+
+    fn resolve_command_token(&self, value: &str) -> String {
+        if let Some(expanded) = Self::expand_tilde_path(value) {
+            return expanded.to_string_lossy().into_owned();
+        }
+
+        if value.starts_with("./") || value.starts_with("../") {
+            return self
+                .tool_dir
+                .join(Path::new(value))
+                .to_string_lossy()
+                .into_owned();
+        }
+
+        value.to_string()
+    }
+
+    fn resolve_arg_token(&self, value: &str) -> String {
+        if let Some(expanded) = Self::expand_tilde_path(value) {
+            return expanded.to_string_lossy().into_owned();
+        }
+
+        if value.starts_with("./") || value.starts_with("../") {
+            return self.tool_dir.join(value).to_string_lossy().into_owned();
+        }
+
+        value.to_string()
+    }
+
     async fn invoke_process(
         &self,
         call: &FinalToolCall,
         runtime: &dyn RuntimeView,
     ) -> Result<RawToolOutcome, ToolExecutionError> {
         let workspace_root = runtime.agent_context().workspace().root.clone();
-        let mut command = Command::new(&self.command);
+        let command_token = self.resolve_command_token(&self.command);
+        let args = self
+            .args
+            .iter()
+            .map(|arg| self.resolve_arg_token(arg))
+            .collect::<Vec<_>>();
+        let mut command = Command::new(command_token);
         command
-            .args(&self.args)
+            .args(&args)
             .kill_on_drop(true)
             .current_dir(&workspace_root)
             .stdout(Stdio::piped())
@@ -187,5 +231,82 @@ impl ToolExecutor for DeclarativeToolExecutor {
         Ok(ToolExecutorOutput::Completed {
             raw_outcome: self.invoke_process(call, runtime).await?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::manifest::{DeclarativeToolManifest, EffectSection, ExecSection};
+    use super::*;
+
+    fn test_executor(tool_dir: PathBuf) -> DeclarativeToolExecutor {
+        let loaded = LoadedDeclarativeTool {
+            manifest_path: tool_dir.join("test_tool.toml"),
+            tool_dir,
+            manifest: DeclarativeToolManifest {
+                name: "test_tool".to_string(),
+                description: "test tool".to_string(),
+                timeout_ms: 5000,
+                output: None,
+                effect: EffectSection::default(),
+                input_schema: toml::Value::Table(toml::map::Map::new()),
+                exec: ExecSection {
+                    command: "sh".to_string(),
+                    args: Vec::new(),
+                    stdin: StdinMode::Json,
+                    stdout: StdoutMode::Text,
+                    env: Vec::new(),
+                },
+            },
+            input_schema_json: json!({}),
+        };
+        let spec = Arc::new(DeclarativeToolSpec::from_loaded_tool(&loaded));
+        DeclarativeToolExecutor::from_loaded_tool(spec, &loaded)
+    }
+
+    #[test]
+    fn expands_tilde_for_explicit_tool_paths() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let executor = test_executor(PathBuf::from("/workspace/.xiaoo/tools"));
+        let resolved = executor.resolve_arg_token("~/.xiaoo/tools/md_to_html.mjs");
+        assert_eq!(
+            resolved,
+            PathBuf::from(home)
+                .join(".xiaoo/tools/md_to_html.mjs")
+                .to_string_lossy()
+                .into_owned()
+        );
+    }
+
+    #[test]
+    fn resolves_dot_relative_tool_paths_from_manifest_dir() {
+        let executor = test_executor(PathBuf::from("/home/user/.xiaoo/tools"));
+
+        assert_eq!(
+            executor.resolve_arg_token("./md_to_html.mjs"),
+            PathBuf::from("/home/user/.xiaoo/tools")
+                .join("./md_to_html.mjs")
+                .to_string_lossy()
+                .into_owned()
+        );
+        assert_eq!(
+            executor.resolve_command_token("./runner.sh"),
+            PathBuf::from("/home/user/.xiaoo/tools")
+                .join("./runner.sh")
+                .to_string_lossy()
+                .into_owned()
+        );
+    }
+
+    #[test]
+    fn keeps_workspace_relative_args_unchanged() {
+        let executor = test_executor(PathBuf::from("/home/user/.xiaoo/tools"));
+
+        assert_eq!(
+            executor.resolve_arg_token(".xiaoo/tools/echo_payload.sh"),
+            ".xiaoo/tools/echo_payload.sh"
+        );
     }
 }

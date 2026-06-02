@@ -1,4 +1,5 @@
 use crate::gateway::backend::GatewayBackendConfig;
+use crate::gateway::prompt_utils::compose_subagent_delegation_rules;
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -9,15 +10,25 @@ use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
-use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
+use llm_client::{create_llm_provider, factory::ApiKeyProviderFn, LlmProviderConfig, LlmProviderWrapper};
 use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl, ToolRuntimeServices};
+use tool::{
+    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl, ToolRuntimeServices,
+};
+
+#[derive(Clone)]
+pub struct SubagentRoleConfigEntry {
+    pub description: String,
+    pub prompt: Option<String>,
+    pub max_turns: Option<u32>,
+    pub tools: BTreeMap<String, bool>,
+}
 
 #[derive(Clone)]
 pub struct HostedSessionRuntimeConfig {
@@ -35,6 +46,7 @@ pub struct HostedSessionRuntimeConfig {
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub operation_backend: Option<GatewayBackendConfig>,
     pub skills_config: SkillsConfig,
+    pub subagent_roles: BTreeMap<String, SubagentRoleConfigEntry>,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -45,9 +57,18 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
+        let subagent_roles = config.subagent_roles.iter().map(|(k, v)| {
+            (k.clone(), SubagentRoleConfig {
+                description: v.description.clone(),
+                prompt: v.prompt.clone(),
+                max_turns: v.max_turns,
+                tools: v.tools.clone(),
+            })
+        }).collect();
         let initial_services = ToolRuntimeServices {
             lsp_registry: config.lsp_registry.clone(),
             workspace_root: Some(config.descriptor.workspace_root.clone()),
+            subagent_roles,
             ..ToolRuntimeServices::default()
         };
         Self {
@@ -58,24 +79,30 @@ impl HostedSessionRuntimeResolver {
     }
 
     fn resolve_api_key(&self) -> Result<Option<String>, SessionRuntimeResolveError> {
-        if let Some(api_key) = self.config.api_key.clone() {
-            return Ok(Some(api_key));
+        if let Some(api_key) = &self.config.api_key {
+            return Ok(Some(api_key.clone()));
         }
 
-        let Some(env_name) = self.config.api_key_env.as_deref() else {
-            return Ok(None);
-        };
-
-        match env::var(env_name) {
-            Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-            Ok(_) | Err(env::VarError::NotPresent) => {
-                Err(SessionRuntimeResolveError::ResolveFailed {
-                    message: format!("missing required API key environment variable: {env_name}"),
-                })
+        if let Some(env_name) = self.config.api_key_env.as_deref() {
+            if let Some(api_key) = crate::gateway::get_decrypted_api_key(env_name) {
+                return Ok(Some(api_key));
             }
-            Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
-                message: format!("API key environment variable is not valid unicode: {env_name}"),
-            }),
+        }
+
+        if let Some(env_name) = self.config.api_key_env.as_deref() {
+            match env::var(env_name) {
+                Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+                Ok(_) | Err(env::VarError::NotPresent) => {
+                    Err(SessionRuntimeResolveError::ResolveFailed {
+                        message: format!("missing required API key environment variable: {env_name}"),
+                    })
+                }
+                Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
+                    message: format!("API key environment variable is not valid unicode: {env_name}"),
+                }),
+            }
+        } else {
+            Ok(None)
         }
     }
 
@@ -163,12 +190,23 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
                 None,
             )),
             None => {
+                let api_key_env = self.config.api_key_env.clone();
+                let api_key_provider = api_key_env.as_ref().map(|env_name| {
+                    let env_name = env_name.clone();
+                    Arc::new(move || {
+                        crate::gateway::get_decrypted_api_key(&env_name)
+                            .unwrap_or_else(|| std::env::var(&env_name).unwrap_or_default())
+                    }) as ApiKeyProviderFn
+                });
+
                 let api_key = self.resolve_api_key()?;
                 let llm_config = LlmProviderConfig {
                     provider: self.config.provider.clone(),
                     api_key,
                     api_base: self.config.api_base.clone(),
                     model: self.config.model.clone(),
+                    api_key_env,
+                    api_key_provider,
                 };
                 Arc::new(
                     create_llm_provider(&llm_config, Some(agent_id.0.clone()), None).map_err(
@@ -189,6 +227,17 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
         descriptor.agent_id = agent_id.clone();
         descriptor.system_prompt =
             compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
+        if request.max_turns_override.is_some() {
+            descriptor.max_turns = request.max_turns_override;
+        }
+
+        let is_subagent = agent_id != self.config.descriptor.agent_id;
+
+        if !is_subagent {
+            if let Some(rules) = compose_subagent_delegation_rules(&descriptor.subagent_roles) {
+                descriptor.system_prompt.push_str(&rules);
+            }
+        }
 
         Ok(ResolvedSessionRuntime {
             descriptor,

@@ -1,4 +1,15 @@
-# Daemon Document
+# Daemon Configuration Guide
+
+> **Note**: This document focuses on Daemon-specific configuration items.
+>
+> For **common configuration items** (llm, subagent, skills, compact, trace, hooker, etc.), please refer to:
+> - [Configuration File Guide](./config_file_guide.md) - Detailed common configuration
+> - [CLI Configuration](./cli_config.md) - CLI basic usage
+> - [TUI Configuration](./tui_config.md) - TUI-specific configuration
+
+---
+
+## Daemon Startup Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -6,26 +17,36 @@
 | `--host <HOST>` | Bind address | `0.0.0.0` |
 | `--port <PORT>` | Listen port | `18080` |
 
-### Daemon Configuration File (TOML)
+---
+
+## Daemon-specific Configuration Items
+
+The following configuration items only take effect in Daemon mode:
+
+### [channels] - Channel Integration
+
+Channel integration allows Daemon to receive user requests through enterprise IM like Feishu, Telegram, etc.
+
+Detailed deployment guides:
+- Feishu integration: [feishu_deploy.md](./feishu_deploy.md)
+- Telegram integration: [telegram_deploy.md](./telegram_deploy.md)
+
+#### Feishu Configuration
 
 ```toml
-[llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
-model = "z-ai/glm-5"
-api_key_env = "OPENROUTER_API_KEY"   # Read API key from this environment variable
-api_base = "https://..."             # Optional, custom API base URL
-context_window = 128000              # Optional, explicit total context budget override
-max_tokens = 128000                   # Optional, max tokens per response
-
-[channels.feishu]                   # Optional, enable Feishu channel integration
+[channels.feishu]
 enabled = true
 channel_instance_id = "ops-feishu"   # Optional, defaults to "feishu"
 app_id = "cli_..."
 app_secret_env = "FEISHU_APP_SECRET"
 verification_token = "your-token"
 base_url = "https://open.feishu.cn"  # Optional, default value
+```
 
-[channels.telegram]                 # Optional, enable Telegram channel integration
+#### Telegram Configuration
+
+```toml
+[channels.telegram]
 enabled = true
 channel_instance_id = "ops-telegram" # Optional, defaults to "telegram"
 transport = "webhook"               # webhook (default) | polling
@@ -35,12 +56,24 @@ bot_username = "@xiaoO_bot"          # Optional, strips leading @bot or /cmd@bot
 base_url = "https://api.telegram.org" # Optional, default value
 polling_timeout_secs = 50           # Polling only; Bot API getUpdates timeout
 polling_limit = 100                 # Polling only; 1-100 updates per request
+```
 
-[http]                               # Optional, enable Bearer auth for chat APIs
+---
+
+### [http] - HTTP API Configuration
+
+#### Bearer Authentication
+
+```toml
+[http]
 bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
 # bearer_token = "local-dev-token"   # Optional, use env var in production; do not set both
+```
 
-[http.rate_limit]                   # Optional, per-IP rate limiting for all HTTP endpoints
+#### Rate Limiting
+
+```toml
+[http.rate_limit]
 enabled = true                      # Enable or disable rate limiting; default: true
 requests_per_second = 2             # Default refill rate; default: 2 (≈120 req/min)
 burst = 10                          # Max burst size; default: 10
@@ -53,28 +86,110 @@ burst = 10                          # Max burst size; default: 10
 # [http.rate_limit.routes.chat]
 # requests_per_second = 1           # Chat API is the most expensive endpoint
 # burst = 5
+```
 
-[trace]                              # Optional, tracing/observability config
-storage_backend = "moirai-sqlite"    # moirai-sqlite (default) | stdout | noop
-db_path = "~/.xiaoo/traces.db"      # Database path for moirai-sqlite; uses trace crate built-in default if not configured
+---
 
-[compact]                            # Optional, context compression strategy
-warning_ratio = 0.6                  # History ratio to enter warning stage
-auto_compact_ratio = 0.75            # History ratio to trigger auto-compact
-blocking_ratio = 0.9                 # History ratio to enter blocking stage
-summary_max_tokens = 1024            # Max token budget for summary
-summary_preserve_tail = 4            # Number of recent messages to preserve after summary
-snip_stale_after_ms = 3600000        # History snip timeout (milliseconds)
+### [agents] - Multi-Agent Management
 
+```toml
 [agents]
 id = "main"                          # Agent ID
 default = true                       # Mark as default agent
 model = "z-ai/glm-5"                 # Optional, override global model
 system_prompt = "You are..."         # Optional, override default system prompt
 workspace = "/path/to/workspace"     # Optional, workspace directory
+```
 
+---
+
+### [paths] - Data Storage Paths
+
+```toml
 [paths]
 data_dir = "~/.xiaoo"                # Optional, root directory for data storage
+```
+
+---
+
+> **Note**: Common configuration items (llm, subagent, trace, compact, etc.) are shown in the "Complete Daemon Configuration Example" below. For detailed descriptions, please refer to [Configuration File Guide](./config_file_guide.md).
+
+## Complete Daemon Configuration Example
+
+Here is a complete example containing both common configuration and Daemon-specific configuration:
+
+```toml
+# Common configuration (applies to CLI/TUI/Daemon)
+[llm]
+provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan
+model = "z-ai/glm-5"
+api_key_env = "OPENROUTER_API_KEY"
+context_window = 128000
+
+# Predefined subagent roles (common configuration) ⭐
+# Note: Tools configuration supports two formats. See config_file_guide.md for details.
+[subagent.code_reviewer]
+description = "Code review specialist"
+prompt = "You are a code review specialist."
+max_turns = 5
+
+[subagent.code_reviewer.tools]
+bash = true
+read = true
+glob = true
+grep = true
+
+# Context compression (common configuration)
+[compact]
+auto_compact_ratio = 0.75
+
+# Tracing (common configuration)
+[trace]
+storage_backend = "moirai-sqlite"
+db_path = "~/.xiaoo/traces.db"
+
+# Skills (common configuration)
+[skills]
+dirs = ["~/.xiaoo/skills"]
+
+# Hooker (common configuration)
+[hooker]
+default = "audit_agent"
+
+# Daemon-specific configuration
+[agents]
+id = "main"
+default = true
+model = "z-ai/glm-5"
+
+# HTTP API configuration (Daemon-specific)
+[http]
+bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
+
+[http.rate_limit]
+enabled = true
+requests_per_second = 2
+burst = 10
+
+# Feishu integration (Daemon-specific)
+[channels.feishu]
+enabled = true
+channel_instance_id = "ops-feishu"
+app_id = "cli_..."
+app_secret_env = "FEISHU_APP_SECRET"
+verification_token = "your-token"
+
+# Telegram integration (Daemon-specific)
+[channels.telegram]
+enabled = true
+channel_instance_id = "ops-telegram"
+transport = "webhook"
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+webhook_secret_token = "your-token"
+
+# Data storage path (Daemon-specific)
+[paths]
+data_dir = "~/.xiaoo"
 ```
 
 ### API Endpoints

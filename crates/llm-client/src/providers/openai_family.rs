@@ -25,20 +25,22 @@ pub(crate) enum OpenAiFamilyAuthStyle {
 #[derive(Clone)]
 pub(crate) struct OpenAiFamilyProvider {
     client: reqwest::Client,
-    api_key: String,
+    api_key: Option<String>,
     api_base: String,
     auth_style: OpenAiFamilyAuthStyle,
     default_headers: Vec<(String, String)>,
     capabilities: ProviderCapabilities,
+    api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl OpenAiFamilyProvider {
     pub(crate) fn new(
-        api_key: String,
+        api_key: Option<String>,
         api_base: String,
         model: String,
         auth_style: OpenAiFamilyAuthStyle,
         default_headers: Vec<(String, String)>,
+        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
         Self {
             client: reqwest::Client::builder()
@@ -58,6 +60,15 @@ impl OpenAiFamilyProvider {
                 max_context_window: 128000,
                 model_name: model,
             },
+            api_key_provider,
+        }
+    }
+
+    fn get_api_key(&self) -> String {
+        if let Some(provider) = &self.api_key_provider {
+            provider()
+        } else {
+            self.api_key.clone().unwrap_or_default()
         }
     }
 
@@ -80,9 +91,10 @@ impl OpenAiFamilyProvider {
 
     fn apply_common_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req = req.header("Content-Type", "application/json");
+        let api_key = self.get_api_key();
         req = match self.auth_style {
             OpenAiFamilyAuthStyle::Bearer => {
-                req.header("Authorization", format!("Bearer {}", self.api_key))
+                req.header("Authorization", format!("Bearer {}", api_key))
             }
         };
         for (name, value) in &self.default_headers {
@@ -331,11 +343,12 @@ mod tests {
 
     fn make_provider() -> OpenAiFamilyProvider {
         OpenAiFamilyProvider::new(
-            "test-key".to_string(),
+            Some("test-key".to_string()),
             "https://api.openai.com/v1".to_string(),
             "gpt-5.4".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
+            None,
         )
     }
 
@@ -365,20 +378,23 @@ mod tests {
 /// Configuration for creating an OpenAI-compatible provider directly.
 pub struct OpenAiCompatibleProviderConfig {
     pub api_base: String,
-    pub api_key: String,
+    pub api_key: Option<String>,
     pub capabilities: ProviderCapabilities,
+    pub api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl OpenAiCompatibleProviderConfig {
     pub fn new(
         api_base: impl Into<String>,
-        api_key: impl Into<String>,
+        api_key: Option<String>,
         capabilities: ProviderCapabilities,
+        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
         Self {
             api_base: api_base.into(),
-            api_key: api_key.into(),
+            api_key,
             capabilities,
+            api_key_provider,
         }
     }
 }
@@ -395,7 +411,7 @@ impl OpenAiCompatibleProvider {
                 "api_base must not be empty".to_string(),
             ));
         }
-        if config.api_key.is_empty() {
+        if config.api_key.is_none() && config.api_key_provider.is_none() {
             return Err(LlmError::ConfigError(
                 "api_key must not be empty".to_string(),
             ));
@@ -407,6 +423,7 @@ impl OpenAiCompatibleProvider {
             model,
             OpenAiFamilyAuthStyle::Bearer,
             Vec::new(),
+            config.api_key_provider,
         );
         inner.capabilities = config.capabilities;
         Ok(Self { inner })

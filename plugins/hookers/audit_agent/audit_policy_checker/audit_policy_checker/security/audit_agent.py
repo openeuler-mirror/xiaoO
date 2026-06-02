@@ -15,7 +15,10 @@ import logging
 from pathlib import Path
 
 from ..config import Config, is_llm_layer3_enabled
-from .heuristic_detector import HeuristicDetector, SAFE_ACTION_TYPES, is_safe_bash_command
+from .heuristic_detector import (
+    HeuristicDetector,
+    is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
+)
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
 from .skill_engine import SkillEngine
@@ -23,11 +26,20 @@ from .types import HeuristicResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
 
-# 白名单只读工具：这些工具在启发式检测未命中 high/critical 时可快速放行
-READONLY_SAFE_TOOLS = frozenset({
-    "ask_user_question", "glob", "grep", "list_dir", "count_text_length",
-    "read", "file_read", "head", "tail", "ls",
+# 完全安全工具：跳过 Layer 2 + Layer 3（不具备读取文件内容的能力）
+FULLY_SAFE_TOOLS = frozenset({
+    "ask_user_question", "glob", "list_dir", "ls", "count_text_length",
+    "filemgr-globfiles",
 })
+
+# 安全但可能访问敏感路径：跳过 Layer 3，保留 Layer 2 敏感路径检测
+READONLY_SENSITIVE_TOOLS = frozenset({
+    "read", "file_read", "read_file", "head", "tail", "grep",
+    "filemgr-readfile", "filemgr-grepfiles",
+})
+
+# 向后兼容
+READONLY_SAFE_TOOLS = FULLY_SAFE_TOOLS | READONLY_SENSITIVE_TOOLS
 
 
 class xiaoOSecBot:
@@ -108,43 +120,57 @@ class xiaoOSecBot:
         else:
             heuristic_result = HeuristicResult(hit=False)
 
-        # ========== 白名单只读工具快速放行 ==========
+        # ========== 白名单快速放行（两级） ==========
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
-        is_readonly_safe = action_type in READONLY_SAFE_TOOLS or action_type in SAFE_ACTION_TYPES
+        heuristic_risk = heuristic_result.risk_level or "low"
+        no_high_risk = heuristic_risk not in ("high", "critical")
 
-        # 扩展：检查安全的 bash 子命令
-        is_safe_bash = (
+        # --- 完全放行：跳过 L2 + L3 ---
+        is_fully_safe_tool = action_type in FULLY_SAFE_TOOLS
+        is_fully_safe_bash = (
             action_type == "bash"
-            and is_safe_bash_command(action_detail)
-            and heuristic_result.risk_level not in ("high", "critical")
+            and is_fully_safe_bash_command(action_detail)
+            and no_high_risk
         )
 
-        if is_readonly_safe and heuristic_result.risk_level not in ("high", "critical"):
+        if is_fully_safe_tool and no_high_risk:
             logger.info(
-                "白名单只读工具快速放行: action_type=%s, heuristic_risk=%s",
-                action_type,
-                heuristic_result.risk_level or "none",
+                "完全安全工具快速放行: action_type=%s, heuristic_risk=%s",
+                action_type, heuristic_risk,
             )
             return SecurityJudgment(
                 allowed=True,
-                reason=f"白名单只读工具且未检测到敏感路径访问: {action_type}",
-                risk_level=heuristic_result.risk_level or "low",
+                reason=f"完全安全工具，跳过深度分析: {action_type}",
+                risk_level=heuristic_risk,
                 source="whitelist_bypass",
                 action_desc=action_detail,
             )
 
-        if is_safe_bash:
-            logger.info(
-                "安全 bash 子命令快速放行: command=%s",
-                action_detail[:50],
-            )
+        if is_fully_safe_bash:
+            logger.info("完全安全 bash 命令快速放行: command=%s", action_detail[:50])
             return SecurityJudgment(
                 allowed=True,
                 reason=f"安全的只读 bash 命令: {action_detail[:100]}",
                 risk_level="low",
                 source="whitelist_bypass",
                 action_desc=action_detail,
+            )
+
+        # --- 轻量放行：跳过 L3，保留 L2 ---
+        skip_llm = False
+        if action_type in READONLY_SENSITIVE_TOOLS and no_high_risk:
+            skip_llm = True
+        elif (
+            action_type == "bash"
+            and is_readonly_sensitive_bash_command(action_detail)
+            and no_high_risk
+        ):
+            skip_llm = True
+
+        if skip_llm:
+            logger.info(
+                "只读敏感工具，跳过 LLM 分析: action_type=%s", action_type,
             )
 
         # ========== 层2: 逻辑规则检测 ==========
@@ -182,7 +208,8 @@ class xiaoOSecBot:
 
         # ========== 层3: LLM + Skill 深度分析 ==========
         # 配置控制：环境变量 > audit_settings.json > 默认值
-        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled()
+        # skip_llm 由白名单快速放行逻辑设置，只读敏感工具跳过 LLM 分析
+        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and not skip_llm
 
         if llm_analysis_enabled:
             try:

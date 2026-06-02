@@ -76,10 +76,14 @@ impl GatewayRuntime {
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
             let trimmed = env_name.trim();
             if !trimmed.is_empty() {
-                let env_value = std::env::var(trimmed).unwrap_or_default();
-                if env_value.trim().is_empty() {
+                let has_api_key = if let Some(key) = crate::gateway::get_decrypted_api_key(trimmed) {
+                    !key.trim().is_empty()
+                } else {
+                    std::env::var(trimmed).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                };
+                if !has_api_key {
                     return Err(format!(
-                        "env var {} is not set. Please configure your API key with /connect or set the environment variable.",
+                        "API key for {} is not set. Please configure your API key with /connect or set the environment variable.",
                         trimmed
                     ));
                 }
@@ -186,6 +190,23 @@ impl GatewayRuntime {
                 max_turns: state
                     .active_agent_role_config()
                     .and_then(|role| role.max_turns),
+                subagent_roles: state
+                    .agent_config
+                    .subagent
+                    .iter()
+                    .map(|(role_id, config)| {
+                        (
+                            role_id.clone(),
+                            crate::gateway::session_record::SubagentRoleRecord {
+                                role_id: role_id.clone(),
+                                description: config.description.clone(),
+                                prompt: config.prompt.clone(),
+                                max_turns: config.max_turns,
+                                tools: config.tools.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
             },
             provider: state.agent_config.llm.provider.clone(),
             model: state.agent_config.llm.model.clone(),
@@ -208,6 +229,22 @@ impl GatewayRuntime {
             operation_backend: state.agent_config.operation_backend.clone(),
             lsp_registry: state.agent_config.build_lsp_registry(),
             skills_config: state.agent_config.resolve_skills_config(),
+            subagent_roles: state
+                .agent_config
+                .subagent
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        crate::gateway::SubagentRoleConfigEntry {
+                            description: v.description.clone(),
+                            prompt: v.prompt.clone(),
+                            max_turns: v.max_turns,
+                            tools: v.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 

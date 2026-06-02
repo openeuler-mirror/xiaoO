@@ -28,6 +28,71 @@ if logic_result.risk_level in ("high", "critical"):
 
 ---
 
+## 快速放行规则（Fast-Pass）
+
+在层1检测之后、层2/层3检测之前，系统检查当前工具/命令是否在白名单中。白名单分为两级：
+
+### Tier 1：完全安全工具 — 跳过 L2 + L3
+
+| 工具类型 | 说明 |
+|---------|------|
+| `ask_user_question` | 用户交互 |
+| `glob` | 文件模式匹配 |
+| `list_dir` | 目录列表 |
+| `ls` | 目录列表 |
+| `count_text_length` | 文本长度统计 |
+| `filemgr-globfiles` | OpenDesk 文件管理器 glob |
+
+| Bash 子命令 | 说明 |
+|------------|------|
+| `ls`、`dir` | 目录列表 |
+| `pwd` | 当前路径 |
+| `which`、`whereis`、`realpath` | 命令/路径查找 |
+| `basename`、`dirname` | 路径组件提取 |
+| `file`、`stat`、`du` | 文件信息 |
+| `echo`、`printf` | 输出 |
+| `type`、`command` | 命令类型查询 |
+
+### Tier 2：只读敏感工具 — 跳过 L3，保留 L2
+
+| 工具类型 | 说明 |
+|---------|------|
+| `read`、`file_read`、`read_file` | 文件读取 |
+| `head`、`tail` | 文件头尾读取 |
+| `grep` | 文本搜索 |
+| `filemgr-readfile` | OpenDesk 文件管理器读取 |
+| `filemgr-grepfiles` | OpenDesk 文件管理器搜索 |
+
+| Bash 子命令 | 说明 |
+|------------|------|
+| `cat`、`head`、`tail`、`less`、`more`、`wc` | 文件读取/统计 |
+| `grep`、`find`、`ag`、`rg` | 搜索 |
+| `awk`、`sed`、`cut`、`sort`、`uniq` | 文本处理 |
+
+### 放行逻辑
+
+```
+层1 检测
+  ↓
+命中 high/critical? → Yes → Deny（不走快速放行）
+  ↓ No
+工具/命令在 Tier 1 白名单? → Yes → Allow（跳过 L2+L3）
+  ↓ No
+工具/命令在 Tier 2 白名单? → Yes → 标记 skip_llm=True
+  ↓ No
+继续正常流程
+  ↓
+层2 检测（Tier 2 工具也执行层2）
+  ↓
+命中 high/critical? → Yes → Deny
+  ↓ No
+skip_llm=True? → Yes → Allow（跳过 L3）
+  ↓ No
+层3 LLM 分析
+```
+
+---
+
 ## 层1：启发式静态检测
 
 ### 1.1 用户敏感规则匹配
@@ -200,7 +265,9 @@ if logic_result.risk_level in ("high", "critical"):
 
 | 模式 | 风险类型 | 说明 | xiaoo 测试结果 |
 |-----|---------|------|----------------|
-| `rm -rf /` | script_execution | 递归强制删除根目录 | ✗ LLM自拒绝 |
+| `rm -rf /` | script_execution | 递归强制删除根目录 | ✓ Deny |
+| `rm -rf <绝对路径>` | script_execution | 递归强制删除绝对路径 | ✓ Deny |
+| `rm -r/-f <关键系统目录>` | script_execution | 删除 /etc、/var、/home 等关键系统目录 | ✓ Deny |
 | `chmod 777` | script_execution | 全权限设置 | ✓ Deny |
 | `/etc/shadow` | file_access | 访问系统密码文件 | ✓ Deny |
 | `.ssh/id_rsa` | file_access | 访问 SSH 私钥 | ✓ Deny |
@@ -218,9 +285,9 @@ if logic_result.risk_level in ("high", "critical"):
   action_type: "bash"
   action_detail: "rm -rf /"
 
-匹配: "\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/"
+匹配: "\brm\s+-(?=[^\s]*r)(?=[^\s]*f)[a-zA-Z]*\s+/"
 结果: Deny
-原因: "检测到递归强制删除关键路径 (rm -rf /...)"
+原因: "检测到递归强制删除绝对路径 (rm -rf /...); 检测到递归删除操作 (rm -r /...); 检测到强制删除文件 (rm -f /...)"
 风险等级: critical
 ```
 
@@ -345,7 +412,7 @@ if logic_result.risk_level in ("high", "critical"):
 
 | 模式 | 风险类型 | 说明 | xiaoo 测试结果 |
 |-----|---------|------|----------------|
-| `rm -rf` (非根目录) | script_execution | 递归强制删除 | ✓ Deny |
+| `rm -r <绝对路径>`（无 -f） | script_execution | 递归删除操作 | ✓ Deny |
 | `chown root` | script_execution | 修改文件所有者为 root | ✓ Deny |
 | `sudo` | script_execution | 提权执行 | ✓ Deny |
 | `/etc/passwd` | file_access | 访问系统用户文件 | ✓ Deny |
@@ -354,18 +421,20 @@ if logic_result.risk_level in ("high", "critical"):
 | `curl POST ... env/secret/key` | data_exfiltration | curl POST 外传敏感信息 | ✓ Deny |
 | `/dev/zero`/`/dev/random` 等 | file_access | 访问设备文件 | ✓ Deny |
 
-**示例 1：`rm -rf` (非根目录)**
+**示例 1：`rm -r /tmp/test.sh`**
 
 ```
 输入:
   action_type: "bash"
-  action_detail: "rm -rf /tmp/cache"
+  action_detail: "rm -r /tmp/test.sh"
 
-匹配: "\brm\s+-[a-zA-Z]*r[a-zA-Z]*[a-zA-Z]*f[a-zA-Z]*\s+"
+匹配: "\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/"
 结果: Deny
-原因: "检测到递归强制删除命令 (rm -rf)"
+原因: "检测到递归删除操作 (rm -r /...)"
 风险等级: high
 ```
+
+> **Medium 级别**：`rm -f <绝对路径>`（无 -r）匹配为 medium，L1.1 不直接拦截，由 L2/L3 综合判断。例如 `rm -f /tmp/test.sh` 经 LLM 判断后 Allow。
 
 **示例 2：`chown root`**
 
@@ -666,7 +735,8 @@ if logic_result.risk_level in ("high", "critical"):
 **规则**：写入文件前，必须在 `action_history` 中存在对该文件的读取操作。
 
 **豁免条件**：
-- 新文件创建（包含 "创建"、"新建"、"create"、"new file"、"touch"）
+- 目标文件不存在于磁盘（视为新建文件，自动豁免）
+- 新文件创建关键词（`reason` 或 `action_detail` 包含 "创建"、"新建"、"create"、"new file"、"touch"）
 - 非写入工具（`ask_user_question`、`glob`、`grep`、`list_dir`、`count_text_length`、`search`）
 
 **示例 1：违规 - 未读取直接写入**
@@ -759,6 +829,8 @@ if logic_result.risk_level in ("high", "critical"):
 ### 2.3 敏感路径访问检测
 
 **规则**：检查 `action_detail` 中是否包含对系统关键文件/目录的访问。
+
+> **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
 #### Critical 级别敏感路径
 
@@ -1605,6 +1677,12 @@ LLM 判断: Deny
                              No
                               │
 ┌─────────────────────────────▼───────────────────────────────┐
+│              快速放行检查（Fast-Pass）                         │
+│  Tier 1 白名单? → Yes → Allow（跳过 L2+L3）                 │
+│  Tier 2 白名单? → Yes → 标记 skip_llm → 继续 L2            │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+┌─────────────────────────────▼───────────────────────────────┐
 │                   层2: 逻辑规则检测                           │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │ 2.1 read_before_write 原则                             │  │
@@ -1614,6 +1692,10 @@ LLM 判断: Deny
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────┬───────────────────────────────┘
                   high/critical? ──── Yes ────→ Deny
+                              │
+                             No
+                              │
+                    skip_llm=True? ──── Yes ────→ Allow（跳过 L3）
                               │
                              No
                               │
@@ -1635,6 +1717,7 @@ LLM 判断: Deny
 
 **关键设计**：
 - **短路机制**：层1/层2 检测到 high/critical 风险直接 Deny，不等待后续检测
+- **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **低风险传递**：层1/层2 检测到 medium/low 风险不拦截，传递到层3 由 LLM 决定
 - **信息传递**：前两层结果（含 low/medium）+ 脚本分析注入层3 prompt
 - **Fail-closed + warn-allow**：LLM 故障时，前序已拦截则 Deny，前序无违规则 Allow

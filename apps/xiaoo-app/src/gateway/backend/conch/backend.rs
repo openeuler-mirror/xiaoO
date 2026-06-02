@@ -160,6 +160,17 @@ impl ConchBackendState {
         raw_path: &str,
         base: &BackendPath,
     ) -> Result<BackendPath, OperationError> {
+        if raw_path == "~" || raw_path.starts_with("~/") {
+            let home_dir = self
+                .home_dir
+                .as_ref()
+                .ok_or_else(|| OperationError::Unsupported {
+                    message: "home_dir is not configured".to_string(),
+                })?;
+            let suffix = raw_path.strip_prefix("~/").unwrap_or_default();
+            return normalize_backend_path(Path::new(home_dir.0.as_str()).join(suffix).as_path());
+        }
+
         let candidate = Path::new(raw_path);
         if candidate.is_absolute() {
             return normalize_backend_path(candidate);
@@ -251,5 +262,53 @@ impl OperationBackend for ConchOperationBackend {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state(home_dir: Option<BackendPath>) -> ConchBackendState {
+        ConchBackendState {
+            backend_id: "test".to_string(),
+            workspace_root: BackendPath("/workspace".to_string()),
+            home_dir,
+            temp_root: BackendPath("/tmp".to_string()),
+            default_shell: None,
+            control_plane: ConchControlPlane {
+                transport: ConchControlTransport::ApiUrl("http://127.0.0.1".to_string()),
+                namespace: "test".to_string(),
+            },
+            sandbox: ConchSandboxHandle {
+                sandbox_id: "sandbox".to_string(),
+                ip: "127.0.0.1".to_string(),
+                agent_port: 1234,
+            },
+            lifecycle: Mutex::new(ConchLifecycle::Active),
+        }
+    }
+
+    #[test]
+    fn resolves_tilde_paths_against_home_dir() {
+        let state = test_state(Some(BackendPath("/home/user".to_string())));
+        let resolved = state
+            .resolve_backend_path("~/.xiaoo/tools/md_to_html.mjs", &state.workspace_root)
+            .expect("resolve");
+
+        assert_eq!(
+            resolved,
+            BackendPath("/home/user/.xiaoo/tools/md_to_html.mjs".to_string())
+        );
+    }
+
+    #[test]
+    fn tilde_requires_configured_home_dir() {
+        let state = test_state(None);
+        let error = state
+            .resolve_backend_path("~/missing", &state.workspace_root)
+            .expect_err("tilde should require home");
+
+        assert!(matches!(error, OperationError::Unsupported { .. }));
     }
 }

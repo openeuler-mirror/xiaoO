@@ -13,9 +13,9 @@ use xiaoo_app::cli::{
     CliEventSink,
 };
 use xiaoo_app::gateway::{
-    AppBootstrap, AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, InMemorySessionStore, SessionRuntimeBindings,
-    SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
+    session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
+    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
+    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -129,7 +129,7 @@ async fn main() {
             reasoning_effort,
         } => {
             if let Some(path) = config_path.as_ref() {
-                if let Err(error) = xiaoo_app::llm_secrets::inject_llm_secrets_into_env(path) {
+                if let Err(error) = xiaoo_app::llm_secrets::init_on_demand_secret_provider(path) {
                     eprintln!(
                         "Failed to initialize LLM secrets from {}: {}",
                         path.display(),
@@ -150,12 +150,14 @@ async fn main() {
             let model = model
                 .or_else(|| llm.and_then(|l| l.model.clone()))
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-            let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
+            let api_key = api_key.or_else(|| {
+                llm.and_then(|l| l.api_key_env.clone())
+                    .and_then(|env_name| xiaoo_app::gateway::get_decrypted_api_key(env_name.as_str()))
+            });
             let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let context_window = llm.and_then(|l| l.context_window);
             let reasoning_effort = reasoning_effort
-                .or_else(|| llm.and_then(|l| l.reasoning_effort))
                 .unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
@@ -182,8 +184,9 @@ async fn main() {
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
-                operation_backend: file_cfg.operation_backend.clone(),
+                operation_backend: None,
                 skills_config,
+                subagent: file_cfg.subagent.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -730,6 +733,22 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             },
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             max_turns: Some(config.max_turns),
+            subagent_roles: config
+                .subagent
+                .iter()
+                .map(|(role_id, cfg)| {
+                    (
+                        role_id.clone(),
+                        SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: cfg.description.clone(),
+                            prompt: cfg.prompt.clone(),
+                            max_turns: cfg.max_turns,
+                            tools: cfg.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         },
         trace: config.trace.clone(),
         provider: config.provider.clone(),
@@ -746,8 +765,23 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
         lsp_registry: None,
-        operation_backend: config.operation_backend.clone(),
+        operation_backend: None,
         skills_config: config.skills_config.clone(),
+        subagent_roles: config
+            .subagent
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    xiaoo_app::gateway::SubagentRoleConfigEntry {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
+            })
+            .collect(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

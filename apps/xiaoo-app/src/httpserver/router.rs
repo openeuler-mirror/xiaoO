@@ -588,8 +588,24 @@ async fn handle_session_interaction(
     }
 }
 
-async fn handle_session_cancel(Path(session_id): Path<String>) -> Response {
-    Json(SseStreamEvent::Cancelled { session_id }).into_response()
+async fn handle_session_cancel(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return Json(SseStreamEvent::Cancelled { session_id }).into_response();
+    };
+
+    match control_plane.resume_session(&session_id).await {
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse {
+                error: format!("session not found: {}", session_id),
+            }),
+        )
+            .into_response(),
+        _ => Json(SseStreamEvent::Cancelled { session_id }).into_response(),
+    }
 }
 
 async fn handle_session_close(
@@ -613,8 +629,15 @@ async fn handle_session_close(
 }
 
 fn map_session_error(error: crate::gateway::SessionServiceError) -> Response {
+    let status = match &error {
+        crate::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+        crate::gateway::SessionServiceError::UnsupportedCapability { .. } => {
+            StatusCode::NOT_IMPLEMENTED
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
     (
-        StatusCode::INTERNAL_SERVER_ERROR,
+        status,
         Json(GatewayErrorResponse {
             error: error.to_string(),
         }),

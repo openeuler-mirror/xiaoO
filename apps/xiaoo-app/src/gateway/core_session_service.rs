@@ -115,6 +115,7 @@ impl CoreBackedSessionService {
                 workspace_root: resolved.descriptor.workspace_root.clone(),
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
+                subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
             loop_state: None,
             memory_snapshot: None,
@@ -148,6 +149,7 @@ impl CoreBackedSessionService {
                 workspace_root: resolved.descriptor.workspace_root.clone(),
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
+                subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
             loop_state: None,
             memory_snapshot: None,
@@ -283,12 +285,14 @@ impl SessionControlPlane for CoreBackedSessionService {
     async fn force_close_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+    ) -> Result<SessionRecord, SessionServiceError> {
         let closed = if let Some(supervisor) = self.supervisor_for_session(session_id).await {
             supervisor.force_close().await
         } else {
             let Some(mut existing) = self.session_store.load(session_id).await else {
-                return Ok(None);
+                return Err(SessionServiceError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                });
             };
             existing.status = SessionLifecycleStatus::Closed;
             existing.updated_at_ms = current_time_ms();
@@ -319,7 +323,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         )
         .await;
 
-        Ok(Some(closed))
+        Ok(closed)
     }
 }
 
