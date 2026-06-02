@@ -432,12 +432,11 @@ impl App {
                     let snapshot = build_snapshot(&self.state, record, parent_chain.clone());
                     match save_snapshot_with_chain(&name, &snapshot, Some(&parent_chain)) {
                         Ok(path) => {
-                            self.state.current_snapshot_context = Some(
-                                crate::session_snapshot_service::SnapshotContext {
+                            self.state.current_snapshot_context =
+                                Some(crate::session_snapshot_service::SnapshotContext {
                                     name: name.clone(),
                                     parent_chain,
-                                },
-                            );
+                                });
                             self.state
                                 .chat_state
                                 .messages
@@ -481,29 +480,30 @@ impl App {
                     Ok((name, matches)) => {
                         if matches.len() == 1 {
                             let (_, snapshot, parent_chain) = matches.into_iter().next().unwrap();
-                            self.load_snapshot_into_state(&name, snapshot, parent_chain).await;
+                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
+                                .await;
                         } else {
                             let entries: Vec<SessionSnapshotListEntry> = matches
                                 .into_iter()
-                                .map(|(snapshot_key, _, parent_chain)| {
-                                    SessionSnapshotListEntry {
-                                        name: name.clone(),
-                                        snapshot_key,
-                                        saved_at_ms: 0,
-                                        parent_name: parent_chain.last().cloned(),
-                                        parent_chain,
-                                        depth: 0,
-                                    }
+                                .map(|(snapshot_key, _, parent_chain)| SessionSnapshotListEntry {
+                                    name: name.clone(),
+                                    snapshot_key,
+                                    saved_at_ms: 0,
+                                    parent_name: parent_chain.last().cloned(),
+                                    parent_chain,
+                                    depth: 0,
                                 })
                                 .collect();
-                            self.state.session_snapshot_dialog = Some(SessionSnapshotDialog::new(entries));
+                            self.state.session_snapshot_dialog =
+                                Some(SessionSnapshotDialog::new(entries));
                             self.state.input_mode = InputMode::SessionSnapshotSelection;
-                            self.state.chat_state.messages.push(
-                                crate::chat::Message::system(format!(
+                            self.state
+                                .chat_state
+                                .messages
+                                .push(crate::chat::Message::system(format!(
                                     "Multiple snapshots named '{}' found. Please select one.",
                                     name
-                                ))
-                            );
+                                )));
                         }
                     }
                     Err(error) => self
@@ -883,12 +883,11 @@ impl App {
         } else {
             format!("{} → {}", parent_chain.join(" → "), name)
         };
-        self.state.current_snapshot_context = Some(
-            crate::session_snapshot_service::SnapshotContext {
+        self.state.current_snapshot_context =
+            Some(crate::session_snapshot_service::SnapshotContext {
                 name: name.to_string(),
                 parent_chain,
-            },
-        );
+            });
         if let Some(record) = record {
             self.gateway.import_session_snapshot(record).await;
         }

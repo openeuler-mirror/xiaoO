@@ -152,13 +152,14 @@ async fn main() {
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
             let api_key = api_key.or_else(|| {
                 llm.and_then(|l| l.api_key_env.clone())
-                    .and_then(|env_name| xiaoo_app::gateway::get_decrypted_api_key(env_name.as_str()))
+                    .and_then(|env_name| {
+                        xiaoo_app::gateway::get_decrypted_api_key(env_name.as_str())
+                    })
             });
             let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let context_window = llm.and_then(|l| l.context_window);
-            let reasoning_effort = reasoning_effort
-                .unwrap_or_default();
+            let reasoning_effort = reasoning_effort.unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
 

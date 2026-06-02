@@ -290,16 +290,14 @@ pub fn load_snapshot(name: &str) -> Result<Vec<(String, TuiSessionSnapshot, Vec<
         bail!("snapshot '{}' not found", name)
     }
 
-    matching_snapshots.sort_by(|a, b| {
-        b.1.saved_at_ms.cmp(&a.1.saved_at_ms).then(a.0.cmp(&b.0))
-    });
+    matching_snapshots.sort_by(|a, b| b.1.saved_at_ms.cmp(&a.1.saved_at_ms).then(a.0.cmp(&b.0)));
 
     Ok(matching_snapshots)
 }
 
 fn parse_snapshot_file(path: &Path, file_stem: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let snapshot: TuiSessionSnapshot = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     if snapshot.version != SNAPSHOT_VERSION {

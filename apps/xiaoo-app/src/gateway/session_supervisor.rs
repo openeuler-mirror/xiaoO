@@ -16,9 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use subagent::{
-    HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest,
-    SpawnSubagentResult, SubagentControlError, SubagentCoordinator, SubagentTerminalKind,
-    SubagentTerminalSnapshot,
+    HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
+    SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
 use tokio::sync::{oneshot, Mutex};
 use tool::ToolSpecSnapshot;
@@ -148,17 +147,24 @@ impl SessionSupervisor {
             created_at: Instant::now(),
         };
 
-        self.pending_interactions.lock().await.insert(request_id.clone(), waiter);
+        self.pending_interactions
+            .lock()
+            .await
+            .insert(request_id.clone(), waiter);
 
         let session = self.session.lock().await.clone();
-        let interaction_handle = self.load_interaction_handle(&session, &parent_agent_id).await;
+        let interaction_handle = self
+            .load_interaction_handle(&session, &parent_agent_id)
+            .await;
         let semaphore = self.interaction_semaphore.clone();
 
         if let Some(handle) = interaction_handle {
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let response = handle.ask(&request).await;
-                supervisor.deliver_interaction_response_from_user(request_id, response).await;
+                supervisor
+                    .deliver_interaction_response_from_user(request_id, response)
+                    .await;
             });
         }
     }
@@ -411,13 +417,11 @@ impl SessionSupervisor {
                     let resolved_call_id = &suspended_call.final_call.call_id;
                     if let Some(last_msg) = resumed_loop_state.messages.last_mut() {
                         if matches!(last_msg.role, agent_types::llm::MessageRole::Assistant) {
-                            last_msg.blocks.retain(|b| {
-                                match b {
-                                    agent_types::llm::ContentBlock::ToolUse { call_id, .. } => {
-                                        call_id == resolved_call_id
-                                    }
-                                    _ => true,
+                            last_msg.blocks.retain(|b| match b {
+                                agent_types::llm::ContentBlock::ToolUse { call_id, .. } => {
+                                    call_id == resolved_call_id
                                 }
+                                _ => true,
                             });
                         }
                     }
@@ -545,13 +549,12 @@ impl SessionSupervisor {
                 let session = supervisor.snapshot().await;
                 runtime_input_from_session(&session, agent_id.clone(), max_turns)
             };
-            let interaction_handle = Arc::new(
-                super::subagent_interaction::SubagentInteractionHandle::new(
+            let interaction_handle =
+                Arc::new(super::subagent_interaction::SubagentInteractionHandle::new(
                     Arc::clone(&supervisor),
                     agent_id.clone(),
                     parent_agent_id.clone(),
-                ),
-            ) as Arc<dyn InteractionHandle>;
+                )) as Arc<dyn InteractionHandle>;
             let result = supervisor
                 .run_lane_until_terminal(LaneRunInput {
                     agent_id: agent_id.clone(),

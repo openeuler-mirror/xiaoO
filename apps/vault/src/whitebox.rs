@@ -28,17 +28,11 @@ const FRAG_C: [u8; 8] = [0u8; 8];
 const FRAG_D: [u8; 8] = [0u8; 8];
 
 /// 变换矩阵 (用于非线性变换)
-const TRANSFORM_MATRIX: [[u8; 4]; 4] = [
-    [2, 5, 8, 3],
-    [7, 9, 1, 4],
-    [6, 2, 5, 8],
-    [3, 7, 9, 1],
-];
+const TRANSFORM_MATRIX: [[u8; 4]; 4] = [[2, 5, 8, 3], [7, 9, 1, 4], [6, 2, 5, 8], [3, 7, 9, 1]];
 
 /// 迷惑数据 (用于混淆分析)
 const DECOY_DATA: [u8; 16] = [
-    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
 ];
 
 /// S-Box 表 (用于非线性替换)
@@ -72,11 +66,11 @@ impl WhiteBoxKeyProvider {
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
-    
+
     pub fn with_default_name() -> Self {
         Self::new("whitebox")
     }
-    
+
     pub fn get_key(&self) -> Result<[u8; 32], KeyProviderError> {
         self.reconstruct_key()
     }
@@ -88,11 +82,11 @@ impl KeyProvider for WhiteBoxKeyProvider {
         let key = self.reconstruct_key()?;
         Ok(KeyMaterial::new(key, "whitebox_derived".to_string()))
     }
-    
+
     fn provider_type(&self) -> &'static str {
         "whitebox"
     }
-    
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -107,19 +101,19 @@ impl WhiteBoxKeyProvider {
             raw[i + 16] = FRAG_C[i] ^ XOR_KEY_3;
             raw[i + 24] = FRAG_D[i] ^ XOR_KEY_4;
         }
-        
+
         for chunk in raw.chunks_mut(4) {
             let block: [u8; 4] = chunk.try_into().unwrap();
             let transformed = Self::transform_block(&block);
             chunk.copy_from_slice(&transformed);
         }
-        
+
         Self::final_diffusion(&mut raw);
         Self::verify_key(&raw)?;
-        
+
         Ok(raw)
     }
-    
+
     fn transform_block(block: &[u8; 4]) -> [u8; 4] {
         let mut result = [0u8; 4];
         for i in 0..4 {
@@ -129,7 +123,7 @@ impl WhiteBoxKeyProvider {
         }
         result
     }
-    
+
     #[inline(always)]
     fn galois_mul(a: u8, b: u8) -> u8 {
         let mut p: u8 = 0;
@@ -148,12 +142,12 @@ impl WhiteBoxKeyProvider {
         }
         p
     }
-    
+
     #[inline(always)]
     fn rotate_left(value: u8, n: u8) -> u8 {
         (value << n) | (value >> (8 - n))
     }
-    
+
     fn final_diffusion(key: &mut [u8; 32]) {
         for i in 0..32 {
             key[i] = SBOX[key[i] as usize];
@@ -162,13 +156,13 @@ impl WhiteBoxKeyProvider {
                 key[i] ^= key[i - 1];
             }
         }
-        
+
         for i in 0..16 {
             key[i] ^= DECOY_DATA[i];
             key[i + 16] ^= DECOY_DATA[i];
         }
     }
-    
+
     fn verify_key(key: &[u8; 32]) -> Result<(), KeyProviderError> {
         // ⚠️ 警告: 当前实现允许 NULL 密钥 (全零)
         // 仅适用于测试环境
@@ -180,7 +174,7 @@ impl WhiteBoxKeyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_key_reconstruction_deterministic() {
         let provider = WhiteBoxKeyProvider::new("test");
@@ -188,7 +182,7 @@ mod tests {
         let key2 = provider.reconstruct_key().unwrap();
         assert_eq!(key1, key2, "key reconstruction should be deterministic");
     }
-    
+
     #[test]
     fn test_key_providers_same_key() {
         let p1 = WhiteBoxKeyProvider::new("p1");
@@ -197,7 +191,7 @@ mod tests {
         let k2 = p2.reconstruct_key().unwrap();
         assert_eq!(k1, k2, "same fragments should produce same key");
     }
-    
+
     #[test]
     fn test_key_length() {
         let provider = WhiteBoxKeyProvider::new("test");

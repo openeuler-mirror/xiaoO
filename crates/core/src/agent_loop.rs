@@ -1603,7 +1603,10 @@ mod tests {
     #[test]
     fn transient_backoff_is_clamped_to_the_ceiling() {
         assert_eq!(transient_backoff(10, 0), Duration::from_millis(60_000));
-        assert_eq!(transient_backoff(u32::MAX, 0), Duration::from_millis(60_000));
+        assert_eq!(
+            transient_backoff(u32::MAX, 0),
+            Duration::from_millis(60_000)
+        );
     }
 
     #[test]

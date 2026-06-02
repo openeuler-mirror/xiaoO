@@ -208,7 +208,10 @@ impl App {
                     .fg(self.state.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Think(Ctrl+T) ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                "  Think(Ctrl+T) ",
+                Style::default().fg(self.state.theme.muted),
+            ),
             Span::styled(
                 self.state.reasoning_effort.to_string(),
                 Style::default()

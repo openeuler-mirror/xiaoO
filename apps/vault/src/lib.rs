@@ -6,18 +6,20 @@
 //! - SDF: 国密接口 (包含 TEE 密钥提供者)
 //! - HSM: 硬件安全模块密钥接口
 
-pub mod key_provider;
-pub mod types;
-pub mod key_provider_error;
-pub mod whitebox;
-pub mod sdf;
 pub mod hsm;
+pub mod key_provider;
+pub mod key_provider_error;
+pub mod sdf;
+pub mod types;
+pub mod whitebox;
 
 // Re-export key provider types
-pub use key_provider::{KeyProvider, KeyMaterial, KeyProviderConfig};
+pub use key_provider::{KeyMaterial, KeyProvider, KeyProviderConfig};
 pub use key_provider_error::KeyProviderError;
 
 // Re-export providers
-pub use whitebox::WhiteBoxKeyProvider;
-pub use sdf::{TeeKeyProvider, TeeType, SdfKeyProvider, init_sdf_provider, encrypt_secret, decrypt_secret};
 pub use hsm::HsmKeyProvider;
+pub use sdf::{
+    decrypt_secret, encrypt_secret, init_sdf_provider, SdfKeyProvider, TeeKeyProvider, TeeType,
+};
+pub use whitebox::WhiteBoxKeyProvider;
