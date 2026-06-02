@@ -76,10 +76,13 @@ impl GatewayRuntime {
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
             let trimmed = env_name.trim();
             if !trimmed.is_empty() {
-                let has_api_key = if let Some(key) = crate::gateway::get_decrypted_api_key(trimmed) {
+                let has_api_key = if let Some(key) = crate::gateway::get_decrypted_api_key(trimmed)
+                {
                     !key.trim().is_empty()
                 } else {
-                    std::env::var(trimmed).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                    std::env::var(trimmed)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
                 };
                 if !has_api_key {
                     return Err(format!(

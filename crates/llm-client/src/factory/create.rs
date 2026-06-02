@@ -80,7 +80,10 @@ fn create_provider_by_protocol(
     match protocol {
         ProtocolFamily::OpenAiCompatible => {
             if profile.api_key_required && api_key_provider.is_none() && api_key.is_none() {
-                return Err(LlmError::ConfigError(format!("{} API key required", profile.display_name)));
+                return Err(LlmError::ConfigError(format!(
+                    "{} API key required",
+                    profile.display_name
+                )));
             }
             Ok(LlmProviderWrapper::new(
                 Arc::new(OpenAiFamilyProvider::new(
@@ -97,20 +100,36 @@ fn create_provider_by_protocol(
         }
         ProtocolFamily::Anthropic => {
             if profile.api_key_required && api_key_provider.is_none() && api_key.is_none() {
-                return Err(LlmError::ConfigError(format!("{} API key required", profile.display_name)));
+                return Err(LlmError::ConfigError(format!(
+                    "{} API key required",
+                    profile.display_name
+                )));
             }
             Ok(LlmProviderWrapper::new(
-                Arc::new(AnthropicProvider::new(api_key, api_base, model, api_key_provider)),
+                Arc::new(AnthropicProvider::new(
+                    api_key,
+                    api_base,
+                    model,
+                    api_key_provider,
+                )),
                 agent_id,
                 runtime_view,
             ))
         }
         ProtocolFamily::Gemini => {
             if profile.api_key_required && api_key_provider.is_none() && api_key.is_none() {
-                return Err(LlmError::ConfigError(format!("{} API key required", profile.display_name)));
+                return Err(LlmError::ConfigError(format!(
+                    "{} API key required",
+                    profile.display_name
+                )));
             }
             Ok(LlmProviderWrapper::new(
-                Arc::new(GeminiProvider::new(api_key, api_base, model, api_key_provider)),
+                Arc::new(GeminiProvider::new(
+                    api_key,
+                    api_base,
+                    model,
+                    api_key_provider,
+                )),
                 agent_id,
                 runtime_view,
             ))
@@ -122,10 +141,18 @@ fn create_provider_by_protocol(
         )),
         ProtocolFamily::Zhipu => {
             if profile.api_key_required && api_key_provider.is_none() && api_key.is_none() {
-                return Err(LlmError::ConfigError(format!("{} API key required", profile.display_name)));
+                return Err(LlmError::ConfigError(format!(
+                    "{} API key required",
+                    profile.display_name
+                )));
             }
             Ok(LlmProviderWrapper::new(
-                Arc::new(ZhipuProvider::new(api_key, api_base, model, api_key_provider)),
+                Arc::new(ZhipuProvider::new(
+                    api_key,
+                    api_base,
+                    model,
+                    api_key_provider,
+                )),
                 agent_id,
                 runtime_view,
             ))

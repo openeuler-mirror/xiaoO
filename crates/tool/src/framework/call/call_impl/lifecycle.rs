@@ -68,7 +68,11 @@ impl ToolCallImpl {
         final_call: &FinalToolCall,
         runtime: &dyn RuntimeView,
     ) -> Result<ExecutorPhaseResult, ToolExecutionError> {
-        match self.executor.invoke(final_call, runtime).await {
+        match crate::scope_tool_invocation(final_call.tool_name.clone(), async {
+            self.executor.invoke(final_call, runtime).await
+        })
+        .await
+        {
             Ok(ToolExecutorOutput::Completed { raw_outcome }) => {
                 Ok(ExecutorPhaseResult::Completed(raw_outcome))
             }

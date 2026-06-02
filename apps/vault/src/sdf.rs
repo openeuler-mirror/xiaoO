@@ -85,9 +85,10 @@ impl KeyProvider for TeeKeyProvider {
             TeeType::Hypervisor => self.get_from_hypervisor().await,
             TeeType::IntelTdx => self.get_from_tdx().await,
             TeeType::Sdf => self.get_from_sdf().await,
-            TeeType::Custom(ref t) => Err(KeyProviderError::Tee(
-                format!("unsupported TEE type: {}", t)
-            )),
+            TeeType::Custom(ref t) => Err(KeyProviderError::Tee(format!(
+                "unsupported TEE type: {}",
+                t
+            ))),
         }
     }
 
@@ -108,31 +109,31 @@ impl TeeKeyProvider {
         }
 
         Err(KeyProviderError::ProviderNotAvailable(
-            "Intel SGX not available. Compile with feature 'tee_sgx' to enable.".into()
+            "Intel SGX not available. Compile with feature 'tee_sgx' to enable.".into(),
         ))
     }
 
     async fn get_from_trustzone(&self) -> Result<KeyMaterial, KeyProviderError> {
         Err(KeyProviderError::ProviderNotAvailable(
-            "ARM TrustZone not yet implemented".into()
+            "ARM TrustZone not yet implemented".into(),
         ))
     }
 
     async fn get_from_nitro(&self) -> Result<KeyMaterial, KeyProviderError> {
         Err(KeyProviderError::ProviderNotAvailable(
-            "AWS Nitro Enclave not yet implemented".into()
+            "AWS Nitro Enclave not yet implemented".into(),
         ))
     }
 
     async fn get_from_hypervisor(&self) -> Result<KeyMaterial, KeyProviderError> {
         Err(KeyProviderError::ProviderNotAvailable(
-            "Hypervisor secure world not yet implemented".into()
+            "Hypervisor secure world not yet implemented".into(),
         ))
     }
 
     async fn get_from_tdx(&self) -> Result<KeyMaterial, KeyProviderError> {
         Err(KeyProviderError::ProviderNotAvailable(
-            "Intel TDX not yet implemented".into()
+            "Intel TDX not yet implemented".into(),
         ))
     }
 
@@ -155,9 +156,8 @@ impl TeeKeyProvider {
 
         static ENCLAVE_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
-        let key = ENCLAVE_KEY.get_or_try_init(|| {
-            Err(KeyProviderError::Tee("SGX key not yet initialized".into()))
-        })?;
+        let key = ENCLAVE_KEY
+            .get_or_try_init(|| Err(KeyProviderError::Tee("SGX key not yet initialized".into())))?;
 
         Ok(KeyMaterial::new(*key, format!("tee_sgx_{}", self.name())))
     }
@@ -186,9 +186,9 @@ impl SdfKeyProvider {
 #[async_trait]
 impl KeyProvider for SdfKeyProvider {
     async fn provide(&self) -> Result<KeyMaterial, KeyProviderError> {
-        use std::sync::OnceLock;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use rand::RngCore;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
 
         static INIT: AtomicBool = AtomicBool::new(false);
         static mut KEY: [u8; 32] = [0; 32];
@@ -217,7 +217,7 @@ impl KeyProvider for SdfKeyProvider {
 impl KeyProvider for SdfKeyProvider {
     async fn provide(&self) -> Result<KeyMaterial, KeyProviderError> {
         Err(KeyProviderError::ProviderNotAvailable(
-            "SDF 国密接口未启用，请使用 --features tee_sdf 编译".into()
+            "SDF 国密接口未启用，请使用 --features tee_sdf 编译".into(),
         ))
     }
 
@@ -251,35 +251,77 @@ pub fn decrypt_secret(encrypted: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
 
 pub mod sdf_impl {
     use super::*;
-    use std::sync::OnceLock;
     use std::os::raw::{c_char, c_int, c_void};
+    use std::sync::OnceLock;
 
     // SDF 函数签名声明
     type SDF_OpenDevice_t = unsafe extern "C" fn(phDeviceHandle: *mut *mut c_void) -> c_int;
-    type SDF_OpenSession_t = unsafe extern "C" fn(hDeviceHandle: *mut c_void, phSessionHandle: *mut *mut c_void) -> c_int;
+    type SDF_OpenSession_t = unsafe extern "C" fn(
+        hDeviceHandle: *mut c_void,
+        phSessionHandle: *mut *mut c_void,
+    ) -> c_int;
     type SDF_CloseSession_t = unsafe extern "C" fn(hSessionHandle: *mut c_void) -> c_int;
     type SDF_CloseDevice_t = unsafe extern "C" fn(hDeviceHandle: *mut c_void) -> c_int;
-    type SDF_GetKEKAccessRight_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, uiKeyIndex: u32, pucPassword: *mut u8, uiPwdLength: u32) -> c_int;
-    type SDF_ReleaseKEKAccessRight_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, uiKeyIndex: u32) -> c_int;
-    type SDF_GenerateKeyWithKEK_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, uiKeyBits: u32, uiAlgID: u32, uiKEKIndex: u32, pucKey: *mut u8, puiKeyLength: *mut u32, phKeyHandle: *mut *mut c_void) -> c_int;
-    type SDF_ImportKeyWithKEK_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, uiAlgID: u32, uiKEKIndex: u32, pucKey: *mut u8, puiKeyLength: u32, phKeyHandle: *mut *mut c_void) -> c_int;
-    type SDF_Encrypt_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, hKeyHandle: *mut c_void, uiAlgID: u32, pucIV: *mut u8, pucData: *mut u8, uiDataLength: u32, pucEncData: *mut u8, puiEncDataLength: *mut u32) -> c_int;
-    type SDF_Decrypt_t = unsafe extern "C" fn(hSessionHandle: *mut c_void, hKeyHandle: *mut c_void, uiAlgID: u32, pucIV: *mut u8, pucEncData: *mut u8, uiEncDataLength: u32, pucData: *mut u8, puiDataLength: *mut u32) -> c_int;
+    type SDF_GetKEKAccessRight_t = unsafe extern "C" fn(
+        hSessionHandle: *mut c_void,
+        uiKeyIndex: u32,
+        pucPassword: *mut u8,
+        uiPwdLength: u32,
+    ) -> c_int;
+    type SDF_ReleaseKEKAccessRight_t =
+        unsafe extern "C" fn(hSessionHandle: *mut c_void, uiKeyIndex: u32) -> c_int;
+    type SDF_GenerateKeyWithKEK_t = unsafe extern "C" fn(
+        hSessionHandle: *mut c_void,
+        uiKeyBits: u32,
+        uiAlgID: u32,
+        uiKEKIndex: u32,
+        pucKey: *mut u8,
+        puiKeyLength: *mut u32,
+        phKeyHandle: *mut *mut c_void,
+    ) -> c_int;
+    type SDF_ImportKeyWithKEK_t = unsafe extern "C" fn(
+        hSessionHandle: *mut c_void,
+        uiAlgID: u32,
+        uiKEKIndex: u32,
+        pucKey: *mut u8,
+        puiKeyLength: u32,
+        phKeyHandle: *mut *mut c_void,
+    ) -> c_int;
+    type SDF_Encrypt_t = unsafe extern "C" fn(
+        hSessionHandle: *mut c_void,
+        hKeyHandle: *mut c_void,
+        uiAlgID: u32,
+        pucIV: *mut u8,
+        pucData: *mut u8,
+        uiDataLength: u32,
+        pucEncData: *mut u8,
+        puiEncDataLength: *mut u32,
+    ) -> c_int;
+    type SDF_Decrypt_t = unsafe extern "C" fn(
+        hSessionHandle: *mut c_void,
+        hKeyHandle: *mut c_void,
+        uiAlgID: u32,
+        pucIV: *mut u8,
+        pucEncData: *mut u8,
+        uiEncDataLength: u32,
+        pucData: *mut u8,
+        puiDataLength: *mut u32,
+    ) -> c_int;
 
     // SDF 常量
-    const SDF_ALG_SMS4_ECB: u32 = 0x401;      // SMS4 ECB 算法
+    const SDF_ALG_SMS4_ECB: u32 = 0x401; // SMS4 ECB 算法
     const SDF_KEY_INDEX_KEK: u32 = 0x1;
     const SDF_KEK_INDEX: u32 = 1;
     const SDF_KEY_BITS_128: u32 = 128;
 
     // 加密数据格式常量
-    const ENCRYPTED_VERSION_SIZE: usize = 1;     // version 字段大小
-    const ENCRYPTED_KEY_LENGTH_SIZE: usize = 4;  // key_length 字段大小
+    const ENCRYPTED_VERSION_SIZE: usize = 1; // version 字段大小
+    const ENCRYPTED_KEY_LENGTH_SIZE: usize = 4; // key_length 字段大小
     const ENCRYPTED_HEADER_SIZE: usize = ENCRYPTED_VERSION_SIZE + ENCRYPTED_KEY_LENGTH_SIZE; // 最小头大小 = 5
 
     // 明文格式常量
-    const PLAINTEXT_LENGTH_PREFIX_SIZE: usize = 4;  // u32 长度前缀
-    const SMS4_BLOCK_SIZE: usize = 16;            // SMS4 ECB 块大小
+    const PLAINTEXT_LENGTH_PREFIX_SIZE: usize = 4; // u32 长度前缀
+    const SMS4_BLOCK_SIZE: usize = 16; // SMS4 ECB 块大小
     const SDF_CIPHER_TEXT_MAX_PADDING: usize = 32; // 解密输出缓冲区额外空间（PKCS7填充最大32字节）
 
     // 默认密钥口令 (设为 NULL 请务必采取以下安全措施)
@@ -301,17 +343,18 @@ pub mod sdf_impl {
                 return Ok(());
             }
             eprintln!("[SDF DEBUG] Loading library: {}", path);
-            LIBRARY.set(Library::new(path).map_err(|e| {
-                KeyProviderError::Tee(format!(
-                    "加载libsdf.so失败: {}。\n\
+            LIBRARY
+                .set(Library::new(path).map_err(|e| {
+                    KeyProviderError::Tee(format!(
+                        "加载libsdf.so失败: {}。\n\
                     提示：SDF国密需要运行在鲲鹏服务器上。\n\
                     请检查：\n\
                     1. 当前环境是否是鲲鹏(Kunpeng)服务器\n\
                     2. 是否具备TEE license\n\
                     如果不具备条件，请将config.toml中[vault]段的use_sdf设置为false",
-                    e
-                ))
-            })?)
+                        e
+                    ))
+                })?)
                 .map_err(|_| KeyProviderError::Tee("库已加载".into()))?;
             eprintln!("[SDF DEBUG] Library loaded successfully");
             Ok(())
@@ -321,57 +364,93 @@ pub mod sdf_impl {
     /// 使用 SDF 加密数据 (API key / token)
     pub fn sdf_encrypt(data: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
         unsafe {
-            let lib = LIBRARY.get().ok_or_else(|| KeyProviderError::ProviderNotAvailable("SDF库未加载".into()))?;
+            let lib = LIBRARY
+                .get()
+                .ok_or_else(|| KeyProviderError::ProviderNotAvailable("SDF库未加载".into()))?;
 
             let mut device_handle: *mut c_void = std::ptr::null_mut();
             let mut session_handle: *mut c_void = std::ptr::null_mut();
 
             // 1. 打开设备
-            let open_device: Symbol<SDF_OpenDevice_t> = lib.get(b"SDF_OpenDevice")
+            let open_device: Symbol<SDF_OpenDevice_t> = lib
+                .get(b"SDF_OpenDevice")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenDevice未找到: {}", e)))?;
             let ret = (open_device)(&mut device_handle);
             if ret != 0 {
-                return Err(KeyProviderError::Tee(format!("SDF_OpenDevice失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_OpenDevice失败: {}",
+                    ret
+                )));
             }
 
             // 2. 创建会话
-            let open_session: Symbol<SDF_OpenSession_t> = lib.get(b"SDF_OpenSession")
+            let open_session: Symbol<SDF_OpenSession_t> = lib
+                .get(b"SDF_OpenSession")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenSession未找到: {}", e)))?;
             let ret = (open_session)(device_handle, &mut session_handle);
             if ret != 0 {
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_OpenSession失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_OpenSession失败: {}",
+                    ret
+                )));
             }
 
             // 3. 获取密钥使用权限
-            let get_kek_right: Symbol<SDF_GetKEKAccessRight_t> = lib.get(b"SDF_GetKEKAccessRight")
-                .map_err(|e| KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e)))?;
+            let get_kek_right: Symbol<SDF_GetKEKAccessRight_t> =
+                lib.get(b"SDF_GetKEKAccessRight").map_err(|e| {
+                    KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e))
+                })?;
             let mut password = DEFAULT_KEK_PASSWORD.to_vec();
-            let ret = (get_kek_right)(session_handle, SDF_KEY_INDEX_KEK, password.as_mut_ptr(), DEFAULT_KEK_PASSWORD.len() as u32);
+            let ret = (get_kek_right)(
+                session_handle,
+                SDF_KEY_INDEX_KEK,
+                password.as_mut_ptr(),
+                DEFAULT_KEK_PASSWORD.len() as u32,
+            );
             if ret != 0 {
-                let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
+                let close_session: Symbol<SDF_CloseSession_t> =
+                    lib.get(b"SDF_CloseSession").unwrap();
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (close_session)(session_handle);
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_GetKEKAccessRight失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_GetKEKAccessRight失败: {}",
+                    ret
+                )));
             }
 
             // 4. 生成会话密钥密文
-            let generate_key_with_kek: Symbol<SDF_GenerateKeyWithKEK_t> = lib.get(b"SDF_GenerateKeyWithKEK")
-                .map_err(|e| KeyProviderError::Tee(format!("SDF_GenerateKeyWithKEK未找到: {}", e)))?;
+            let generate_key_with_kek: Symbol<SDF_GenerateKeyWithKEK_t> =
+                lib.get(b"SDF_GenerateKeyWithKEK").map_err(|e| {
+                    KeyProviderError::Tee(format!("SDF_GenerateKeyWithKEK未找到: {}", e))
+                })?;
             let mut key_buffer = vec![0u8; 256];
             let mut key_length: u32 = 256;
             let mut key_handle: *mut c_void = std::ptr::null_mut();
-            let ret = (generate_key_with_kek)(session_handle, SDF_KEY_BITS_128, SDF_ALG_SMS4_ECB, SDF_KEK_INDEX, key_buffer.as_mut_ptr(), &mut key_length, &mut key_handle);
+            let ret = (generate_key_with_kek)(
+                session_handle,
+                SDF_KEY_BITS_128,
+                SDF_ALG_SMS4_ECB,
+                SDF_KEK_INDEX,
+                key_buffer.as_mut_ptr(),
+                &mut key_length,
+                &mut key_handle,
+            );
             if ret != 0 {
-                let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> = lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
-                let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
+                let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> =
+                    lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
+                let close_session: Symbol<SDF_CloseSession_t> =
+                    lib.get(b"SDF_CloseSession").unwrap();
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (release_kek)(session_handle, SDF_KEY_INDEX_KEK);
                 (close_session)(session_handle);
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_GenerateKeyWithKEK失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_GenerateKeyWithKEK失败: {}",
+                    ret
+                )));
             }
 
             // 5. 加密数据
@@ -387,7 +466,8 @@ pub mod sdf_impl {
             let mut ciphertext = vec![0u8; plaintext.len() + 32];
             let mut ciphertext_len: u32 = ciphertext.len() as u32;
 
-            let encrypt: Symbol<SDF_Encrypt_t> = lib.get(b"SDF_Encrypt")
+            let encrypt: Symbol<SDF_Encrypt_t> = lib
+                .get(b"SDF_Encrypt")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_Encrypt未找到: {}", e)))?;
             let ret = (encrypt)(
                 session_handle,
@@ -401,7 +481,8 @@ pub mod sdf_impl {
             );
 
             // 6. 释放资源
-            let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> = lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
+            let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> =
+                lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
             let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
             let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
             (release_kek)(session_handle, SDF_KEY_INDEX_KEK);
@@ -427,15 +508,22 @@ pub mod sdf_impl {
     /// 使用 SDF 解密数据 (API key / token)
     pub fn sdf_decrypt(encrypted: &[u8]) -> Result<Vec<u8>, KeyProviderError> {
         if encrypted.len() < ENCRYPTED_HEADER_SIZE {
-            return Err(KeyProviderError::InvalidInput("encrypted data too short".into()));
+            return Err(KeyProviderError::InvalidInput(
+                "encrypted data too short".into(),
+            ));
         }
 
         unsafe {
-            let lib = LIBRARY.get().ok_or_else(|| KeyProviderError::ProviderNotAvailable("SDF库未加载".into()))?;
+            let lib = LIBRARY
+                .get()
+                .ok_or_else(|| KeyProviderError::ProviderNotAvailable("SDF库未加载".into()))?;
 
             let version = encrypted[0];
             if version != 1 {
-                return Err(KeyProviderError::InvalidInput(format!("unknown version: {}", version)));
+                return Err(KeyProviderError::InvalidInput(format!(
+                    "unknown version: {}",
+                    version
+                )));
             }
 
             // 解析 version(1) + key_length(4) + key_buffer + ciphertext
@@ -467,57 +555,90 @@ pub mod sdf_impl {
             let mut session_handle: *mut c_void = std::ptr::null_mut();
 
             // 1. 打开设备
-            let open_device: Symbol<SDF_OpenDevice_t> = lib.get(b"SDF_OpenDevice")
+            let open_device: Symbol<SDF_OpenDevice_t> = lib
+                .get(b"SDF_OpenDevice")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenDevice未找到: {}", e)))?;
             let ret = (open_device)(&mut device_handle);
             if ret != 0 {
-                return Err(KeyProviderError::Tee(format!("SDF_OpenDevice失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_OpenDevice失败: {}",
+                    ret
+                )));
             }
 
             // 2. 创建会话
-            let open_session: Symbol<SDF_OpenSession_t> = lib.get(b"SDF_OpenSession")
+            let open_session: Symbol<SDF_OpenSession_t> = lib
+                .get(b"SDF_OpenSession")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_OpenSession未找到: {}", e)))?;
             let ret = (open_session)(device_handle, &mut session_handle);
             if ret != 0 {
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_OpenSession失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_OpenSession失败: {}",
+                    ret
+                )));
             }
 
             // 3. 获取密钥使用权限
-            let get_kek_right: Symbol<SDF_GetKEKAccessRight_t> = lib.get(b"SDF_GetKEKAccessRight")
-                .map_err(|e| KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e)))?;
+            let get_kek_right: Symbol<SDF_GetKEKAccessRight_t> =
+                lib.get(b"SDF_GetKEKAccessRight").map_err(|e| {
+                    KeyProviderError::Tee(format!("SDF_GetKEKAccessRight未找到: {}", e))
+                })?;
             let mut password = DEFAULT_KEK_PASSWORD.to_vec();
-            let ret = (get_kek_right)(session_handle, SDF_KEY_INDEX_KEK, password.as_mut_ptr(), DEFAULT_KEK_PASSWORD.len() as u32);
+            let ret = (get_kek_right)(
+                session_handle,
+                SDF_KEY_INDEX_KEK,
+                password.as_mut_ptr(),
+                DEFAULT_KEK_PASSWORD.len() as u32,
+            );
             if ret != 0 {
-                let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
+                let close_session: Symbol<SDF_CloseSession_t> =
+                    lib.get(b"SDF_CloseSession").unwrap();
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (close_session)(session_handle);
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_GetKEKAccessRight失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_GetKEKAccessRight失败: {}",
+                    ret
+                )));
             }
 
             // 4. 导入会话密钥（从加密时存储的 key_buffer）
-            let import_key: Symbol<SDF_ImportKeyWithKEK_t> = lib.get(b"SDF_ImportKeyWithKEK")
+            let import_key: Symbol<SDF_ImportKeyWithKEK_t> = lib
+                .get(b"SDF_ImportKeyWithKEK")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_ImportKeyWithKEK未找到: {}", e)))?;
             let mut imported_key_handle: *mut c_void = std::ptr::null_mut();
             let key_len_u32 = key_length as u32;
-            let ret = (import_key)(session_handle, SDF_ALG_SMS4_ECB, SDF_KEK_INDEX, key_buffer.as_ptr() as *mut u8, key_len_u32, &mut imported_key_handle);
+            let ret = (import_key)(
+                session_handle,
+                SDF_ALG_SMS4_ECB,
+                SDF_KEK_INDEX,
+                key_buffer.as_ptr() as *mut u8,
+                key_len_u32,
+                &mut imported_key_handle,
+            );
             if ret != 0 {
-                let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> = lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
-                let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
+                let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> =
+                    lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
+                let close_session: Symbol<SDF_CloseSession_t> =
+                    lib.get(b"SDF_CloseSession").unwrap();
                 let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
                 (release_kek)(session_handle, SDF_KEY_INDEX_KEK);
                 (close_session)(session_handle);
                 (close_device)(device_handle);
-                return Err(KeyProviderError::Tee(format!("SDF_ImportKeyWithKEK失败: {}", ret)));
+                return Err(KeyProviderError::Tee(format!(
+                    "SDF_ImportKeyWithKEK失败: {}",
+                    ret
+                )));
             }
 
             // 5. 解密数据
             let mut plaintext = vec![0u8; ciphertext.len() + SDF_CIPHER_TEXT_MAX_PADDING];
             let mut plaintext_len: u32 = plaintext.len() as u32;
 
-            let decrypt: Symbol<SDF_Decrypt_t> = lib.get(b"SDF_Decrypt")
+            let decrypt: Symbol<SDF_Decrypt_t> = lib
+                .get(b"SDF_Decrypt")
                 .map_err(|e| KeyProviderError::Tee(format!("SDF_Decrypt未找到: {}", e)))?;
             let ret = (decrypt)(
                 session_handle,
@@ -531,7 +652,8 @@ pub mod sdf_impl {
             );
 
             // 6. 释放资源
-            let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> = lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
+            let release_kek: Symbol<SDF_ReleaseKEKAccessRight_t> =
+                lib.get(b"SDF_ReleaseKEKAccessRight").unwrap();
             let close_session: Symbol<SDF_CloseSession_t> = lib.get(b"SDF_CloseSession").unwrap();
             let close_device: Symbol<SDF_CloseDevice_t> = lib.get(b"SDF_CloseDevice").unwrap();
             (release_kek)(session_handle, SDF_KEY_INDEX_KEK);
@@ -546,15 +668,14 @@ pub mod sdf_impl {
 
             // 7. 解析长度前缀
             if plaintext.len() < PLAINTEXT_LENGTH_PREFIX_SIZE {
-                return Err(KeyProviderError::InvalidInput("decrypted data too short for length prefix".into()));
+                return Err(KeyProviderError::InvalidInput(
+                    "decrypted data too short for length prefix".into(),
+                ));
             }
 
-            let json_len = u32::from_be_bytes([
-                plaintext[0],
-                plaintext[1],
-                plaintext[2],
-                plaintext[3],
-            ]) as usize;
+            let json_len =
+                u32::from_be_bytes([plaintext[0], plaintext[1], plaintext[2], plaintext[3]])
+                    as usize;
 
             if PLAINTEXT_LENGTH_PREFIX_SIZE + json_len > plaintext.len() {
                 return Err(KeyProviderError::InvalidInput(format!(
@@ -564,9 +685,9 @@ pub mod sdf_impl {
                 )));
             }
 
-            let json_bytes = &plaintext[PLAINTEXT_LENGTH_PREFIX_SIZE..PLAINTEXT_LENGTH_PREFIX_SIZE + json_len];
+            let json_bytes =
+                &plaintext[PLAINTEXT_LENGTH_PREFIX_SIZE..PLAINTEXT_LENGTH_PREFIX_SIZE + json_len];
             Ok(json_bytes.to_vec())
         }
     }
-
 }

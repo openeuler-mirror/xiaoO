@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 密钥材料
-/// 
+///
 /// 包含加密所需的密钥字节
 #[derive(Clone, Serialize, Deserialize)]
 pub struct KeyMaterial {
@@ -60,18 +60,23 @@ impl KeyProviderConfig {
     pub fn whitebox(name: impl Into<String>) -> Self {
         Self::WhiteBox { name: name.into() }
     }
-    
+
     pub fn tee(name: impl Into<String>, tee_type: impl Into<String>) -> Self {
-        Self::Tee { 
-            name: name.into(), 
+        Self::Tee {
+            name: name.into(),
             tee_type: tee_type.into(),
             slot: None,
         }
     }
-    
-    pub fn hsm(name: impl Into<String>, library_path: impl Into<String>, slot_id: impl Into<String>, key_label: impl Into<String>) -> Self {
-        Self::Hsm { 
-            name: name.into(), 
+
+    pub fn hsm(
+        name: impl Into<String>,
+        library_path: impl Into<String>,
+        slot_id: impl Into<String>,
+        key_label: impl Into<String>,
+    ) -> Self {
+        Self::Hsm {
+            name: name.into(),
             library_path: library_path.into(),
             slot_id: slot_id.into(),
             key_label: key_label.into(),

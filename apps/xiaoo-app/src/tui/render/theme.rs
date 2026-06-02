@@ -376,7 +376,7 @@ mod tests {
         let theme = Theme::from_terminal_env(&env);
 
         assert_eq!(theme.background, Color::Indexed(233));
-        assert_eq!(theme.status_bar_bg, Color::Indexed(236));
+        assert_eq!(theme.status_bar_bg, Color::Indexed(233));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
+use crate::gateway::backend::GatewayBackendConfig;
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
@@ -22,6 +23,7 @@ use crate::theme::Theme;
 pub enum InputMode {
     Editing,
     ProviderSelection,
+    SandboxSelection,
     SessionSnapshotSelection,
     InteractionPrompt,
     TurnDelete,
@@ -41,6 +43,53 @@ pub struct ApiKeyDialogState {
     pub input: Input,
     pub error: Option<String>,
     pub show_plaintext: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxOption {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxDialog {
+    pub options: Vec<SandboxOption>,
+    pub selected: usize,
+}
+
+impl SandboxDialog {
+    pub fn new(current_id: &str) -> Self {
+        let mut options = vec![SandboxOption {
+            id: "local",
+            name: "Local",
+            description: "本地执行，不启用 Seatbelt policy。",
+        }];
+        if cfg!(target_os = "macos") {
+            options.push(SandboxOption {
+                id: "seatbelt",
+                name: "Seatbelt",
+                description: "macOS sandbox-exec + local file policy。",
+            });
+        }
+        let selected = options
+            .iter()
+            .position(|option| option.id == current_id)
+            .unwrap_or(0);
+        Self { options, selected }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        self.selected = (self.selected + 1).min(self.options.len().saturating_sub(1));
+    }
+
+    pub fn selected(&self) -> Option<&SandboxOption> {
+        self.options.get(self.selected)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +177,7 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
+    pub sandbox_dialog: Option<SandboxDialog>,
     pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
@@ -164,6 +214,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            sandbox_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -201,6 +252,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            sandbox_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -232,6 +284,7 @@ impl AppState {
         self.status_panel.set_workspace(&self.workspace);
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
+        self.sandbox_dialog = None;
         self.session_snapshot_dialog = None;
         self.delete_dialog = None;
         self.api_key_dialog = None;
@@ -761,15 +814,96 @@ fn build_status_panel(config: &Config) -> StatusPanel {
     if !config.llm.provider.trim().is_empty() && !config.llm.model.trim().is_empty() {
         status_panel.set_provider(&config.llm.provider, &config.llm.model);
     }
+    status_panel.set_backend(sandbox_display_name(&config.operation_backend));
     status_panel
+}
+
+pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
+    let Some(backend) = config.operation_backend.as_ref() else {
+        return "local";
+    };
+    if backend.kind != "local" {
+        return "local";
+    }
+    let Some(isolation) = backend.options.get("isolation") else {
+        return "local";
+    };
+    if isolation
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .is_some_and(|kind| kind == "macos_seatbelt")
+    {
+        "seatbelt"
+    } else {
+        "local"
+    }
+}
+
+pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'static str {
+    let Some(backend) = backend.as_ref() else {
+        return "Local";
+    };
+    if backend.kind == "local"
+        && backend
+            .options
+            .get("isolation")
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|kind| kind == "macos_seatbelt")
+    {
+        "Seatbelt"
+    } else {
+        "Local"
+    }
+}
+
+pub(crate) fn sandbox_backend_config(
+    id: &str,
+    current: &Option<GatewayBackendConfig>,
+) -> Option<GatewayBackendConfig> {
+    let mut options = current
+        .as_ref()
+        .filter(|backend| backend.kind == "local")
+        .map(|backend| backend.options.clone())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    if !options.is_object() {
+        options = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let object = options.as_object_mut()?;
+
+    match id {
+        "seatbelt" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "macos_seatbelt"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        _ => {
+            object.remove("isolation");
+            if object.is_empty() {
+                None
+            } else {
+                Some(GatewayBackendConfig::new("local", options))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{current_git_diff_delta_for_file, ApiKeyDialogState, AppState, RuntimeStatusLight};
+    use super::{
+        current_git_diff_delta_for_file, sandbox_backend_config, ApiKeyDialogState, AppState,
+        RuntimeStatusLight,
+    };
+    use crate::gateway::backend::GatewayBackendConfig;
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
     use agent_types::ReasoningEffort;
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
 
@@ -778,6 +912,36 @@ mod tests {
         let state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
             .expect("app state should initialize");
         assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Idle);
+    }
+
+    #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_seatbelt() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/zsh"}),
+        ));
+
+        let updated = sandbox_backend_config("seatbelt", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/zsh");
+        assert_eq!(updated.options["isolation"]["kind"], "macos_seatbelt");
+    }
+
+    #[test]
+    fn sandbox_backend_config_removes_only_isolation_when_switching_local() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({
+                "default_shell": "/bin/zsh",
+                "isolation": {"kind": "macos_seatbelt"}
+            }),
+        ));
+
+        let updated = sandbox_backend_config("local", &current).expect("backend");
+
+        assert_eq!(updated.options["default_shell"], "/bin/zsh");
+        assert!(updated.options.get("isolation").is_none());
     }
 
     #[test]

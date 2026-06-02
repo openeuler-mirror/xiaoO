@@ -10,7 +10,9 @@ use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
-use llm_client::{create_llm_provider, factory::ApiKeyProviderFn, LlmProviderConfig, LlmProviderWrapper};
+use llm_client::{
+    create_llm_provider, factory::ApiKeyProviderFn, LlmProviderConfig, LlmProviderWrapper,
+};
 use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
@@ -19,7 +21,8 @@ use std::env;
 use std::sync::{Arc, RwLock};
 use subagent::SubagentControl;
 use tool::{
-    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl, ToolRuntimeServices,
+    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
+    ToolRuntimeServices,
 };
 
 #[derive(Clone)]
@@ -57,14 +60,21 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
-        let subagent_roles = config.subagent_roles.iter().map(|(k, v)| {
-            (k.clone(), SubagentRoleConfig {
-                description: v.description.clone(),
-                prompt: v.prompt.clone(),
-                max_turns: v.max_turns,
-                tools: v.tools.clone(),
+        let subagent_roles = config
+            .subagent_roles
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    SubagentRoleConfig {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
             })
-        }).collect();
+            .collect();
         let initial_services = ToolRuntimeServices {
             lsp_registry: config.lsp_registry.clone(),
             workspace_root: Some(config.descriptor.workspace_root.clone()),
@@ -94,12 +104,18 @@ impl HostedSessionRuntimeResolver {
                 Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
                 Ok(_) | Err(env::VarError::NotPresent) => {
                     Err(SessionRuntimeResolveError::ResolveFailed {
-                        message: format!("missing required API key environment variable: {env_name}"),
+                        message: format!(
+                            "missing required API key environment variable: {env_name}"
+                        ),
                     })
                 }
-                Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
-                    message: format!("API key environment variable is not valid unicode: {env_name}"),
-                }),
+                Err(env::VarError::NotUnicode(_)) => {
+                    Err(SessionRuntimeResolveError::ResolveFailed {
+                        message: format!(
+                            "API key environment variable is not valid unicode: {env_name}"
+                        ),
+                    })
+                }
             }
         } else {
             Ok(None)

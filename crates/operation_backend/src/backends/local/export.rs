@@ -19,6 +19,7 @@ impl LocalExport {
 }
 
 struct LocalExportedFileHandle {
+    state: Arc<LocalBackendState>,
     host_path: PathBuf,
     metadata: ExportedFileMeta,
 }
@@ -30,6 +31,9 @@ impl ExportedFileHandle for LocalExportedFileHandle {
     }
 
     async fn open_read(&self) -> Result<ExportedFileReader, OperationError> {
+        self.state
+            .policy
+            .check_read(self.host_path.as_path(), "export")?;
         let file = tokio::fs::File::open(self.host_path.as_path())
             .await
             .map_err(|error| io_error_for_path(self.host_path.as_path(), error))?;
@@ -44,6 +48,9 @@ impl OperationExport for LocalExport {
         request: ExportFileRequest,
     ) -> Result<SharedExportedFileHandle, OperationError> {
         let host_path = self._state.backend_path_to_host(&request.path)?;
+        self._state
+            .policy
+            .check_read(host_path.as_path(), "export")?;
         self._state.ensure_file(host_path.as_path())?;
         let metadata = std::fs::metadata(host_path.as_path())
             .map_err(|error| io_error_for_path(host_path.as_path(), error))?;
@@ -53,6 +60,7 @@ impl OperationExport for LocalExport {
         };
 
         Ok(Arc::new(LocalExportedFileHandle {
+            state: Arc::clone(&self._state),
             host_path,
             metadata: ExportedFileMeta {
                 file_name,
@@ -60,5 +68,59 @@ impl OperationExport for LocalExport {
                 media_type: None,
             },
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::local::backend::LocalBackendState;
+    use crate::backends::local::policy::LocalBackendPolicy;
+    use agent_contracts::backend::BackendPath;
+
+    fn export(root: &std::path::Path) -> LocalExport {
+        let workspace = root.join("workspace");
+        let temp = workspace.join("tmp");
+        std::fs::create_dir_all(temp.as_path()).unwrap();
+        LocalExport::new(Arc::new(LocalBackendState {
+            backend_id: "local-test".to_string(),
+            workspace_root: BackendPath(workspace.display().to_string()),
+            workspace_root_host: workspace.clone(),
+            home_dir: None,
+            home_dir_host: None,
+            temp_root_host: temp.clone(),
+            default_shell: None,
+            policy: LocalBackendPolicy::test_macos_seatbelt(
+                vec![workspace.clone(), temp.clone()],
+                vec![temp],
+                false,
+            ),
+        }))
+    }
+
+    #[test]
+    fn export_outside_policy_root_is_denied() {
+        let root =
+            std::env::temp_dir().join(format!("xiaoo-local-export-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(root.as_path());
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let file = root.join("outside").join("secret.txt");
+        std::fs::write(file.as_path(), b"secret").unwrap();
+        let export = export(root.as_path());
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(export.export_file(ExportFileRequest {
+                path: BackendPath(file.display().to_string()),
+                preferred_name: None,
+            }));
+
+        assert!(matches!(
+            result,
+            Err(OperationError::SandboxPolicyDenied { .. })
+        ));
+        let _ = std::fs::remove_dir_all(root.as_path());
     }
 }

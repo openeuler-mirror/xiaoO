@@ -1,4 +1,5 @@
 use crate::backends::local::backend::{LocalBackendState, LocalOperationBackend};
+use crate::backends::local::policy::{LocalBackendPolicy, LocalIsolationOptions};
 use agent_contracts::backend::{
     BackendPath, OperationBackend, OperationBackendBuildError, OperationBackendConfig,
 };
@@ -13,6 +14,7 @@ struct LocalBackendOptions {
     home_dir: Option<String>,
     temp_root: Option<String>,
     default_shell: Option<String>,
+    isolation: Option<LocalIsolationOptions>,
 }
 
 pub async fn build_backend(
@@ -39,6 +41,11 @@ pub async fn build_backend(
         Some(path) => absolute_dir("temp_root", path)?,
         None => std::env::temp_dir(),
     };
+    let policy = LocalBackendPolicy::from_isolation_options(
+        options.isolation,
+        workspace_root_host.as_path(),
+        temp_root_host.as_path(),
+    )?;
 
     let backend = LocalOperationBackend::new(Arc::new(LocalBackendState {
         backend_id: "local".to_string(),
@@ -48,16 +55,27 @@ pub async fn build_backend(
         home_dir_host,
         temp_root_host,
         default_shell: options.default_shell,
+        policy,
     }));
 
     Ok(Arc::new(backend))
 }
 
-pub fn local_backend_for_workspace(
+pub fn local_backend(
     workspace_root: PathBuf,
     home_dir: Option<PathBuf>,
     temp_root: Option<PathBuf>,
     default_shell: Option<String>,
+) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
+    local_backend_with_isolation(workspace_root, home_dir, temp_root, default_shell, None)
+}
+
+pub fn local_backend_with_isolation(
+    workspace_root: PathBuf,
+    home_dir: Option<PathBuf>,
+    temp_root: Option<PathBuf>,
+    default_shell: Option<String>,
+    isolation: Option<serde_json::Value>,
 ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
     let workspace_root_host = absolute_dir(
         "workspace_root",
@@ -87,6 +105,17 @@ pub fn local_backend_for_workspace(
         .map(|path| backend_path_from_host_path(path.as_path()))
         .transpose()?;
     let temp_root_host = temp_root.unwrap_or_else(std::env::temp_dir);
+    let isolation = isolation
+        .map(serde_json::from_value::<LocalIsolationOptions>)
+        .transpose()
+        .map_err(|error| OperationBackendBuildError::InvalidConfig {
+            message: format!("invalid local backend isolation options: {error}"),
+        })?;
+    let policy = LocalBackendPolicy::from_isolation_options(
+        isolation,
+        workspace_root_host.as_path(),
+        temp_root_host.as_path(),
+    )?;
 
     Ok(Arc::new(LocalOperationBackend::new(Arc::new(
         LocalBackendState {
@@ -97,6 +126,7 @@ pub fn local_backend_for_workspace(
             home_dir_host,
             temp_root_host,
             default_shell,
+            policy,
         },
     ))))
 }

@@ -83,7 +83,6 @@ pub fn read_image_file<P: AsRef<Path>>(
     })
 }
 
-#[allow(dead_code)]
 pub fn read_image_from_bytes(
     extension: &str,
     bytes: &[u8],

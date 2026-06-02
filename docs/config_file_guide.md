@@ -256,9 +256,22 @@ For detailed hooker configuration and plugin instructions, please refer to [plug
 
 ```toml
 [operation_backend]
-type = "conch"                       # Operation backend type
-config = { ... }                     # Backend-specific configuration
+kind = "local"                       # Operation backend kind: local, conch
+options = { ... }                    # Backend-specific options
 ```
+
+On macOS, the local backend can enable Seatbelt isolation:
+
+```toml
+[operation_backend]
+kind = "local"
+
+[operation_backend.options.isolation]
+kind = "macos_seatbelt"
+allow_network = false
+```
+
+For details, see [macOS Seatbelt Isolation](../crates/operation_backend/docs/seatbelt/README.md).
 
 ---
 

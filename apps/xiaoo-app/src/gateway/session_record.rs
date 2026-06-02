@@ -1,4 +1,5 @@
 use crate::gateway::GatewayEntryContext;
+use agent_contracts::backend::BackendInstance;
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use memory::MemorySnapshot;
@@ -56,6 +57,8 @@ pub struct SessionRecord {
     pub channel_instance_id: Option<String>,
     pub status: SessionLifecycleStatus,
     pub runtime: SessionRuntimeSnapshot,
+    #[serde(default)]
+    pub backend_instance: Option<BackendInstance>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     #[serde(default)]

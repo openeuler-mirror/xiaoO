@@ -69,11 +69,10 @@ impl ToolCliRuntime {
             std::env::current_dir().map_err(|error| BuildError::DependencyError {
                 message: format!("failed to resolve current directory: {error}"),
             })?;
-        let operation_backend =
-            operation_backend::local_backend_for_workspace(workspace_root, None, None, None)
-                .map_err(|error| BuildError::InvalidConfig {
-                    message: format!("failed to build local operation backend: {error}"),
-                })?;
+        let operation_backend = operation_backend::local_backend(workspace_root, None, None, None)
+            .map_err(|error| BuildError::InvalidConfig {
+                message: format!("failed to build local operation backend: {error}"),
+            })?;
 
         Ok(Self {
             state_store,
