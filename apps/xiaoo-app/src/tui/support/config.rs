@@ -302,15 +302,26 @@ impl Config {
         if let Some(skills) = self.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
-                    skills_dirs.push(PathBuf::from(dir));
+                    let path = PathBuf::from(dir);
+                    let dir_str = path.to_string_lossy();
+                    if dir_str != ".xiaoo/skills"
+                        && !dir_str.ends_with("/.xiaoo/skills")
+                        && !dir_str.ends_with("\\.xiaoo\\skills")
+                        && dir_str != "/usr/lib/.xiaoo/skills"
+                    {
+                        skills_dirs.push(path);
+                    }
                 }
             }
         }
 
-        // Priority 3: Global level (lowest)
+        // Priority 3: User level
         if let Some(home) = dirs::home_dir() {
             skills_dirs.push(home.join(".xiaoo").join("skills"));
         }
+
+        // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+        skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
         ResolvedSkillsConfig {
             skills_dirs,

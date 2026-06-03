@@ -2,17 +2,26 @@
 
 Skills are prompt-based reusable instruction sets. The LLM automatically invokes registered skills via the built-in `skill` tool.
 
-### Skill Directories
+### Skill Directories (Four-Level Priority)
 
-Skills are automatically loaded from `~/.xiaoo/skills/` by default. Each subdirectory containing a `SKILL.md` or `SKILL.toml` constitutes a skill:
+Skills are automatically loaded from multiple directories with the following priority (highest to lowest):
+
+1. **Project level**: `./.xiaoo/skills/` - Project-specific skills
+2. **Config level**: directories specified in `[skills].dirs` - Team/user shared skills
+3. **User level**: `~/.xiaoo/skills/` - Personal skills available everywhere
+4. **System level**: `/usr/lib/.xiaoo/skills/` - Built-in skills like `xiaoo-guardian`
 
 ```
-~/.xiaoo/skills/
+Skill directory structure:
+./.xiaoo/skills/           # Project level (highest priority)
 ├── code-review/
 │   └── SKILL.md
+~/.xiaoo/skills/           # User level
 ├── lint-runner/
 │   └── SKILL.toml
-└── ...
+/usr/lib/.xiaoo/skills/    # System level (lowest priority, built-in only)
+├── xiaoo-guardian/
+│   └── SKILL.md
 ```
 
 Additional skill directories can be added in `~/.config/xiaoo/config.toml`:
@@ -77,6 +86,48 @@ xiaoo skill install https://github.com/user/my-skill.git
 
 # Remove an installed skill
 xiaoo skill remove <name>
+```
+
+### Built-in Skills
+
+Builtin skills are automatically installed when you run `cargo install --path apps/xiaoo-app`. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
+
+**Installation locations** (automatic fallback):
+- **System level** (preferred): `/usr/lib/.xiaoo/skills/` - requires root privileges
+- **User level** (fallback): `~/.xiaoo/skills/` - used if system-level installation fails
+
+**Builtin skills** (located in `<xiaoO>/plugins/skills/`):
+- `xiaoo-guardian` - Security policy enforcement
+- `block-analyzer` - Block analysis capabilities
+
+> **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
+>
+> **Installation Behavior**:
+> - First attempts to install all builtin skills to system-level directory (requires root privileges)
+> - If system-level installation fails (e.g., permission denied), automatically falls back to user-level directory
+> - Without these skills, security features and other capabilities may be unavailable.
+>
+> **For system-wide installation** (recommended for multi-user environments):
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+
+To remove builtin skills:
+
+```bash
+# System level (requires root)
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+sudo rm -rf /usr/lib/.xiaoo/skills/block-analyzer
+
+# User level
+rm -rf ~/.xiaoo/skills/xiaoo-guardian
+rm -rf ~/.xiaoo/skills/block-analyzer
+```
+
+To completely uninstall all skills along with the application:
+
+```bash
+cargo uninstall xiaoo-app
+sudo rm -rf /usr/lib/.xiaoo/skills
+rm -rf ~/.xiaoo/skills
 ```
 
 ### Security Audit

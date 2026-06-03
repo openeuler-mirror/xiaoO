@@ -535,7 +535,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `git push --force` | high | 强制推送，可能覆盖远程提交历史 |
 | `curl POST ... env/secret/key` | high | curl POST 外传敏感信息 |
 | `/dev/zero`/`/dev/random` 等 | high | 访问设备文件 |
-| `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录 |
+| `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录（系统级/用户级） |
 
 **扫描示例**：
 ```
@@ -637,9 +637,11 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 - **系统配置**（high/medium）：`/etc/passwd`、`/etc/hosts`、`/etc/crontab`、`/etc/systemd/`、`/etc/ssh/sshd_config`
 - **危险目录**（critical/high）：`/boot/`、`/proc/sys/`、`/sys/`
 - **设备文件**（critical/high/medium）：`/dev/mem`、`/dev/zero`、`/dev/null`、`/dev/random` 等
-- **安全防护目录**（critical）：`~/.xiaoo/skills/xiaoo-guardian/`（区分读写：写入/删除操作拦截，读取操作放行）
+- **安全防护目录**（critical）：
+  - `/usr/lib/.xiaoo/skills/xiaoo-guardian/`（系统级，区分读写：写入/删除操作拦截，读取操作放行）
+  - `~/.xiaoo/skills/xiaoo-guardian/`（用户级，区分读写：写入/删除操作拦截，读取操作放行）
 
-> 注意：对 xiaoo-guardian 安全防护目录，区分读写操作：读取和执行放行，写入/删除/修改操作拦截。
+> 注意：对 xiaoo-guardian 安全防护目录（系统级和用户级），区分读写操作：读取和执行放行，写入/删除/修改操作拦截。
 
 #### 2.4 危险操作模式检测
 

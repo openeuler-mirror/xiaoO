@@ -49,9 +49,30 @@ cd xiaoO
 cargo install --path apps/xiaoo-app
 ```
 
-This installs the application binaries into `~/.cargo/bin`. Make sure `~/.cargo/bin` is in your `PATH`.
+This installs the application binaries into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
 
-If you want the interactive security-plugin prompt during build, use:
+> **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
+>
+> **Installation Behavior**:
+> - First attempts to install builtin skills to system-level directory: `/usr/lib/.xiaoo/skills/` (requires root privileges)
+> - If system-level installation fails (e.g., permission denied), automatically falls back to user-level directory: `~/.xiaoo/skills/`
+> - Builtin skills include `xiaoo-guardian` (security policy enforcement) and other built-in capabilities
+> - Without these skills, security features may be unavailable.
+>
+> **For system-wide installation** (recommended for multi-user environments):
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+
+### Uninstallation
+
+```bash
+# Uninstall binaries
+cargo uninstall xiaoo-app
+
+# Remove the guardian skill (system level requires root)
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+```
+
+### Skill Directory Priority (Four Levels - Runtime Search Only)
 
 ```bash
 ./build.sh --release

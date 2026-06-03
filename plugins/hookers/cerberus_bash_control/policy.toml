@@ -33,7 +33,12 @@ path = "/root/.xiaoo/"
 permission = "readexecute"
 
 # 保护 xiaoo-guardian 系统级安全 Skill（禁止修改/删除，仅允许读取和执行）
-# 使用 ~ 展开为当前用户的家目录，支持多用户环境
+# 系统级路径：所有用户共享的内置 skill
+[[custom_paths]]
+path = "/usr/lib/.xiaoo/skills/xiaoo-guardian/"
+permission = "readexecute"
+
+# 用户级路径：用户自定义 skill（兼容旧版本）
 [[custom_paths]]
 path = "~/.xiaoo/skills/xiaoo-guardian/"
 permission = "readexecute"
