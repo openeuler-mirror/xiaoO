@@ -23,7 +23,8 @@ impl LocalExec {
 #[async_trait]
 impl OperationExec for LocalExec {
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
-        let mut command = build_command(self._state.default_shell.as_deref(), &request)?;
+        let command_spec = build_command_spec(self._state.default_shell.as_deref(), &request)?;
+        let mut command = command_from_spec(command_spec, &self._state.policy);
 
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {
@@ -33,6 +34,7 @@ impl OperationExec for LocalExec {
 
         if let Some(cwd) = request.cwd.as_ref() {
             let cwd = self._state.backend_path_to_host(cwd)?;
+            self._state.policy.check_exec_cwd(cwd.as_path())?;
             self._state.ensure_directory(cwd.as_path())?;
             command.current_dir(cwd);
         }
@@ -124,10 +126,15 @@ impl OperationExec for LocalExec {
     }
 }
 
-fn build_command(
+struct LocalCommandSpec {
+    program: String,
+    args: Vec<String>,
+}
+
+fn build_command_spec(
     default_shell: Option<&str>,
     request: &ExecRequest,
-) -> Result<Command, OperationError> {
+) -> Result<LocalCommandSpec, OperationError> {
     if request.command.trim().is_empty() {
         return Err(OperationError::ExecutionFailed {
             message: "command cannot be empty".to_string(),
@@ -140,12 +147,31 @@ fn build_command(
                 message: "shell execution does not support args".to_string(),
             });
         }
-        let mut command = Command::new(shell);
-        command.arg("-c").arg(request.command.as_str());
-        return Ok(command);
+        return Ok(LocalCommandSpec {
+            program: shell.to_string(),
+            args: vec!["-c".to_string(), request.command.clone()],
+        });
     }
 
-    let mut command = Command::new(request.command.as_str());
-    command.args(request.args.iter());
-    Ok(command)
+    Ok(LocalCommandSpec {
+        program: request.command.clone(),
+        args: request.args.clone(),
+    })
+}
+
+fn command_from_spec(
+    spec: LocalCommandSpec,
+    policy: &crate::backends::local::policy::LocalBackendPolicy,
+) -> Command {
+    if let Some(profile) = policy.seatbelt_profile() {
+        let mut command = Command::new("sandbox-exec");
+        command.arg("-p").arg(profile.to_profile_text());
+        command.arg(spec.program);
+        command.args(spec.args);
+        return command;
+    }
+
+    let mut command = Command::new(spec.program);
+    command.args(spec.args);
+    command
 }

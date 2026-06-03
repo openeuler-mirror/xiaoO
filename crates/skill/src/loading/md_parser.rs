@@ -231,15 +231,14 @@ fn yaml_like_to_json(yaml: &str) -> String {
                 }
                 i = j - 1;
 
-                let content = multiline_content.trim();
-                format!("\"{}\"", content.replace('\\', "\\\\").replace('"', "\\\""))
+                json_string(multiline_content.trim())
             } else if value.starts_with('[') && value.ends_with(']') {
                 let inner = &value[1..value.len() - 1];
                 let items: Vec<String> = inner
                     .split(',')
                     .map(|s| {
                         let s = s.trim().trim_matches('"').trim_matches('\'');
-                        format!("\"{}\"", s)
+                        json_string(s)
                     })
                     .collect();
                 format!("[{}]", items.join(","))
@@ -249,18 +248,19 @@ fn yaml_like_to_json(yaml: &str) -> String {
                 "null".to_string()
             } else {
                 let unquoted = value.trim_matches('"').trim_matches('\'');
-                format!(
-                    "\"{}\"",
-                    unquoted.replace('\\', "\\\\").replace('"', "\\\"")
-                )
+                json_string(unquoted)
             };
 
-            entries.push(format!("\"{}\":{}", key, json_value));
+            entries.push(format!("{}:{}", json_string(key), json_value));
         }
         i += 1;
     }
 
     format!("{{{}}}", entries.join(","))
+}
+
+fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("serializing a string cannot fail")
 }
 
 fn get_str(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {

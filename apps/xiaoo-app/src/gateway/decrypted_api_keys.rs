@@ -1,6 +1,6 @@
+use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use anyhow::{bail, Context, Result};
 
 static SECRET_PROVIDER: OnceLock<SecretProvider> = OnceLock::new();
 
@@ -27,8 +27,7 @@ impl SecretProvider {
             return Ok(self.load_from_env(env_name)?);
         }
 
-        let bytes = std::fs::read(&self.secrets_path)
-            .context("failed to read secrets file")?;
+        let bytes = std::fs::read(&self.secrets_path).context("failed to read secrets file")?;
 
         if bytes.is_empty() {
             return Ok(self.load_from_env(env_name)?);
@@ -40,15 +39,15 @@ impl SecretProvider {
         }
 
         let decrypted = if self.use_sdf {
-            use vault::sdf::{init_sdf_provider, decrypt_secret};
+            use vault::sdf::{decrypt_secret, init_sdf_provider};
             init_sdf_provider("/usr/local/sdf/lib/libsdf.so")?;
             decrypt_secret(&bytes)?
         } else {
             decrypt_aes_gcm(&bytes)?
         };
 
-        let store: SecretsStore = serde_json::from_slice(&decrypted)
-            .context("failed to parse secrets file")?;
+        let store: SecretsStore =
+            serde_json::from_slice(&decrypted).context("failed to parse secrets file")?;
 
         if let Some(secret) = store.api_keys.get(env_name) {
             return Ok(secret.clone());
@@ -100,7 +99,8 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
     }
 
     let key_provider = WhiteBoxKeyProvider::new("default");
-    let master_key = key_provider.get_key()
+    let master_key = key_provider
+        .get_key()
         .context("failed to get key material")?;
 
     let cipher = Aes256Gcm::new_from_slice(&master_key)
@@ -109,7 +109,8 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
     let nonce = Nonce::from_slice(&encrypted[1..13]);
     let ciphertext = &encrypted[13..];
 
-    cipher.decrypt(nonce, ciphertext)
+    cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("decryption failed"))
 }
 

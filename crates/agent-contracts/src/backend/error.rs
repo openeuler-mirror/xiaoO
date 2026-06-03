@@ -19,6 +19,9 @@ pub enum OperationError {
     #[error("permission denied: {path}")]
     PermissionDenied { path: String },
 
+    #[error("sandbox policy denied: {denial}")]
+    SandboxPolicyDenied { denial: super::SandboxPolicyDenial },
+
     #[error("unsupported operation: {message}")]
     Unsupported { message: String },
 

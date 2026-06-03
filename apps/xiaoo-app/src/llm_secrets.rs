@@ -42,7 +42,9 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     let use_sdf = get_use_sdf_from_config(config_path);
 
     let mut store = load_secrets_store(&secrets_path, use_sdf)?;
-    store.api_keys.insert(env_name.to_string(), secret.to_string());
+    store
+        .api_keys
+        .insert(env_name.to_string(), secret.to_string());
 
     save_encrypted_store(&secrets_path, &store, use_sdf)
 }
@@ -57,7 +59,9 @@ pub fn save_token(config_path: &Path, token_name: &str, token: &str) -> Result<(
     let use_sdf = get_use_sdf_from_config(config_path);
 
     let mut store = load_secrets_store(&secrets_path, use_sdf)?;
-    store.tokens.insert(token_name.to_string(), token.to_string());
+    store
+        .tokens
+        .insert(token_name.to_string(), token.to_string());
 
     save_encrypted_store(&secrets_path, &store, use_sdf)
 }
@@ -91,7 +95,10 @@ pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
 
     save_llm_secret(config_path, env_name, &api_key)?;
 
-    tracing::info!("auto saving API key from env {} to llm_secrets.json", env_name);
+    tracing::info!(
+        "auto saving API key from env {} to llm_secrets.json",
+        env_name
+    );
 
     Ok(())
 }
@@ -105,12 +112,11 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
         .with_context(|| format!("failed to read secrets file {}", path.display()))?;
 
     let decrypted = if use_sdf {
-        use vault::sdf::{init_sdf_provider, decrypt_secret};
+        use vault::sdf::{decrypt_secret, init_sdf_provider};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
-        decrypt_secret(&bytes)
-            .map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
+        decrypt_secret(&bytes).map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
     } else {
         decrypt_aes_gcm(&bytes)?
     };
@@ -120,16 +126,14 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
 }
 
 fn save_encrypted_store(path: &Path, store: &SecretsStore, use_sdf: bool) -> Result<()> {
-    let json = serde_json::to_vec(store)
-        .context("failed to serialize secrets")?;
+    let json = serde_json::to_vec(store).context("failed to serialize secrets")?;
 
     let encrypted = if use_sdf {
-        use vault::sdf::{init_sdf_provider, encrypt_secret};
+        use vault::sdf::{encrypt_secret, init_sdf_provider};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
-        encrypt_secret(json.as_ref())
-            .map_err(|e| anyhow::anyhow!("SDF 加密失败: {}", e))?
+        encrypt_secret(json.as_ref()).map_err(|e| anyhow::anyhow!("SDF 加密失败: {}", e))?
     } else {
         encrypt_aes_gcm(&json)?
     };
@@ -149,7 +153,8 @@ fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {
     use vault::WhiteBoxKeyProvider;
 
     let key_provider = WhiteBoxKeyProvider::new("default");
-    let master_key = key_provider.get_key()
+    let master_key = key_provider
+        .get_key()
         .context("failed to get key material")?;
 
     let cipher = Aes256Gcm::new_from_slice(&master_key)
@@ -159,7 +164,8 @@ fn encrypt_aes_gcm(plaintext: &[u8]) -> Result<Vec<u8>> {
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
         .map_err(|_| anyhow::anyhow!("encryption failed"))?;
 
     let mut result = vec![1u8];
@@ -185,7 +191,8 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
     }
 
     let key_provider = WhiteBoxKeyProvider::new("default");
-    let master_key = key_provider.get_key()
+    let master_key = key_provider
+        .get_key()
         .context("failed to get key material")?;
 
     let cipher = Aes256Gcm::new_from_slice(&master_key)
@@ -194,7 +201,8 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
     let nonce = Nonce::from_slice(&encrypted[1..13]);
     let ciphertext = &encrypted[13..];
 
-    cipher.decrypt(nonce, ciphertext)
+    cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("decryption failed"))
 }
 
@@ -217,18 +225,17 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
     }
 
     let decrypted = if use_sdf {
-        use vault::sdf::{init_sdf_provider, decrypt_secret};
+        use vault::sdf::{decrypt_secret, init_sdf_provider};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
             anyhow::bail!("SDF 初始化失败: {}", e);
         }
-        decrypt_secret(&bytes)
-            .map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
+        decrypt_secret(&bytes).map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
     } else {
         decrypt_aes_gcm(&bytes)?
     };
 
-    let _store: SecretsStore = serde_json::from_slice(&decrypted)
-        .with_context(|| "failed to parse decrypted secrets")?;
+    let _store: SecretsStore =
+        serde_json::from_slice(&decrypted).with_context(|| "failed to parse decrypted secrets")?;
 
     tracing::info!("successfully verified secrets decryption");
     Ok(())
@@ -246,7 +253,10 @@ pub fn init_on_demand_secret_provider(config_path: &Path) -> Result<()> {
     let secrets_path = llm_secrets_path(config_path);
 
     crate::gateway::init_secret_provider(secrets_path, use_sdf);
-    tracing::info!("on-demand secret provider initialized (use_sdf={})", use_sdf);
+    tracing::info!(
+        "on-demand secret provider initialized (use_sdf={})",
+        use_sdf
+    );
     Ok(())
 }
 

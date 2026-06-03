@@ -38,6 +38,9 @@ Edit `[agent.<name>]` and `[agent.<name>.tools]`
 
 Example:
 ```toml
+[tui]
+agent_order = ["xuanyuan", "Core", "baize", "dayu", "fuxi", "kuafu", "plan"]
+
 [agent.code-reviewer]
 description = "Reviews code for best practices and potential issues"
 prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
@@ -46,6 +49,8 @@ prompt = "You are a code reviewer. Focus on security, performance, and maintaina
 file_write = false
 file_edit = false
 ```
+
+`[tui].agent_order` is optional. It controls the full Agent tab order. Include `Core` to place the default agent anywhere in the tab bar; if `Core` is omitted, it stays first for backward compatibility. Roles omitted from the list are appended in the default alphabetical order.
 
 ### 2.3 Configuration Reference
 

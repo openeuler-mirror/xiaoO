@@ -1,9 +1,11 @@
 use crate::gateway::backend::ExternalBackendManager;
+use crate::gateway::session_backend::{lease_session_backend, sync_session_backend_instance};
 use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLifecycleStatus, SessionRecord,
     SessionRuntimeBuildInput, SessionRuntimeResolver, SessionServiceError, SessionStore,
 };
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -16,9 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use subagent::{
-    HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest,
-    SpawnSubagentResult, SubagentControlError, SubagentCoordinator, SubagentTerminalKind,
-    SubagentTerminalSnapshot,
+    HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
+    SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
 use tokio::sync::{oneshot, Mutex};
 use tool::ToolSpecSnapshot;
@@ -148,17 +149,24 @@ impl SessionSupervisor {
             created_at: Instant::now(),
         };
 
-        self.pending_interactions.lock().await.insert(request_id.clone(), waiter);
+        self.pending_interactions
+            .lock()
+            .await
+            .insert(request_id.clone(), waiter);
 
         let session = self.session.lock().await.clone();
-        let interaction_handle = self.load_interaction_handle(&session, &parent_agent_id).await;
+        let interaction_handle = self
+            .load_interaction_handle(&session, &parent_agent_id)
+            .await;
         let semaphore = self.interaction_semaphore.clone();
 
         if let Some(handle) = interaction_handle {
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let response = handle.ask(&request).await;
-                supervisor.deliver_interaction_response_from_user(request_id, response).await;
+                supervisor
+                    .deliver_interaction_response_from_user(request_id, response)
+                    .await;
             });
         }
     }
@@ -338,14 +346,15 @@ impl SessionSupervisor {
         let mut tool_manifest = self.load_lane_tool_manifest(&input.agent_id).await?;
 
         loop {
+            let operation_backend = self.lease_backend_for_lane(&input.runtime_input).await?;
             let session_snapshot = self.snapshot().await;
             let worker_result = SessionWorker::run(
                 self.runtime_resolver.as_ref(),
-                Arc::clone(&self.backend_manager),
                 SessionWorkerInput {
                     runtime_input: input.runtime_input.clone(),
                     session: session_snapshot,
                     agent_id: input.agent_id.clone(),
+                    operation_backend,
                     user_message,
                     append_user_message,
                     reasoning_effort: input.reasoning_effort,
@@ -411,13 +420,11 @@ impl SessionSupervisor {
                     let resolved_call_id = &suspended_call.final_call.call_id;
                     if let Some(last_msg) = resumed_loop_state.messages.last_mut() {
                         if matches!(last_msg.role, agent_types::llm::MessageRole::Assistant) {
-                            last_msg.blocks.retain(|b| {
-                                match b {
-                                    agent_types::llm::ContentBlock::ToolUse { call_id, .. } => {
-                                        call_id == resolved_call_id
-                                    }
-                                    _ => true,
+                            last_msg.blocks.retain(|b| match b {
+                                agent_types::llm::ContentBlock::ToolUse { call_id, .. } => {
+                                    call_id == resolved_call_id
                                 }
+                                _ => true,
                             });
                         }
                     }
@@ -469,6 +476,31 @@ impl SessionSupervisor {
                 }
             }
         }
+    }
+
+    async fn lease_backend_for_lane(
+        &self,
+        runtime_input: &SessionRuntimeBuildInput,
+    ) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
+        let session_snapshot = self.snapshot().await;
+        let resolved = self
+            .runtime_resolver
+            .resolve(runtime_input, Some(&session_snapshot))
+            .await?;
+        let lease =
+            lease_session_backend(self.backend_manager.as_ref(), &session_snapshot, &resolved)
+                .await?;
+
+        let operation_backend = lease.backend();
+        let mut session = self.session.lock().await;
+        if sync_session_backend_instance(&mut session, &lease) {
+            session.updated_at_ms = current_time_ms();
+            let snapshot = session.clone();
+            drop(session);
+            self.session_store.save(snapshot).await;
+        }
+
+        Ok(operation_backend)
     }
 
     async fn apply_host_actions_internal(
@@ -545,13 +577,12 @@ impl SessionSupervisor {
                 let session = supervisor.snapshot().await;
                 runtime_input_from_session(&session, agent_id.clone(), max_turns)
             };
-            let interaction_handle = Arc::new(
-                super::subagent_interaction::SubagentInteractionHandle::new(
+            let interaction_handle =
+                Arc::new(super::subagent_interaction::SubagentInteractionHandle::new(
                     Arc::clone(&supervisor),
                     agent_id.clone(),
                     parent_agent_id.clone(),
-                ),
-            ) as Arc<dyn InteractionHandle>;
+                )) as Arc<dyn InteractionHandle>;
             let result = supervisor
                 .run_lane_until_terminal(LaneRunInput {
                     agent_id: agent_id.clone(),

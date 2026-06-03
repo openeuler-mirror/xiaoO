@@ -100,7 +100,10 @@ impl SessionGateway {
         let active_session_ids = Arc::clone(&self.active_session_ids);
         let backend_manager = self.backend_manager.clone();
         tokio::spawn(async move {
-            active_session_ids.lock().await.insert(request.session_id.clone());
+            active_session_ids
+                .lock()
+                .await
+                .insert(request.session_id.clone());
 
             let loop_summary = Arc::new(Mutex::new(None));
             let bindings = SessionRuntimeBindings {
