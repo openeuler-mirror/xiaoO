@@ -45,7 +45,7 @@ const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 async fn main() -> Result<()> {
     let config_arg = parse_config_path()?;
     let config = load_tui_config(&config_arg)?;
-    config::inject_llm_secrets_into_env(&config_arg.path).with_context(|| {
+    config::load_llm_secrets_to_memory(&config_arg.path).with_context(|| {
         format!(
             "failed to initialize TUI secrets from {}",
             config_arg.path.display()

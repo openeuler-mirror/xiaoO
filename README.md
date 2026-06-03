@@ -26,7 +26,7 @@ The runtime also includes a layered memory and adaptive context-compression syst
 - Full tool suite: file operations, shell execution, Git, web search/browse, patch application, sub-agents, and extensible tool manifests.
 - Adaptive context management: token-budget tracking, configured compaction, forced recovery after context-limit errors, and prefix-cache telemetry.
 - Streaming reasoning: provider reasoning/thinking deltas can be surfaced while the model works.
-- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Shift+Tab`.
+- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Ctrl+T`.
 - Session management: save and resume long-running work.
 - LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
 - Skills system: installable instruction packs loaded from local directories or Git sources.
@@ -49,9 +49,30 @@ cd xiaoO
 cargo install --path apps/xiaoo-app
 ```
 
-This installs the application binaries into `~/.cargo/bin`. Make sure `~/.cargo/bin` is in your `PATH`.
+This installs the application binaries into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
 
-If you want the interactive security-plugin prompt during build, use:
+> **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
+>
+> **Installation Behavior**:
+> - First attempts to install builtin skills to system-level directory: `/usr/lib/.xiaoo/skills/` (requires root privileges)
+> - If system-level installation fails (e.g., permission denied), automatically falls back to user-level directory: `~/.xiaoo/skills/`
+> - Builtin skills include `xiaoo-guardian` (security policy enforcement) and other built-in capabilities
+> - Without these skills, security features may be unavailable.
+>
+> **For system-wide installation** (recommended for multi-user environments):
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+
+### Uninstallation
+
+```bash
+# Uninstall binaries
+cargo uninstall xiaoo-app
+
+# Remove the guardian skill (system level requires root)
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+```
+
+### Skill Directory Priority (Four Levels - Runtime Search Only)
 
 ```bash
 ./build.sh --release
@@ -151,7 +172,7 @@ More details are available in [Memory & Context Compression](./docs/memory_conte
 | `high` | Use a stronger reasoning/thinking setting | Yellow |
 | `max` | Use the strongest reasoning/thinking setting | Red |
 
-The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
+The TUI status bar shows the current value as `Think off/high/max`. Press `Ctrl+T` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
 
 ```bash
 xiaoo run --reasoning-effort high -p "Explain this repository"

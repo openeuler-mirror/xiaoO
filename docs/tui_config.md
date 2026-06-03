@@ -199,7 +199,7 @@ bash = false                         # Planning phase does not execute commands
 
 In TUI:
 - `Tab` key - Switch agent role
-- `Shift+Tab` - Switch reasoning effort (off/high/max)
+- `Ctrl+T` - Switch reasoning effort (off/high/max)
 - Status bar shows current agent role name
 
 ---

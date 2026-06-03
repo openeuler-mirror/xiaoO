@@ -7,7 +7,7 @@ use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,6 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
+    pub vault: VaultConfig,
+    #[serde(default)]
     pub trace: Option<Value>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
@@ -65,6 +67,8 @@ pub struct Config {
 pub struct TuiConfig {
     #[serde(default)]
     pub remote: Option<RemoteConfig>,
+    #[serde(default)]
+    pub agent_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -75,6 +79,23 @@ pub struct RemoteConfig {
     pub bearer_token_env: Option<String>,
     #[serde(default)]
     pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_sdf: bool,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            use_sdf: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -237,7 +258,34 @@ impl Config {
     }
 
     pub fn agent_role_ids(&self) -> Vec<String> {
-        self.agent.keys().cloned().collect()
+        let mut ordered = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for configured_role_id in &self.tui.agent_order {
+            let configured_role_id = configured_role_id.trim();
+            if configured_role_id.is_empty() {
+                continue;
+            }
+
+            if let Some(role_id) = self
+                .agent
+                .keys()
+                .find(|role_id| role_id.eq_ignore_ascii_case(configured_role_id))
+                .cloned()
+            {
+                if seen.insert(role_id.clone()) {
+                    ordered.push(role_id);
+                }
+            }
+        }
+
+        for role_id in self.agent.keys() {
+            if seen.insert(role_id.clone()) {
+                ordered.push(role_id.clone());
+            }
+        }
+
+        ordered
     }
 
     pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
@@ -254,15 +302,26 @@ impl Config {
         if let Some(skills) = self.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
-                    skills_dirs.push(PathBuf::from(dir));
+                    let path = PathBuf::from(dir);
+                    let dir_str = path.to_string_lossy();
+                    if dir_str != ".xiaoo/skills"
+                        && !dir_str.ends_with("/.xiaoo/skills")
+                        && !dir_str.ends_with("\\.xiaoo\\skills")
+                        && dir_str != "/usr/lib/.xiaoo/skills"
+                    {
+                        skills_dirs.push(path);
+                    }
                 }
             }
         }
 
-        // Priority 3: Global level (lowest)
+        // Priority 3: User level
         if let Some(home) = dirs::home_dir() {
             skills_dirs.push(home.join(".xiaoo").join("skills"));
         }
+
+        // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+        skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
         ResolvedSkillsConfig {
             skills_dirs,
@@ -364,8 +423,47 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     xiaoo_app::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
-pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    xiaoo_app::llm_secrets::inject_llm_secrets_into_env(config_path)
+pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
+    let config = match Config::load_from(config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    let secrets_path = xiaoo_app::llm_secrets::llm_secrets_path(config_path);
+    let file_existed_before = secrets_path.exists();
+
+    if !should_initialize_secret_provider(&config, file_existed_before) {
+        tracing::debug!("vault.enabled=false, skipping secrets loading");
+        return Ok(());
+    }
+
+    if config.vault.enabled {
+        xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
+    } else {
+        tracing::info!(
+            "existing llm_secrets.json found while vault.enabled=false; initializing secret provider"
+        );
+    }
+
+    crate::gateway::init_secret_provider(secrets_path.clone(), config.vault.use_sdf);
+    tracing::info!(
+        "secrets provider initialized for on-demand decryption (use_sdf={})",
+        config.vault.use_sdf
+    );
+
+    if !file_existed_before {
+        if secrets_path.exists() {
+            tracing::info!(
+                "secrets file created this run, skipping load (will load on next startup)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn should_initialize_secret_provider(config: &Config, secrets_file_exists: bool) -> bool {
+    config.vault.enabled || secrets_file_exists
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
@@ -490,6 +588,22 @@ mod tests {
     }
 
     #[test]
+    fn secret_provider_initializes_when_existing_secrets_file_is_present() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(super::should_initialize_secret_provider(&config, true));
+    }
+
+    #[test]
+    fn secret_provider_skips_when_vault_disabled_and_no_secrets_file_exists() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(!super::should_initialize_secret_provider(&config, false));
+    }
+
+    #[test]
     fn tui_bootstrap_requires_default_agent_id_in_agents_list() {
         let mut config = valid_config();
         config.agents.default_agent_id = "missing".to_string();
@@ -541,6 +655,27 @@ file_edit = false
         assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
+    }
+
+    #[test]
+    fn agent_role_ids_follow_tui_agent_order() {
+        let mut config = Config::default();
+        for role_id in ["baize", "dayu", "fuxi", "kuafu", "xuanyuan"] {
+            config
+                .agent
+                .insert(role_id.to_string(), super::AgentRoleConfig::default());
+        }
+        config.tui.agent_order = vec![
+            "xuanyuan".to_string(),
+            "FUXI".to_string(),
+            "missing".to_string(),
+            "xuanyuan".to_string(),
+        ];
+
+        assert_eq!(
+            config.agent_role_ids(),
+            vec!["xuanyuan", "fuxi", "baize", "dayu", "kuafu"]
+        );
     }
 
     #[test]

@@ -39,8 +39,10 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": "/dev/urandom", "risk_level": "medium", "desc": "伪随机数设备"},
     {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备"},
     {"path": "/dev/kmsg", "risk_level": "high", "desc": "内核消息缓冲区"},
-    # xiaoO 系统级安全 Skill（保护目录及所有子目录/文件）
-    {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 安全防护 Skill 目录"},
+    # xiaoO 系统级安全 Skill（系统级路径 - 所有用户共享的内置 skill）
+    {"path": "/usr/lib/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 系统级安全防护 Skill 目录"},
+    # xiaoO 用户级安全 Skill（用户级路径 - 兼容旧版本）
+    {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 用户级安全防护 Skill 目录"},
 ]
 
 # ==================== 写入操作关键词 ====================

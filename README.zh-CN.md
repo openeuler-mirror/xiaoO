@@ -26,7 +26,7 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 - 完整工具能力：文件操作、Shell 执行、Git、Web 搜索/浏览、补丁应用、子 Agent 和可扩展工具清单。
 - 自适应上下文管理：Token 预算跟踪、配置化压缩、上下文超限后的强制恢复和 prefix-cache 遥测。
 - 流式推理展示：在模型工作时展示 provider 返回的 reasoning/thinking 增量。
-- 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Shift+Tab` 循环切换。
+- 推理强度分级：支持 `off`、`high`、`max`；TUI 中可用 `Ctrl+T` 循环切换。
 - 会话管理：支持保存和恢复长时间运行的任务。
 - LSP 诊断：编辑后通过 `rust-analyzer`、`pyright`、`typescript-language-server`、`gopls`、`clangd` 等服务展示错误和警告。
 - Skills 技能系统：从本地目录或 Git 来源安装可复用的指令包。
@@ -49,9 +49,30 @@ cd xiaoO
 cargo install --path apps/xiaoo-app
 ```
 
-安装后应用二进制会位于 `~/.cargo/bin`。请确认 `~/.cargo/bin` 已加入 `PATH`。
+安装后应用二进制会位于 `~/.cargo/bin`，并尝试安装内置技能。请确认 `~/.cargo/bin` 已加入 `PATH`。
 
-如果希望构建时出现交互式安全插件安装提示，可以使用：
+> **注意**：`cargo build` 不会安装技能，只有 `cargo install` 会触发技能安装。
+>
+> **安装行为**：
+> - 首先尝试安装内置技能到系统级目录：`/usr/lib/.xiaoo/skills/`（需要 root 权限）
+> - 如果系统级安装失败（如权限不足），自动回退到用户级目录：`~/.xiaoo/skills/`
+> - 内置技能包括 `xiaoo-guardian`（安全策略执行）以及其他内置能力
+> - 缺少这些技能可能导致安全功能不可用。
+>
+> **系统级安装**（推荐用于多用户环境）：
+> - 使用 root 权限运行 `cargo install`：`sudo cargo install --path apps/xiaoo-app`
+
+### 卸载
+
+```bash
+# 卸载二进制文件
+cargo uninstall xiaoo-app
+
+# 删除系统级 guardian 技能（需要 root 权限）
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+```
+
+### 技能目录优先级（四层 - 仅运行时搜索）
 
 ```bash
 ./build.sh --release
@@ -151,7 +172,7 @@ CLI 输出示例：
 | `high` | 使用更强的推理/思考设置 | 黄色 |
 | `max` | 使用最强的推理/思考设置 | 红色 |
 
-TUI 状态栏会显示当前值：`Think off/high/max`。按 `Shift+Tab` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
+TUI 状态栏会显示当前值：`Think off/high/max`。按 `Ctrl+T` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
 
 ```bash
 xiaoo run --reasoning-effort high -p "Explain this repository"

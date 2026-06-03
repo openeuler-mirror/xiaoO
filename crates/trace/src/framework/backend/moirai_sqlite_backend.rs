@@ -49,14 +49,17 @@ impl MoiraiSqliteBackend {
         }
 
         let storage = {
-            let mut cache = STORAGE_CACHE.lock().map_err(|_| BuildError::DependencyError {
-                message: "trace storage cache poisoned".to_string(),
-            })?;
+            let mut cache = STORAGE_CACHE
+                .lock()
+                .map_err(|_| BuildError::DependencyError {
+                    message: "trace storage cache poisoned".to_string(),
+                })?;
             cache
                 .entry(db_path.clone())
                 .or_insert_with(|| {
                     Arc::new(
-                        SqliteStorage::new(&db_path).expect("failed to create shared moirai sqlite storage"),
+                        SqliteStorage::new(&db_path)
+                            .expect("failed to create shared moirai sqlite storage"),
                     )
                 })
                 .clone()
