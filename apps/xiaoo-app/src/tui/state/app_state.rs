@@ -603,9 +603,10 @@ impl AppState {
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
-        let mut tabs = vec!["Core".to_string()];
-        tabs.extend(self.agent_config.agent_role_ids());
-        tabs
+        self.agent_tabs()
+            .into_iter()
+            .map(|tab| tab.unwrap_or_else(|| "Core".to_string()))
+            .collect()
     }
 
     pub fn active_agent_tab_label(&self) -> &str {
@@ -619,30 +620,79 @@ impl AppState {
     }
 
     pub fn cycle_agent_role(&mut self, reverse: bool) -> bool {
-        let role_ids = self.agent_config.agent_role_ids();
-        if role_ids.is_empty() {
+        let tabs = self.agent_tabs();
+        if tabs.len() <= 1 {
             return false;
         }
 
-        let total_tabs = role_ids.len() + 1;
-        let current_index = self
-            .active_agent_role
-            .as_ref()
-            .and_then(|current| role_ids.iter().position(|role_id| role_id == current))
-            .map(|index| index + 1)
+        let current_index = tabs
+            .iter()
+            .position(|tab| tab.as_ref() == self.active_agent_role.as_ref())
             .unwrap_or(0);
         let next_index = if reverse {
-            (current_index + total_tabs - 1) % total_tabs
+            (current_index + tabs.len() - 1) % tabs.len()
         } else {
-            (current_index + 1) % total_tabs
+            (current_index + 1) % tabs.len()
         };
 
-        self.active_agent_role = if next_index == 0 {
-            None
-        } else {
-            role_ids.get(next_index - 1).cloned()
-        };
+        self.active_agent_role = tabs.get(next_index).cloned().flatten();
         true
+    }
+
+    fn agent_tabs(&self) -> Vec<Option<String>> {
+        let order_mentions_core = self
+            .agent_config
+            .tui
+            .agent_order
+            .iter()
+            .any(|tab| tab.trim().eq_ignore_ascii_case("core"));
+        let mut tabs = Vec::new();
+        let mut seen_core = false;
+        let mut seen_roles = std::collections::BTreeSet::new();
+
+        if !order_mentions_core {
+            tabs.push(None);
+            seen_core = true;
+        }
+
+        for configured_tab in &self.agent_config.tui.agent_order {
+            let configured_tab = configured_tab.trim();
+            if configured_tab.is_empty() {
+                continue;
+            }
+
+            if configured_tab.eq_ignore_ascii_case("core") {
+                if !seen_core {
+                    tabs.push(None);
+                    seen_core = true;
+                }
+                continue;
+            }
+
+            if let Some(role_id) = self
+                .agent_config
+                .agent
+                .keys()
+                .find(|role_id| role_id.eq_ignore_ascii_case(configured_tab))
+                .cloned()
+            {
+                if seen_roles.insert(role_id.clone()) {
+                    tabs.push(Some(role_id));
+                }
+            }
+        }
+
+        for role_id in self.agent_config.agent_role_ids() {
+            if seen_roles.insert(role_id.clone()) {
+                tabs.push(Some(role_id));
+            }
+        }
+
+        if !seen_core {
+            tabs.push(None);
+        }
+
+        tabs
     }
 
     pub fn cycle_reasoning_effort(&mut self) {
@@ -899,6 +949,7 @@ mod tests {
         current_git_diff_delta_for_file, sandbox_backend_config, ApiKeyDialogState, AppState,
         RuntimeStatusLight,
     };
+    use crate::config::{AgentRoleConfig, Config};
     use crate::gateway::backend::GatewayBackendConfig;
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
@@ -912,6 +963,37 @@ mod tests {
         let state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
             .expect("app state should initialize");
         assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Idle);
+    }
+
+    #[test]
+    fn agent_tab_labels_allow_core_in_configured_order() {
+        let mut config = Config::default();
+        for role_id in ["baize", "xuanyuan", "plan"] {
+            config
+                .agent
+                .insert(role_id.to_string(), AgentRoleConfig::default());
+        }
+        config.tui.agent_order = vec![
+            "xuanyuan".to_string(),
+            "Core".to_string(),
+            "baize".to_string(),
+        ];
+        let mut state = AppState::new_with_config(
+            &config,
+            PathBuf::from("config.toml"),
+            PathBuf::from("."),
+        )
+        .expect("app state should initialize");
+
+        assert_eq!(
+            state.agent_tab_labels(),
+            vec!["xuanyuan", "Core", "baize", "plan"]
+        );
+
+        assert!(state.cycle_agent_role(false));
+        assert_eq!(state.active_agent_tab_label(), "xuanyuan");
+        assert!(state.cycle_agent_role(false));
+        assert_eq!(state.active_agent_tab_label(), "Core");
     }
 
     #[test]

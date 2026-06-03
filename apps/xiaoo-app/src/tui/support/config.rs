@@ -7,7 +7,7 @@ use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -67,6 +67,8 @@ pub struct Config {
 pub struct TuiConfig {
     #[serde(default)]
     pub remote: Option<RemoteConfig>,
+    #[serde(default)]
+    pub agent_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -256,7 +258,34 @@ impl Config {
     }
 
     pub fn agent_role_ids(&self) -> Vec<String> {
-        self.agent.keys().cloned().collect()
+        let mut ordered = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for configured_role_id in &self.tui.agent_order {
+            let configured_role_id = configured_role_id.trim();
+            if configured_role_id.is_empty() {
+                continue;
+            }
+
+            if let Some(role_id) = self
+                .agent
+                .keys()
+                .find(|role_id| role_id.eq_ignore_ascii_case(configured_role_id))
+                .cloned()
+            {
+                if seen.insert(role_id.clone()) {
+                    ordered.push(role_id);
+                }
+            }
+        }
+
+        for role_id in self.agent.keys() {
+            if seen.insert(role_id.clone()) {
+                ordered.push(role_id.clone());
+            }
+        }
+
+        ordered
     }
 
     pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
@@ -589,6 +618,27 @@ file_edit = false
         assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
+    }
+
+    #[test]
+    fn agent_role_ids_follow_tui_agent_order() {
+        let mut config = Config::default();
+        for role_id in ["baize", "dayu", "fuxi", "kuafu", "xuanyuan"] {
+            config
+                .agent
+                .insert(role_id.to_string(), super::AgentRoleConfig::default());
+        }
+        config.tui.agent_order = vec![
+            "xuanyuan".to_string(),
+            "FUXI".to_string(),
+            "missing".to_string(),
+            "xuanyuan".to_string(),
+        ];
+
+        assert_eq!(
+            config.agent_role_ids(),
+            vec!["xuanyuan", "fuxi", "baize", "dayu", "kuafu"]
+        );
     }
 
     #[test]
