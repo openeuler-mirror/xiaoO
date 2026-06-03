@@ -10,10 +10,10 @@
 use crate::key_provider::{KeyMaterial, KeyProvider, KeyProviderError};
 use async_trait::async_trait;
 
-/// 密钥碎片常量
-///
-/// ⚠️ 警告: 当前设为全零，仅适用于测试环境
-/// 生产环境请使用 SDF 国密或 HSM 方案
+// 密钥碎片常量
+//
+// 警告: 当前设为全零，仅适用于测试环境。
+// 生产环境请使用 SDF 国密或 HSM 方案。
 
 /// 碎片 A: 位置 0-7
 const FRAG_A: [u8; 8] = [0u8; 8];
@@ -145,7 +145,7 @@ impl WhiteBoxKeyProvider {
 
     #[inline(always)]
     fn rotate_left(value: u8, n: u8) -> u8 {
-        (value << n) | (value >> (8 - n))
+        value.rotate_left(n.into())
     }
 
     fn final_diffusion(key: &mut [u8; 32]) {
@@ -163,7 +163,7 @@ impl WhiteBoxKeyProvider {
         }
     }
 
-    fn verify_key(key: &[u8; 32]) -> Result<(), KeyProviderError> {
+    fn verify_key(_key: &[u8; 32]) -> Result<(), KeyProviderError> {
         // ⚠️ 警告: 当前实现允许 NULL 密钥 (全零)
         // 仅适用于测试环境
         // 生产环境应验证密钥有效性
