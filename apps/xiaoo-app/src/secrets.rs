@@ -37,7 +37,7 @@ impl KeyProviderFactory {
                 Ok(Arc::new(WhiteBoxKeyProvider::new(name)))
             }
             KeyProviderConfig::Tee { name, tee_type, slot } => {
-                let tee_type = TeeType::from_str(tee_type);
+                let tee_type = TeeType::from(tee_type.as_str());
                 let provider = TeeKeyProvider::new(name, tee_type);
                 let provider = if let Some(slot) = slot {
                     provider.with_slot(slot)
