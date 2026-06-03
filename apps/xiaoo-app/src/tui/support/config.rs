@@ -418,15 +418,21 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
         Err(_) => return Ok(()),
     };
 
-    if !config.vault.enabled {
+    let secrets_path = xiaoo_app::llm_secrets::llm_secrets_path(config_path);
+    let file_existed_before = secrets_path.exists();
+
+    if !should_initialize_secret_provider(&config, file_existed_before) {
         tracing::debug!("vault.enabled=false, skipping secrets loading");
         return Ok(());
     }
 
-    let secrets_path = xiaoo_app::llm_secrets::llm_secrets_path(config_path);
-    let file_existed_before = secrets_path.exists();
-
-    xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
+    if config.vault.enabled {
+        xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
+    } else {
+        tracing::info!(
+            "existing llm_secrets.json found while vault.enabled=false; initializing secret provider"
+        );
+    }
 
     crate::gateway::init_secret_provider(secrets_path.clone(), config.vault.use_sdf);
     tracing::info!(
@@ -443,6 +449,10 @@ pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn should_initialize_secret_provider(config: &Config, secrets_file_exists: bool) -> bool {
+    config.vault.enabled || secrets_file_exists
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
@@ -564,6 +574,22 @@ mod tests {
         config.llm.provider = "anthropic".to_string();
 
         assert_eq!(resolve_context_window(&config), Some(200_000));
+    }
+
+    #[test]
+    fn secret_provider_initializes_when_existing_secrets_file_is_present() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(super::should_initialize_secret_provider(&config, true));
+    }
+
+    #[test]
+    fn secret_provider_skips_when_vault_disabled_and_no_secrets_file_exists() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(!super::should_initialize_secret_provider(&config, false));
     }
 
     #[test]

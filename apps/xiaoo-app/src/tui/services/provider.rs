@@ -92,11 +92,32 @@ pub fn persist_active_provider_selection(
     api_key_env: Option<String>,
     api_base: String,
 ) {
+    persist_active_provider_selection_internal(
+        state,
+        provider,
+        model,
+        api_key_env,
+        api_base,
+        false,
+    );
+}
+
+fn persist_active_provider_selection_internal(
+    state: &mut AppState,
+    provider: String,
+    model: String,
+    api_key_env: Option<String>,
+    api_base: String,
+    enable_vault_storage: bool,
+) {
     let mut cfg = Config::load_from(&state.config_path).unwrap_or_default();
     cfg.llm.provider = provider.clone();
     cfg.llm.model = model.clone();
     cfg.llm.api_key_env = api_key_env.clone();
     cfg.llm.api_base = api_base.clone();
+    if enable_vault_storage {
+        cfg.vault.enabled = true;
+    }
     if let Err(error) = cfg.save_to(&state.config_path) {
         tracing::warn!("Failed to save config: {}", error);
     }
@@ -105,6 +126,9 @@ pub fn persist_active_provider_selection(
     state.agent_config.llm.model = model.clone();
     state.agent_config.llm.api_key_env = api_key_env;
     state.agent_config.llm.api_base = api_base;
+    if enable_vault_storage {
+        state.agent_config.vault.enabled = true;
+    }
 
     state.status_panel.set_provider(&provider, &model);
 }
@@ -123,7 +147,14 @@ pub fn validate_and_connect_api_key(
         tracing::warn!("Failed to save API key: {}", error);
     }
 
-    persist_active_provider_selection(state, provider, model, Some(env_var), api_base);
+    persist_active_provider_selection_internal(
+        state,
+        provider,
+        model,
+        Some(env_var),
+        api_base,
+        true,
+    );
     Ok(())
 }
 
@@ -226,6 +257,25 @@ mod tests {
         assert_eq!(saved.llm.model, "gpt-4o");
         assert_eq!(saved.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(saved.llm.api_base, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn validate_and_connect_api_key_enables_vault_storage() {
+        let (_temp_dir, mut state) = temp_state();
+        let config_path = state.config_path.clone();
+
+        validate_and_connect_api_key(
+            &mut state,
+            "openai".to_string(),
+            "gpt-4o".to_string(),
+            "test-api-key",
+        )
+        .expect("connect should persist API key");
+
+        let saved = Config::load_from(&config_path).expect("load saved config");
+        assert!(saved.vault.enabled);
+        assert_eq!(saved.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+        assert!(xiaoo_app::llm_secrets::llm_secrets_path(&config_path).exists());
     }
 
     #[test]
