@@ -72,7 +72,7 @@ fn sanitize_terminal_text_for_mode(text: &str, ascii_mode: bool) -> String {
             '⭕' => output.push('o'),
             '◔' => output.push_str("[-]"),
             '•' => output.push('*'),
-            '●' => output.push('o'),
+            '●' | '○' => output.push('o'),
             '✅' => output.push_str("[x]"),
             '✓' => output.push('x'),
             '☐' | '□' => output.push_str("[ ]"),
