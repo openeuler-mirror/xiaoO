@@ -87,25 +87,33 @@ impl App {
             height: 1,
         });
 
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
-        let (status_light_color, status_label, status_label_style) =
+        let now = chrono::Local::now();
+        let now_text = now.format("%H:%M:%S").to_string();
+        let (status_light_symbol, status_light_style, status_label, status_label_style) =
             match self.state.runtime_status_light() {
-                RuntimeStatusLight::Running => (
-                    self.state.theme.success,
-                    "RUN",
-                    Style::default()
-                        .fg(self.state.theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                RuntimeStatusLight::Running => {
+                    let (symbol, light_style) =
+                        running_status_light(now.timestamp_millis(), self.state.theme.success);
+                    (
+                        symbol,
+                        light_style,
+                        "RUN",
+                        Style::default()
+                            .fg(self.state.theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
                 RuntimeStatusLight::AwaitingInteraction => (
-                    self.state.theme.gradient_yellow,
+                    "●",
+                    Style::default().fg(self.state.theme.gradient_yellow),
                     "ASK",
                     Style::default()
                         .fg(self.state.theme.gradient_yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
                 RuntimeStatusLight::Idle => (
-                    self.state.theme.foreground,
+                    "●",
+                    Style::default().fg(self.state.theme.foreground),
                     "IDLE",
                     Style::default()
                         .fg(self.state.theme.foreground)
@@ -114,11 +122,11 @@ impl App {
             };
         let status = Paragraph::new(Line::from(vec![
             Span::styled(
-                sanitize_terminal_text("● "),
-                Style::default().fg(status_light_color),
+                sanitize_terminal_text(&format!("{status_light_symbol} ")),
+                status_light_style,
             ),
             Span::styled(format!("{status_label} "), status_label_style),
-            Span::styled(now, Style::default().fg(self.state.theme.muted)),
+            Span::styled(now_text, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);
         frame.render_widget(status, inner_chunks[3]);
@@ -229,5 +237,34 @@ fn reasoning_effort_color(effort: ReasoningEffort) -> Color {
         ReasoningEffort::Off => Color::Gray,
         ReasoningEffort::High => Color::Yellow,
         ReasoningEffort::Max => Color::Red,
+    }
+}
+
+fn running_status_light(now_millis: i64, color: Color) -> (&'static str, Style) {
+    let bright = now_millis.rem_euclid(1_200) < 650;
+    let symbol = if bright { "●" } else { "○" };
+    let modifier = if bright {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+    (symbol, Style::default().fg(color).add_modifier(modifier))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::{Color, Modifier};
+
+    use super::running_status_light;
+
+    #[test]
+    fn running_status_light_blinks_at_human_scale() {
+        let (bright_symbol, bright_style) = running_status_light(0, Color::Green);
+        let (dim_symbol, dim_style) = running_status_light(700, Color::Green);
+
+        assert_eq!(bright_symbol, "●");
+        assert!(bright_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(dim_symbol, "○");
+        assert!(!dim_style.add_modifier.contains(Modifier::BOLD));
     }
 }
