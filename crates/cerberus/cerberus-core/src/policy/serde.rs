@@ -76,6 +76,13 @@ impl Policy {
             "file_access_audit = {}    # true = collect openat events, false = disabled\n\n",
             self.file_access_audit
         ));
+        output.push_str("# Collect network access events via eBPF for each execution.\n");
+        output.push_str("# Independent of network_policy; with a policy the records carry the\n");
+        output.push_str("# enforcement verdict, otherwise they are pure observations.\n");
+        output.push_str(&format!(
+            "network_audit = {}    # true = collect connection events, false = disabled\n\n",
+            self.network_audit
+        ));
 
         output.push_str("# Custom Filesystem Rules\n");
         output.push_str("# Add paths beyond the predefined groups above.\n");

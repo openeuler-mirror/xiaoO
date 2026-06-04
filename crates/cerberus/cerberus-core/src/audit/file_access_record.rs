@@ -1,9 +1,9 @@
 //! Serializable file access audit records collected during execution.
 
+use super::ebpf_types::system_time_to_nanos;
 use super::{FileAccessEvent, FileAccessResult, FileOperation};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A single file access event collected during one Cerberus execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,14 +65,6 @@ impl From<FileAccessResult> for FileAccessOutcome {
     }
 }
 
-fn system_time_to_nanos(timestamp: SystemTime) -> u64 {
-    timestamp
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos()
-        .min(u64::MAX as u128) as u64
-}
-
 /// In-memory collector for file access events during one execution.
 #[derive(Debug, Default)]
 pub struct FileAccessCollector {
@@ -117,6 +109,7 @@ impl FileAccessCollector {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn converts_file_access_event_to_record() {

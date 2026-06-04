@@ -75,6 +75,7 @@ pub(in crate::execute) fn execute_process_linux(
         let config = EbpfAuditSessionConfig {
             network_policy,
             file_access_audit: policy.file_access_audit,
+            network_audit: policy.network_audit,
         };
 
         if config.is_enabled() {
@@ -276,7 +277,9 @@ fn finish_exec_result(
     ebpf_session: Option<crate::sandbox::ebpf::EbpfAuditSession>,
 ) -> ExecResult {
     if let Some(session) = ebpf_session {
-        result.file_accesses = session.finish();
+        let output = session.finish();
+        result.file_accesses = output.file_accesses;
+        result.network_accesses = output.network_accesses;
     }
     result
 }

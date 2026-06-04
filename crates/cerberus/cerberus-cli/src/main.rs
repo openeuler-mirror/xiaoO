@@ -10,7 +10,7 @@ use cerberus_cli::profiles::{
     resolve_policy_file, PolicySource, BUILTIN_PROFILE_WORKSPACE_WRITE_NETWORK_ON_DEV_ENV,
 };
 use cerberus_core::sandbox::{check_strict_policy_enforceable, detect_capabilities};
-use cerberus_core::{execute, ExecRequest, FileAccessRecord, FsPermission, FsRule, Policy};
+use cerberus_core::{execute, ExecRequest, FsPermission, FsRule, Policy};
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -143,52 +143,66 @@ fn exec_command(args: Vec<String>, policy: &Policy) -> Result<(), CliError> {
 
     print!("{}", render_result(&result));
 
-    emit_file_access_audit(&cmd_str, &result.file_accesses)?;
+    emit_audit(
+        "file_access_audit",
+        "CERBERUS_FILE_ACCESS_AUDIT_PATH",
+        &cmd_str,
+        &result.file_accesses,
+    )?;
+    emit_audit(
+        "network_audit",
+        "CERBERUS_NETWORK_AUDIT_PATH",
+        &cmd_str,
+        &result.network_accesses,
+    )?;
 
     std::process::exit(result.exit_code);
 }
 
-/// Surface the file-access audit collected for one invocation.
+/// Surface one eBPF audit stream (file access or network) collected for an
+/// invocation.
 ///
 /// Channel selection (the reason this is gated on an env var):
 /// a wrapping agent (e.g. xiaoO) captures the sandboxed command's stderr and
 /// feeds it back to its model. Dumping the full audit to stderr poisons the
 /// agent's context for broad commands (e.g. `find /` touching thousands of
 /// files), which can blow the context window and crash the run. So:
-/// - sidecar configured (`CERBERUS_FILE_ACCESS_AUDIT_PATH`): that file is the
-///   *sole* audit channel (one JSONL record per invocation); stderr gets only a
-///   one-line summary.
-/// - no sidecar: keep the legacy human-facing stderr dump for interactive use.
-fn emit_file_access_audit(
+/// - sidecar configured (`sidecar_env`): that file is the *sole* audit channel
+///   (one JSONL record per invocation); stderr gets only a one-line summary.
+/// - no sidecar: keep the human-facing stderr dump for interactive use.
+fn emit_audit<T: serde::Serialize>(
+    label: &str,
+    sidecar_env: &str,
     cmd_str: &str,
-    file_accesses: &[FileAccessRecord],
+    records: &[T],
 ) -> Result<(), CliError> {
-    if file_accesses.is_empty() {
+    if records.is_empty() {
         return Ok(());
     }
 
-    let Some(audit_path) = std::env::var_os("CERBERUS_FILE_ACCESS_AUDIT_PATH") else {
-        let json = serde_json::to_string_pretty(file_accesses).map_err(|error| {
-            CliError::ConfigError(format!("Failed to serialize file access audit: {}", error))
+    let Some(audit_path) = std::env::var_os(sidecar_env) else {
+        let json = serde_json::to_string_pretty(records).map_err(|error| {
+            CliError::ConfigError(format!("Failed to serialize {}: {}", label, error))
         })?;
-        eprintln!("\n--- file_access_audit ---\n{}\n", json);
+        eprintln!("\n--- {} ---\n{}\n", label, json);
         return Ok(());
     };
 
     let record = serde_json::json!({
         "command": cmd_str,
-        "events": file_accesses,
+        "events": records,
     });
     match append_audit_record(&audit_path, &record) {
         Ok(()) => eprintln!(
-            "[cerberus] file_access_audit: {} event(s) -> {}",
-            file_accesses.len(),
+            "[cerberus] {}: {} event(s) -> {}",
+            label,
+            records.len(),
             std::path::Path::new(&audit_path).display()
         ),
         // Never fail the command because audit persistence failed; the
         // sandboxed result is authoritative.
         Err(error) => {
-            eprintln!("Warning: failed to write file access audit file: {}", error)
+            eprintln!("Warning: failed to write {} file: {}", label, error)
         }
     }
     Ok(())
@@ -314,6 +328,7 @@ fn handle_profile(command: &ProfileCommands) -> Result<(), CliError> {
                 policy.mount_isolation_fallback
             );
             println!("  file_access_audit:         {}", policy.file_access_audit);
+            println!("  network_audit:             {}", policy.network_audit);
 
             println!();
             println!("Namespaces:");

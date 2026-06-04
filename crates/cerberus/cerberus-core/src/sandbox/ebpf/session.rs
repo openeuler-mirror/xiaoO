@@ -1,6 +1,9 @@
 //! Unified eBPF audit session for network enforcement and file access collection.
 
-use crate::audit::{EbpfAuditEvent, FileAccessCollector, FileAccessRecord};
+use crate::audit::{
+    EbpfAuditEvent, FileAccessCollector, FileAccessRecord, NetworkAccessCollector,
+    NetworkAccessRecord,
+};
 use crate::network::{NetworkEnforcer, NetworkPolicyMatcher};
 use crate::policy::NetworkPolicy;
 use bytes::BytesMut;
@@ -31,11 +34,13 @@ const DRAIN_MAX_WAIT_MS: u64 = 2000;
 pub struct EbpfAuditSessionConfig {
     pub network_policy: Option<NetworkPolicy>,
     pub file_access_audit: bool,
+    pub network_audit: bool,
 }
 
 impl EbpfAuditSessionConfig {
     pub fn is_enabled(&self) -> bool {
         self.file_access_audit
+            || self.network_audit
             || self
                 .network_policy
                 .as_ref()
@@ -44,11 +49,21 @@ impl EbpfAuditSessionConfig {
     }
 }
 
+/// Audit records collected over one execution-scoped eBPF session.
+#[derive(Debug, Default, Clone)]
+pub struct EbpfAuditOutput {
+    /// File access events, populated when `file_access_audit` is enabled.
+    pub file_accesses: Vec<FileAccessRecord>,
+    /// Network access events, populated when a network policy is active.
+    pub network_accesses: Vec<NetworkAccessRecord>,
+}
+
 /// Handle for one execution-scoped eBPF audit session.
 pub struct EbpfAuditSession {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     file_access_collector: Option<Arc<FileAccessCollector>>,
+    network_access_collector: Option<Arc<NetworkAccessCollector>>,
 }
 
 impl EbpfAuditSession {
@@ -71,10 +86,22 @@ impl EbpfAuditSession {
             None
         };
 
+        // Network auditing is an independent switch: records are collected iff
+        // `network_audit` is set, whether or not a policy/enforcer is active.
+        let network_access_collector = if config.network_audit {
+            Some(NetworkAccessCollector::new())
+        } else {
+            None
+        };
+
         let (init_tx, init_rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let collector_for_thread = file_access_collector.clone();
+        let sinks = EventSinks {
+            network_enforcer,
+            network_collector: network_access_collector.clone(),
+            file_collector: file_access_collector.clone(),
+        };
         let shutdown_for_thread = shutdown.clone();
         // A dedicated synchronous polling thread drains every per-CPU perf ring
         // buffer. We deliberately avoid an async runtime here: the perf fds do
@@ -83,12 +110,7 @@ impl EbpfAuditSession {
         // starved, dropping events. A tight synchronous poll loop on its own
         // thread is robust and simple.
         let thread = thread::spawn(move || {
-            run_poll_loop(
-                init_tx,
-                shutdown_for_thread,
-                network_enforcer,
-                collector_for_thread,
-            );
+            run_poll_loop(init_tx, shutdown_for_thread, sinks);
         });
 
         init_rx.recv().map_err(|error| {
@@ -102,14 +124,21 @@ impl EbpfAuditSession {
             shutdown,
             thread: Some(thread),
             file_access_collector,
+            network_access_collector,
         })
     }
 
-    pub fn finish(mut self) -> Vec<FileAccessRecord> {
+    pub fn finish(mut self) -> EbpfAuditOutput {
         // Let the reader drain the ring buffers before we tear the session
-        // down (see wait_for_drain for the quiescence rationale).
-        if let Some(collector) = self.file_access_collector.as_deref() {
-            wait_for_drain(collector);
+        // down (see wait_for_drain for the quiescence rationale). Quiescence is
+        // measured across all active collectors so neither stream is cut short.
+        let file_collector = self.file_access_collector.clone();
+        let network_collector = self.network_access_collector.clone();
+        if file_collector.is_some() || network_collector.is_some() {
+            wait_for_drain(|| {
+                file_collector.as_ref().map(|c| c.len()).unwrap_or(0)
+                    + network_collector.as_ref().map(|c| c.len()).unwrap_or(0)
+            });
         }
 
         self.shutdown.store(true, Ordering::SeqCst);
@@ -117,41 +146,50 @@ impl EbpfAuditSession {
             let _ = handle.join();
         }
 
-        let records = self
-            .file_access_collector
-            .as_ref()
-            .map(|collector| collector.take())
-            .unwrap_or_default();
+        let output = EbpfAuditOutput {
+            file_accesses: self
+                .file_access_collector
+                .as_ref()
+                .map(|collector| collector.take())
+                .unwrap_or_default(),
+            network_accesses: self
+                .network_access_collector
+                .as_ref()
+                .map(|collector| collector.take())
+                .unwrap_or_default(),
+        };
 
         if std::env::var_os("CERBERUS_EBPF_DEBUG").is_some() {
             eprintln!(
-                "[ebpf-debug] session.finish collected {} file-access records",
-                records.len()
+                "[ebpf-debug] session.finish collected {} file-access, {} network records",
+                output.file_accesses.len(),
+                output.network_accesses.len()
             );
         }
 
-        records
+        output
     }
 }
 
-/// Wait for the perf-buffer reader to finish draining into `collector`.
+/// Wait for the perf-buffer reader to finish draining into the collectors.
 ///
 /// The audited command has already exited by the time this runs, so all of its
 /// events are sitting in the kernel ring buffers. Rather than a fixed sleep we
 /// wait until the collected count stops growing (quiescence), bounded by
 /// `DRAIN_MAX_WAIT_MS`, with a `DRAIN_MIN_WAIT_MS` floor so we don't bail out
 /// during the initial window before the reader has scheduled its first poll
-/// (collector still empty).
-fn wait_for_drain(collector: &FileAccessCollector) {
+/// (collectors still empty). `pending` returns the combined record count across
+/// every active collector.
+fn wait_for_drain(pending: impl Fn() -> usize) {
     let poll = std::time::Duration::from_millis(DRAIN_POLL_MS);
     let min_wait = std::time::Duration::from_millis(DRAIN_MIN_WAIT_MS);
     let max_wait = std::time::Duration::from_millis(DRAIN_MAX_WAIT_MS);
     let start = std::time::Instant::now();
-    let mut last_len = collector.len();
+    let mut last_len = pending();
     let mut stable_rounds = 0u32;
     loop {
         std::thread::sleep(poll);
-        let len = collector.len();
+        let len = pending();
         if len == last_len {
             stable_rounds += 1;
         } else {
@@ -180,8 +218,7 @@ fn ebpf_init_error(error: impl std::fmt::Display) -> String {
 fn run_poll_loop(
     init_tx: mpsc::Sender<Result<(), String>>,
     shutdown: Arc<AtomicBool>,
-    network_enforcer: Option<NetworkEnforcer>,
-    collector: Option<Arc<FileAccessCollector>>,
+    sinks: EventSinks,
 ) {
     use crate::ebpf::EbpfLoader;
 
@@ -216,32 +253,19 @@ fn run_poll_loop(
         .take(READ_BATCH)
         .collect();
 
+    let mut drain = || drain_once(&mut bufs, &mut scratch, &sinks);
+
     let mut total = 0usize;
     loop {
-        let drained = drain_once(
-            &mut bufs,
-            &mut scratch,
-            network_enforcer.as_ref(),
-            collector.as_deref(),
-        );
+        let drained = drain();
         total += drained;
 
         if shutdown.load(Ordering::SeqCst) {
             // Final drain pass to flush anything still buffered.
-            let mut extra = drain_once(
-                &mut bufs,
-                &mut scratch,
-                network_enforcer.as_ref(),
-                collector.as_deref(),
-            );
+            let mut extra = drain();
             while extra > 0 {
                 total += extra;
-                extra = drain_once(
-                    &mut bufs,
-                    &mut scratch,
-                    network_enforcer.as_ref(),
-                    collector.as_deref(),
-                );
+                extra = drain();
             }
             break;
         }
@@ -261,8 +285,7 @@ fn run_poll_loop(
 fn drain_once(
     bufs: &mut [aya::maps::perf::PerfEventArrayBuffer<aya::maps::MapData>],
     scratch: &mut [BytesMut],
-    network_enforcer: Option<&NetworkEnforcer>,
-    collector: Option<&FileAccessCollector>,
+    sinks: &EventSinks,
 ) -> usize {
     use crate::ebpf::EbpfLoader;
 
@@ -281,7 +304,7 @@ fn drain_once(
             }
             for raw in scratch.iter_mut().take(events.read) {
                 if let Some(event) = EbpfLoader::decode_event(raw) {
-                    dispatch_event(&event, network_enforcer, collector);
+                    sinks.dispatch(&event);
                     dispatched += 1;
                 }
             }
@@ -293,23 +316,43 @@ fn drain_once(
     dispatched
 }
 
-fn dispatch_event(
-    event: &EbpfAuditEvent,
-    network_enforcer: Option<&NetworkEnforcer>,
-    file_access_collector: Option<&FileAccessCollector>,
-) {
-    match event {
-        EbpfAuditEvent::Network(net_event) => {
-            if let Some(enforcer) = network_enforcer {
-                let result = enforcer.process(net_event, net_event.pid);
-                let _ = NetworkEnforcer::to_audit_result(&result);
+/// Per-execution destinations for decoded kernel events.
+///
+/// Bundles the network enforcer (which also performs enforcement as a side
+/// effect of processing) with the optional audit collectors, so the poll/drain
+/// path threads a single value instead of several parallel `Option`s. Each
+/// sink is independent: enforcement and either audit stream can be on or off in
+/// any combination.
+struct EventSinks {
+    network_enforcer: Option<NetworkEnforcer>,
+    network_collector: Option<Arc<NetworkAccessCollector>>,
+    file_collector: Option<Arc<FileAccessCollector>>,
+}
+
+impl EventSinks {
+    fn dispatch(&self, event: &EbpfAuditEvent) {
+        match event {
+            EbpfAuditEvent::Network(net_event) => {
+                // Enforcement (kill in enforce mode) happens inside process();
+                // its mapped verdict is the authoritative audit outcome. Without
+                // an enforcer we record the kernel-observed result as-is.
+                let outcome = match self.network_enforcer.as_ref() {
+                    Some(enforcer) => {
+                        let result = enforcer.process(net_event, net_event.pid);
+                        NetworkEnforcer::to_audit_result(&result)
+                    }
+                    None => net_event.result,
+                };
+                if let Some(collector) = self.network_collector.as_deref() {
+                    collector.record(net_event, outcome);
+                }
             }
-        }
-        EbpfAuditEvent::FileAccess(file_event) => {
-            if let Some(collector) = file_access_collector {
-                collector.record(file_event.clone());
+            EbpfAuditEvent::FileAccess(file_event) => {
+                if let Some(collector) = self.file_collector.as_deref() {
+                    collector.record(file_event.clone());
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }

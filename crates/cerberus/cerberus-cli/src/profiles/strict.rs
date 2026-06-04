@@ -21,6 +21,7 @@ pub fn create() -> Policy {
         mount_isolation_fallback: false,
         seccomp_optional: false,
         file_access_audit: false,
+        network_audit: false,
     }
 }
 

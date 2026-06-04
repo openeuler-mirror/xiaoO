@@ -51,6 +51,7 @@
 mod context;
 mod ebpf_types;
 mod file_access_record;
+mod network_access_record;
 mod observer;
 mod sink;
 
@@ -66,6 +67,9 @@ pub use ebpf_types::{
 };
 pub use file_access_record::{
     FileAccessCollector, FileAccessOperation, FileAccessOutcome, FileAccessRecord,
+};
+pub use network_access_record::{
+    NetworkAccessCollector, NetworkAccessDirection, NetworkAccessOutcome, NetworkAccessRecord,
 };
 pub use observer::{
     CompositeObserver, ExecObserver, ExecutionMetrics, LoggingObserver, MetricsObserver,

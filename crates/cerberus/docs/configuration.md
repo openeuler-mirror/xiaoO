@@ -84,6 +84,7 @@ permission = "readwrite"
 | `mount_isolation_fallback` | `bool` | `false` | Landlock 不可用时，是否允许退化到 mount 隔离 |
 | `seccomp_optional` | `bool` | `false` | seccomp 不可用时（如模拟/跨架构容器），是否把失败降级为告警而继续执行，而不是中止 |
 | `file_access_audit` | `bool` | `false` | 是否为本次执行采集文件访问事件（openat 等）。需启用 `ebpf` feature 且运行在 Linux 上；事件随 `ExecResult.file_accesses` 返回 |
+| `network_audit` | `bool` | `false` | 是否为本次执行采集网络连接事件。需启用 `ebpf` feature 且运行在 Linux 上；独立于 `network_policy`：配了策略则记录带裁决，否则为纯观测。事件随 `ExecResult.network_accesses` 返回 |
 | `path_groups` | table | 全部为 `false` | 预定义文件系统访问组 |
 | `custom_paths` | array<table> | 空数组 | 自定义文件系统路径规则 |
 | `namespaces` | table | 全部为 `true` | Linux namespace 隔离开关 |
@@ -371,6 +372,38 @@ ports = [[80, 80], [443, 443]]
 - 开了 `ebpf` 时，它才进入真实的 host / CIDR / port 匹配与 monitor / enforce 流程
 
 如果你在默认构建里看到 `network_policy` 被拒绝，不是“文档保守”，而是当前 build 本身就没有打开那条 backend。
+
+### 网络访问审计输出
+
+启用 `ebpf` feature 并把 `network_audit = true` 时，Cerberus 会在执行期间收集每个网络连接事件，随 `ExecResult.network_accesses` 返回（与 `file_access_audit` 的 `ExecResult.file_accesses` 是两条独立的 list）。`network_audit` 是独立开关，与 `network_policy` 解耦：
+
+- **配了 `network_policy`**：记录里带上**策略裁决结果**（`allowed` / `denied_by_policy` / `monitored`）。`monitor` 模式下连接照常放行但仍被记录，因此 `mode = "monitor"` + `network_audit = true` 就是“带裁决的纯审计”。
+- **没配 `network_policy`**：记录的是内核观察到的原始结果，纯观测、不做任何 enforcement。
+
+单条记录（`NetworkAccessRecord`）形如：
+
+```json
+{
+  "direction": "outbound",
+  "protocol": "tcp",
+  "address": "8.8.8.8",
+  "port": 443,
+  "result": "allowed",
+  "pid": 41234,
+  "timestamp_nanos": 1717000000000000000
+}
+```
+
+- `direction`：`outbound` / `inbound`
+- `protocol`：`tcp` / `udp` / `other(<n>)`
+- `result`：`allowed` / `denied_by_policy` / `monitored`（配了 `network_policy` 时是**策略 enforcement** 的裁决；未配时是内核观察到的原始结果）
+
+CLI 输出通道与 file access 对称，由环境变量 `CERBERUS_NETWORK_AUDIT_PATH` 决定：
+
+- **已设置**（推荐）：每次调用以一行 JSONL 追加到该 sidecar 文件，stderr 只留一行摘要。
+- **未设置**：完整审计以 JSON 打印到 stderr，仅适合交互式调试。
+
+> `file_access_audit` 与 `network_audit` 是两个互相独立的开关，可任意组合开启，各自产出一条 list / 一个 sidecar 文件；网络审计是否带策略裁决，取决于是否另外配了 `network_policy`。
 
 ---
 

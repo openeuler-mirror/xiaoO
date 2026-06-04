@@ -47,6 +47,13 @@ pub struct Policy {
     /// Whether to collect file access events via eBPF for this execution.
     #[serde(default)]
     pub file_access_audit: bool,
+    /// Whether to collect network access events via eBPF for this execution.
+    ///
+    /// Independent of `network_policy`: with a policy active the records carry
+    /// the enforcement verdict; without one they are pure observations. Set
+    /// alongside a `monitor`-mode policy for audit without blocking.
+    #[serde(default)]
+    pub network_audit: bool,
 }
 
 impl Policy {
@@ -74,6 +81,7 @@ impl Policy {
             mount_isolation_fallback: false,
             seccomp_optional: false,
             file_access_audit: false,
+            network_audit: false,
         }
     }
 
@@ -93,6 +101,7 @@ impl Policy {
             mount_isolation_fallback: false,
             seccomp_optional: false,
             file_access_audit: false,
+            network_audit: false,
         }
     }
 
@@ -112,6 +121,7 @@ impl Policy {
             mount_isolation_fallback: false,
             seccomp_optional: false,
             file_access_audit: false,
+            network_audit: false,
         }
     }
 

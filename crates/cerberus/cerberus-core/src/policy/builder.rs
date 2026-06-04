@@ -26,6 +26,7 @@ pub struct PolicyBuilder {
     mount_isolation_fallback: bool,
     seccomp_optional: bool,
     file_access_audit: bool,
+    network_audit: bool,
 }
 
 impl PolicyBuilder {
@@ -42,6 +43,7 @@ impl PolicyBuilder {
             mount_isolation_fallback: false,
             seccomp_optional: false,
             file_access_audit: false,
+            network_audit: false,
         }
     }
 
@@ -75,6 +77,7 @@ impl PolicyBuilder {
             mount_isolation_fallback: policy.mount_isolation_fallback,
             seccomp_optional: policy.seccomp_optional,
             file_access_audit: policy.file_access_audit,
+            network_audit: policy.network_audit,
         }
     }
 
@@ -186,6 +189,12 @@ impl PolicyBuilder {
         self
     }
 
+    /// Enable collecting network access events via eBPF for each execution.
+    pub fn network_audit(mut self, enabled: bool) -> Self {
+        self.network_audit = enabled;
+        self
+    }
+
     /// Set the network policy.
     pub fn network_policy(mut self, policy: NetworkPolicy) -> Self {
         self.network_policy = Some(policy);
@@ -205,6 +214,7 @@ impl PolicyBuilder {
             mount_isolation_fallback: self.mount_isolation_fallback,
             seccomp_optional: self.seccomp_optional,
             file_access_audit: self.file_access_audit,
+            network_audit: self.network_audit,
         }
     }
 }

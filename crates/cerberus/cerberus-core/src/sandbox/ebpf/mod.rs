@@ -2,4 +2,4 @@
 
 mod session;
 
-pub use session::{EbpfAuditSession, EbpfAuditSessionConfig};
+pub use session::{EbpfAuditOutput, EbpfAuditSession, EbpfAuditSessionConfig};
