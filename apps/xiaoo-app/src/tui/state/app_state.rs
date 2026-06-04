@@ -4,7 +4,6 @@ use ratatui::{layout::Rect, text::Line};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
@@ -209,6 +208,7 @@ pub struct AppState {
     pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
     pub tool_file_changes: HashMap<String, crate::chat::FileChangeDelta>,
     tool_file_baselines: HashMap<String, ToolFileBaseline>,
+    session_file_content_baselines: HashMap<String, Option<String>>,
 }
 
 impl AppState {
@@ -244,6 +244,7 @@ impl AppState {
             session_file_changes: BTreeMap::new(),
             tool_file_changes: HashMap::new(),
             tool_file_baselines: HashMap::new(),
+            session_file_content_baselines: HashMap::new(),
         })
     }
 
@@ -282,6 +283,7 @@ impl AppState {
             session_file_changes: BTreeMap::new(),
             tool_file_changes: HashMap::new(),
             tool_file_baselines: HashMap::new(),
+            session_file_content_baselines: HashMap::new(),
         })
     }
 
@@ -310,6 +312,7 @@ impl AppState {
         self.session_file_changes.clear();
         self.tool_file_changes.clear();
         self.tool_file_baselines.clear();
+        self.session_file_content_baselines.clear();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -364,6 +367,10 @@ impl AppState {
             return;
         };
         let absolute_path = resolve_workspace_file_path(&self.workspace, &file_path);
+        let current_content = read_file_if_exists(&absolute_path);
+        self.session_file_content_baselines
+            .entry(file_path.clone())
+            .or_insert_with(|| current_content.clone());
         self.tool_file_baselines.insert(
             call_id.to_string(),
             ToolFileBaseline {
@@ -385,11 +392,21 @@ impl AppState {
             return;
         };
 
-        let computed = current_git_diff_delta_for_file(
-            &self.workspace,
-            &baseline.file_path,
-            &baseline.absolute_path,
-        );
+        let current_content = read_file_if_exists(&baseline.absolute_path);
+        let computed = self
+            .session_file_content_baselines
+            .get(&baseline.file_path)
+            .and_then(|initial_content| {
+                if initial_content.is_none() && current_content.is_none() {
+                    None
+                } else {
+                    Some(file_content_delta(
+                        &baseline.file_path,
+                        initial_content.as_deref(),
+                        current_content.as_deref(),
+                    ))
+                }
+            });
         if let Some(delta) = computed.or(fallback) {
             self.session_file_changes.insert(
                 delta.file_path.clone(),
@@ -727,6 +744,36 @@ fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String>
     }
 }
 
+pub(crate) fn file_change_delta_from_tool_args(
+    tool: &str,
+    args_preview: &str,
+) -> Option<crate::chat::FileChangeDelta> {
+    let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
+    let file_path = value.get("file_path")?.as_str()?.to_string();
+    let (additions, deletions) = match tool {
+        "file_edit" => {
+            let old_string = value.get("old_string")?.as_str()?;
+            let new_string = value.get("new_string")?.as_str()?;
+            line_change_counts(old_string, new_string)
+        }
+        "file_write" => {
+            let content = value.get("content")?.as_str()?;
+            (text_line_count(content), 0)
+        }
+        _ => return None,
+    };
+
+    if additions == 0 && deletions == 0 {
+        return None;
+    }
+
+    Some(crate::chat::FileChangeDelta {
+        file_path,
+        additions,
+        deletions,
+    })
+}
+
 fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
     if path.is_absolute() {
@@ -744,105 +791,97 @@ fn read_file_if_exists(path: &Path) -> Option<String> {
     }
 }
 
-fn current_git_diff_delta_for_file(
-    workspace: &Path,
+fn file_content_delta(
     file_path: &str,
-    absolute_path: &Path,
-) -> Option<crate::chat::FileChangeDelta> {
-    let repo_root = git_repo_root(workspace)?;
-    let normalized_path = absolute_path
-        .canonicalize()
-        .unwrap_or_else(|_| absolute_path.to_path_buf());
-    let relative_path = normalized_path.strip_prefix(&repo_root).ok()?.to_path_buf();
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["diff", "--numstat", "--"])
-        .arg(&relative_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    if let Some((_, stats)) = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(parse_git_numstat_line)
-    {
-        return Some(crate::chat::FileChangeDelta {
-            file_path: file_path.to_string(),
-            additions: stats.additions,
-            deletions: stats.deletions,
-        });
-    }
-
-    let untracked = Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["ls-files", "--others", "--exclude-standard", "--"])
-        .arg(&relative_path)
-        .output()
-        .ok()?;
-    if !untracked.status.success() {
-        return None;
-    }
-
-    let is_untracked = String::from_utf8_lossy(&untracked.stdout)
-        .lines()
-        .any(|line| !line.trim().is_empty());
-    let additions = if is_untracked {
-        read_file_if_exists(absolute_path)
-            .map(|content| content.lines().count() as u32)
-            .unwrap_or(0)
-    } else {
-        0
+    before: Option<&str>,
+    after: Option<&str>,
+) -> crate::chat::FileChangeDelta {
+    let (additions, deletions) = match (before, after) {
+        (Some(before), Some(after)) => line_change_counts(before, after),
+        (None, Some(after)) => (text_line_count(after), 0),
+        (Some(before), None) => (0, text_line_count(before)),
+        (None, None) => (0, 0),
     };
 
-    Some(crate::chat::FileChangeDelta {
+    crate::chat::FileChangeDelta {
         file_path: file_path.to_string(),
         additions,
-        deletions: 0,
-    })
+        deletions,
+    }
 }
 
-fn git_repo_root(workspace: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn line_change_counts(before: &str, after: &str) -> (u32, u32) {
+    if before == after {
+        return (0, 0);
     }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if root.is_empty() {
-        None
+
+    let before_lines = text_lines(before);
+    let after_lines = text_lines(after);
+    if before_lines.is_empty() {
+        return (after_lines.len() as u32, 0);
+    }
+    if after_lines.is_empty() {
+        return (0, before_lines.len() as u32);
+    }
+
+    let cell_count = before_lines.len().saturating_mul(after_lines.len());
+    let common = if cell_count > 20_000 {
+        coarse_common_line_count(&before_lines, &after_lines)
     } else {
-        let root_path = PathBuf::from(root);
-        Some(root_path.canonicalize().unwrap_or(root_path))
+        lcs_line_count(&before_lines, &after_lines)
+    };
+
+    (
+        after_lines.len().saturating_sub(common) as u32,
+        before_lines.len().saturating_sub(common) as u32,
+    )
+}
+
+fn lcs_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
+    let mut previous = vec![0usize; after_lines.len() + 1];
+    let mut current = vec![0usize; after_lines.len() + 1];
+    for before_line in before_lines {
+        for (after_index, after_line) in after_lines.iter().enumerate() {
+            current[after_index + 1] = if before_line == after_line {
+                previous[after_index] + 1
+            } else {
+                current[after_index].max(previous[after_index + 1])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
     }
+    previous[after_lines.len()]
 }
 
-fn parse_git_numstat_line(line: &str) -> Option<(String, SessionFileChangeStats)> {
-    let mut parts = line.split('\t');
-    let additions = parse_numstat_count(parts.next()?)?;
-    let deletions = parse_numstat_count(parts.next()?)?;
-    let path = parts.next()?.to_string();
-    Some((
-        path,
-        SessionFileChangeStats {
-            additions,
-            deletions,
-        },
-    ))
+fn coarse_common_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
+    let mut prefix = 0usize;
+    while prefix < before_lines.len().min(after_lines.len())
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < before_lines.len().saturating_sub(prefix)
+        && suffix < after_lines.len().saturating_sub(prefix)
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    prefix + suffix
 }
 
-fn parse_numstat_count(value: &str) -> Option<u32> {
-    match value {
-        "-" => Some(0),
-        other => other.parse().ok(),
+fn text_line_count(text: &str) -> u32 {
+    text_lines(text).len() as u32
+}
+
+fn text_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
     }
 }
 
@@ -959,7 +998,7 @@ pub(crate) fn sandbox_backend_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        current_git_diff_delta_for_file, current_sandbox_id, sandbox_backend_config,
+        current_sandbox_id, sandbox_backend_config,
         sandbox_display_name, ApiKeyDialogState, AppState, RuntimeStatusLight,
     };
     use crate::config::{AgentRoleConfig, Config};
@@ -991,9 +1030,12 @@ mod tests {
             "Core".to_string(),
             "baize".to_string(),
         ];
-        let mut state =
-            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
-                .expect("app state should initialize");
+        let mut state = AppState::new_with_config(
+            &config,
+            PathBuf::from("config.toml"),
+            PathBuf::from("."),
+        )
+        .expect("app state should initialize");
 
         assert_eq!(
             state.agent_tab_labels(),
@@ -1172,57 +1214,27 @@ mod tests {
     }
 
     #[test]
-    fn current_git_diff_delta_for_file_reads_real_numstat() {
+    fn session_file_change_uses_content_baseline_for_existing_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
-        fs::create_dir_all(workspace.join("src")).expect("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
 
-        let init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["init"])
-            .output()
-            .expect("git init");
-        assert!(init.status.success());
+        let file = workspace.join("README.md");
+        fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").expect("baseline");
 
-        let file = workspace.join("src/main.rs");
-        fs::write(&file, "fn main() {\n    println!(\"before\");\n}\n").expect("baseline");
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
+            .expect("app state should initialize");
+        state.capture_tool_file_baseline("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
 
-        let add = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["add", "src/main.rs"])
-            .output()
-            .expect("git add");
-        assert!(add.status.success());
+        fs::write(&file, "one\ntwo\nTHREE\nfour\nfive\n").expect("modified");
+        state.reconcile_tool_file_change_from_baseline("call-1", None);
 
-        let commit = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args([
-                "-c",
-                "user.name=Codex",
-                "-c",
-                "user.email=codex@example.com",
-                "commit",
-                "-m",
-                "baseline",
-            ])
-            .output()
-            .expect("git commit");
-        assert!(commit.status.success());
-
-        fs::write(
-            &file,
-            "fn main() {\n    println!(\"after\");\n    println!(\"more\");\n}\n",
-        )
-        .expect("modified");
-
-        let delta = current_git_diff_delta_for_file(&workspace, "src/main.rs", &file)
-            .expect("current git diff");
-        assert_eq!(delta.file_path, "src/main.rs");
-        assert_eq!(delta.additions, 2);
-        assert_eq!(delta.deletions, 1);
+        let stats = state
+            .session_file_changes
+            .get("README.md")
+            .expect("session stats should be tracked");
+        assert_eq!(stats.additions, 1);
+        assert_eq!(stats.deletions, 1);
     }
 
     fn sample_prompt_request() -> PromptRequest {

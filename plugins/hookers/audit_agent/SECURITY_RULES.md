@@ -10,19 +10,25 @@
 
 | 风险等级 | 层1/层2 处理方式 | 层3 处理方式 |
 |---------|-----------------|-------------|
-| **critical** | 直接 Deny（短路，不等待后续检测） | — |
-| **high** | 直接 Deny（短路，不等待后续检测） | — |
+| **critical** | high/critical → 直接 Deny（短路）；内联脚本 file_access 转层3 | — |
+| **high** | high/critical → 直接 Deny（短路）；内联脚本 file_access 转层3 | — |
 | **medium** | 不拦截，传递到层3 | 作为提示信息注入 LLM prompt，由 LLM 决定 |
 | **low** | 不拦截，传递到层3 | 作为提示信息注入 LLM prompt，由 LLM 决定 |
 
-**关键逻辑**：层1 和 层2 只有 `high` 和 `critical` 才会直接拦截，`medium` 和 `low` 会传递到层3 由 LLM 做最终判断。
+**关键逻辑**：层1 的 `high`/`critical` 匹配默认立即拦截。但对于内联脚本命令（`python -c`、`perl -e` 等），如果命中的是 `file_access` 风险类型（如 `/etc/shadow` 出现在字符串字面量中），层1/层2 **不立即拦截**，转交层3 LLM 做语义判断。其他风险类型（`script_execution`、`data_exfiltration` 等）仍然立即拦截。
 
 ```python
 # audit_agent.py 核心逻辑
-if heuristic_result.risk_level in ("high", "critical"):
+# 内联脚本命令的 file_access 风险 → 转层3（避免假阳性）
+if is_inline_script_command(action_detail) and heuristic_result.risk_type == "file_access":
+    skip_inline_file_access = True  # 不立即 Deny，转层3 语义判断
+
+# 层1：常规命令 high/critical → 直接 Deny；内联脚本 file_access → 转层3
+if heuristic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
     return SecurityJudgment(allowed=False, ...)  # 直接 Deny
 
-if logic_result.risk_level in ("high", "critical"):
+# 层2：同样处理
+if logic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
     return SecurityJudgment(allowed=False, ...)  # 直接 Deny
 ```
 
@@ -108,13 +114,14 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `wget *--post-data*` | high | wget 发送 POST 数据 | ✓ Deny |
 | `crontab -e` | high | 编辑定时任务 | ✓ Deny |
 | `crontab -r` | high | 删除定时任务 | ✗ LLM自拦截 |
-| `crontab * \| crontab` | high | 管道方式修改定时任务 | ✗ 模式不匹配 |
+| `* \| crontab` | high | 管道方式安装/修改定时任务 | ✓ Deny |
+| `>> ~/.bashrc` | high | 追加写入 Shell 配置文件 | ✓ Deny |
 | `iptables -` | high | 修改防火墙规则 | ✓ Deny (iptables -A) |
 | `ssh * -o StrictHostKeyChecking=no` | high | SSH 跳过主机密钥验证 | ✓ Deny |
 | `base64 -d * bash` | high | Base64 解码后执行 | ✓ Deny |
 | `curl * \| bash` | critical | 下载远程脚本并执行 | ✓ Deny |
 
-> **测试说明**：`crontab * | crontab` 模式要求以 `crontab` 开头，但实际管道命令如 `echo '...' | crontab -` 以其他命令开头，导致模式不匹配。建议修改为 `* | crontab` 或在逻辑规则层检测。
+> **说明**：`* | crontab` 模式已替代原 `crontab * | crontab`，可匹配所有管道方式修改 crontab 的操作（如 `echo '...' | crontab -`、`(crontab -l; echo '...') | crontab -` 等）。
 
 **示例 1：`curl * -d *`**
 
@@ -317,6 +324,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 风险等级: critical
 ```
 
+> **内联脚本假阳性防护**：从 v2.8 起，对内联脚本命令（`python -c`、`perl -e` 等），如果命中 `file_access` 风险类型（如 `/etc/shadow`、`.ssh/id_rsa`），层1/层2 不立即拦截，转交层3 LLM 做语义判断。例如 `python3 -c "text = 'cat /etc/shadow'; print(text)"` 中 `/etc/shadow` 仅是字符串字面量，不会被误拦。真实威胁如 `python3 -c "import os; os.system('cat /etc/shadow')"` 则由 LLM 识别出实际执行路径并拦截。
+
 **示例 4：`.ssh/id_rsa`**
 
 ```
@@ -420,6 +429,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `git push --force` | script_execution | 强制推送 | ✗ LLM询问用户 |
 | `curl POST ... env/secret/key` | data_exfiltration | curl POST 外传敏感信息 | ✓ Deny |
 | `/dev/zero`/`/dev/random` 等 | file_access | 访问设备文件 | ✓ Deny |
+| `>> ~/.bashrc` | persistence | 追加写入 Shell 配置文件 | ✓ Deny |
 
 **示例 1：`rm -r /tmp/test.sh`**
 
@@ -524,6 +534,19 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 匹配: "/dev/(zero|random|urandom|full|core|loop|sd|hd|nvme|vd|mem|kmsg|port)"
 结果: Deny
 原因: "检测到访问设备文件 (/dev/*)"
+风险等级: high
+```
+
+**示例 9：`>> ~/.bashrc`**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "echo alias ll=ls -la >> ~/.bashrc"
+
+匹配: ">>\s*(~|/home/[^/]+)/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile)"
+结果: Deny
+原因: "检测到修改 Shell 配置文件（~/.bashrc 等），可能用于持久化后门"
 风险等级: high
 ```
 
@@ -832,6 +855,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 > **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
+> **凭据文件处理说明**：`credentials.yml`、`secrets.yml` 等凭据文件使用 `\b` 边界匹配避免非文件名拼接误报，且**无论读写均拦截**（读取凭据文件同样危险）。其他系统路径只拦截写入/删除操作，读取操作放行。
+
 #### Critical 级别敏感路径
 
 | 路径 | 说明 |
@@ -897,6 +922,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `/sys/` | sysfs 内核接口 |
 | `/dev/zero` | 零设备 |
 | `/dev/kmsg` | 内核消息缓冲区 |
+| `credentials.yml` / `secrets.yml` / `.env` 等 | 凭据/密钥/环境变量配置文件（无论读写均拦截） |
 
 **示例 1：`/etc/passwd`**
 
@@ -934,6 +960,19 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 匹配: "/etc/crontab"
 结果: Deny
 原因: "访问敏感路径: 系统定时任务 (/etc/crontab)"
+风险等级: high
+```
+
+**示例 4：凭据文件 `credentials.yml`（读操作也拦截）**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "head -n 5 ../../config/credentials.yml"
+
+匹配: "\bcredentials\.yml\b"
+结果: Deny
+原因: "访问敏感路径: 凭据配置文件 (credentials.yml)"
 风险等级: high
 ```
 
@@ -1717,7 +1756,7 @@ LLM 判断: Deny
 ```
 
 **关键设计**：
-- **短路机制**：层1/层2 检测到 high/critical 风险直接 Deny，不等待后续检测
+- **短路机制**：层1/层2 检测到 high/critical 风险时直接 Deny（除非是内联脚本命令的 file_access 风险——此时转层3 LLM 语义判断，避免字符串字面量中的敏感路径被误拦截）。
 - **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **低风险传递**：层1/层2 检测到 medium/low 风险不拦截，传递到层3 由 LLM 决定
 - **信息传递**：前两层结果（含 low/medium）+ 脚本分析注入层3 prompt
