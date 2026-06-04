@@ -578,3 +578,112 @@ impl ToolExecutor for GrepExecutor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(pattern: &str) -> GrepInput {
+        GrepInput {
+            pattern: pattern.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `-e` must immediately precede the pattern so it is never reparsed as a flag.
+    fn pattern_is_e_guarded(args: &[String], pattern: &str) -> bool {
+        args.windows(2)
+            .any(|w| w[0] == "-e" && w[1] == pattern)
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn recursive_default_mode_excludes_vcs_dirs() {
+        let args = GrepExecutor::build_grep_args(&input("TODO"), ".");
+
+        assert!(args.contains(&"-P".to_string()), "PCRE engine selected");
+        assert!(args.contains(&"-r".to_string()), "recursive on directory");
+        assert!(args.contains(&"-l".to_string()), "files-with-matches default");
+        assert!(pattern_is_e_guarded(&args, "TODO"));
+        assert_eq!(args.last().map(String::as_str), Some("."), "target is last arg");
+        for dir in VCS_DIRECTORIES_TO_EXCLUDE {
+            assert!(
+                args.contains(&format!("--exclude-dir={}", dir)),
+                "VCS dir {dir} excluded"
+            );
+        }
+        assert!(!args.contains(&"-n".to_string()), "no line numbers outside content mode");
+    }
+
+    /// A single-file target must NOT recurse: the `-r`, `--exclude-dir`, and
+    /// `--include`/`--exclude` glob flags are recursive-only and would change
+    /// the meaning of a one-file search if they leaked through.
+    #[test]
+    fn single_file_target_is_not_recursive() {
+        let mut grep_input = input("TODO");
+        grep_input.glob = Some("*.py".to_string());
+        let args = GrepExecutor::build_grep_args(&grep_input, "foo.py");
+
+        assert!(!args.contains(&"-r".to_string()), "no recursion on a single file");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--exclude-dir=")),
+            "no VCS exclusions on a single file"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("--include=")),
+            "globs are recursive-only"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("foo.py"));
+    }
+
+    #[test]
+    fn content_mode_emits_line_numbers_and_context() {
+        let mut grep_input = input("needle");
+        grep_input.output_mode = Some(OutputMode::Content);
+        grep_input.context = Some(3);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"-n".to_string()), "line numbers on by default");
+        assert!(has_pair(&args, "-C", "3"), "symmetric context passed through");
+        assert!(pattern_is_e_guarded(&args, "needle"));
+    }
+
+    #[test]
+    fn count_mode_uses_dash_c() {
+        let mut grep_input = input("x");
+        grep_input.output_mode = Some(OutputMode::Count);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"-c".to_string()));
+        assert!(!args.contains(&"-l".to_string()));
+        assert!(!args.contains(&"-n".to_string()));
+    }
+
+    #[test]
+    fn case_insensitive_adds_dash_i() {
+        let mut grep_input = input("x");
+        grep_input.case_insensitive = Some(true);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+        assert!(args.contains(&"-i".to_string()));
+    }
+
+    #[test]
+    fn glob_maps_to_include_and_exclude() {
+        let mut grep_input = input("x");
+        grep_input.glob = Some("*.py, !*_test.py".to_string());
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"--include=*.py".to_string()));
+        assert!(args.contains(&"--exclude=*_test.py".to_string()));
+    }
+
+    /// A pattern beginning with `-` must not be swallowed as a grep flag.
+    #[test]
+    fn leading_dash_pattern_is_guarded() {
+        let args = GrepExecutor::build_grep_args(&input("-n"), ".");
+        assert!(pattern_is_e_guarded(&args, "-n"));
+    }
+}
