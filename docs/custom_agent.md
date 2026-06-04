@@ -39,7 +39,7 @@ Edit `[agent.<name>]` and `[agent.<name>.tools]`
 Example:
 ```toml
 [tui]
-agent_order = ["xuanyuan", "Core", "baize", "dayu", "fuxi", "kuafu", "plan"]
+agent_order = ["Agent1", "Core", "Agent2, "plan"]
 
 [agent.code-reviewer]
 description = "Reviews code for best practices and potential issues"

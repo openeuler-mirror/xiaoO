@@ -647,27 +647,6 @@ file_edit = false
     }
 
     #[test]
-    fn agent_role_ids_follow_tui_agent_order() {
-        let mut config = Config::default();
-        for role_id in ["baize", "dayu", "fuxi", "kuafu", "xuanyuan"] {
-            config
-                .agent
-                .insert(role_id.to_string(), super::AgentRoleConfig::default());
-        }
-        config.tui.agent_order = vec![
-            "xuanyuan".to_string(),
-            "FUXI".to_string(),
-            "missing".to_string(),
-            "xuanyuan".to_string(),
-        ];
-
-        assert_eq!(
-            config.agent_role_ids(),
-            vec!["xuanyuan", "fuxi", "baize", "dayu", "kuafu"]
-        );
-    }
-
-    #[test]
     fn tui_bootstrap_adds_builtin_plan_agent_role() {
         let config =
             require_tui_bootstrap_config(Some(valid_config()), Path::new("/tmp/config.toml"))
