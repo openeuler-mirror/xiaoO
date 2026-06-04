@@ -60,11 +60,14 @@ def _handle_hook_payload(data: dict) -> int:
     # 将 tool input 序列化为字符串作为 action_detail
     # 对于 Bash 工具，提取 command 字段以正确检测危险命令
     # 对于文件操作工具，只提取 file_path 字段，避免 content 中的文本触发敏感路径误报
+    # 对于 skill 工具，只提取 skill 名称，避免 args（自然语言描述）中的文本触发敏感路径误报
     if isinstance(tool_input, dict):
         if tool_name.lower() == "bash" and "command" in tool_input:
             action_detail = str(tool_input.get("command", ""))
         elif tool_name.lower() in ("file_write", "file_edit", "file_read") and "file_path" in tool_input:
             action_detail = str(tool_input.get("file_path", ""))
+        elif tool_name.lower() == "skill" and "skill" in tool_input:
+            action_detail = str(tool_input.get("skill", ""))
         else:
             action_detail = json.dumps(tool_input, ensure_ascii=False)
     else:

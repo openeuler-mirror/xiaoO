@@ -1,12 +1,14 @@
 """日志工具 — 记录每次审计调用的输入、LLM 交互、决策结果和耗时"""
 
+import logging
 import time
 import functools
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
-from loguru import logger
-
 from .config import get_default_config
+
+logger = logging.getLogger("audit_policy_checker")
 
 
 def setup_logger(log_level: str | None = None) -> None:
@@ -16,22 +18,24 @@ def setup_logger(log_level: str | None = None) -> None:
     Args:
         log_level: 日志级别，为 None 时使用默认配置
     """
-    level = log_level or get_default_config().log_level
-    logger.remove()
-    logger.add(
-        sink="audit_policy_checker.log",
-        level=level,
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{function}:{line} - {message}",
-        rotation="10 MB",
-        retention="7 days",
-        encoding="utf-8",
+    level = (log_level or get_default_config().log_level).upper()
+    logger.setLevel(getattr(logging, level, logging.INFO))
+    logger.handlers.clear()
+
+    fmt = logging.Formatter(
+        "%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)s:%(funcName)s:%(lineno)d - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
-    logger.add(
-        sink=lambda msg: print(msg, end=""),
-        level=level,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level:<8}</level> | {message}",
-        colorize=True,
+
+    file_handler = RotatingFileHandler(
+        "audit_policy_checker.log", maxBytes=10 * 1024 * 1024, backupCount=7, encoding="utf-8"
     )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+    logger.addHandler(console_handler)
 
 
 class AuditLogger:
