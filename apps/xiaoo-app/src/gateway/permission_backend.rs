@@ -558,14 +558,15 @@ fn permission_prompt(
     context: Option<&PermissionRequestContext>,
 ) -> String {
     let tool_name = tool::current_tool_name().unwrap_or_else(|| denial.operation.clone());
+    let isolation = isolation_display_name(denial.isolation.as_str());
     if let Some(PermissionRequestContext::Bash { command, .. }) = context {
         return format!(
-            "macOS Seatbelt blocked {tool_name}\n\nCommand:\n{command}\n\nBlocked operation: {} {}\n{}",
+            "{isolation} blocked {tool_name}\n\nCommand:\n{command}\n\nBlocked operation: {} {}\n{}",
             denial.capability, denial.operation, denial.path
         );
     }
     format!(
-        "macOS Seatbelt blocked {tool_name}\n\nAllow this tool call to continue with additional sandbox permissions?\nBlocked operation: {} {}\n{}",
+        "{isolation} blocked {tool_name}\n\nAllow this tool call to continue with additional sandbox permissions?\nBlocked operation: {} {}\n{}",
         denial.capability, denial.operation, denial.path
     )
 }
@@ -647,14 +648,21 @@ fn annotate_seatbelt_stderr(result: &mut ExecResult) {
     if !stderr.contains("Operation not permitted") && !stderr.contains("operation not permitted") {
         return;
     }
-    let prefix =
-        b"Command failed because macOS Seatbelt blocked an operation inside the local sandbox.\n";
+    let prefix = b"Command failed because the local sandbox blocked an operation.\n";
     if result.stderr.starts_with(prefix) {
         return;
     }
     let mut annotated = prefix.to_vec();
     annotated.extend_from_slice(result.stderr.as_slice());
     result.stderr = annotated;
+}
+
+fn isolation_display_name(isolation: &str) -> &'static str {
+    match isolation {
+        "macos_seatbelt" => "macOS Seatbelt",
+        "linux_bubblewrap" => "Linux Bubblewrap",
+        _ => "Local sandbox",
+    }
 }
 
 fn runtime_seatbelt_denial(result: &ExecResult) -> Option<SandboxPolicyDenial> {
@@ -793,6 +801,22 @@ mod tests {
             permission_options(&denial, None),
             vec![ALLOW_ONCE.to_string(), DENY.to_string()]
         );
+    }
+
+    #[test]
+    fn permission_prompt_uses_bubblewrap_display_name() {
+        let denial = SandboxPolicyDenial {
+            backend_id: "local".to_string(),
+            isolation: "linux_bubblewrap".to_string(),
+            operation: "file_write".to_string(),
+            capability: SandboxPermissionCapability::Write,
+            path: "/workspace/src/lib.rs".to_string(),
+        };
+
+        let prompt = permission_prompt(&denial, None);
+
+        assert!(prompt.starts_with("Linux Bubblewrap blocked"));
+        assert!(!prompt.contains("macOS Seatbelt"));
     }
 
     #[test]

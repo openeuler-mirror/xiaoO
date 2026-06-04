@@ -12,11 +12,12 @@ use super::backend::normalize_absolute_host_path;
 #[derive(Debug, Clone)]
 pub(crate) enum LocalIsolationConfig {
     None,
-    MacosSeatbelt(MacosSeatbeltConfig),
+    MacosSeatbelt(PathIsolationConfig),
+    LinuxBubblewrap(PathIsolationConfig),
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MacosSeatbeltConfig {
+pub(crate) struct PathIsolationConfig {
     pub(crate) allow_network: bool,
     readable_roots: Vec<PathBuf>,
     writable_roots: Vec<PathBuf>,
@@ -52,6 +53,14 @@ pub(crate) enum LocalIsolationOptions {
         #[serde(default)]
         writable_roots: Vec<String>,
     },
+    LinuxBubblewrap {
+        #[serde(default = "default_allow_network")]
+        allow_network: bool,
+        #[serde(default)]
+        readable_roots: Vec<String>,
+        #[serde(default)]
+        writable_roots: Vec<String>,
+    },
 }
 
 fn default_allow_network() -> bool {
@@ -75,47 +84,74 @@ impl LocalBackendPolicy {
             return Ok(Self::unrestricted());
         };
 
-        match options {
+        let (kind, allow_network, readable_roots, writable_roots) = match options {
             LocalIsolationOptions::MacosSeatbelt {
                 allow_network,
                 readable_roots,
                 writable_roots,
-            } => {
+            } => (
+                "macos_seatbelt",
+                allow_network,
+                readable_roots,
+                writable_roots,
+            ),
+            LocalIsolationOptions::LinuxBubblewrap {
+                allow_network,
+                readable_roots,
+                writable_roots,
+            } => (
+                "linux_bubblewrap",
+                allow_network,
+                readable_roots,
+                writable_roots,
+            ),
+        };
+
+        match kind {
+            "macos_seatbelt" => {
                 if !cfg!(target_os = "macos") {
                     return Err(OperationBackendBuildError::Unsupported {
                         message: "macos_seatbelt isolation is only supported on macOS".to_string(),
                     });
                 }
 
-                let mut readable = if readable_roots.is_empty() {
-                    vec![normalize_build_path("workspace_root", workspace_root)?]
-                } else {
-                    normalize_build_roots("readable_roots", readable_roots)?
-                };
-                let writable = if writable_roots.is_empty() {
-                    vec![
-                        normalize_build_path("workspace_root", workspace_root)?,
-                        normalize_build_path("temp_root", temp_root)?,
-                    ]
-                } else {
-                    normalize_build_roots("writable_roots", writable_roots)?
-                };
-
-                for root in &writable {
-                    if !readable.iter().any(|existing| existing == root) {
-                        readable.push(root.clone());
-                    }
-                }
-
                 Ok(Self {
-                    isolation: LocalIsolationConfig::MacosSeatbelt(MacosSeatbeltConfig {
+                    isolation: LocalIsolationConfig::MacosSeatbelt(build_path_isolation_config(
                         allow_network,
-                        readable_roots: readable,
-                        writable_roots: writable,
-                    }),
+                        readable_roots,
+                        writable_roots,
+                        workspace_root,
+                        temp_root,
+                    )?),
                     grants: Arc::new(Mutex::new(GrantStore::default())),
                 })
             }
+            "linux_bubblewrap" => {
+                if !cfg!(target_os = "linux") {
+                    return Err(OperationBackendBuildError::Unsupported {
+                        message: "linux_bubblewrap isolation is only supported on Linux"
+                            .to_string(),
+                    });
+                }
+                if !bubblewrap_available() {
+                    return Err(OperationBackendBuildError::Unsupported {
+                        message: "linux_bubblewrap isolation requires bubblewrap (bwrap) in PATH"
+                            .to_string(),
+                    });
+                }
+
+                Ok(Self {
+                    isolation: LocalIsolationConfig::LinuxBubblewrap(build_path_isolation_config(
+                        allow_network,
+                        readable_roots,
+                        writable_roots,
+                        workspace_root,
+                        temp_root,
+                    )?),
+                    grants: Arc::new(Mutex::new(GrantStore::default())),
+                })
+            }
+            _ => unreachable!("all local isolation kinds are matched"),
         }
     }
 
@@ -124,11 +160,12 @@ impl LocalBackendPolicy {
         match &self.isolation {
             LocalIsolationConfig::None => true,
             LocalIsolationConfig::MacosSeatbelt(config) => config.allow_network,
+            LocalIsolationConfig::LinuxBubblewrap(config) => config.allow_network,
         }
     }
 
     pub(crate) fn check_read(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
-        let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
+        let Some((isolation_name, config)) = self.active_path_isolation() else {
             return Ok(());
         };
         let path = normalize_for_read(path)?;
@@ -141,6 +178,7 @@ impl LocalBackendPolicy {
             return Ok(());
         }
         Err(sandbox_denial(
+            isolation_name,
             operation,
             SandboxPermissionCapability::Read,
             path.as_path(),
@@ -148,7 +186,7 @@ impl LocalBackendPolicy {
     }
 
     pub(crate) fn check_write(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
-        let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
+        let Some((isolation_name, config)) = self.active_path_isolation() else {
             return Ok(());
         };
         let path = normalize_for_write(path)?;
@@ -161,6 +199,7 @@ impl LocalBackendPolicy {
             return Ok(());
         }
         Err(sandbox_denial(
+            isolation_name,
             operation,
             SandboxPermissionCapability::Write,
             path.as_path(),
@@ -168,7 +207,7 @@ impl LocalBackendPolicy {
     }
 
     pub(crate) fn check_exec_cwd(&self, path: &Path) -> Result<(), OperationError> {
-        let LocalIsolationConfig::MacosSeatbelt(config) = &self.isolation else {
+        let Some((isolation_name, config)) = self.active_path_isolation() else {
             return Ok(());
         };
         let path = normalize_for_read(path)?;
@@ -181,6 +220,7 @@ impl LocalBackendPolicy {
             return Ok(());
         }
         Err(sandbox_denial(
+            isolation_name,
             "bash",
             SandboxPermissionCapability::ExecCwd,
             path.as_path(),
@@ -200,7 +240,28 @@ impl LocalBackendPolicy {
                 }
                 Some(MacosSeatbeltProfile::from_config_and_grants(config, grants))
             }
+            LocalIsolationConfig::LinuxBubblewrap(_) => None,
         }
+    }
+
+    pub(crate) fn bubblewrap_args(&self, cwd: &Path) -> Option<Vec<String>> {
+        match &self.isolation {
+            LocalIsolationConfig::LinuxBubblewrap(config) => {
+                let grants = self.active_grants();
+                if grants
+                    .iter()
+                    .any(|grant| grant.capability == SandboxPermissionCapability::ExecRuntime)
+                {
+                    return None;
+                }
+                Some(LinuxBubblewrapProfile::from_config_and_grants(config, grants).to_args(cwd))
+            }
+            LocalIsolationConfig::None | LocalIsolationConfig::MacosSeatbelt(_) => None,
+        }
+    }
+
+    pub(crate) fn requires_exec_cwd(&self) -> bool {
+        matches!(self.isolation, LocalIsolationConfig::LinuxBubblewrap(_))
     }
 
     pub(crate) fn grant(
@@ -267,20 +328,48 @@ impl LocalBackendPolicy {
         })
     }
 
+    fn active_path_isolation(&self) -> Option<(&'static str, &PathIsolationConfig)> {
+        match &self.isolation {
+            LocalIsolationConfig::None => None,
+            LocalIsolationConfig::MacosSeatbelt(config) => Some(("macos_seatbelt", config)),
+            LocalIsolationConfig::LinuxBubblewrap(config) => Some(("linux_bubblewrap", config)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_isolated(
+        isolation_name: &str,
+        readable_roots: Vec<PathBuf>,
+        writable_roots: Vec<PathBuf>,
+        allow_network: bool,
+    ) -> Self {
+        let config = PathIsolationConfig {
+            allow_network,
+            readable_roots,
+            writable_roots,
+        };
+        let isolation = match isolation_name {
+            "linux_bubblewrap" => LocalIsolationConfig::LinuxBubblewrap(config),
+            _ => LocalIsolationConfig::MacosSeatbelt(config),
+        };
+        Self {
+            isolation,
+            grants: Arc::new(Mutex::new(GrantStore::default())),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn test_macos_seatbelt(
         readable_roots: Vec<PathBuf>,
         writable_roots: Vec<PathBuf>,
         allow_network: bool,
     ) -> Self {
-        Self {
-            isolation: LocalIsolationConfig::MacosSeatbelt(MacosSeatbeltConfig {
-                allow_network,
-                readable_roots,
-                writable_roots,
-            }),
-            grants: Arc::new(Mutex::new(GrantStore::default())),
-        }
+        Self::test_isolated(
+            "macos_seatbelt",
+            readable_roots,
+            writable_roots,
+            allow_network,
+        )
     }
 }
 
@@ -303,7 +392,7 @@ pub(crate) struct MacosSeatbeltProfile {
 
 impl MacosSeatbeltProfile {
     fn from_config_and_grants(
-        config: &MacosSeatbeltConfig,
+        config: &PathIsolationConfig,
         grants: Vec<SandboxPermissionGrant>,
     ) -> Self {
         let mut profile = Self {
@@ -376,6 +465,215 @@ impl MacosSeatbeltProfile {
 
         lines.join("\n")
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LinuxBubblewrapProfile {
+    readable_roots: Vec<PathBuf>,
+    writable_roots: Vec<PathBuf>,
+    allow_network: bool,
+}
+
+impl LinuxBubblewrapProfile {
+    fn from_config_and_grants(
+        config: &PathIsolationConfig,
+        grants: Vec<SandboxPermissionGrant>,
+    ) -> Self {
+        let mut profile = Self {
+            readable_roots: config.readable_roots.clone(),
+            writable_roots: config.writable_roots.clone(),
+            allow_network: config.allow_network,
+        };
+        for grant in grants {
+            match grant.capability {
+                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
+                    push_unique_path(&mut profile.readable_roots, grant.path);
+                }
+                SandboxPermissionCapability::ExecRuntime => {}
+                SandboxPermissionCapability::Write => {
+                    push_unique_path(&mut profile.readable_roots, grant.path.clone());
+                    push_unique_path(&mut profile.writable_roots, grant.path);
+                }
+            }
+        }
+        profile
+    }
+
+    pub(crate) fn to_args(&self, cwd: &Path) -> Vec<String> {
+        let mut builder = BubblewrapArgsBuilder::new();
+        builder.arg("--die-with-parent");
+        builder.arg("--unshare-user");
+        builder.arg("--unshare-ipc");
+        builder.arg("--unshare-pid");
+        builder.arg("--unshare-uts");
+        builder.arg("--unshare-cgroup-try");
+        if !self.allow_network {
+            builder.arg("--unshare-net");
+        }
+        builder.bind_runtime_roots();
+
+        for root in &self.readable_roots {
+            if self.writable_roots.iter().any(|writable| writable == root) {
+                continue;
+            }
+            builder.ro_bind(root, root);
+        }
+        for root in &self.writable_roots {
+            builder.rw_bind(root, root);
+        }
+
+        builder.ensure_directory(cwd);
+        builder.arg("--chdir");
+        builder.arg(cwd);
+        builder.into_args()
+    }
+}
+
+struct BubblewrapArgsBuilder {
+    args: Vec<String>,
+    dirs: Vec<PathBuf>,
+}
+
+impl BubblewrapArgsBuilder {
+    fn new() -> Self {
+        Self {
+            args: Vec::new(),
+            dirs: Vec::new(),
+        }
+    }
+
+    fn arg(&mut self, value: impl BubblewrapArg) {
+        self.args.push(value.into_arg());
+    }
+
+    fn bind_runtime_roots(&mut self) {
+        for root in ["/usr", "/bin", "/sbin", "/lib", "/lib64"] {
+            let path = Path::new(root);
+            if path.exists() {
+                self.ro_bind(path, path);
+            }
+        }
+        for root in ["/proc", "/dev"] {
+            let path = Path::new(root);
+            if path.exists() {
+                self.arg(if root == "/proc" { "--proc" } else { "--dev" });
+                self.arg(path);
+            }
+        }
+        for root in [
+            "/etc/ld.so.cache",
+            "/etc/ld.so.conf",
+            "/etc/ld.so.conf.d",
+            "/etc/nsswitch.conf",
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/hosts",
+            "/etc/resolv.conf",
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/pki",
+            "/etc/localtime",
+        ] {
+            let path = Path::new(root);
+            if path.exists() {
+                self.ro_bind(path, path);
+            }
+        }
+    }
+
+    fn ro_bind(&mut self, source: &Path, dest: &Path) {
+        self.ensure_bind_destination(source, dest);
+        self.arg("--ro-bind");
+        self.arg(source);
+        self.arg(dest);
+    }
+
+    fn rw_bind(&mut self, source: &Path, dest: &Path) {
+        self.ensure_bind_destination(source, dest);
+        self.arg("--bind");
+        self.arg(source);
+        self.arg(dest);
+    }
+
+    fn ensure_bind_destination(&mut self, source: &Path, dest: &Path) {
+        let dir_dest = if source.is_file() {
+            dest.parent()
+                .unwrap_or(Path::new(std::path::MAIN_SEPARATOR_STR))
+        } else {
+            dest
+        };
+        self.ensure_directory(dir_dest);
+    }
+
+    fn ensure_directory(&mut self, dest: &Path) {
+        let mut current = PathBuf::new();
+        for component in dest.components() {
+            current.push(component.as_os_str());
+            if current == Path::new(std::path::MAIN_SEPARATOR_STR) {
+                continue;
+            }
+            if self.dirs.iter().any(|existing| existing == &current) {
+                continue;
+            }
+            self.arg("--dir");
+            self.arg(current.as_path());
+            self.dirs.push(current.clone());
+        }
+    }
+
+    fn into_args(self) -> Vec<String> {
+        self.args
+    }
+}
+
+trait BubblewrapArg {
+    fn into_arg(self) -> String;
+}
+
+impl BubblewrapArg for &str {
+    fn into_arg(self) -> String {
+        self.to_string()
+    }
+}
+
+impl BubblewrapArg for &Path {
+    fn into_arg(self) -> String {
+        self.to_string_lossy().into_owned()
+    }
+}
+
+fn build_path_isolation_config(
+    allow_network: bool,
+    readable_roots: Vec<String>,
+    writable_roots: Vec<String>,
+    workspace_root: &Path,
+    temp_root: &Path,
+) -> Result<PathIsolationConfig, OperationBackendBuildError> {
+    let mut readable = if readable_roots.is_empty() {
+        vec![normalize_build_path("workspace_root", workspace_root)?]
+    } else {
+        normalize_build_roots("readable_roots", readable_roots)?
+    };
+    let writable = if writable_roots.is_empty() {
+        vec![
+            normalize_build_path("workspace_root", workspace_root)?,
+            normalize_build_path("temp_root", temp_root)?,
+        ]
+    } else {
+        normalize_build_roots("writable_roots", writable_roots)?
+    };
+
+    for root in &writable {
+        if !readable.iter().any(|existing| existing == root) {
+            readable.push(root.clone());
+        }
+    }
+
+    Ok(PathIsolationConfig {
+        allow_network,
+        readable_roots: readable,
+        writable_roots: writable,
+    })
 }
 
 fn normalize_build_roots(
@@ -453,7 +751,20 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn bubblewrap_available() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bwrap").is_file()))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bubblewrap_available() -> bool {
+    false
+}
+
 fn sandbox_denial(
+    isolation: &str,
     operation: &str,
     capability: SandboxPermissionCapability,
     path: &Path,
@@ -461,7 +772,7 @@ fn sandbox_denial(
     OperationError::SandboxPolicyDenied {
         denial: SandboxPolicyDenial {
             backend_id: "local".to_string(),
-            isolation: "macos_seatbelt".to_string(),
+            isolation: isolation.to_string(),
             operation: operation.to_string(),
             capability,
             path: path.display().to_string(),
@@ -487,7 +798,7 @@ mod tests {
             Path::new("/tmp"),
         )
         .unwrap_or_else(|_| LocalBackendPolicy {
-            isolation: LocalIsolationConfig::MacosSeatbelt(MacosSeatbeltConfig {
+            isolation: LocalIsolationConfig::MacosSeatbelt(PathIsolationConfig {
                 allow_network: false,
                 readable_roots: vec![PathBuf::from("/workspace"), PathBuf::from("/workspace/tmp")],
                 writable_roots: vec![PathBuf::from("/workspace/tmp")],
@@ -667,9 +978,88 @@ mod tests {
     fn macos_seatbelt_defaults_to_allowing_network() {
         let options: LocalIsolationOptions =
             serde_json::from_value(serde_json::json!({"kind": "macos_seatbelt"})).unwrap();
-        let LocalIsolationOptions::MacosSeatbelt { allow_network, .. } = options;
+        let LocalIsolationOptions::MacosSeatbelt { allow_network, .. } = options else {
+            panic!("expected macos seatbelt options");
+        };
 
         assert!(allow_network);
+    }
+
+    #[test]
+    fn linux_bubblewrap_defaults_to_allowing_network() {
+        let options: LocalIsolationOptions =
+            serde_json::from_value(serde_json::json!({"kind": "linux_bubblewrap"})).unwrap();
+        let LocalIsolationOptions::LinuxBubblewrap { allow_network, .. } = options else {
+            panic!("expected linux bubblewrap options");
+        };
+
+        assert!(allow_network);
+    }
+
+    #[test]
+    fn bubblewrap_args_bind_configured_roots_and_disable_network() {
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/workspace/.tmp"),
+            ],
+            vec![PathBuf::from("/workspace/.tmp")],
+            false,
+        );
+
+        let args = policy.bubblewrap_args(Path::new("/workspace")).unwrap();
+
+        assert!(args.iter().any(|arg| arg == "--unshare-net"));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--ro-bind", "/workspace", "/workspace"]));
+        assert!(args
+            .windows(3)
+            .any(|window| window == ["--bind", "/workspace/.tmp", "/workspace/.tmp"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--chdir", "/workspace"]));
+    }
+
+    #[test]
+    fn exec_runtime_grant_disables_bubblewrap_args_for_exec() {
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![PathBuf::from("/workspace")],
+            vec![PathBuf::from("/workspace")],
+            true,
+        );
+        assert!(policy.bubblewrap_args(Path::new("/workspace")).is_some());
+
+        policy
+            .grant(grant_request(
+                SandboxPermissionCapability::ExecRuntime,
+                "<runtime path not reported by local sandbox>",
+                SandboxPermissionScope::Once,
+            ))
+            .unwrap();
+
+        assert!(policy.bubblewrap_args(Path::new("/workspace")).is_none());
+    }
+
+    #[test]
+    fn bubblewrap_denial_reports_linux_isolation() {
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![PathBuf::from("/workspace")],
+            vec![PathBuf::from("/workspace/tmp")],
+            true,
+        );
+
+        let error = policy
+            .check_write(Path::new("/workspace/src/lib.rs"), "file_write")
+            .unwrap_err();
+
+        let OperationError::SandboxPolicyDenied { denial } = error else {
+            panic!("expected sandbox denial");
+        };
+        assert_eq!(denial.isolation, "linux_bubblewrap");
     }
 
     fn grant_request(
@@ -694,6 +1084,26 @@ mod tests {
     fn macos_seatbelt_is_unsupported_on_non_macos() {
         let error = LocalBackendPolicy::from_isolation_options(
             Some(LocalIsolationOptions::MacosSeatbelt {
+                allow_network: false,
+                readable_roots: vec![],
+                writable_roots: vec![],
+            }),
+            Path::new("/workspace"),
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationBackendBuildError::Unsupported { .. }
+        ));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn linux_bubblewrap_is_unsupported_on_non_linux() {
+        let error = LocalBackendPolicy::from_isolation_options(
+            Some(LocalIsolationOptions::LinuxBubblewrap {
                 allow_network: false,
                 readable_roots: vec![],
                 writable_roots: vec![],

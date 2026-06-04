@@ -72,6 +72,13 @@ impl SandboxDialog {
                 description: "macOS sandbox-exec + local file policy。",
             });
         }
+        if cfg!(target_os = "linux") {
+            options.push(SandboxOption {
+                id: "bubblewrap",
+                name: "Bubblewrap",
+                description: "Linux bubblewrap + local file policy。",
+            });
+        }
         let selected = options
             .iter()
             .position(|option| option.id == current_id)
@@ -878,14 +885,10 @@ pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
     let Some(isolation) = backend.options.get("isolation") else {
         return "local";
     };
-    if isolation
-        .get("kind")
-        .and_then(|value| value.as_str())
-        .is_some_and(|kind| kind == "macos_seatbelt")
-    {
-        "seatbelt"
-    } else {
-        "local"
+    match isolation.get("kind").and_then(|value| value.as_str()) {
+        Some("macos_seatbelt") => "seatbelt",
+        Some("linux_bubblewrap") => "bubblewrap",
+        _ => "local",
     }
 }
 
@@ -893,17 +896,18 @@ pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'
     let Some(backend) = backend.as_ref() else {
         return "Local";
     };
-    if backend.kind == "local"
-        && backend
-            .options
-            .get("isolation")
-            .and_then(|value| value.get("kind"))
-            .and_then(|value| value.as_str())
-            .is_some_and(|kind| kind == "macos_seatbelt")
+    if backend.kind != "local" {
+        return "Local";
+    }
+    match backend
+        .options
+        .get("isolation")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
     {
-        "Seatbelt"
-    } else {
-        "Local"
+        Some("macos_seatbelt") => "Seatbelt",
+        Some("linux_bubblewrap") => "Bubblewrap",
+        _ => "Local",
     }
 }
 
@@ -932,6 +936,15 @@ pub(crate) fn sandbox_backend_config(
             );
             Some(GatewayBackendConfig::new("local", options))
         }
+        "bubblewrap" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "linux_bubblewrap"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
         _ => {
             object.remove("isolation");
             if object.is_empty() {
@@ -946,8 +959,8 @@ pub(crate) fn sandbox_backend_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        current_git_diff_delta_for_file, sandbox_backend_config, ApiKeyDialogState, AppState,
-        RuntimeStatusLight,
+        current_git_diff_delta_for_file, current_sandbox_id, sandbox_backend_config,
+        sandbox_display_name, ApiKeyDialogState, AppState, RuntimeStatusLight,
     };
     use crate::config::{AgentRoleConfig, Config};
     use crate::gateway::backend::GatewayBackendConfig;
@@ -978,12 +991,9 @@ mod tests {
             "Core".to_string(),
             "baize".to_string(),
         ];
-        let mut state = AppState::new_with_config(
-            &config,
-            PathBuf::from("config.toml"),
-            PathBuf::from("."),
-        )
-        .expect("app state should initialize");
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
 
         assert_eq!(
             state.agent_tab_labels(),
@@ -1024,6 +1034,35 @@ mod tests {
 
         assert_eq!(updated.options["default_shell"], "/bin/zsh");
         assert!(updated.options.get("isolation").is_none());
+    }
+
+    #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_bubblewrap() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/bash"}),
+        ));
+
+        let updated = sandbox_backend_config("bubblewrap", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/bash");
+        assert_eq!(updated.options["isolation"]["kind"], "linux_bubblewrap");
+    }
+
+    #[test]
+    fn sandbox_helpers_recognize_bubblewrap() {
+        let mut config = Config::default();
+        config.operation_backend = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"isolation": {"kind": "linux_bubblewrap"}}),
+        ));
+
+        assert_eq!(current_sandbox_id(&config), "bubblewrap");
+        assert_eq!(
+            sandbox_display_name(&config.operation_backend),
+            "Bubblewrap"
+        );
     }
 
     #[test]
