@@ -18,6 +18,7 @@ from ..config import Config, is_llm_layer3_enabled
 from .heuristic_detector import (
     HeuristicDetector,
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
+    is_inline_script_command,
 )
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
@@ -90,6 +91,14 @@ class xiaoOSecBot:
 
         violated_layers: list[str] = []
 
+        # ========== 内联脚本命令检查（假阳性防护） ==========
+        # 对内联脚本命令（python -c, perl -e 等），Layer 1/2 的 file_access 模式
+        # （如 /etc/shadow）不立即 Deny。因为敏感路径可能出现在字符串字面量中，
+        # 而纯正则无法可靠区分字符串和执行路径。交给 Layer 3 LLM 做语义判断。
+        action_detail = a_next.get("action_detail", "").lower()
+        is_inline_script_cmd = is_inline_script_command(action_detail)
+        skip_inline_file_access = False
+
         # ========== 层1: 启发式静态检测 ==========
         if security_cfg.heuristic_enabled:
             heuristic_result = self._heuristic_detector.detect(a_next, reason)
@@ -100,8 +109,13 @@ class xiaoOSecBot:
                 heuristic_result.reason,
             )
             if heuristic_result.hit:
-                violated_layers.append("1.1")
-                if heuristic_result.risk_level in ("high", "critical"):
+                # 对内联脚本命令，file_access 风险不立即 Deny
+                skip_inline_file_access = (
+                    is_inline_script_cmd
+                    and heuristic_result.risk_type == "file_access"
+                )
+                if heuristic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
+                    violated_layers.append("1.1")
                     logger.info(
                         "启发式检测拦截: risk_level=%s, reason=%s",
                         heuristic_result.risk_level,
@@ -185,8 +199,9 @@ class xiaoOSecBot:
                 logic_result.reason,
             )
             if logic_result.hit:
-                violated_layers.append("1.2")
-                if logic_result.risk_level in ("high", "critical"):
+                # 内联脚本的 file_access 不立即 Deny，转 Layer 3 语义判断
+                if logic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
+                    violated_layers.append("1.2")
                     logger.info(
                         "逻辑规则检测拦截: violated_rule=%s, reason=%s",
                         logic_result.violated_rule,

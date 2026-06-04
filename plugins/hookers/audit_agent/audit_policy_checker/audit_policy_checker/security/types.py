@@ -19,13 +19,14 @@ class SecurityJudgment:
 
 @dataclass
 class HeuristicResult:
-    """启发式检测 результат"""
+    """启发式检测结果"""
 
     hit: bool = False
     matched_patterns: list[str] = field(default_factory=list)
     risk_level: str = "low"
     reason: str = ""
     risk_type: str = ""
+    confidence: int = 100  # 0-100，置信度；<80 时不立即 Deny，转交 Layer 2/3 分析
 
 
 @dataclass

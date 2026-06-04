@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 CONFIG_FILE="$HOME/.config/xiaoo/config.toml"
 
 # --- Parse command line arguments ---
@@ -102,7 +102,14 @@ for item in data:
     any_changed = False
     new_tokens = []
     for token in tokens:
-        if needs_resolve(token):
+        if '=' in token:
+            key, value = token.split('=', 1)
+            if needs_resolve(value):
+                new_tokens.append(f'{key}={resolve_token(value, hooker_dir)}')
+                any_changed = True
+            else:
+                new_tokens.append(token)
+        elif needs_resolve(token):
             new_tokens.append(resolve_token(token, hooker_dir))
             any_changed = True
         else:
