@@ -50,6 +50,7 @@
 
 mod context;
 mod ebpf_types;
+mod file_access_record;
 mod observer;
 mod sink;
 
@@ -62,6 +63,9 @@ pub use ebpf_types::{
     FILE_ACCESS_RETVAL_OFFSET, FORK_CHILD_PID_OFFSET, FORK_CLONE_FLAGS_OFFSET, FORK_COUNT_OFFSET,
     FORK_PARENT_PID_OFFSET, NETWORK_ADDRESS_OFFSET, NETWORK_DIRECTION_OFFSET, NETWORK_PORT_OFFSET,
     NETWORK_PROTOCOL_OFFSET, NETWORK_RESULT_OFFSET,
+};
+pub use file_access_record::{
+    FileAccessCollector, FileAccessOperation, FileAccessOutcome, FileAccessRecord,
 };
 pub use observer::{
     CompositeObserver, ExecObserver, ExecutionMetrics, LoggingObserver, MetricsObserver,

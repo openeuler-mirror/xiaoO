@@ -82,6 +82,8 @@ permission = "readwrite"
 |------|------|--------|------|
 | `landlock_optional` | `bool` | `false` | Landlock 不可用时，是否允许继续执行 |
 | `mount_isolation_fallback` | `bool` | `false` | Landlock 不可用时，是否允许退化到 mount 隔离 |
+| `seccomp_optional` | `bool` | `false` | seccomp 不可用时（如模拟/跨架构容器），是否把失败降级为告警而继续执行，而不是中止 |
+| `file_access_audit` | `bool` | `false` | 是否为本次执行采集文件访问事件（openat 等）。需启用 `ebpf` feature 且运行在 Linux 上；事件随 `ExecResult.file_accesses` 返回 |
 | `path_groups` | table | 全部为 `false` | 预定义文件系统访问组 |
 | `custom_paths` | array<table> | 空数组 | 自定义文件系统路径规则 |
 | `namespaces` | table | 全部为 `true` | Linux namespace 隔离开关 |
@@ -369,6 +371,94 @@ ports = [[80, 80], [443, 443]]
 - 开了 `ebpf` 时，它才进入真实的 host / CIDR / port 匹配与 monitor / enforce 流程
 
 如果你在默认构建里看到 `network_policy` 被拒绝，不是“文档保守”，而是当前 build 本身就没有打开那条 backend。
+
+---
+
+## `file_access_audit`：文件访问审计
+
+`file_access_audit = true` 时，Cerberus 在每次执行期间通过 eBPF 采集子进程的文件访问事件（`openat` 系列系统调用），并把记录通过 `ExecResult.file_accesses` 返回；CLI 还会把它落地成审计输出。该能力与 `network_policy` 一样是 **feature gate** 的：只有用 `ebpf` feature 构建、且运行在 Linux 上才会真正采集，默认构建下配置 `file_access_audit = true` 会直接报错（fail-closed）。
+
+### 构建要求
+
+eBPF 相关 crate 在上游 workspace 中默认是注释停泊的，构建前需取消注释 `Cargo.toml` 里的三个成员（缺一不可，`cerberus-core` 的 `build.rs` 会用 `cargo build --package audit-bpf --features eBPF` 编译 BPF 字节码，要求它在 workspace 内）：
+
+```toml
+[workspace]
+members = [
+    # ...
+    "crates/cerberus/cerberus-core",
+    "crates/cerberus/cerberus-cli",
+    "crates/cerberus/cerberus-core/bpf",
+]
+```
+
+然后用 `ebpf` feature 构建（需要 eBPF 工具链：nightly + bpf-linker）：
+
+```bash
+cargo build -p cerberus-cli --features ebpf
+```
+
+### 启用与运行
+
+在策略 TOML 里打开开关（没有对应的命令行参数，只能通过策略文件启用）：
+
+```toml
+# minimal-audit.toml
+landlock_optional = true
+file_access_audit = true
+
+[path_groups]
+system_binaries = true
+system_libraries = true
+
+[namespaces]
+mount = true
+pid = true
+network = false
+user = true
+
+[[custom_paths]]
+path = "."
+permission = "readwrite"
+```
+
+```bash
+cerberus --policy-file minimal-audit.toml exec -- cat /etc/hostname
+```
+
+### 输出通道
+
+单条记录的结构（`FileAccessRecord`）：
+
+```json
+{
+  "path": "/etc/hostname",
+  "operation": "read",
+  "result": "allowed",
+  "pid": 41234,
+  "timestamp_nanos": 1717000000000000000
+}
+```
+
+- `operation`：`read` / `write` / `execute`
+- `result`：`allowed` / `denied_by_landlock` / `denied_by_path_not_found`
+
+输出走哪条通道取决于环境变量 `CERBERUS_FILE_ACCESS_AUDIT_PATH`：
+
+- **未设置**：把完整审计以 pretty JSON 数组打印到 stderr（便于交互式查看）。
+- **已设置**：把本次调用写成**一行 JSONL**追加到该 sidecar 文件，stderr 只留一行摘要。这样当上层 agent 捕获子命令 stderr 回喂模型时，广命令（如 `find /` 触及成千上万文件）不会撑爆上下文。每行形如：
+
+```json
+{"command": "cat /etc/hostname", "events": [{"path": "/etc/hostname", "operation": "read", "result": "allowed", "pid": 41234, "timestamp_nanos": 1717000000000000000}]}
+```
+
+```bash
+CERBERUS_FILE_ACCESS_AUDIT_PATH=/tmp/file_access.jsonl \
+  cerberus --policy-file minimal-audit.toml exec -- cat /etc/hostname
+# stderr: [cerberus] file_access_audit: 1 event(s) -> /tmp/file_access.jsonl
+```
+
+写 sidecar 文件失败时只告警、不影响命令结果（sandbox 执行结果才是权威）。
 
 ---
 

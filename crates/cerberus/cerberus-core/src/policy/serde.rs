@@ -60,8 +60,21 @@ impl Policy {
             "# mount_isolation_fallback = true allows fallback to mount-only isolation\n",
         );
         output.push_str(&format!(
-            "mount_isolation_fallback = {}    # true = use mount fallback, false = no fallback\n\n",
+            "mount_isolation_fallback = {}    # true = use mount fallback, false = no fallback\n",
             self.mount_isolation_fallback
+        ));
+        output.push_str(
+            "# seccomp_optional = true downgrades seccomp setup failure to a warning\n",
+        );
+        output.push_str(&format!(
+            "seccomp_optional = {}    # true = continue without syscall filtering, false = fail if unavailable\n\n",
+            self.seccomp_optional
+        ));
+        output.push_str("# Collect file access events via eBPF for each execution.\n");
+        output.push_str("# Requires Cerberus built with the ebpf feature and a Linux runtime.\n");
+        output.push_str(&format!(
+            "file_access_audit = {}    # true = collect openat events, false = disabled\n\n",
+            self.file_access_audit
         ));
 
         output.push_str("# Custom Filesystem Rules\n");

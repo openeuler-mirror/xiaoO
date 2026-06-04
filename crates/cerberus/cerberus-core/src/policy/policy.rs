@@ -35,6 +35,18 @@ pub struct Policy {
     /// Whether to use mount isolation fallback.
     #[serde(default)]
     pub mount_isolation_fallback: bool,
+    /// Whether seccomp syscall filtering is optional.
+    ///
+    /// When `true`, a seccomp setup failure is downgraded to a warning instead
+    /// of aborting execution. This mirrors `landlock_optional` and is needed on
+    /// runtimes where seccomp cannot be installed (e.g. emulated/cross-arch
+    /// containers), while still allowing the rest of the sandbox (including the
+    /// eBPF file-access audit) to run.
+    #[serde(default)]
+    pub seccomp_optional: bool,
+    /// Whether to collect file access events via eBPF for this execution.
+    #[serde(default)]
+    pub file_access_audit: bool,
 }
 
 impl Policy {
@@ -60,6 +72,8 @@ impl Policy {
             network_policy: None,
             landlock_optional: false,
             mount_isolation_fallback: false,
+            seccomp_optional: false,
+            file_access_audit: false,
         }
     }
 
@@ -77,6 +91,8 @@ impl Policy {
             network_policy: None,
             landlock_optional: false,
             mount_isolation_fallback: false,
+            seccomp_optional: false,
+            file_access_audit: false,
         }
     }
 
@@ -94,6 +110,8 @@ impl Policy {
             network_policy: None,
             landlock_optional: false,
             mount_isolation_fallback: false,
+            seccomp_optional: false,
+            file_access_audit: false,
         }
     }
 

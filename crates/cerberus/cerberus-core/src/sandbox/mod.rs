@@ -43,7 +43,7 @@ pub mod process;
 pub mod setup;
 
 #[cfg(feature = "ebpf")]
-pub mod network;
+pub mod ebpf;
 
 pub use capability::{
     check_policy_runtime_requirements, check_strict_policy_enforceable, detect_capabilities,
