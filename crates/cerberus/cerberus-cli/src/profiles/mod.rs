@@ -536,7 +536,7 @@ mod tests {
         let mut file = std::fs::File::create(&policy_path).unwrap();
         writeln!(
             file,
-            "[[custom_paths]]\npath = \"~/.xiaoo/skills/xiaoo-guardian/\"\npermission = \"readexecute\""
+            "[[custom_paths]]\npath = \"/usr/lib/.xiaoo/skills/xiaoo-guardian/\"\npermission = \"readexecute\""
         )
         .unwrap();
         drop(file);
@@ -549,12 +549,10 @@ mod tests {
         let _ = std::env::set_current_dir(&original_dir);
 
         assert_eq!(policy.custom_paths.len(), 1);
-        let expected_path = dirs::home_dir()
-            .unwrap()
-            .join(".xiaoo/skills/xiaoo-guardian/");
+        let expected_path = std::path::PathBuf::from("/usr/lib/.xiaoo/skills/xiaoo-guardian/");
         assert_eq!(
             policy.custom_paths[0].path, expected_path,
-            "tilde should be expanded to home directory"
+            "system level skill path should be used for built-in skills"
         );
     }
 

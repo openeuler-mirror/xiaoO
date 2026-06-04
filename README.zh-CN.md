@@ -49,9 +49,30 @@ cd xiaoO
 cargo install --path apps/xiaoo-app
 ```
 
-安装后应用二进制会位于 `~/.cargo/bin`。请确认 `~/.cargo/bin` 已加入 `PATH`。
+安装后应用二进制会位于 `~/.cargo/bin`，并尝试安装内置技能。请确认 `~/.cargo/bin` 已加入 `PATH`。
 
-如果希望构建时出现交互式安全插件安装提示，可以使用：
+> **注意**：`cargo build` 不会安装技能，只有 `cargo install` 会触发技能安装。
+>
+> **安装行为**：
+> - 首先尝试安装内置技能到系统级目录：`/usr/lib/.xiaoo/skills/`（需要 root 权限）
+> - 如果系统级安装失败（如权限不足），自动回退到用户级目录：`~/.xiaoo/skills/`
+> - 内置技能包括 `xiaoo-guardian`（安全策略执行）以及其他内置能力
+> - 缺少这些技能可能导致安全功能不可用。
+>
+> **系统级安装**（推荐用于多用户环境）：
+> - 使用 root 权限运行 `cargo install`：`sudo cargo install --path apps/xiaoo-app`
+
+### 卸载
+
+```bash
+# 卸载二进制文件
+cargo uninstall xiaoo-app
+
+# 删除系统级 guardian 技能（需要 root 权限）
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+```
+
+### 技能目录优先级（四层 - 仅运行时搜索）
 
 ```bash
 ./build.sh --release
