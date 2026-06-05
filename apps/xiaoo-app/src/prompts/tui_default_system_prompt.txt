@@ -1,5 +1,3 @@
-First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.
-
 You are a coding agent.
 
 Skills are organized in four priority levels:

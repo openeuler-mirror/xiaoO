@@ -40,6 +40,7 @@ impl PermissionAwareOperationBackend {
     pub(crate) fn new(
         inner: Arc<dyn OperationBackend>,
         interaction: Arc<dyn InteractionHandle>,
+        exec_isolation: Option<&'static str>,
     ) -> Self {
         let bash_rules = Arc::new(BashSandboxApprovalRules::default());
         Self {
@@ -49,6 +50,7 @@ impl PermissionAwareOperationBackend {
                 Arc::clone(&inner),
                 Arc::clone(&interaction),
                 Arc::clone(&bash_rules),
+                exec_isolation,
             ),
             export: PermissionAwareExport::new(Arc::clone(&inner), interaction),
             inner,
@@ -193,6 +195,7 @@ struct PermissionAwareExec {
     inner: Arc<dyn OperationBackend>,
     interaction: Arc<dyn InteractionHandle>,
     bash_rules: Arc<BashSandboxApprovalRules>,
+    exec_isolation: Option<&'static str>,
 }
 
 impl PermissionAwareExec {
@@ -200,11 +203,13 @@ impl PermissionAwareExec {
         inner: Arc<dyn OperationBackend>,
         interaction: Arc<dyn InteractionHandle>,
         bash_rules: Arc<BashSandboxApprovalRules>,
+        exec_isolation: Option<&'static str>,
     ) -> Self {
         Self {
             inner,
             interaction,
             bash_rules,
+            exec_isolation,
         }
     }
 }
@@ -220,10 +225,12 @@ impl OperationExec for PermissionAwareExec {
         .await?;
         let mut retries = 0;
         loop {
-            let denial = runtime_seatbelt_denial(&result).or_else(|| {
-                is_silent_seatbelt_exec_denial(&result)
-                    .then(|| silent_runtime_denial(self.inner.backend_id()))
-            });
+            let denial = runtime_exec_denial(
+                &self.inner,
+                self.exec_isolation.as_deref(),
+                &request,
+                &result,
+            );
             let Some(denial) = denial else {
                 break;
             };
@@ -665,6 +672,26 @@ fn isolation_display_name(isolation: &str) -> &'static str {
     }
 }
 
+fn runtime_exec_denial(
+    backend: &Arc<dyn OperationBackend>,
+    exec_isolation: Option<&str>,
+    request: &ExecRequest,
+    result: &ExecResult,
+) -> Option<SandboxPolicyDenial> {
+    match exec_isolation {
+        Some("macos_seatbelt") => runtime_seatbelt_denial(result).or_else(|| {
+            is_silent_seatbelt_exec_denial(result)
+                .then(|| silent_runtime_denial(backend.backend_id()))
+        }),
+        Some("linux_bubblewrap") => runtime_bubblewrap_denial(
+            backend.permission_control(),
+            request.command.as_str(),
+            result,
+        ),
+        _ => None,
+    }
+}
+
 fn runtime_seatbelt_denial(result: &ExecResult) -> Option<SandboxPolicyDenial> {
     let stderr = String::from_utf8_lossy(result.stderr.as_slice());
     let path = denied_path_from_stderr(stderr.as_ref())?;
@@ -684,6 +711,168 @@ fn silent_runtime_denial(backend_id: &str) -> SandboxPolicyDenial {
         operation: "bash".to_string(),
         capability: SandboxPermissionCapability::ExecRuntime,
         path: "<runtime path not reported by macOS Seatbelt>".to_string(),
+    }
+}
+
+fn runtime_bubblewrap_denial(
+    control: Option<&dyn OperationPermissionControl>,
+    command: &str,
+    result: &ExecResult,
+) -> Option<SandboxPolicyDenial> {
+    if result.exit_code == Some(0) || result.timed_out {
+        return None;
+    }
+    let control = control?;
+    let stderr = String::from_utf8_lossy(result.stderr.as_slice());
+    for candidate in bubblewrap_path_candidates_from_stderr(stderr.as_ref(), command) {
+        let path = BackendPath(candidate.path);
+        match control.sandbox_denial_for_path(&path, candidate.capability, "bash") {
+            Ok(Some(denial)) => return Some(denial),
+            Ok(None) => {}
+            Err(_) => {}
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePathCandidate {
+    path: String,
+    capability: SandboxPermissionCapability,
+}
+
+fn bubblewrap_path_candidates_from_stderr(
+    stderr: &str,
+    command: &str,
+) -> Vec<RuntimePathCandidate> {
+    let mut candidates = Vec::new();
+    for line in stderr.lines() {
+        if !is_bubblewrap_path_boundary_line(line) {
+            continue;
+        }
+        for path in absolute_paths_from_text(line) {
+            let capability = infer_bubblewrap_path_capability(line, command, path.as_str());
+            if !candidates.iter().any(|candidate: &RuntimePathCandidate| {
+                candidate.path == path && candidate.capability == capability
+            }) {
+                candidates.push(RuntimePathCandidate { path, capability });
+            }
+        }
+    }
+    candidates
+}
+
+fn is_bubblewrap_path_boundary_line(line: &str) -> bool {
+    line.contains("No such file or directory") || line.contains("Read-only file system")
+}
+
+fn infer_bubblewrap_path_capability(
+    line: &str,
+    command: &str,
+    path: &str,
+) -> SandboxPermissionCapability {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("read-only file system")
+        || lower.contains("cannot create")
+        || lower.contains("cannot touch")
+        || lower.contains("cannot remove")
+        || lower.contains("cannot move")
+        || command_redirects_to_path(command, path)
+        || stderr_write_program_targets_path(line, path)
+    {
+        SandboxPermissionCapability::Write
+    } else {
+        SandboxPermissionCapability::Read
+    }
+}
+
+fn command_redirects_to_path(command: &str, path: &str) -> bool {
+    let Some(index) = command.find(path) else {
+        return false;
+    };
+    command[..index].trim_end().ends_with('>')
+}
+
+fn stderr_write_program_targets_path(line: &str, path: &str) -> bool {
+    if !line.contains(path) {
+        return false;
+    }
+    let command_name = line
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    matches!(
+        command_name,
+        "chmod" | "chown" | "ln" | "mkdir" | "rm" | "rmdir" | "tee" | "touch" | "truncate"
+    )
+}
+
+fn absolute_paths_from_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let quoted_paths = quoted_absolute_paths(text);
+    for path in quoted_paths {
+        push_unique_path_string(&mut paths, path);
+    }
+    if !paths.is_empty() {
+        return paths;
+    }
+
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if start.is_none() {
+            if ch == '/' {
+                start = Some(index);
+            }
+            continue;
+        }
+        if is_unquoted_path_delimiter(ch) {
+            if let Some(path) = clean_denied_path_candidate(&text[start.unwrap()..index]) {
+                push_unique_path_string(&mut paths, path);
+            }
+            start = None;
+        }
+    }
+    if let Some(index) = start {
+        if let Some(path) = clean_denied_path_candidate(&text[index..]) {
+            push_unique_path_string(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn quoted_absolute_paths(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for (open, close) in [('"', '"'), ('\'', '\''), ('`', '`'), ('‘', '’'), ('“', '”')] {
+        let mut rest = text;
+        while let Some(open_index) = rest.find(open) {
+            let after_open = &rest[open_index + open.len_utf8()..];
+            let Some(close_index) = after_open.find(close) else {
+                break;
+            };
+            if let Some(path) = clean_denied_path_candidate(&after_open[..close_index]) {
+                push_unique_path_string(&mut paths, path);
+            }
+            rest = &after_open[close_index + close.len_utf8()..];
+        }
+    }
+    paths
+}
+
+fn is_unquoted_path_delimiter(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ':' | '"' | '\'' | '`' | '‘' | '’' | '“' | '”' | '<' | '>' | '|'
+        )
+}
+
+fn push_unique_path_string(paths: &mut Vec<String>, path: String) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
     }
 }
 
@@ -718,9 +907,16 @@ fn clean_denied_path_candidate(value: &str) -> Option<String> {
         .trim()
         .trim_matches('"')
         .trim_matches('\'')
+        .trim_matches('`')
+        .trim_matches('‘')
+        .trim_matches('’')
+        .trim_matches('“')
+        .trim_matches('”')
         .trim_end_matches(':')
+        .trim_end_matches(',')
+        .trim_end_matches(';')
         .trim();
-    if candidate.starts_with('/') {
+    if candidate.starts_with('/') && candidate != "/" {
         Some(candidate.to_string())
     } else {
         None
@@ -771,6 +967,168 @@ mod tests {
             runtime_seatbelt_denial(&result).map(|denial| denial.capability),
             Some(SandboxPermissionCapability::Write)
         );
+    }
+
+    #[test]
+    fn bubblewrap_candidates_parse_read_path_from_no_such_file() {
+        let candidates = bubblewrap_path_candidates_from_stderr(
+            "cat: /data/secret.txt: No such file or directory\n",
+            "cat /data/secret.txt",
+        );
+
+        assert_eq!(
+            candidates,
+            vec![RuntimePathCandidate {
+                path: "/data/secret.txt".to_string(),
+                capability: SandboxPermissionCapability::Read,
+            }]
+        );
+    }
+
+    #[test]
+    fn bubblewrap_candidates_parse_write_path_from_redirection() {
+        let candidates = bubblewrap_path_candidates_from_stderr(
+            "bash: /data/out.txt: No such file or directory\n",
+            "printf hi > /data/out.txt",
+        );
+
+        assert_eq!(
+            candidates,
+            vec![RuntimePathCandidate {
+                path: "/data/out.txt".to_string(),
+                capability: SandboxPermissionCapability::Write,
+            }]
+        );
+    }
+
+    #[test]
+    fn bubblewrap_candidates_parse_write_path_from_pipeline_tool_stderr() {
+        let candidates = bubblewrap_path_candidates_from_stderr(
+            "tee: /data/out.txt: No such file or directory\n",
+            "printf hi | tee /data/out.txt",
+        );
+
+        assert_eq!(
+            candidates,
+            vec![RuntimePathCandidate {
+                path: "/data/out.txt".to_string(),
+                capability: SandboxPermissionCapability::Write,
+            }]
+        );
+    }
+
+    #[test]
+    fn bubblewrap_candidates_parse_quoted_unicode_path() {
+        let candidates = bubblewrap_path_candidates_from_stderr(
+            "ls: cannot access ‘/data/input folder’: No such file or directory\n",
+            "ls '/data/input folder'",
+        );
+
+        assert_eq!(
+            candidates,
+            vec![RuntimePathCandidate {
+                path: "/data/input folder".to_string(),
+                capability: SandboxPermissionCapability::Read,
+            }]
+        );
+    }
+
+    #[test]
+    fn runtime_bubblewrap_denial_requires_permission_control_confirmation() {
+        let control = TestPermissionControl {
+            expected_path: "/data/secret.txt",
+            expected_capability: SandboxPermissionCapability::Read,
+            denial: Some(SandboxPolicyDenial {
+                backend_id: "local".to_string(),
+                isolation: "linux_bubblewrap".to_string(),
+                operation: "bash".to_string(),
+                capability: SandboxPermissionCapability::Read,
+                path: "/data/secret.txt".to_string(),
+            }),
+        };
+        let result = ExecResult {
+            stdout: vec![],
+            stderr: b"cat: /data/secret.txt: No such file or directory\n".to_vec(),
+            exit_code: Some(1),
+            timed_out: false,
+        };
+
+        let denial = runtime_bubblewrap_denial(Some(&control), "cat /data/secret.txt", &result)
+            .expect("expected denial");
+
+        assert_eq!(denial.isolation, "linux_bubblewrap");
+        assert_eq!(denial.capability, SandboxPermissionCapability::Read);
+    }
+
+    #[test]
+    fn runtime_bubblewrap_denial_skips_unconfirmed_paths() {
+        let control = TestPermissionControl {
+            expected_path: "/missing/path.txt",
+            expected_capability: SandboxPermissionCapability::Read,
+            denial: None,
+        };
+        let result = ExecResult {
+            stdout: vec![],
+            stderr: b"cat: /missing/path.txt: No such file or directory\n".to_vec(),
+            exit_code: Some(1),
+            timed_out: false,
+        };
+
+        assert!(
+            runtime_bubblewrap_denial(Some(&control), "cat /missing/path.txt", &result).is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bubblewrap_exec_prompts_and_retries_for_existing_hidden_read_path() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let temp_root = workspace.join("tmp");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(temp_root.as_path()).unwrap();
+        std::fs::create_dir_all(outside.as_path()).unwrap();
+        let secret = outside.join("secret.txt");
+        std::fs::write(secret.as_path(), b"secret").unwrap();
+
+        let inner = match operation_backend::local_backend_with_isolation(
+            workspace.clone(),
+            None,
+            Some(temp_root),
+            Some("/bin/bash".to_string()),
+            Some(serde_json::json!({
+                "kind": "linux_bubblewrap",
+                "readable_roots": [workspace],
+                "writable_roots": [workspace]
+            })),
+        ) {
+            Ok(backend) => backend,
+            Err(agent_contracts::backend::OperationBackendBuildError::Unsupported { .. }) => {
+                return;
+            }
+            Err(error) => panic!("backend should build: {error}"),
+        };
+        let wrapped = PermissionAwareOperationBackend::new(
+            inner,
+            Arc::new(AllowSessionInteraction),
+            Some("linux_bubblewrap"),
+        );
+
+        let result = wrapped
+            .exec()
+            .exec(ExecRequest {
+                command: format!("cat {}", shell_quote(secret.as_path())),
+                args: vec![],
+                shell: None,
+                cwd: Some(BackendPath(workspace.display().to_string())),
+                timeout_ms: Some(5000),
+                env: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(String::from_utf8_lossy(result.stdout.as_slice()), "secret");
     }
 
     #[test]
@@ -858,5 +1216,55 @@ mod tests {
         };
 
         assert!(!is_silent_seatbelt_exec_denial(&result));
+    }
+
+    struct TestPermissionControl {
+        expected_path: &'static str,
+        expected_capability: SandboxPermissionCapability,
+        denial: Option<SandboxPolicyDenial>,
+    }
+
+    impl OperationPermissionControl for TestPermissionControl {
+        fn sandbox_denial_for_path(
+            &self,
+            path: &BackendPath,
+            capability: SandboxPermissionCapability,
+            operation: &str,
+        ) -> Result<Option<SandboxPolicyDenial>, OperationError> {
+            assert_eq!(path.0, self.expected_path);
+            assert_eq!(capability, self.expected_capability);
+            assert_eq!(operation, "bash");
+            Ok(self.denial.clone())
+        }
+
+        fn grant(
+            &self,
+            _request: SandboxPermissionGrantRequest,
+        ) -> Result<SandboxPermissionGrantId, OperationError> {
+            panic!("grant should not be called by runtime_bubblewrap_denial")
+        }
+
+        fn revoke(&self, _id: SandboxPermissionGrantId) -> Result<(), OperationError> {
+            panic!("revoke should not be called by runtime_bubblewrap_denial")
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct AllowSessionInteraction;
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl InteractionHandle for AllowSessionInteraction {
+        async fn ask(&self, _request: &InteractionRequest) -> InteractionResponse {
+            InteractionResponse::Choice {
+                value: Some(ALLOW_SESSION.to_string()),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shell_quote(path: &Path) -> String {
+        let value = path.to_string_lossy();
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }

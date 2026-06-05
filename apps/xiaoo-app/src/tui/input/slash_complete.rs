@@ -1,5 +1,5 @@
 //! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/sandbox`, `/save`, `/skills`).
+//! `app.rs` (`/allow-path`, `/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/sandbox`, `/save`, `/skills`).
 
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
@@ -11,6 +11,10 @@ pub struct SlashCommandSpec {
 
 /// Canonical slash commands (ASCII only).
 pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
+    SlashCommandSpec {
+        name: "/allow-path",
+        summary: "授权本地 sandbox 路径。用法：/allow-path [read|write] <path>。",
+    },
     SlashCommandSpec {
         name: "/connect",
         summary: "打开 provider / model 选择窗口并连接当前后端。",
@@ -237,10 +241,19 @@ mod tests {
         assert_eq!(
             candidates_for_prefix("/", NO_EXT),
             vec![
-                "/connect", "/dir", "/delete", "/load", "/new", "/save", "/remote", "/sandbox",
+                "/allow-path",
+                "/connect",
+                "/dir",
+                "/delete",
+                "/load",
+                "/new",
+                "/save",
+                "/remote",
+                "/sandbox",
                 "/skills"
             ]
         );
+        assert_eq!(candidates_for_prefix("/a", NO_EXT), vec!["/allow-path"]);
         assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
@@ -265,7 +278,7 @@ mod tests {
         assert!(all.contains(&"/connect".to_string()));
 
         let a = candidates_for_prefix("/a", &ext);
-        assert_eq!(a, vec!["/agent-start"]);
+        assert_eq!(a, vec!["/allow-path", "/agent-start"]);
     }
 
     #[test]

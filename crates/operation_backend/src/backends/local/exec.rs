@@ -203,7 +203,10 @@ fn command_from_spec(
 mod linux_bubblewrap_tests {
     use super::*;
     use crate::backends::local::factory::local_backend_with_isolation;
-    use agent_contracts::backend::BackendPath;
+    use agent_contracts::backend::{
+        BackendPath, SandboxPermissionCapability, SandboxPermissionGrantRequest,
+        SandboxPermissionScope, SandboxPolicyDenial,
+    };
     use serde_json::json;
     use std::path::{Path, PathBuf};
 
@@ -258,6 +261,32 @@ mod linux_bubblewrap_tests {
         ));
         assert_ne!(denied_read.exit_code, Some(0));
         assert!(!String::from_utf8_lossy(denied_read.stdout.as_slice()).contains("secret"));
+
+        backend
+            .permission_control()
+            .unwrap()
+            .grant(SandboxPermissionGrantRequest {
+                denial: SandboxPolicyDenial {
+                    backend_id: backend.backend_id().to_string(),
+                    isolation: "linux_bubblewrap".to_string(),
+                    operation: "test".to_string(),
+                    capability: SandboxPermissionCapability::Read,
+                    path: outside_path.display().to_string(),
+                },
+                scope: SandboxPermissionScope::Session,
+            })
+            .unwrap();
+
+        let granted_read = runtime.block_on(exec_bash(
+            backend.as_ref(),
+            &workspace,
+            format!("cat {}", shell_quote(outside_path.as_path())).as_str(),
+        ));
+        assert_eq!(granted_read.exit_code, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(granted_read.stdout.as_slice()),
+            "secret"
+        );
 
         let _ = std::fs::remove_dir_all(root.as_path());
     }

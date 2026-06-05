@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,8 +10,12 @@ use crate::app_state::AppState;
 use crate::chat::Message;
 use crate::config::Config;
 use crate::gateway::{
-    AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig, SessionOpenRequest,
-    SessionRuntimeDescriptor,
+    backend::BackendEnsureSessionRequest, AppTurnRequest, GatewayEntryContext,
+    HostedSessionRuntimeConfig, SessionOpenRequest, SessionRuntimeDescriptor,
+};
+use agent_contracts::backend::{
+    SandboxPermissionCapability, SandboxPermissionGrantRequest, SandboxPermissionScope,
+    SandboxPolicyDenial,
 };
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -49,6 +54,63 @@ impl GatewayRuntime {
         } else {
             false
         }
+    }
+
+    pub async fn grant_sandbox_path(
+        &mut self,
+        state: &mut AppState,
+        raw_path: &str,
+        capability: SandboxPermissionCapability,
+    ) -> Result<String, String> {
+        if self.remote.is_some() {
+            return Err(
+                "remote backend is active; local sandbox path grants do not apply".to_string(),
+            );
+        }
+        if crate::app_state::current_sandbox_id(&state.agent_config) == "local" {
+            return Ok("当前 backend 未启用本地 sandbox，不需要授权路径。".to_string());
+        }
+
+        let runtime_config = self.build_runtime_config(state)?;
+        let open_request = self.session_open_request(state)?;
+        self.session_gateway
+            .ensure_session_open(runtime_config.clone(), open_request)
+            .await?;
+
+        let lease = self
+            .session_gateway
+            .backend_manager
+            .ensure_session_backend(BackendEnsureSessionRequest {
+                config: runtime_config.operation_backend.clone(),
+                workspace_root: state.workspace.clone(),
+                session_id: state.session_id.clone(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let backend = lease.backend();
+        let Some(control) = backend.permission_control() else {
+            return Err("current backend does not support sandbox permission grants".to_string());
+        };
+
+        let path = resolve_local_grant_path(raw_path, state.workspace.as_path())?;
+        control
+            .grant(SandboxPermissionGrantRequest {
+                denial: SandboxPolicyDenial {
+                    backend_id: backend.backend_id().to_string(),
+                    isolation: sandbox_isolation_id(&state.agent_config),
+                    operation: "allow_path".to_string(),
+                    capability,
+                    path: path.display().to_string(),
+                },
+                scope: SandboxPermissionScope::Session,
+            })
+            .map_err(|error| error.to_string())?;
+
+        Ok(format!(
+            "已授权 sandbox 路径（本 session）：{} {}",
+            capability,
+            path.display()
+        ))
     }
 
     fn discard_pending_user_message(&mut self, prompt: &str) {
@@ -280,6 +342,85 @@ impl GatewayRuntime {
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
         })
+    }
+}
+
+fn sandbox_isolation_id(config: &Config) -> String {
+    match crate::app_state::current_sandbox_id(config) {
+        "seatbelt" => "macos_seatbelt",
+        "bubblewrap" => "linux_bubblewrap",
+        _ => "local",
+    }
+    .to_string()
+}
+
+fn resolve_local_grant_path(raw_path: &str, workspace: &Path) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err("path cannot be empty".to_string());
+    }
+
+    let path = if trimmed == "~" || trimmed.starts_with("~/") {
+        let home = dirs::home_dir().ok_or_else(|| "home directory is not available".to_string())?;
+        home.join(trimmed.strip_prefix("~/").unwrap_or_default())
+    } else {
+        let path = Path::new(trimmed);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            workspace.join(path)
+        }
+    };
+
+    normalize_host_path(path.as_path())
+}
+
+fn normalize_host_path(path: &Path) -> Result<PathBuf, String> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => {
+                normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!("path escapes root: {}", path.display()));
+                }
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    if normalized.is_absolute() {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "path must resolve to an absolute path: {}",
+            path.display()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod sandbox_path_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_relative_grant_path_against_workspace() {
+        assert_eq!(
+            resolve_local_grant_path("data/input", Path::new("/workspace")).unwrap(),
+            PathBuf::from("/workspace/data/input")
+        );
+    }
+
+    #[test]
+    fn normalizes_parent_components() {
+        assert_eq!(
+            resolve_local_grant_path("/workspace/../data", Path::new("/workspace")).unwrap(),
+            PathBuf::from("/data")
+        );
     }
 }
 

@@ -286,6 +286,11 @@ allow_network = false
 
 For details, see [Linux Bubblewrap Isolation](../crates/operation_backend/docs/bubblewrap/README.md).
 
+In the TUI, Bubblewrap Bash failures that resolve to an existing host path (or a
+write target under an existing host parent directory) can prompt for a session
+grant automatically. `/allow-path read <path>` and `/allow-path write <path>`
+can also grant a path explicitly without editing the config file.
+
 ---
 
 ## Configuration Loading Mechanism

@@ -227,6 +227,38 @@ impl LocalBackendPolicy {
         ))
     }
 
+    pub(crate) fn sandbox_denial_for_path(
+        &self,
+        path: &Path,
+        capability: SandboxPermissionCapability,
+        operation: &str,
+    ) -> Result<Option<SandboxPolicyDenial>, OperationError> {
+        match capability {
+            SandboxPermissionCapability::Read => {
+                let path = normalize_for_read(path)?;
+                if !path.exists() || path == Path::new(std::path::MAIN_SEPARATOR_STR) {
+                    return Ok(None);
+                }
+                sandbox_denial_from_result(self.check_read(path.as_path(), operation))
+            }
+            SandboxPermissionCapability::Write => {
+                let path = normalize_for_write(path)?;
+                if !is_authorizable_write_target(path.as_path()) {
+                    return Ok(None);
+                }
+                sandbox_denial_from_result(self.check_write(path.as_path(), operation))
+            }
+            SandboxPermissionCapability::ExecCwd => {
+                let path = normalize_for_read(path)?;
+                if !path.is_dir() || path == Path::new(std::path::MAIN_SEPARATOR_STR) {
+                    return Ok(None);
+                }
+                sandbox_denial_from_result(self.check_exec_cwd(path.as_path()))
+            }
+            SandboxPermissionCapability::ExecRuntime => Ok(None),
+        }
+    }
+
     pub(crate) fn seatbelt_profile(&self) -> Option<MacosSeatbeltProfile> {
         match &self.isolation {
             LocalIsolationConfig::None => None,
@@ -740,6 +772,29 @@ fn write_grant_root(path: &Path) -> PathBuf {
     }
 }
 
+fn is_authorizable_write_target(path: &Path) -> bool {
+    if path == Path::new(std::path::MAIN_SEPARATOR_STR) {
+        return false;
+    }
+    if path.exists() {
+        return true;
+    }
+    path.parent()
+        .filter(|parent| *parent != Path::new(std::path::MAIN_SEPARATOR_STR))
+        .map(|parent| parent.exists())
+        .unwrap_or(false)
+}
+
+fn sandbox_denial_from_result(
+    result: Result<(), OperationError>,
+) -> Result<Option<SandboxPolicyDenial>, OperationError> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(OperationError::SandboxPolicyDenied { denial }) => Ok(Some(denial)),
+        Err(error) => Err(error),
+    }
+}
+
 fn profile_string(path: &Path) -> String {
     let value = path.to_string_lossy();
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
@@ -846,6 +901,103 @@ mod tests {
             policy().check_write(Path::new("/workspace/src/lib.rs"), "file_write"),
             Err(OperationError::SandboxPolicyDenied { .. })
         ));
+    }
+
+    #[test]
+    fn sandbox_denial_for_read_path_requires_existing_host_path() {
+        let root = std::env::temp_dir().join(format!(
+            "xiaoo-local-policy-read-denial-{}",
+            std::process::id()
+        ));
+        let outside = root.join("outside");
+        std::fs::create_dir_all(outside.as_path()).unwrap();
+        let file = outside.join("secret.txt");
+        std::fs::write(file.as_path(), b"secret").unwrap();
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![root.join("workspace")],
+            vec![root.join("workspace")],
+            true,
+        );
+
+        let denial = policy
+            .sandbox_denial_for_path(file.as_path(), SandboxPermissionCapability::Read, "bash")
+            .unwrap()
+            .expect("outside existing file should be denied");
+        assert_eq!(denial.isolation, "linux_bubblewrap");
+        assert_eq!(denial.capability, SandboxPermissionCapability::Read);
+
+        assert!(policy
+            .sandbox_denial_for_path(
+                outside.join("missing.txt").as_path(),
+                SandboxPermissionCapability::Read,
+                "bash",
+            )
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn sandbox_denial_for_write_path_allows_missing_file_with_existing_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "xiaoo-local-policy-write-denial-{}",
+            std::process::id()
+        ));
+        let outside = root.join("outside");
+        std::fs::create_dir_all(outside.as_path()).unwrap();
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![root.join("workspace")],
+            vec![root.join("workspace")],
+            true,
+        );
+
+        let denial = policy
+            .sandbox_denial_for_path(
+                outside.join("new.txt").as_path(),
+                SandboxPermissionCapability::Write,
+                "bash",
+            )
+            .unwrap()
+            .expect("new file under existing outside directory should be denied");
+        assert_eq!(denial.isolation, "linux_bubblewrap");
+        assert_eq!(denial.capability, SandboxPermissionCapability::Write);
+
+        assert!(policy
+            .sandbox_denial_for_path(
+                outside.join("missing-parent").join("new.txt").as_path(),
+                SandboxPermissionCapability::Write,
+                "bash",
+            )
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn sandbox_denial_for_path_skips_already_allowed_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "xiaoo-local-policy-allowed-denial-{}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.as_path()).unwrap();
+        let workspace = std::fs::canonicalize(workspace.as_path()).unwrap();
+        let file = workspace.join("visible.txt");
+        std::fs::write(file.as_path(), b"visible").unwrap();
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_bubblewrap",
+            vec![workspace.clone()],
+            vec![workspace],
+            true,
+        );
+
+        assert!(policy
+            .sandbox_denial_for_path(file.as_path(), SandboxPermissionCapability::Read, "bash")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(root.as_path());
     }
 
     #[test]

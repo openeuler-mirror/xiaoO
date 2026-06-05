@@ -298,6 +298,18 @@ impl OperationBackend for LocalOperationBackend {
 }
 
 impl OperationPermissionControl for LocalOperationBackend {
+    fn sandbox_denial_for_path(
+        &self,
+        path: &BackendPath,
+        capability: agent_contracts::backend::SandboxPermissionCapability,
+        operation: &str,
+    ) -> Result<Option<agent_contracts::backend::SandboxPolicyDenial>, OperationError> {
+        let host_path = self.state.backend_path_to_host(path)?;
+        self.state
+            .policy
+            .sandbox_denial_for_path(host_path.as_path(), capability, operation)
+    }
+
     fn grant(
         &self,
         request: SandboxPermissionGrantRequest,
