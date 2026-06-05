@@ -17,7 +17,7 @@ const CHANNEL_FILE_INSTRUCTION: &str = include_str!("prompts/channel_file_instru
 const CHANNEL_CONTEXT_BOUNDARY_INSTRUCTION: &str =
     include_str!("prompts/channel_context_boundary_instruction.md");
 
-pub fn compose_system_messages(base_system: &str, context: &PromptContext) -> Vec<String> {
+pub(crate) fn compose_system_messages(base_system: &str, context: &PromptContext) -> Vec<String> {
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let mut messages = Vec::new();
 
