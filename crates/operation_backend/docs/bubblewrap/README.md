@@ -69,19 +69,9 @@ look absent instead of returning a structured policy denial. When a Bash command
 fails this way, the gateway checks the reported absolute path from the host side.
 If the path exists for reads, or the write target has an existing parent
 directory, and the current Bubblewrap bind list does not already cover it, the
-TUI asks whether to grant the needed path access and retries the command after
-approval.
-
-The TUI also provides an explicit path grant entry when the user already knows
-which path should be visible:
-
-```text
-/allow-path read /data/input
-/allow-path write /data/output
-```
-
-The grant lasts for the current session and is merged into later Bubblewrap bind
-arguments.
+TUI asks whether to grant the needed path access. Approved grants last for the
+current session, are merged into later Bubblewrap bind arguments, and the failed
+command is retried automatically.
 
 ## Notes
 

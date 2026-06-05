@@ -1,4 +1,3 @@
-use agent_contracts::backend::SandboxPermissionCapability;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
@@ -531,11 +530,6 @@ impl App {
             return Ok(());
         }
 
-        if is_named_slash_command(trimmed, "/allow-path") {
-            self.handle_allow_path_command(trimmed).await;
-            return Ok(());
-        }
-
         if trimmed.eq_ignore_ascii_case("/sandbox") {
             self.state.chat_state.input.reset();
             self.open_sandbox_selection_dialog();
@@ -656,25 +650,6 @@ impl App {
                     }
                 }
             }
-        };
-        self.state.chat_state.messages.push(message);
-        self.state.chat_state.stick_to_bottom = true;
-    }
-
-    async fn handle_allow_path_command(&mut self, trimmed: &str) {
-        self.state.chat_state.input.reset();
-        let message = match parse_allow_path_command(trimmed) {
-            Ok((capability, raw_path)) => match self
-                .gateway
-                .grant_sandbox_path(&mut self.state, raw_path, capability)
-                .await
-            {
-                Ok(message) => crate::chat::Message::system(message),
-                Err(error) => {
-                    crate::chat::Message::error(format!("Authorize path failed: {error}"))
-                }
-            },
-            Err(error) => crate::chat::Message::system(error),
         };
         self.state.chat_state.messages.push(message);
         self.state.chat_state.stick_to_bottom = true;
@@ -1043,78 +1018,5 @@ fn slash_command_argument<'a>(trimmed: &'a str, command: &str) -> Option<&'a str
         None
     } else {
         Some(rest)
-    }
-}
-
-fn parse_allow_path_command(
-    trimmed: &str,
-) -> std::result::Result<(SandboxPermissionCapability, &str), String> {
-    let Some(arg) = slash_command_argument(trimmed, "/allow-path") else {
-        return Err(allow_path_usage());
-    };
-    let Some((first, rest)) = split_first_token(arg) else {
-        return Err(allow_path_usage());
-    };
-
-    let mode = first.to_ascii_lowercase();
-    match mode.as_str() {
-        "read" | "r" | "ro" | "readonly" => {
-            let path = rest.trim();
-            if path.is_empty() {
-                return Err(allow_path_usage());
-            }
-            Ok((SandboxPermissionCapability::Read, path))
-        }
-        "write" | "w" | "rw" | "readwrite" | "read-write" => {
-            let path = rest.trim();
-            if path.is_empty() {
-                return Err(allow_path_usage());
-            }
-            Ok((SandboxPermissionCapability::Write, path))
-        }
-        _ => Ok((SandboxPermissionCapability::Read, arg.trim())),
-    }
-}
-
-fn split_first_token(value: &str) -> Option<(&str, &str)> {
-    let trimmed = value.trim_start();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let end = trimmed
-        .char_indices()
-        .find_map(|(index, ch)| ch.is_whitespace().then_some(index))
-        .unwrap_or(trimmed.len());
-    Some((&trimmed[..end], &trimmed[end..]))
-}
-
-fn allow_path_usage() -> String {
-    "用法：/allow-path [read|write] <path>。例如：/allow-path read /data/input 或 /allow-path write /data/output".to_string()
-}
-
-#[cfg(test)]
-mod allow_path_tests {
-    use super::*;
-
-    #[test]
-    fn parse_allow_path_defaults_to_read() {
-        let (capability, path) = parse_allow_path_command("/allow-path /data/input").unwrap();
-
-        assert_eq!(capability, SandboxPermissionCapability::Read);
-        assert_eq!(path, "/data/input");
-    }
-
-    #[test]
-    fn parse_allow_path_accepts_write_mode_and_spaces() {
-        let (capability, path) =
-            parse_allow_path_command("/allow-path write /data/output folder").unwrap();
-
-        assert_eq!(capability, SandboxPermissionCapability::Write);
-        assert_eq!(path, "/data/output folder");
-    }
-
-    #[test]
-    fn parse_allow_path_requires_path_after_mode() {
-        assert!(parse_allow_path_command("/allow-path write").is_err());
     }
 }
