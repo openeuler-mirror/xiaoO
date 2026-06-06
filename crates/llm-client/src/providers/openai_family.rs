@@ -10,6 +10,10 @@ use crate::convert::{
 use crate::error::{
     map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
+use crate::url_fallback::{
+    build_base_url_candidates, build_final_candidates, should_try_next_candidate,
+    write_url_fallback_error_log, UrlAttemptRecord,
+};
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::{
@@ -103,28 +107,21 @@ impl OpenAiFamilyProvider {
         req
     }
 
+    #[allow(dead_code)]
     fn chat_completions_url(&self) -> String {
         format!("{}/chat/completions", self.api_base.trim_end_matches('/'))
     }
-}
 
-fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
-    match effort {
-        ReasoningEffort::Off => None,
-        ReasoningEffort::High => Some("high"),
-        ReasoningEffort::Max => Some("xhigh"),
-    }
-}
-
-#[async_trait]
-impl LlmProvider for OpenAiFamilyProvider {
-    async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let url = self.chat_completions_url();
+    async fn try_single_endpoint(
+        &self,
+        url: &str,
+        request: &LlmRequest,
+    ) -> Result<LlmResponse, LlmError> {
         let body = self.build_body(request, false)?;
         let body_str = serde_json::to_string(&body).unwrap_or_default();
 
         let response = self
-            .apply_common_headers(self.client.post(&url))
+            .apply_common_headers(self.client.post(url))
             .json(&body)
             .send()
             .await
@@ -132,6 +129,10 @@ impl LlmProvider for OpenAiFamilyProvider {
 
         let status = response.status();
         let headers = response.headers().clone();
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         let resp_body = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
@@ -143,6 +144,14 @@ impl LlmProvider for OpenAiFamilyProvider {
             ));
         }
 
+        if !content_type.to_lowercase().starts_with("application/json") {
+            return Err(LlmError::ApiError(format!(
+                "unexpected content type: {content_type}; expected application/json. \
+                 Response body preview: {}",
+                &resp_body.chars().take(200).collect::<String>(),
+            )));
+        }
+
         let wire_response: crate::wire_types::WireResponse =
             serde_json::from_str(&resp_body).map_err(map_serde_error)?;
         let mut llm_response = wire_response_to_llm_response(&wire_response);
@@ -150,25 +159,30 @@ impl LlmProvider for OpenAiFamilyProvider {
         Ok(llm_response)
     }
 
-    async fn complete_stream(
+    async fn try_stream_endpoint(
         &self,
+        url: &str,
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let url = self.chat_completions_url();
         let body = self.build_body(request, true)?;
         let body_str = serde_json::to_string(&body).unwrap_or_default();
 
         let response = self
-            .apply_common_headers(self.client.post(&url))
+            .apply_common_headers(self.client.post(url))
             .json(&body)
             .send()
             .await
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
+        let headers = response.headers().clone();
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
         if !status.is_success() {
-            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
             return Err(map_api_status_error(
                 status,
@@ -176,6 +190,20 @@ impl LlmProvider for OpenAiFamilyProvider {
                 &body_str,
                 Some(&headers),
             ));
+        }
+
+        if !content_type.to_lowercase().starts_with("text/event-stream") {
+            let preview = response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            return Err(LlmError::ApiError(format!(
+                "unexpected content type: {content_type}; expected text/event-stream. \
+                 Response body preview: {preview}",
+            )));
         }
 
         let mut full_text = String::new();
@@ -248,6 +276,17 @@ impl LlmProvider for OpenAiFamilyProvider {
             })
             .collect();
 
+        if full_text.is_empty()
+            && full_reasoning.is_empty()
+            && tool_use_blocks.is_empty()
+        {
+            return Err(LlmError::ApiError(
+                "empty stream response: stream completed but received no content. \
+                 The endpoint may not support SSE streaming or returned an unexpected response."
+                    .to_string(),
+            ));
+        }
+
         Ok(LlmResponse {
             message: AssistantMessage {
                 text: if full_text.is_empty() {
@@ -269,6 +308,150 @@ impl LlmProvider for OpenAiFamilyProvider {
                 .unwrap_or_default(),
         })
     }
+}
+
+fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::Off => None,
+        ReasoningEffort::High => Some("high"),
+        ReasoningEffort::Max => Some("xhigh"),
+    }
+}
+
+#[async_trait]
+impl LlmProvider for OpenAiFamilyProvider {
+    async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let base_candidates = build_base_url_candidates(&self.api_base);
+        let final_urls = build_final_candidates(&base_candidates);
+
+        let mut attempts = Vec::new();
+
+        for (idx, url) in final_urls.iter().enumerate() {
+            match self.try_single_endpoint(url, request).await {
+                Ok(response) => {
+                    return Ok(response);
+                }
+                Err(error) => {
+                    attempts.push(UrlAttemptRecord {
+                        index: idx,
+                        url: url.clone(),
+                        error: error.to_string(),
+                    });
+
+                    let is_phase1 = idx < base_candidates.len();
+                    let has_more_candidates = idx + 1 < final_urls.len();
+
+                    if should_try_next_candidate(&error) && has_more_candidates {
+                        if is_phase1 {
+                            tracing::warn!(
+                                "Phase 1 candidate #{} failed: {} - trying next candidate",
+                                idx + 1,
+                                url
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
+                                idx + 1,
+                                url
+                            );
+                        }
+                        continue;
+                    }
+
+                    let error_msg = write_url_fallback_error_log(
+                        &self.api_base,
+                        &base_candidates,
+                        &attempts,
+                        &error,
+                    );
+                    return Err(LlmError::ApiError(error_msg));
+                }
+            }
+        }
+
+        let final_error = LlmError::ApiError(format!(
+            "All {} endpoint URL candidates failed",
+            final_urls.len()
+        ));
+
+        let error_msg = write_url_fallback_error_log(
+            &self.api_base,
+            &base_candidates,
+            &attempts,
+            &final_error,
+        );
+
+        Err(LlmError::ApiError(error_msg))
+    }
+
+    async fn complete_stream(
+        &self,
+        request: &LlmRequest,
+        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<LlmResponse, LlmError> {
+        let base_candidates = build_base_url_candidates(&self.api_base);
+        let final_urls = build_final_candidates(&base_candidates);
+
+        let mut attempts = Vec::new();
+
+        for (idx, url) in final_urls.iter().enumerate() {
+            match self.try_stream_endpoint(url, request, on_chunk).await {
+                Ok(response) => {
+                    return Ok(response);
+                }
+                Err(error) => {
+                    attempts.push(UrlAttemptRecord {
+                        index: idx,
+                        url: url.clone(),
+                        error: error.to_string(),
+                    });
+
+                    let is_phase1 = idx < base_candidates.len();
+                    let has_more_candidates = idx + 1 < final_urls.len();
+
+                    if should_try_next_candidate(&error) && has_more_candidates {
+                        if is_phase1 {
+                            tracing::warn!(
+                                "Phase 1 candidate #{} failed: {} - trying next candidate",
+                                idx + 1,
+                                url
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Phase 2 candidate #{} failed with endpoint error: {} - trying next",
+                                idx + 1,
+                                url
+                            );
+                        }
+                        continue;
+                    }
+
+                    let error_msg = write_url_fallback_error_log(
+                        &self.api_base,
+                        &base_candidates,
+                        &attempts,
+                        &error,
+                    );
+                    return Err(LlmError::ApiError(error_msg));
+                }
+            }
+        }
+
+        let final_error = LlmError::ApiError(format!(
+            "All {} endpoint URL candidates failed",
+            final_urls.len()
+        ));
+
+        let error_msg = write_url_fallback_error_log(
+            &self.api_base,
+            &base_candidates,
+            &attempts,
+            &final_error,
+        );
+
+        Err(LlmError::ApiError(error_msg))
+    }
+
 
     fn capabilities(&self) -> &ProviderCapabilities {
         &self.capabilities

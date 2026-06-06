@@ -6,6 +6,7 @@ pub mod provider_registry;
 pub mod resolver;
 
 pub(crate) mod convert;
+pub(crate) mod url_fallback;
 mod providers;
 pub(crate) mod wire_types;
 
@@ -28,6 +29,10 @@ pub use models::{create_model_catalog, resolve_model_context_length, ModelCatalo
 pub use provider_registry::{
     normalize_api_base, resolve_protocol_family, resolve_provider_profile, supported_providers,
     ProtocolFamily, ProviderProfile,
+};
+pub use url_fallback::{
+    build_base_url_candidates, build_final_candidates, is_endpoint_path_error,
+    should_try_next_candidate, UrlAttemptRecord,
 };
 pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};
