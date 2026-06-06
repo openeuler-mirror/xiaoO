@@ -21,17 +21,23 @@ pub(crate) fn compose_system_messages(base_system: &str, context: &PromptContext
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let mut messages = Vec::new();
 
+    // Put Context section first (only Environment)
+    if let Some(environment_section) = compose_environment_section(context) {
+        messages.push(format!("# Context\n{}", environment_section));
+    }
+
     let base_system = base_system.trim();
     if !base_system.is_empty() {
         messages.push(base_system.to_string());
     }
 
-    if let Some(context_section) = compose_context_section(context) {
-        messages.push(context_section);
-    }
-
     if let Some(workspace_prompt) = workspace_prompt {
         messages.push(workspace_prompt);
+    }
+
+    // Add Available Skills at the end
+    if let Some(skill_section) = compose_skill_section(context) {
+        messages.push(skill_section);
     }
 
     messages
@@ -70,29 +76,6 @@ pub fn compose_channel_system_prompt(sections: ChannelPromptSections<'_>) -> Str
     }
 
     parts.join("\n\n")
-}
-
-fn compose_context_section(context: &PromptContext) -> Option<String> {
-    let mut sections = Vec::new();
-
-    if let Some(environment_section) = compose_environment_section(context) {
-        sections.push(environment_section);
-    }
-    if let Some(instruction_section) = compose_instruction_section(context) {
-        sections.push(instruction_section);
-    }
-    if let Some(memory_section) = compose_memory_section(context) {
-        sections.push(memory_section);
-    }
-    if let Some(skill_section) = compose_skill_section(context) {
-        sections.push(skill_section);
-    }
-
-    if sections.is_empty() {
-        None
-    } else {
-        Some(format!("# Context\n{}", sections.join("\n\n")))
-    }
 }
 
 fn split_workspace_prompt_block(base_system: &str) -> (String, Option<String>) {
@@ -156,75 +139,23 @@ fn compose_environment_section(context: &PromptContext) -> Option<String> {
     }
 }
 
-fn compose_instruction_section(context: &PromptContext) -> Option<String> {
-    if context.instructions.is_empty() {
-        return None;
-    }
-
-    let lines = context
-        .instructions
-        .iter()
-        .map(|instruction| {
-            format!(
-                "- {}: {}",
-                instruction.source.trim(),
-                instruction.content.trim()
-            )
-        })
-        .collect::<Vec<_>>();
-
-    Some(format!("## Instructions\n{}", lines.join("\n")))
-}
-
-fn compose_memory_section(context: &PromptContext) -> Option<String> {
-    if context.memory_snippets.is_empty() {
-        return None;
-    }
-
-    let lines = context
-        .memory_snippets
-        .iter()
-        .map(|snippet| {
-            format!(
-                "- [{}] {}",
-                normalize_memory_source(&snippet.source),
-                snippet.content.trim()
-            )
-        })
-        .collect::<Vec<_>>();
-
-    Some(format!("## Memory\n{}", lines.join("\n")))
-}
-
 fn compose_skill_section(context: &PromptContext) -> Option<String> {
     if context.skill_snippets.is_empty() {
         return None;
     }
 
-    let lines = context
-        .skill_snippets
-        .iter()
-        .map(|snippet| {
-            format!(
-                "- {}: {}",
-                snippet.skill_id.trim(),
-                snippet.description.trim()
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut lines = Vec::new();
 
-    let mut section = String::from("## Available Skills\nThe following skills are available. Use the `skill` tool to invoke them by name.\n");
+    for snippet in &context.skill_snippets {
+        let skill_id = snippet.skill_id.trim();
+        let desc = snippet.description.trim();
+
+        lines.push(format!("- {}: {}", skill_id, desc));
+    }
+
+    let mut section = String::from("### Available Skills\n\nInvoke skills by name using `skill` tool or `/skill-name` command.\n");
     section.push_str(&lines.join("\n"));
     Some(section)
-}
-
-fn normalize_memory_source(source: &str) -> String {
-    let source = source.trim();
-    if let Some(value) = source.strip_prefix("fact:") {
-        format!("fact/{}", value.trim())
-    } else {
-        source.to_string()
-    }
 }
 
 #[cfg(test)]

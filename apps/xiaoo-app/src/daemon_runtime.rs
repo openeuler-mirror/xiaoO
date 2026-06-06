@@ -19,6 +19,7 @@ use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
+use std::path::PathBuf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
@@ -26,7 +27,7 @@ use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
     ToolRuntimeServices,
 };
-use xiaoo_app::gateway::prompt_utils::compose_subagent_delegation_rules;
+use xiaoo_app::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 use xiaoo_app::gateway::{
     backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
@@ -49,6 +50,7 @@ pub struct ConfiguredRuntimeResolver {
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
+    skills_dirs: Vec<PathBuf>,
     lsp_registry: Option<Arc<LspServiceRegistry>>,
     operation_backend: Option<GatewayBackendConfig>,
 }
@@ -90,8 +92,9 @@ impl ConfiguredRuntimeResolver {
 
         let trace = config.resolve_trace_config();
         let compression_pipeline = build_compression_pipeline(config, &llm_provider)?;
+        let skills_config = config.resolve_skills_config();
         let skill_registry: Arc<dyn SkillRegistry> =
-            Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
+            Arc::new(FileSkillRegistry::new(&skills_config));
 
         let lsp_registry = config.build_lsp_registry();
 
@@ -111,6 +114,7 @@ impl ConfiguredRuntimeResolver {
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
+            skills_dirs: skills_config.skills_dirs.clone(),
             operation_backend: config.app.operation_backend.clone(),
             lsp_registry,
         })
@@ -248,6 +252,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                     request,
                     &subagent_roles,
                     is_subagent,
+                    &self.skills_dirs,
                 ),
                 feature_flags: self.feature_flags.clone(),
 
@@ -357,13 +362,25 @@ fn build_system_prompt(
     request: &SessionRuntimeBuildInput,
     subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
     is_subagent: bool,
+    skills_dirs: &[PathBuf],
 ) -> String {
     let mut base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
     base_prompt = base_prompt.trim().to_string();
 
+    base_prompt = base_prompt.replace(
+        "{{skills_dirs_table}}",
+        &generate_skills_dirs_table(skills_dirs),
+    );
+
     if !is_subagent {
         if let Some(rules) = compose_subagent_delegation_rules(&subagent_roles) {
-            base_prompt.push_str(&rules);
+            // Insert Subagent Delegation after identity introduction
+            // Find the first double newline after the identity line
+            if let Some(pos) = base_prompt.find("\n\n") {
+                base_prompt.insert_str(pos, &rules);
+            } else {
+                base_prompt.push_str(&rules);
+            }
         }
     }
 
@@ -495,7 +512,7 @@ mod tests {
         };
 
         let prompt =
-            build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false);
+            build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false, &Vec::new());
 
         assert!(prompt.contains("base rules"));
         assert!(prompt.contains("repo rules"));
