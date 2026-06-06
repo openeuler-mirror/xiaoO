@@ -475,8 +475,10 @@ impl EbpfLoader {
         let addr_bytes = [data[8], data[9], data[10], data[11]];
         let address = Ipv4Addr::from(addr_bytes);
 
-        // Parse port (offset 12, u16 in network byte order)
-        let port = u16::from_be_bytes([data[12], data[13]]);
+        // Parse port (offset 12). The eBPF side already converts sin_port from
+        // network to host order (`u16::from_be`) before writing the buffer, so
+        // here we read it back in native order like every other field above.
+        let port = u16::from_ne_bytes([data[12], data[13]]);
 
         // Result is always Allowed at parsing time (enforcement happens in user-space later)
         let result = NetworkAccessResult::Allowed;
