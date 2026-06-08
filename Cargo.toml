@@ -48,6 +48,7 @@ tempfile = "3.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "rustls-tls-native-roots"] }
 chrono = "0.4"
 cron = "0.13"
+shellexpand = "3"
 arboard = { version = "3", default-features = false }
 base64 = "0.22"
 crossterm = { version = "0.28", features = ["event-stream"] }
