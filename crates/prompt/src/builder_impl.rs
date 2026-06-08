@@ -2,11 +2,12 @@ use agent_contracts::{PromptBuildInput, PromptBuilder, ToolSpecView};
 use agent_llm::ChatMessageExt;
 use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
 use agent_types::{
-    ChatMessage, ContentBlock, LlmRequest, ReasoningEffort, ResponseFormat, Tool, ToolChoice,
+    ChatMessage, ContentBlock, LlmRequest, MessageRole, ReasoningEffort, ResponseFormat, Tool,
+    ToolChoice,
 };
 use async_trait::async_trait;
 
-use crate::compose::compose_system_messages;
+use crate::compose::compose_system_text;
 use crate::context::collect_prompt_context;
 use crate::decision::decide_prompt;
 
@@ -30,17 +31,24 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let system_messages = compose_system_messages(&input.system_prompt, &context);
+        let system_text = compose_system_text(&input.system_prompt, &context);
 
-        if system_messages.is_empty() {
+        if system_text.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
                 message: "missing required context: system_prompt".to_string(),
             });
         }
 
-        let mut messages = Vec::with_capacity(input.messages.len() + system_messages.len());
-        messages.extend(system_messages.iter().cloned().map(ChatMessage::system));
-        messages.extend(input.messages);
+        let mut messages = Vec::with_capacity(input.messages.len() + 1);
+        messages.push(ChatMessage::system(system_text));
+
+        messages.extend(
+            input
+                .messages
+                .iter()
+                .filter(|m| m.role != MessageRole::System)
+                .cloned(),
+        );
 
         let request = LlmRequest {
             messages,
@@ -305,5 +313,59 @@ mod tests {
         };
 
         assert!(matches!(err, PromptBuildError::BuildFailed { .. }));
+    }
+
+    #[test]
+    fn build_filters_out_existing_system_messages() {
+        let builder = PromptBuilderImpl::new();
+        let input = PromptBuildInput {
+            system_prompt: "New system prompt".to_string(),
+            messages: vec![
+                ChatMessage::system("Old system prompt 1"),
+                ChatMessage::user("hello"),
+                ChatMessage::system("Old system prompt 2"),
+                ChatMessage::assistant("response", 0),
+            ],
+            visible_tools: Vec::new(),
+            skill_summaries: Vec::new(),
+            memory_snippets: Vec::new(),
+            environment: EnvironmentInfo {
+                model: "gpt-test".to_string(),
+                cwd: String::new(),
+                workspace_root: None,
+                date: "2026-04-10".to_string(),
+                agent_id: "main".to_string(),
+            },
+            feature_flags: FeatureFlags::default(),
+            turn_count: 1,
+            budget: TokenBudgetConfig {
+                total_budget: 1024,
+                reserved_for_output: 256,
+                reserved_for_system: 128,
+                hard_limit_ratio: 0.9,
+            },
+        };
+
+        let result = futures::executor::block_on(builder.build(input)).unwrap();
+
+        assert_eq!(result.request.messages.len(), 3);
+
+        assert_eq!(result.request.messages[0].role, agent_types::MessageRole::System);
+        let system_text = result.request.messages[0].text_content().unwrap();
+        assert!(system_text.contains("New system prompt"));
+        assert!(system_text.contains("Environment"));
+
+        assert_eq!(result.request.messages[1].role, agent_types::MessageRole::User);
+        assert_eq!(result.request.messages[1].text_content(), Some("hello"));
+
+        assert_eq!(result.request.messages[2].role, agent_types::MessageRole::Assistant);
+        assert_eq!(result.request.messages[2].text_content(), Some("response"));
+
+        for message in &result.request.messages {
+            if message.role == agent_types::MessageRole::System {
+                let text = message.text_content().unwrap();
+                assert!(!text.contains("Old system prompt"), "Old system messages should be filtered out");
+            }
+        }
     }
 }

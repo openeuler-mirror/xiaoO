@@ -22,16 +22,19 @@ impl PluginToolSource {
     fn discovery_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
 
-        if let Some(home) = std::env::var_os("HOME") {
-            dirs.push(PathBuf::from(home).join(".xiaoo").join("tools"));
-        }
-
         let workspace_root = self
             .workspace_root
             .clone()
             .or_else(|| std::env::current_dir().ok());
         if let Some(workspace_root) = workspace_root {
             dirs.push(workspace_root.join(".xiaoo").join("tools"));
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let home_tools = PathBuf::from(home).join(".xiaoo").join("tools");
+            if !dirs.contains(&home_tools) {
+                dirs.push(home_tools);
+            }
         }
 
         dirs
@@ -73,11 +76,19 @@ impl PluginToolSource {
 
 impl ToolSource for PluginToolSource {
     fn discover(&self) -> Vec<DiscoveredTool> {
-        self.discovery_dirs()
-            .into_iter()
-            .flat_map(|dir| Self::discover_dir(&dir))
-            .map(Self::discovered_tool)
-            .collect()
+        let mut discovered_tools = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        for dir in self.discovery_dirs() {
+            for loaded in Self::discover_dir(&dir) {
+                let tool_name = loaded.manifest.name.clone();
+                if seen_names.insert(tool_name) {
+                    discovered_tools.push(Self::discovered_tool(loaded));
+                }
+            }
+        }
+
+        discovered_tools
     }
 }
 
@@ -325,11 +336,13 @@ stdout = "text"
 
         let source = PluginToolSource::new(Some(workspace.clone()));
         let tools = source.discover();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].spec.name().0, "echo_payload");
+        let echo_tool = tools
+            .iter()
+            .find(|t| t.spec.name().0 == "echo_payload")
+            .expect("echo_payload tool should be discovered");
 
         let runtime = TestRuntime::new(workspace);
-        let output = tools[0]
+        let output = echo_tool
             .executor
             .invoke(
                 &FinalToolCall {
@@ -352,6 +365,116 @@ stdout = "text"
                 assert_eq!(payload["context"]["agent_id"], "test-agent");
             }
             other => panic!("unexpected custom tool output: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_tool_names_are_deduplicated() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let home_dir = temp.path().join("home");
+        let home_tools_dir = home_dir.join(".xiaoo").join("tools");
+        std::fs::create_dir_all(&home_tools_dir).expect("home tools dir");
+
+        let workspace = temp.path().join("workspace");
+        let workspace_tools_dir = workspace.join(".xiaoo").join("tools");
+        std::fs::create_dir_all(&workspace_tools_dir).expect("workspace tools dir");
+
+        std::fs::write(
+            home_tools_dir.join("test_tool.toml"),
+            r#"
+name = "test_tool"
+description = "Home version"
+timeout_ms = 5000
+
+[input_schema]
+type = "object"
+
+[exec]
+command = "echo"
+args = ["home"]
+"#,
+        )
+        .expect("home manifest");
+
+        std::fs::write(
+            workspace_tools_dir.join("test_tool.toml"),
+            r#"
+name = "test_tool"
+description = "Workspace version"
+timeout_ms = 5000
+
+[input_schema]
+type = "object"
+
+[exec]
+command = "echo"
+args = ["workspace"]
+"#,
+        )
+        .expect("workspace manifest");
+
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_dir);
+        let source = PluginToolSource::new(Some(workspace.clone()));
+        let tools = source.discover();
+
+        assert_eq!(tools.len(), 1, "Should only have one tool after deduplication");
+        assert_eq!(tools[0].spec.name().0, "test_tool");
+        assert_eq!(
+            tools[0].spec.description(),
+            "Workspace version",
+            "Workspace tools should have priority over home tools"
+        );
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn same_directory_is_not_scanned_twice() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let dir = temp.path().join("same");
+        let tools_dir = dir.join(".xiaoo").join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        std::fs::write(
+            tools_dir.join("unique_tool.toml"),
+            r#"
+name = "unique_tool"
+description = "Only one instance"
+timeout_ms = 5000
+
+[input_schema]
+type = "object"
+
+[exec]
+command = "echo"
+args = ["test"]
+"#,
+        )
+        .expect("manifest");
+
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &dir);
+        let source = PluginToolSource::new(Some(dir.clone()));
+        let tools = source.discover();
+
+        assert_eq!(
+            tools.len(),
+            1,
+            "Tool should only be discovered once when workspace == home"
+        );
+        assert_eq!(tools[0].spec.name().0, "unique_tool");
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
         }
     }
 }

@@ -206,6 +206,132 @@ impl GrepExecutor {
         ))
     }
 
+    /// Build GNU `grep` arguments mirroring [`Self::build_rg_args`].
+    ///
+    /// Used as a fallback when the `rg` binary is unavailable in the execution
+    /// environment (e.g. SWE-bench containers ship `grep` but not ripgrep).
+    /// `-P` selects the PCRE engine, the closest match to ripgrep's regex
+    /// flavor (`\d`, `\w`, `\s`, lazy quantifiers). Multiline and `--type`
+    /// have no clean grep equivalent and are intentionally dropped — degrading
+    /// to a superset of results is safer than hard-failing the whole call.
+    fn build_grep_args(input: &GrepInput, search_target: &str) -> Vec<String> {
+        let recursive = search_target == ".";
+        let mut args = vec!["-P".to_string()];
+
+        if recursive {
+            args.push("-r".to_string());
+            for dir in VCS_DIRECTORIES_TO_EXCLUDE {
+                args.push(format!("--exclude-dir={}", dir));
+            }
+        }
+
+        if input.case_insensitive.unwrap_or(false) {
+            args.push("-i".to_string());
+        }
+
+        let output_mode = input.output_mode.unwrap_or(OutputMode::FilesWithMatches);
+        match output_mode {
+            OutputMode::FilesWithMatches => {
+                args.push("-l".to_string());
+            }
+            OutputMode::Count => {
+                args.push("-c".to_string());
+            }
+            OutputMode::Content => {
+                if input.show_line_numbers.unwrap_or(true) {
+                    args.push("-n".to_string());
+                }
+
+                if let Some(ctx) = input.context {
+                    args.push("-C".to_string());
+                    args.push(ctx.to_string());
+                } else if let Some(ctx_c) = input.context_c {
+                    args.push("-C".to_string());
+                    args.push(ctx_c.to_string());
+                } else {
+                    if let Some(before) = input.context_before {
+                        args.push("-B".to_string());
+                        args.push(before.to_string());
+                    }
+                    if let Some(after) = input.context_after {
+                        args.push("-A".to_string());
+                        args.push(after.to_string());
+                    }
+                }
+            }
+        }
+
+        // `-e` keeps leading-dash patterns from being parsed as flags.
+        args.push("-e".to_string());
+        args.push(input.pattern.clone());
+
+        if recursive {
+            if let Some(ref glob) = input.glob {
+                for pattern in glob
+                    .split(|c| c == ',' || c == ' ')
+                    .filter(|s| !s.is_empty())
+                {
+                    let pattern = pattern.trim();
+                    if let Some(stripped) = pattern.strip_prefix('!') {
+                        args.push(format!("--exclude={}", stripped));
+                    } else {
+                        args.push(format!("--include={}", pattern));
+                    }
+                }
+            }
+        }
+
+        args.push(search_target.to_string());
+        args
+    }
+
+    async fn run_grep(
+        backend: &dyn agent_contracts::backend::OperationBackend,
+        args: Vec<String>,
+        cwd: BackendPath,
+        output_mode: OutputMode,
+    ) -> Result<Vec<String>, String> {
+        let output = backend
+            .exec()
+            .exec(ExecRequest {
+                command: "grep".to_string(),
+                args,
+                shell: None,
+                cwd: Some(cwd),
+                timeout_ms: None,
+                env: None,
+            })
+            .await
+            .map_err(|e| format!("Failed to execute grep via backend exec: {}", e))?;
+
+        // grep exit codes: 0 = matches, 1 = no matches, >1 = error.
+        if output.exit_code == Some(0) || output.exit_code == Some(1) {
+            let stdout = String::from_utf8_lossy(output.stdout.as_slice());
+            let lines = stdout
+                .lines()
+                .map(|line| line.replace('\r', ""))
+                .filter(|line| {
+                    // `grep -rc` emits `path:0` for non-matching files; ripgrep's
+                    // `--count-matches` omits them. Drop zero-count lines so the
+                    // downstream Count parsing matches ripgrep semantics.
+                    if matches!(output_mode, OutputMode::Count) {
+                        if let Some((_, count)) = line.rsplit_once(':') {
+                            return count.parse::<u64>().map(|c| c != 0).unwrap_or(true);
+                        }
+                    }
+                    true
+                })
+                .collect();
+            return Ok(lines);
+        }
+
+        Err(format!(
+            "grep exited with code {:?}: {}",
+            output.exit_code,
+            String::from_utf8_lossy(output.stderr.as_slice())
+        ))
+    }
+
     async fn resolve_result_path(
         backend: &dyn agent_contracts::backend::OperationBackend,
         cwd: &BackendPath,
@@ -231,8 +357,21 @@ impl GrepExecutor {
         let head_limit = input.head_limit.unwrap_or(DEFAULT_HEAD_LIMIT);
         let offset = input.offset.unwrap_or(0);
 
-        let args = Self::build_rg_args(input, &resolved_target.search_target);
-        let lines = Self::run_rg(backend, args, resolved_target.cwd.clone()).await?;
+        let rg_args = Self::build_rg_args(input, &resolved_target.search_target);
+        let lines = match Self::run_rg(backend, rg_args, resolved_target.cwd.clone()).await {
+            Ok(lines) => lines,
+            Err(rg_err) => {
+                // `rg` is missing or errored; fall back to GNU `grep`, which is
+                // present in environments (e.g. SWE-bench containers) that lack
+                // ripgrep. Without this the tool fails on every call there.
+                let grep_args = Self::build_grep_args(input, &resolved_target.search_target);
+                Self::run_grep(backend, grep_args, resolved_target.cwd.clone(), output_mode)
+                    .await
+                    .map_err(|grep_err| {
+                        format!("search failed (rg: {rg_err}) (grep fallback: {grep_err})")
+                    })?
+            }
+        };
 
         match output_mode {
             OutputMode::Content => {
@@ -437,5 +576,114 @@ impl ToolExecutor for GrepExecutor {
                 raw_outcome: RawToolOutcome::Error { message: e },
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(pattern: &str) -> GrepInput {
+        GrepInput {
+            pattern: pattern.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `-e` must immediately precede the pattern so it is never reparsed as a flag.
+    fn pattern_is_e_guarded(args: &[String], pattern: &str) -> bool {
+        args.windows(2)
+            .any(|w| w[0] == "-e" && w[1] == pattern)
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn recursive_default_mode_excludes_vcs_dirs() {
+        let args = GrepExecutor::build_grep_args(&input("TODO"), ".");
+
+        assert!(args.contains(&"-P".to_string()), "PCRE engine selected");
+        assert!(args.contains(&"-r".to_string()), "recursive on directory");
+        assert!(args.contains(&"-l".to_string()), "files-with-matches default");
+        assert!(pattern_is_e_guarded(&args, "TODO"));
+        assert_eq!(args.last().map(String::as_str), Some("."), "target is last arg");
+        for dir in VCS_DIRECTORIES_TO_EXCLUDE {
+            assert!(
+                args.contains(&format!("--exclude-dir={}", dir)),
+                "VCS dir {dir} excluded"
+            );
+        }
+        assert!(!args.contains(&"-n".to_string()), "no line numbers outside content mode");
+    }
+
+    /// A single-file target must NOT recurse: the `-r`, `--exclude-dir`, and
+    /// `--include`/`--exclude` glob flags are recursive-only and would change
+    /// the meaning of a one-file search if they leaked through.
+    #[test]
+    fn single_file_target_is_not_recursive() {
+        let mut grep_input = input("TODO");
+        grep_input.glob = Some("*.py".to_string());
+        let args = GrepExecutor::build_grep_args(&grep_input, "foo.py");
+
+        assert!(!args.contains(&"-r".to_string()), "no recursion on a single file");
+        assert!(
+            !args.iter().any(|a| a.starts_with("--exclude-dir=")),
+            "no VCS exclusions on a single file"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("--include=")),
+            "globs are recursive-only"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("foo.py"));
+    }
+
+    #[test]
+    fn content_mode_emits_line_numbers_and_context() {
+        let mut grep_input = input("needle");
+        grep_input.output_mode = Some(OutputMode::Content);
+        grep_input.context = Some(3);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"-n".to_string()), "line numbers on by default");
+        assert!(has_pair(&args, "-C", "3"), "symmetric context passed through");
+        assert!(pattern_is_e_guarded(&args, "needle"));
+    }
+
+    #[test]
+    fn count_mode_uses_dash_c() {
+        let mut grep_input = input("x");
+        grep_input.output_mode = Some(OutputMode::Count);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"-c".to_string()));
+        assert!(!args.contains(&"-l".to_string()));
+        assert!(!args.contains(&"-n".to_string()));
+    }
+
+    #[test]
+    fn case_insensitive_adds_dash_i() {
+        let mut grep_input = input("x");
+        grep_input.case_insensitive = Some(true);
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+        assert!(args.contains(&"-i".to_string()));
+    }
+
+    #[test]
+    fn glob_maps_to_include_and_exclude() {
+        let mut grep_input = input("x");
+        grep_input.glob = Some("*.py, !*_test.py".to_string());
+        let args = GrepExecutor::build_grep_args(&grep_input, ".");
+
+        assert!(args.contains(&"--include=*.py".to_string()));
+        assert!(args.contains(&"--exclude=*_test.py".to_string()));
+    }
+
+    /// A pattern beginning with `-` must not be swallowed as a grep flag.
+    #[test]
+    fn leading_dash_pattern_is_guarded() {
+        let args = GrepExecutor::build_grep_args(&input("-n"), ".");
+        assert!(pattern_is_e_guarded(&args, "-n"));
     }
 }

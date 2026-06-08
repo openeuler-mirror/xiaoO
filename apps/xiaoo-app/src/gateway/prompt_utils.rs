@@ -1,5 +1,6 @@
 use crate::gateway::session_record::SubagentRoleRecord;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 pub fn compose_subagent_delegation_rules(
     subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
@@ -15,19 +16,47 @@ pub fn compose_subagent_delegation_rules(
         .join("\n");
 
     Some(format!(
-        "\n\n## Subagent Delegation Rules\n\n\
-        When handling user requests, you MUST check if there is a suitable predefined subagent role available. \
-        If a predefined subagent role's description matches the user's request scenario, you MUST use spawn_subagent \
-        with that subagent_role_id to delegate the task, instead of executing it yourself.\n\n\
-        **Critical**: spawn_subagent returns an agent_id but does NOT wait for completion. The subagent runs asynchronously. \
-        You MUST call join_subagent with the returned agent_id at an appropriate point in your workflow to wait for the \
-        subagent to finish and receive its results. Your delegated task is NOT complete until you call join_subagent and \
-        process the returned results.\n\n\
-        Available predefined subagent roles:\n{}\n\n\
-        **Important**: Do NOT attempt to complete tasks yourself when a matching subagent role exists. \
-        Delegation ensures specialized handling and better results.",
+        "\n\n## Subagent Delegation\n\n\
+        When a predefined subagent role matches the user's request, delegate to it using `spawn_subagent` with `subagent_role_id`. **Workflow**: spawn → wait → `join_subagent` → process results.\n\n\
+        **Available Roles**:\n{}\n\n\
+        Always delegate to matching roles instead of handling directly.",
         roles_list
     ))
+}
+
+pub fn generate_skills_dirs_table(skills_dirs: &[PathBuf]) -> String {
+    if skills_dirs.is_empty() {
+        return "| Priority | Directory | Purpose |\n|----------|-----------|---------|\n| (none configured) | - | - |".to_string();
+    }
+
+    let mut table = "| Priority | Directory | Purpose |\n|----------|-----------|---------|\n".to_string();
+
+    let mut config_counter = 0;
+
+    for dir in skills_dirs {
+        let dir_str = dir.display().to_string();
+        let (priority, purpose) = classify_skill_dir(&dir_str, &mut config_counter);
+
+        table.push_str(&format!("| {} | `{}` | {} |\n", priority, dir_str, purpose));
+    }
+
+    table.trim_end().to_string()
+}
+
+fn classify_skill_dir(dir: &str, config_counter: &mut usize) -> (String, String) {
+    if dir == ".xiaoo/skills" {
+        ("Project".to_string(), "Project-specific skills".to_string())
+    } else if dir == "/usr/lib/.xiaoo/skills" {
+        ("System".to_string(), "Built-in skills".to_string())
+    } else if dir.ends_with("/.xiaoo/skills") 
+        && (dir.starts_with('~') 
+            || dir.starts_with("/home/")
+            || dir.starts_with("/root/")) {
+        ("User".to_string(), "Personal skills".to_string())
+    } else {
+        *config_counter += 1;
+        ("Config".to_string(), format!("Configured skill dir {}", config_counter))
+    }
 }
 
 #[cfg(test)]
@@ -95,10 +124,71 @@ mod tests {
 
         let rules = compose_subagent_delegation_rules(&roles).unwrap();
 
-        assert!(rules.starts_with("\n\n##"));
-        assert!(rules.contains("MUST check"));
-        assert!(rules.contains("**Critical**"));
-        assert!(rules.contains("Available predefined subagent roles"));
-        assert!(rules.contains("**Important**"));
+        assert!(rules.contains("## Subagent Delegation"));
+        assert!(rules.contains("spawn_subagent"));
+        assert!(rules.contains("join_subagent"));
+        assert!(rules.contains("**Available Roles**"));
+    }
+
+    #[test]
+    fn test_generate_skills_dirs_table_empty() {
+        let dirs: Vec<PathBuf> = Vec::new();
+        let table = generate_skills_dirs_table(&dirs);
+        assert!(table.contains("(none configured)"));
+    }
+
+    #[test]
+    fn test_generate_skills_dirs_table_default_four_levels() {
+        let dirs = vec![
+            PathBuf::from(".xiaoo/skills"),
+            PathBuf::from("/home/user/.xiaoo/skills"),
+            PathBuf::from("/usr/lib/.xiaoo/skills"),
+        ];
+        let table = generate_skills_dirs_table(&dirs);
+        assert!(table.contains("Project"));
+        assert!(table.contains("User"));
+        assert!(table.contains("System"));
+        assert!(table.contains(".xiaoo/skills"));
+        assert!(table.contains("/home/user/.xiaoo/skills"));
+        assert!(table.contains("/usr/lib/.xiaoo/skills"));
+    }
+
+    #[test]
+    fn test_generate_skills_dirs_table_with_config_dirs() {
+        let dirs = vec![
+            PathBuf::from(".xiaoo/skills"),
+            PathBuf::from("/opt/custom/skills"),
+            PathBuf::from("/etc/xiaoo/skills"),
+            PathBuf::from("/home/user/.xiaoo/skills"),
+            PathBuf::from("/usr/lib/.xiaoo/skills"),
+        ];
+        let table = generate_skills_dirs_table(&dirs);
+        assert!(table.contains("Config"));
+        assert!(table.contains("Configured skill dir 1"));
+        assert!(table.contains("Configured skill dir 2"));
+        assert!(table.contains("/opt/custom/skills"));
+        assert!(table.contains("/etc/xiaoo/skills"));
+        assert!(table.contains("User"));
+        assert!(table.contains("/home/user/.xiaoo/skills"));
+    }
+
+    #[test]
+    fn test_classify_skill_dir_user_variations() {
+        let mut counter = 0;
+        
+        assert_eq!(
+            classify_skill_dir("~/.xiaoo/skills", &mut counter),
+            ("User".to_string(), "Personal skills".to_string())
+        );
+        
+        assert_eq!(
+            classify_skill_dir("/home/test/.xiaoo/skills", &mut counter),
+            ("User".to_string(), "Personal skills".to_string())
+        );
+        
+        assert_eq!(
+            classify_skill_dir("/root/.xiaoo/skills", &mut counter),
+            ("User".to_string(), "Personal skills".to_string())
+        );
     }
 }

@@ -5,6 +5,7 @@ mod plugin;
 pub mod reqwest_util;
 mod runtime_services;
 mod source_loader;
+pub mod tool_input;
 
 pub use builtin::file_read;
 pub use runtime_services::{SubagentRoleConfig, ToolRuntimeServices};
