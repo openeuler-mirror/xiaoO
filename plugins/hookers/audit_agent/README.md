@@ -133,7 +133,24 @@ audit_policy_checker/
 - `--disable-llm`：禁用 LLM 分析（仅使用启发式+逻辑规则检测）
 - 环境变量 `AUDIT_ENABLE_LLM=1/0`：通过环境变量控制
 
-### 方式三：手动安装
+### 方式三：通过 RPM 安装
+
+通过 RPM 安装 xiaoO-hookers 包后，audit_agent 安装在 `/usr/lib/.xiaoo/hookers/audit_agent/`：
+
+```bash
+# 第一步：安装 xiaoO-hookers RPM 包
+sudo dnf install ./xiaoO-hookers-0.0.3-1.oe2403sp3.x86_64.rpm
+
+# 第二步：启用 audit_agent 插件（可选：启用/禁用 LLM 分析）
+bash /usr/bin/xiaoo-hookers-install --non-interactive audit_agent
+
+# 如需禁用 audit_agent 插件
+bash /usr/bin/xiaoo-hookers-uninstall
+```
+
+> RPM 安装时 plugin.json 中的路径会自动改为绝对路径，无需手动修改。
+
+### 方式四：手动安装
 
 ```bash
 cd plugins/hookers/audit_agent/audit_policy_checker
@@ -147,12 +164,20 @@ pip install -e .
 **LLM 配置**：如果 xiaoo 已配置 LLM（`~/.config/xiaoo/config.toml`），audit_agent 会自动继承配置。否则需手动创建 `config.json`：
 
 ```bash
+# 源码安装
 cp audit_policy_checker/audit_policy_checker/config.json.example audit_policy_checker/audit_policy_checker/config.json
+
+# RPM 安装（路径在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
+cp audit_policy_checker/config.json.example audit_policy_checker/config.json
 ```
 
 **审计设置**：通过 `audit_settings.json` 配置审计行为：
 
 ```bash
+# 源码安装
+cp audit_settings.json.example audit_settings.json
+
+# RPM 安装（已在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
 cp audit_settings.json.example audit_settings.json
 ```
 
@@ -220,6 +245,7 @@ AuditAgent 自动根据配置的 Provider 注入特殊 HTTP Headers，解决部�
 ```toml
 # ~/.config/xiaoo/config.toml
 [llm]
+api_key_env = "XIAOO_API_KEY"
 provider = "openrouter"
 model = "minimax/minimax-m2.5"
 ```
@@ -346,6 +372,8 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ## 端到端测试
 
+### 源码安装环境
+
 ```bash
 # 运行所有 rules 用例（50 条）
 cd audit_policy_checker/tests/xiaoo
@@ -369,6 +397,38 @@ bash run-allow-01-read-log.sh   # 正常读日志放行
 
 cd audit_policy_checker/tests/cases
 bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
+```
+
+### RPM 安装环境
+
+通过 RPM 安装 xiaoO-hookers 后，需额外指定二进制和 plugin.json 路径：
+
+```bash
+cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+
+# 运行全部用例
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
+
+# 仅跑某层
+python3 run_rules_tests.py \
+  --api-key "your-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --level 1
+
+# 预览用例
+python3 run_rules_tests.py \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --dry-run
+
+# Shell 脚本测试
+export XIAOO_BIN=/usr/bin/xiaoo
+export XIAOO_CONFIG=~/.config/xiaoo/config.toml
+bash run-deny-01-passwd.sh
 ```
 
 详细测试指南见 [TEST_GUIDE.md](audit_policy_checker/tests/TEST_GUIDE.md)。
