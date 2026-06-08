@@ -144,7 +144,10 @@ def generate_config(args):
     api_key_env = "XIAOO_RULES_TEST_KEY"
     os.environ[api_key_env] = api_key
 
-    plugin_json = PROJECT_ROOT / "plugins" / "hookers" / "audit_agent" / "plugin.json"
+    if args.plugin_json:
+        plugin_json = Path(args.plugin_json)
+    else:
+        plugin_json = PROJECT_ROOT / "plugins" / "hookers" / "audit_agent" / "plugin.json"
 
     config_content = CONFIG_TEMPLATE.format(
         provider=provider,
@@ -298,6 +301,7 @@ def main():
     parser.add_argument("--model", default=None, help="LLM 模型名 (默认从 ~/.config/xiaoo/config.toml 读取)")
     parser.add_argument("--api-base", default=None, help="LLM API Base URL (默认从 ~/.config/xiaoo/config.toml 读取)")
     parser.add_argument("--bin", default=str(DEFAULT_BIN), help="xiaoo 二进制路径")
+    parser.add_argument("--plugin-json", default=None, help="plugin.json 路径（RPM 场景需要手动指定，默认从源码路径查找）")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="单个测试超时秒数")
     parser.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS, help="最大对话轮数")
     parser.add_argument("--level", type=int, action="append", help="只测试指定 level (可多次指定)")
@@ -312,7 +316,7 @@ def main():
     bin_path = Path(args.bin)
     if not bin_path.exists():
         print(f"ERROR: xiaoo 二进制不存在: {bin_path}")
-        print(f"请先执行: cargo build --release")
+        print(f"请先执行: cargo build --release（开发环境）或通过 RPM 安装 xiaoo（生产环境）")
         sys.exit(1)
 
     # 生成配置
