@@ -1691,6 +1691,8 @@ dependencies = [
  "agent-types",
  "async-stream",
  "async-trait",
+ "chrono",
+ "dirs 5.0.1",
  "futures",
  "hook",
  "mockito",
