@@ -7,6 +7,7 @@
 3. [LLM 配置](#3-llm-配置)
 4. [测试用例说明](#4-测试用例说明)
 5. [常见问题](#5-常见问题)
+6. [RPM 安装环境测试](#6-rpm-安装环境测试)
 
 ---
 
@@ -377,3 +378,73 @@ LLM 输出有随机性，同一个 Deny 用例有时 PASS 有时 FAIL，原因�
 - 文件保护（Landlock）：普通用户即可
 - 网络隔离（eBPF）：需要 root 或 `CAP_BPF`
 - 无 root 时禁用 eBPF 网络策略即可（不影响文件保护测试）
+
+---
+
+## 6. RPM 安装环境测试
+
+通过 RPM 安装 xiaoO-hookers 后，audit_agent 安装到 `/usr/lib/.xiaoo/hookers/audit_agent/`，测试脚本需要额外指定二进制和 plugin.json 路径。
+
+### 6.1 前置条件
+
+确认 RPM 包已安装：
+
+```bash
+rpm -qa | grep xiaoO
+```
+
+预期输出包含 `xiaoO-hookers-*`。
+
+### 6.2 运行全部 rules 测试
+
+```bash
+cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
+```
+
+### 6.3 常用参数
+
+```bash
+# 仅跑某层
+python3 run_rules_tests.py \
+  --api-key "your-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --level 1
+
+# 只跑某个规则
+python3 run_rules_tests.py \
+  --api-key "your-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --rule sudo
+
+# 预览用例
+python3 run_rules_tests.py \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --dry-run
+```
+
+### 6.4 使用 Shell 脚本测试
+
+```bash
+cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+
+export XIAOO_BIN=/usr/bin/xiaoo
+export XIAOO_CONFIG=~/.config/xiaoo/config.toml
+export ZHIPU_API_KEY="your-api-key"
+bash run-deny-01-passwd.sh
+bash run-allow-01-read-log.sh
+```
+
+### 6.5 注意事项
+
+- **`--plugin-json` 参数是必需的**：RPM 安装路径下，测试脚本无法自动推测 plugin.json 位置，必须显式指定
+- **`--bin` 参数**：RPM 安装后 xiaoo 在 `/usr/bin/xiaoo`，与开发环境不同
+- **LLM 配置**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM，可省略 `--api-key`、`--provider`、`--model` 等参数，脚本会自动读取
+- **日志位置**：可通过 `AUDIT_LOG_PATH` 环境变量指定 audit_agent 日志路径
