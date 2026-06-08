@@ -1,5 +1,5 @@
 use crate::gateway::backend::GatewayBackendConfig;
-use crate::gateway::prompt_utils::compose_subagent_delegation_rules;
+use crate::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -243,6 +243,12 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
         descriptor.agent_id = agent_id.clone();
         descriptor.system_prompt =
             compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
+
+        descriptor.system_prompt = descriptor.system_prompt.replace(
+            "{{skills_dirs_table}}",
+            &generate_skills_dirs_table(&self.config.skills_config.skills_dirs),
+        );
+
         if request.max_turns_override.is_some() {
             descriptor.max_turns = request.max_turns_override;
         }
@@ -251,7 +257,13 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
 
         if !is_subagent {
             if let Some(rules) = compose_subagent_delegation_rules(&descriptor.subagent_roles) {
-                descriptor.system_prompt.push_str(&rules);
+                // Insert Subagent Delegation after identity introduction
+                // Find the first double newline after the identity line
+                if let Some(pos) = descriptor.system_prompt.find("\n\n") {
+                    descriptor.system_prompt.insert_str(pos, &rules);
+                } else {
+                    descriptor.system_prompt.push_str(&rules);
+                }
             }
         }
 

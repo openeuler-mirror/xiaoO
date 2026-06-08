@@ -114,8 +114,9 @@ impl TraceBackend for MoiraiSqliteBackend {
                 span.parent_span_id().map(ToString::to_string),
             )
             .await
-            .unwrap_or_else(|error| panic!("moirai begin_span failed: {error}"));
-
+            .ok()
+            .unwrap_or_else(|| span.span_id().to_string());
+        
         self.active_spans.lock().await.insert(persisted_span_id);
     }
 
@@ -141,8 +142,7 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await
-            .unwrap_or_else(|error| panic!("moirai update_span failed: {error}"));
+            .await.ok();
     }
 
     async fn end_span(
@@ -174,13 +174,11 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await
-            .unwrap_or_else(|error| panic!("moirai end_span update failed: {error}"));
+            .await.ok();
 
         self.context
             .end_span_at(span.span_id(), occurred_at_ms as i64)
-            .await
-            .unwrap_or_else(|error| panic!("moirai end_span failed: {error}"));
+            .await.ok();
     }
 
     async fn finalize_trace(
@@ -214,8 +212,7 @@ impl TraceBackend for MoiraiSqliteBackend {
 
         self.context
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
-            .await
-            .unwrap_or_else(|error| panic!("moirai trace finalization failed: {error}"));
+            .await.ok();
 
         *finalized = true;
     }
