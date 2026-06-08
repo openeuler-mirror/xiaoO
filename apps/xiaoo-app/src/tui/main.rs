@@ -150,8 +150,23 @@ fn default_config_path() -> Result<PathBuf> {
     }
 }
 
-async fn run_tui(mut config: config::Config, config_path: PathBuf) -> Result<()> {
-    populate_effective_context_window(&mut config).await;
+async fn run_tui(config: config::Config, config_path: PathBuf) -> Result<()> {
+    populate_effective_context_window(&config).await;
+
+    let (validation_errors, validation_warnings) = validate_config_for_tui(&config, &config_path);
+
+    for warning in &validation_warnings {
+        tracing::warn!("Config validation warning: {}", warning);
+    }
+
+    if !validation_errors.is_empty() {
+        for error in &validation_errors {
+            eprintln!("! Config Error: {}", error);
+            eprintln!("Program startup failed due to invalid configuration.");
+            eprintln!("Please fix the configuration in: {}", config_path.display());
+            std::process::exit(1);
+        }
+    }
 
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     execute!(io::stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
@@ -165,6 +180,27 @@ async fn run_tui(mut config: config::Config, config_path: PathBuf) -> Result<()>
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut app = app::App::new_with_config(&config, config_path.clone(), workspace)
         .context("failed to initialize TUI app state")?;
+
+    for error in validation_errors {
+        app.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(format!(
+                "! Config Error: {}",
+                error
+            )));
+    }
+
+    for warning in validation_warnings {
+        app.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(format!(
+                "! Config Warning: {}",
+                warning
+            )));
+    }
+
     if let Some(remote) = config
         .tui
         .remote
@@ -198,15 +234,25 @@ async fn run_tui(mut config: config::Config, config_path: PathBuf) -> Result<()>
     result
 }
 
-async fn populate_effective_context_window(config: &mut config::Config) {
-    if config
-        .llm
-        .context_window
-        .filter(|value| *value > 0)
-        .is_some()
-    {
-        return;
+async fn populate_effective_context_window(config: &config::Config) {
+    tracing::debug!("Starting context window detection process");
+
+    let configured_max_tokens = config.llm.max_tokens as usize;
+    let conservative_limit = 400_000;
+
+    if configured_max_tokens > conservative_limit {
+        tracing::warn!(
+            configured_max_tokens,
+            conservative_limit,
+            provider = &config.llm.provider,
+            model = &config.llm.model,
+            "⚠ max_tokens {} exceeds conservative limit {}. \
+             High risk of API rejection. Consider reducing max_tokens.",
+            configured_max_tokens, conservative_limit
+        );
     }
+
+    tracing::info!("Querying model catalog API for context window");
 
     let resolved = llm_client::resolve_config(llm_client::ResolveInput {
         provider: Some(config.llm.provider.clone()),
@@ -220,47 +266,104 @@ async fn populate_effective_context_window(config: &mut config::Config) {
         },
     });
 
-    match resolved {
-        Ok(resolved) => {
-            match llm_client::resolve_model_context_length(&resolved, &config.llm.model).await {
-                Ok(Some(context_window)) => match u32::try_from(context_window) {
-                    Ok(value) => {
-                        config.llm.context_window = Some(value);
-                        return;
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            provider = %config.llm.provider,
-                            model = %config.llm.model,
-                            context_window,
-                            "dynamic context window does not fit into TUI config type; falling back"
-                        );
-                    }
-                },
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        provider = %config.llm.provider,
-                        model = %config.llm.model,
-                        error = %error,
-                        "failed to dynamically resolve model context window; falling back"
-                    );
-                }
-            }
-        }
-        Err(error) => {
+    let resolved_ok: Option<llm_client::ResolvedConfig> = match &resolved {
+        Ok(r) => Some(r.clone()),
+        Err(e) => {
             tracing::warn!(
-                provider = %config.llm.provider,
-                model = %config.llm.model,
-                error = %error,
-                "failed to resolve provider config for dynamic context window lookup; falling back"
+                source = "catalog_resolution_failed",
+                error = e.to_string(),
+                "Failed to resolve provider config for catalog query"
             );
+            None
+        }
+    };
+
+    if let Some(resolved) = &resolved_ok {
+        match llm_client::resolve_model_context_length(resolved, &config.llm.model).await {
+            Ok(Some(context_window)) => {
+                tracing::info!(
+                    source = "model_catalog",
+                    context_window,
+                    provider = &config.llm.provider,
+                    model = &config.llm.model,
+                    "✓ Context window detected from model catalog: {}",
+                    context_window
+                );
+                return;
+            }
+            Ok(None) => {
+                tracing::info!(
+                    source = "catalog_not_found",
+                    provider = &config.llm.provider,
+                    model = &config.llm.model,
+                    "Catalog did not return context_window for this model"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    source = "catalog_query_failed",
+                    provider = &config.llm.provider,
+                    model = &config.llm.model,
+                    error = error.to_string(),
+                    "Catalog query failed"
+                );
+            }
         }
     }
 
-    if let Some(context_window) =
-        config::resolve_context_window(config).and_then(|value| u32::try_from(value).ok())
-    {
-        config.llm.context_window = Some(context_window);
+    if let Some(context_window) = config::resolve_context_window(config) {
+        tracing::info!(
+            source = "protocol_default",
+            context_window,
+            provider = &config.llm.provider,
+            model = &config.llm.model,
+            "Using protocol default context_window (runtime will auto-adjust if needed)"
+        );
+    } else {
+        tracing::warn!(
+            provider = &config.llm.provider,
+            model = &config.llm.model,
+            "Could not determine context_window, runtime will auto-detect from API errors"
+        );
     }
+}
+
+/// Validate configuration for TUI
+
+fn validate_config_for_tui(
+    config: &config::Config,
+    config_path: &PathBuf,
+) -> (Vec<String>, Vec<String>) {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    let resolved_context_window = config::resolve_context_window(config).unwrap_or(128_000);
+    let max_tokens = config.llm.max_tokens;
+
+    let max_reasonable_output_ratio = 0.5;
+    let max_reasonable_output_tokens = (resolved_context_window as f64 * max_reasonable_output_ratio) as usize;
+
+    if max_tokens as usize > max_reasonable_output_tokens {
+        warnings.push(format!(
+            "max_tokens {} exceeds 50% of context_window ({} * 0.5 = {}) for model {}. \
+            This may limit input space.",
+            max_tokens, resolved_context_window, max_reasonable_output_tokens, config.llm.model
+        ));
+    }
+
+    if max_tokens as usize >= resolved_context_window {
+        errors.push(format!(
+            "max_tokens {} >= context_window {} (auto-detected). \
+            This would leave NO space for input.\n\
+            Configuration file: {}\n\
+            Suggestions:\n\
+              - Reduce max_tokens (currently {}) in [llm] section",
+            max_tokens,
+            resolved_context_window,
+            config_path.display(),
+            max_tokens,
+        ));
+    }
+
+    (errors, warnings)
 }

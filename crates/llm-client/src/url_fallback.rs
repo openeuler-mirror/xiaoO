@@ -100,6 +100,8 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
                 || msg.contains("connect")
         }
         LlmError::ApiError(msg) => {
+            // Only endpoint path errors should trigger URL fallback
+            // HTTP 400/403 are configuration/parameter errors - should stop immediately
             msg.contains("HTTP 404")
                 || msg.contains("HTTP 405")
                 || msg.contains("Not Found")
@@ -117,16 +119,79 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
     }
 }
 
+pub fn is_configuration_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::ApiError(msg) => {
+            // Priority: HTTP status code > message keywords
+            //
+            // HTTP status codes indicate clear error categories:
+            // - 404/405: Endpoint path errors → try other URLs
+            // - 400/403: Configuration errors → stop immediately
+            //
+            // Message keywords may be misleading:
+            // Example: "HTTP 404 Not Found: Invalid URL (POST /v1)"
+            // - Contains "Invalid" → could be mistaken as config error
+            // - But HTTP 404 indicates endpoint path error → should try other URLs
+            //
+            // Therefore, check HTTP status codes FIRST, before checking keywords
+
+            // If HTTP status indicates endpoint path error, it's NOT a configuration error
+            if msg.contains("HTTP 404")
+                || msg.contains("HTTP 405")
+                || msg.contains("Not Found")
+                || msg.contains("endpoint not found")
+                || msg.contains("route not found")
+            {
+                return false;  // Endpoint path error, NOT configuration error
+            }
+
+            // Only after excluding endpoint path errors, check for configuration errors
+            msg.contains("HTTP 400")
+                || msg.contains("HTTP 403")
+                || msg.contains("Bad Request")
+                || msg.contains("Invalid")
+                || msg.contains("invalid_request_error")
+        }
+        LlmError::AuthError { .. }
+        | LlmError::ModelNotFound { .. }
+        | LlmError::RateLimited { .. }
+        | LlmError::ContextLengthExceeded { .. } => true,
+        _ => false,
+    }
+}
+
+pub fn is_retryable_network_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::Timeout
+        | LlmError::IoError(_)
+        | LlmError::StreamError { .. }
+        | LlmError::ParseError(_) => true,
+        LlmError::ApiError(msg) => {
+            // Only retry for transient network/server errors
+            // RateLimited (429/529) is quota/policy issue - should fail immediately
+            msg.contains("HTTP 502")
+                || msg.contains("HTTP 503")
+                || msg.contains("HTTP 504")
+                || msg.contains("Bad Gateway")
+                || msg.contains("Service Unavailable")
+                || msg.contains("Gateway Timeout")
+                || msg.contains("timeout")
+                || msg.contains("network")
+                || msg.contains("connection")
+        }
+        LlmError::RateLimited { .. } => false, // Rate limit is NOT retryable - quota exhausted
+        _ => false,
+    }
+}
+
 pub fn should_try_next_candidate(error: &LlmError) -> bool {
+    // Stop immediately for configuration/parameter errors
+    if is_configuration_error(error) {
+        return false;
+    }
+
+    // Try next candidate only for endpoint path errors
     is_endpoint_path_error(error)
-        && !matches!(
-            error,
-            LlmError::AuthError { .. }
-                | LlmError::ModelNotFound { .. }
-                | LlmError::RateLimited { .. }
-                | LlmError::ContextLengthExceeded { .. }
-                | LlmError::Cancelled
-        )
 }
 
 pub fn write_url_fallback_error_log(
@@ -190,10 +255,18 @@ pub fn write_url_fallback_error_log(
                 "  • Check if API base URL is correct and accessible"
             )
             .ok();
+            let test_url = {
+                let base = base_candidates.get(1).unwrap_or(&base_candidates[0]);
+                if base.ends_with("/v1") || base.contains("/v1/") {
+                    format!("{}{}", base.trim_end_matches('/'), "/models")
+                } else {
+                    format!("{}{}", base.trim_end_matches('/'), "/v1/models")
+                }
+            };
             writeln!(
                 file,
-                "  • Test endpoint manually: curl -v {}/v1/models",
-                base_candidates.get(1).unwrap_or(&base_candidates[0])
+                "  • Test endpoint manually: curl -v {}",
+                test_url
             )
             .ok();
             writeln!(
@@ -362,37 +435,119 @@ mod tests {
     }
 
     #[test]
-fn test_error_message_generation() {
-    let original_base = "http://wrong.endpoint.com";
-    let base_candidates = vec![
-        "http://wrong.endpoint.com".to_string(),
-        "http://wrong.endpoint.com/v1".to_string(),
-    ];
-    let attempts = vec![
-        UrlAttemptRecord {
-            index: 0,
-            url: "http://wrong.endpoint.com/chat/completions".to_string(),
-            error: "HTTP 404".to_string(),
-        },
-        UrlAttemptRecord {
-            index: 1,
-            url: "http://wrong.endpoint.com/v1/chat/completions".to_string(),
-            error: "Connection timeout".to_string(),
-        },
-    ];
-    let final_error = LlmError::ApiError("All candidates failed".to_string());
+    fn test_http_404_with_invalid_keyword_is_endpoint_error() {
+        // Test case from user: "HTTP 404 Not Found: Invalid URL (POST /v1)"
+        // This error should be treated as endpoint path error (try other URLs),
+        // NOT as configuration error (stop immediately), even though it contains "Invalid"
 
-    let error_msg = write_url_fallback_error_log(
-        original_base,
-        &base_candidates,
-        &attempts,
-        &final_error,
-    );
+        let error_msg = "API error: HTTP 404 Not Found: {\"error\": \"Invalid URL (POST /v1)\"}";
+        let error = LlmError::ApiError(error_msg.to_string());
 
-    assert!(error_msg.contains("All 2 endpoint URL candidates failed"));
-    assert!(error_msg.contains("http://wrong.endpoint.com"));
-    assert!(error_msg.contains("~/.xiaoo/log/error.log"));
-    assert!(error_msg.contains("http://wrong.endpoint.com/chat/completions"));
-    println!("生成的错误消息:\n{}", error_msg);
-}
+        // Should be classified as endpoint path error
+        assert!(is_endpoint_path_error(&error));
+
+        // Should NOT be classified as configuration error
+        assert!(!is_configuration_error(&error));
+
+        // Should try next candidate
+        assert!(should_try_next_candidate(&error));
+    }
+
+    #[test]
+    fn test_http_400_with_invalid_keyword_is_config_error() {
+        // Contrast with HTTP 400: truly a configuration error
+
+        let error_msg = "API error: HTTP 400 Bad Request: Invalid parameter";
+        let error = LlmError::ApiError(error_msg.to_string());
+
+        // Should NOT be classified as endpoint path error
+        assert!(!is_endpoint_path_error(&error));
+
+        // Should be classified as configuration error
+        assert!(is_configuration_error(&error));
+
+        // Should NOT try next candidate
+        assert!(!should_try_next_candidate(&error));
+    }
+
+    #[test]
+    fn test_error_message_generation() {
+        let original_base = "http://wrong.endpoint.com";
+        let base_candidates = vec![
+            "http://wrong.endpoint.com".to_string(),
+            "http://wrong.endpoint.com/v1".to_string(),
+        ];
+        let attempts = vec![
+            UrlAttemptRecord {
+                index: 0,
+                url: "http://wrong.endpoint.com/chat/completions".to_string(),
+                error: "HTTP 404".to_string(),
+            },
+            UrlAttemptRecord {
+                index: 1,
+                url: "http://wrong.endpoint.com/v1/chat/completions".to_string(),
+                error: "Connection timeout".to_string(),
+            },
+        ];
+        let final_error = LlmError::ApiError("All candidates failed".to_string());
+
+        let error_msg = write_url_fallback_error_log(
+            original_base,
+            &base_candidates,
+            &attempts,
+            &final_error,
+        );
+
+        assert!(error_msg.contains("All 2 endpoint URL candidates failed"));
+        assert!(error_msg.contains("http://wrong.endpoint.com"));
+        assert!(error_msg.contains("~/.xiaoo/log/error.log"));
+        assert!(error_msg.contains("http://wrong.endpoint.com/chat/completions"));
+    }
+
+    #[test]
+    fn rate_limited_is_not_retryable() {
+        // RateLimited (429/529) means quota exhausted - should fail immediately
+        let error = LlmError::RateLimited {
+            retry_after_ms: 5000,
+            message: "Too many requests".to_string(),
+        };
+
+        assert!(!is_retryable_network_error(&error));
+    }
+
+    #[test]
+    fn test_http_502_is_retryable() {
+        // HTTP 502 Bad Gateway - temporary server failure, should retry
+        let error_msg = "API error: HTTP 502 Bad Gateway";
+        let error = LlmError::ApiError(error_msg.to_string());
+
+        assert!(is_retryable_network_error(&error));
+    }
+
+    #[test]
+    fn test_http_503_is_retryable() {
+        // HTTP 503 Service Unavailable - temporary server failure, should retry
+        let error_msg = "API error: HTTP 503 Service Unavailable";
+        let error = LlmError::ApiError(error_msg.to_string());
+
+        assert!(is_retryable_network_error(&error));
+    }
+
+    #[test]
+    fn test_http_504_is_retryable() {
+        // HTTP 504 Gateway Timeout - temporary server failure, should retry
+        let error_msg = "API error: HTTP 504 Gateway Timeout";
+        let error = LlmError::ApiError(error_msg.to_string());
+
+        assert!(is_retryable_network_error(&error));
+    }
+
+    #[test]
+    fn test_http_500_is_not_retryable() {
+        // HTTP 500 Internal Server Error - might be persistent, not retryable here
+        let error_msg = "API error: HTTP 500 Internal Server Error";
+        let error = LlmError::ApiError(error_msg.to_string());
+
+        assert!(!is_retryable_network_error(&error));
+    }
 }

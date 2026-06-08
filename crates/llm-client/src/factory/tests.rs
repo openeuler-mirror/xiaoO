@@ -77,6 +77,7 @@ mod wrapper_tests {
                 timestamp_ms: 0,
                 api_usage_tokens: None,
                 reasoning_content: None,
+                estimated_tokens: None,
             }],
             tools: vec![],
             tool_choice: Default::default(),
@@ -236,10 +237,6 @@ mod wrapper_tests {
                 hookers: map,
                 enabled,
             }
-        }
-
-        fn empty() -> Self {
-            Self::with_hookers(vec![])
         }
     }
 
@@ -485,6 +482,7 @@ mod wrapper_tests {
                         timestamp_ms: 0,
                         api_usage_tokens: None,
                         reasoning_content: None,
+                        estimated_tokens: None,
                     }];
                     Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                         modified_request: req,
@@ -852,6 +850,7 @@ mod wrapper_tests {
                             timestamp_ms: 0,
                             api_usage_tokens: None,
                             reasoning_content: None,
+                            estimated_tokens: None,
                         }];
                         Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                             modified_request: req,

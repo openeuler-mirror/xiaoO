@@ -38,7 +38,6 @@ pub struct LlmSection {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
-    pub context_window: Option<usize>,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
