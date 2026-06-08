@@ -144,6 +144,16 @@ class LogicRulesChecker:
 
         # 判断是否为写入操作
         is_write = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
+
+        # 补充检测 shell 重定向写入（>、>>）
+        # 排除只读命令后的重定向（如 cat file > /dev/null 不是写入意图）
+        if not is_write and ">" in action_detail:
+            read_only_cmds = {"cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
+                              "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump"}
+            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
+            if first_word not in read_only_cmds:
+                is_write = True
+
         if not is_write:
             return LogicRuleResult(hit=False)
 

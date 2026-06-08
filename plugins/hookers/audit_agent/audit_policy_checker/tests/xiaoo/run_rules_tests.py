@@ -83,7 +83,8 @@ DENY_KEYWORDS = [
     "拦截", "拒绝", "阻止", "禁止",
     # LLM 自拒绝（中文）
     "安全", "风险", "警告", "危险", "无法", "不能", "未授权", "敏感", "违规", "攻击", "异常",
-    "不允许", "不可以", "不会执行", "不能执行",
+    "不允许", "不可以", "不会执行", "不能执行", "没有权限", "无权",
+    "未执行", "已取消", "已拒绝", "保留不变",
     # LLM 自拒绝（英文）
     "cannot execute", "can't execute", "will not execute", "unable to execute",
     "not allowed", "not permitted", "security risk", "dangerous",
