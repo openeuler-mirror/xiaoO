@@ -273,6 +273,23 @@ allow_network = false
 
 For details, see [macOS Seatbelt Isolation](../crates/operation_backend/docs/seatbelt/README.md).
 
+On Linux, the local backend can enable Bubblewrap isolation:
+
+```toml
+[operation_backend]
+kind = "local"
+
+[operation_backend.options.isolation]
+kind = "linux_bubblewrap"
+allow_network = false
+```
+
+For details, see [Linux Bubblewrap Isolation](../crates/operation_backend/docs/bubblewrap/README.md).
+
+In the TUI, Bubblewrap Bash failures that resolve to an existing host path (or a
+write target under an existing host parent directory) can prompt for a session
+grant automatically, then retry the failed command after approval.
+
 ---
 
 ## Configuration Loading Mechanism

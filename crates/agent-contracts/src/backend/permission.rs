@@ -1,3 +1,4 @@
+use crate::backend::BackendPath;
 use std::fmt;
 
 /// Capability requested by a sandboxed backend operation.
@@ -57,6 +58,16 @@ pub struct SandboxPermissionGrantRequest {
 pub struct SandboxPermissionGrantId(pub u64);
 
 pub trait OperationPermissionControl: Send + Sync {
+    fn sandbox_denial_for_path(
+        &self,
+        path: &BackendPath,
+        capability: SandboxPermissionCapability,
+        operation: &str,
+    ) -> Result<Option<SandboxPolicyDenial>, super::OperationError> {
+        let _ = (path, capability, operation);
+        Ok(None)
+    }
+
     fn grant(
         &self,
         request: SandboxPermissionGrantRequest,

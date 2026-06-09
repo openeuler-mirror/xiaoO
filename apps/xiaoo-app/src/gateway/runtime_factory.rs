@@ -152,6 +152,7 @@ impl AppRuntimeFactory {
                 Arc::new(PermissionAwareOperationBackend::new(
                     operation_backend,
                     Arc::clone(&interaction_handle),
+                    operation_backend_exec_isolation(resolved.operation_backend.as_ref()),
                 ));
             let inner = BasicRuntimeView::new(
                 ToolStateStoreBuilderImpl::new()
@@ -239,6 +240,25 @@ impl ToolEventSink for SharedToolEventSink {
             return;
         }
         NoopToolEventSink::new().emit(event);
+    }
+}
+
+fn operation_backend_exec_isolation(
+    config: Option<&crate::gateway::backend::GatewayBackendConfig>,
+) -> Option<&'static str> {
+    let config = config?;
+    if config.kind != "local" {
+        return None;
+    }
+    match config
+        .options
+        .get("isolation")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
+    {
+        Some("macos_seatbelt") => Some("macos_seatbelt"),
+        Some("linux_bubblewrap") => Some("linux_bubblewrap"),
+        _ => None,
     }
 }
 
