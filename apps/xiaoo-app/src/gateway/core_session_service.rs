@@ -208,7 +208,13 @@ impl CoreBackedSessionService {
         let supervisor = self.get_or_create_supervisor(seed_session).await;
         supervisor.prepare_root_turn(&request, &resolved).await;
         supervisor
-            .run_root_turn(request, event_sink, interaction_handle, channel_file_sender)
+            .run_root_turn(
+                request,
+                resolved,
+                event_sink,
+                interaction_handle,
+                channel_file_sender,
+            )
             .await
     }
 }
@@ -394,8 +400,8 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::gateway::{
-        backend::GatewayBackendConfig, AppBootstrap, GatewayEntryContext, InMemorySessionStore,
-        SessionRuntimeBindings, SessionRuntimeDescriptor,
+        AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionRuntimeBindings,
+        SessionRuntimeDescriptor, backend::GatewayBackendConfig,
     };
     use agent_contracts::backend::BackendLifecycleState;
     use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -404,7 +410,7 @@ mod tests {
     use agent_types::hook::HookerRegistryConfig;
     use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
     use llm_client::LlmProviderWrapper;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     struct StubLlmProvider {

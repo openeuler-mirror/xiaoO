@@ -7,11 +7,11 @@ use crate::gateway::{
 };
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
+use agent_types::ReasoningEffort;
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::outcome::AgentOutcome;
 use agent_types::tool::{RawToolOutcome, ToolExecutionResult};
-use agent_types::ReasoningEffort;
 use memory::MemorySnapshot;
 use serde_json::json;
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use subagent::{
     HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tool::ToolSpecSnapshot;
 use xiaoo_core::agent_loop::build_tool_result_message;
 use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};
@@ -47,6 +47,7 @@ struct PendingInteractionWaiter {
 struct LaneRunInput {
     agent_id: AgentId,
     runtime_input: SessionRuntimeBuildInput,
+    resolved_runtime: Option<ResolvedSessionRuntime>,
     user_message: String,
     append_user_message: bool,
     reasoning_effort: ReasoningEffort,
@@ -295,6 +296,7 @@ impl SessionSupervisor {
     pub async fn run_root_turn(
         self: &Arc<Self>,
         request: AppTurnRequest,
+        resolved_runtime: ResolvedSessionRuntime,
         loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
         interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
@@ -312,6 +314,7 @@ impl SessionSupervisor {
             .run_lane_until_terminal(LaneRunInput {
                 agent_id: root_agent_id,
                 runtime_input,
+                resolved_runtime: Some(resolved_runtime),
                 user_message: request.text,
                 append_user_message: true,
                 reasoning_effort: request.reasoning_effort,
@@ -344,28 +347,37 @@ impl SessionSupervisor {
         let mut loop_state = self.load_lane_loop_state(&input.agent_id).await?;
         let mut memory_snapshot = self.load_lane_memory_snapshot(&input.agent_id).await?;
         let mut tool_manifest = self.load_lane_tool_manifest(&input.agent_id).await?;
+        let mut next_resolved_runtime = input.resolved_runtime;
 
         loop {
-            let operation_backend = self.lease_backend_for_lane(&input.runtime_input).await?;
+            let resolved_runtime = match next_resolved_runtime.take() {
+                Some(resolved_runtime) => resolved_runtime,
+                None => {
+                    let session_snapshot = self.snapshot().await;
+                    self.runtime_resolver
+                        .resolve(&input.runtime_input, Some(&session_snapshot))
+                        .await?
+                }
+            };
+            let loop_event_sink = resolved_runtime.bindings.loop_event_sink.clone();
+            let operation_backend = self.lease_backend_for_lane(&resolved_runtime).await?;
             let session_snapshot = self.snapshot().await;
-            let worker_result = SessionWorker::run(
-                self.runtime_resolver.as_ref(),
-                SessionWorkerInput {
-                    runtime_input: input.runtime_input.clone(),
-                    session: session_snapshot,
-                    agent_id: input.agent_id.clone(),
-                    operation_backend,
-                    user_message,
-                    append_user_message,
-                    reasoning_effort: input.reasoning_effort,
-                    loop_event_sink_override: input.loop_event_sink_override.clone(),
-                    interaction_handle_override: input.interaction_handle_override.clone(),
-                    channel_file_sender_override: input.channel_file_sender_override.clone(),
-                    loop_state: loop_state.clone(),
-                    memory_snapshot: memory_snapshot.clone(),
-                    tool_manifest: tool_manifest.clone(),
-                },
-            )
+            let worker_result = SessionWorker::run(SessionWorkerInput {
+                runtime_input: input.runtime_input.clone(),
+                resolved_runtime,
+                session: session_snapshot,
+                agent_id: input.agent_id.clone(),
+                operation_backend,
+                user_message,
+                append_user_message,
+                reasoning_effort: input.reasoning_effort,
+                loop_event_sink_override: input.loop_event_sink_override.clone(),
+                interaction_handle_override: input.interaction_handle_override.clone(),
+                channel_file_sender_override: input.channel_file_sender_override.clone(),
+                loop_state: loop_state.clone(),
+                memory_snapshot: memory_snapshot.clone(),
+                tool_manifest: tool_manifest.clone(),
+            })
             .await?;
 
             loop_state = Some(worker_result.loop_state.clone());
@@ -431,35 +443,24 @@ impl SessionSupervisor {
 
                     resumed_loop_state.messages.push(tool_result_msg.clone());
 
-                    let mut runtime_input_copy = input.runtime_input.clone();
-                    runtime_input_copy.agent_id_override = Some(input.agent_id.clone());
-                    if let Ok(resolved) = self
-                        .runtime_resolver
-                        .resolve(&runtime_input_copy, Some(&*self.session.lock().await))
-                        .await
-                    {
-                        if let Some(sink) = resolved.bindings.loop_event_sink {
-                            let output_preview =
-                                serde_json::to_string(&serde_json::json!({ "terminal": terminal }))
-                                    .unwrap_or_default();
-                            let is_error =
-                                terminal.status == subagent::SubagentTerminalKind::Failed;
-                            sink.on_tool_result(
-                                &input.agent_id,
-                                &agent_types::events::ToolResultEvent {
-                                    call_id: suspended_call.final_call.call_id.clone(),
-                                    tool_name: suspended_call.final_call.tool_name.clone(),
-                                    output_preview,
-                                    is_error,
-                                    args_preview: serde_json::to_string_pretty(
-                                        &suspended_call.final_call.input,
-                                    )
-                                    .unwrap_or_else(|_| {
-                                        suspended_call.final_call.input.to_string()
-                                    }),
-                                },
-                            );
-                        }
+                    if let Some(sink) = loop_event_sink.as_ref() {
+                        let output_preview =
+                            serde_json::to_string(&serde_json::json!({ "terminal": terminal }))
+                                .unwrap_or_default();
+                        let is_error = terminal.status == subagent::SubagentTerminalKind::Failed;
+                        sink.on_tool_result(
+                            &input.agent_id,
+                            &agent_types::events::ToolResultEvent {
+                                call_id: suspended_call.final_call.call_id.clone(),
+                                tool_name: suspended_call.final_call.tool_name.clone(),
+                                output_preview,
+                                is_error,
+                                args_preview: serde_json::to_string_pretty(
+                                    &suspended_call.final_call.input,
+                                )
+                                .unwrap_or_else(|_| suspended_call.final_call.input.to_string()),
+                            },
+                        );
                     }
 
                     loop_state = Some(resumed_loop_state.clone());
@@ -480,15 +481,11 @@ impl SessionSupervisor {
 
     async fn lease_backend_for_lane(
         &self,
-        runtime_input: &SessionRuntimeBuildInput,
+        resolved: &ResolvedSessionRuntime,
     ) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
         let session_snapshot = self.snapshot().await;
-        let resolved = self
-            .runtime_resolver
-            .resolve(runtime_input, Some(&session_snapshot))
-            .await?;
         let lease =
-            lease_session_backend(self.backend_manager.as_ref(), &session_snapshot, &resolved)
+            lease_session_backend(self.backend_manager.as_ref(), &session_snapshot, resolved)
                 .await?;
 
         let operation_backend = lease.backend();
@@ -587,6 +584,7 @@ impl SessionSupervisor {
                 .run_lane_until_terminal(LaneRunInput {
                     agent_id: agent_id.clone(),
                     runtime_input,
+                    resolved_runtime: None,
                     user_message: prompt,
                     append_user_message: true,
                     reasoning_effort: ReasoningEffort::Off,
