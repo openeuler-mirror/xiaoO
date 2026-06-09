@@ -1022,6 +1022,11 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         return Ok(None);
     }
 
+    // Repair empty call_ids before the validity partition below.
+    if let Some(msg) = ctx.turn.assistant_message.as_mut() {
+        synthesize_missing_call_ids(msg, ctx.state.turn_count);
+    }
+
     let tool_calls: Vec<ToolUseBlock> = ctx
         .turn
         .assistant_message
@@ -1196,6 +1201,17 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     Ok(None)
+}
+
+/// Fill empty `call_id`s with a stable, turn-scoped id (`call_<turn>_<idx>`) so a
+/// provider that omits `tool_call.id` does not get the call rejected as invalid; a
+/// non-empty id is left untouched.
+fn synthesize_missing_call_ids(msg: &mut AssistantMessage, turn: u32) {
+    for (idx, tc) in msg.tool_calls.iter_mut().enumerate() {
+        if tc.call_id.trim().is_empty() {
+            tc.call_id = format!("call_{turn}_{idx}");
+        }
+    }
 }
 
 fn is_valid_tool_call(tc: &ToolUseBlock) -> bool {
@@ -1633,6 +1649,53 @@ mod tests {
         assert!(!is_transient(&LlmError::ContextLengthExceeded {
             message: String::new(),
         }));
+    }
+
+    fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> AssistantMessage {
+        AssistantMessage {
+            text: None,
+            reasoning_content: None,
+            tool_calls: calls
+                .iter()
+                .map(|(call_id, tool_name)| ToolUseBlock {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    input: serde_json::json!({}),
+                })
+                .collect(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+        }
+    }
+
+    #[test]
+    fn synthesize_missing_call_ids_fills_only_empty_ids_uniquely() {
+        let mut msg = assistant_with_tool_calls(&[
+            ("", "grep"),          // missing id → synthesized
+            ("   ", "bash"),       // whitespace-only id → treated as missing
+            ("call_real", "edit"), // provider-supplied id → preserved
+        ]);
+
+        synthesize_missing_call_ids(&mut msg, 3);
+
+        assert_eq!(msg.tool_calls[0].call_id, "call_3_0");
+        assert_eq!(msg.tool_calls[1].call_id, "call_3_1");
+        assert_eq!(msg.tool_calls[2].call_id, "call_real");
+        assert!(msg.tool_calls.iter().all(is_valid_tool_call));
+        assert_ne!(msg.tool_calls[0].call_id, msg.tool_calls[1].call_id);
+
+        let mut next = assistant_with_tool_calls(&[("", "grep")]);
+        synthesize_missing_call_ids(&mut next, 4);
+        assert_eq!(next.tool_calls[0].call_id, "call_4_0");
+        assert_ne!(next.tool_calls[0].call_id, msg.tool_calls[0].call_id);
+    }
+
+    #[test]
+    fn synthesize_missing_call_ids_does_not_rescue_empty_tool_name() {
+        let mut msg = assistant_with_tool_calls(&[("", "")]);
+        synthesize_missing_call_ids(&mut msg, 0);
+        assert_eq!(msg.tool_calls[0].call_id, "call_0_0");
+        assert!(!is_valid_tool_call(&msg.tool_calls[0]));
     }
 
     struct StreamingTestProvider {
@@ -2248,8 +2311,11 @@ mod tests {
         }
     }
 
+    /// Streams an empty-`call_id` tool call on the first turn, then a plain
+    /// completion so the loop terminates after the call is executed.
     struct EmptyCallIdToolCallProvider {
         capabilities: ProviderCapabilities,
+        calls: Arc<StdMutex<usize>>,
     }
 
     impl EmptyCallIdToolCallProvider {
@@ -2262,6 +2328,7 @@ mod tests {
                     max_context_window: 4096,
                     model_name: "empty-call-id-test".to_string(),
                 },
+                calls: Arc::new(StdMutex::new(0)),
             }
         }
     }
@@ -2277,11 +2344,34 @@ mod tests {
             _request: &LlmRequest,
             on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
         ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut calls = self.calls.lock().expect("call counter mutex poisoned");
+                *calls += 1;
+                *calls
+            };
+
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
                 delta_reasoning: None,
                 delta_tool_call: None,
             });
+
+            if call_number >= 2 {
+                return Ok(LlmResponse {
+                    message: AssistantMessage {
+                        text: Some("done".to_string()),
+                        reasoning_content: None,
+                        tool_calls: Vec::new(),
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 2,
+                            total_tokens: 12,
+                        },
+                        stop_reason: StopReason::EndTurn,
+                    },
+                    kv_cache_chunk_hashes: vec![],
+                });
+            }
 
             Ok(LlmResponse {
                 message: AssistantMessage {
@@ -2309,7 +2399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_agent_loop_drops_invalid_tool_calls_with_empty_call_id() {
+    async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
         let provider = Arc::new(LlmProviderWrapper::new(
             Arc::new(EmptyCallIdToolCallProvider::new()),
             None,
@@ -2324,27 +2414,41 @@ mod tests {
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await
-            .expect("loop should degrade invalid tool call into assistant text");
+            .expect("loop should execute the call after synthesizing its id");
 
         assert!(matches!(
             outcome,
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
-        assert_eq!(loop_state.turn_count, 1);
-        assert_eq!(loop_state.messages.read().len(), 2);
+        assert_eq!(loop_state.turn_count, 2);
+
+        let messages = loop_state.messages.read();
+        let tool_use = messages.iter().find_map(|m| {
+            m.blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolUse {
+                    call_id, tool_name, ..
+                } => Some((call_id.clone(), tool_name.clone())),
+                _ => None,
+            })
+        });
         assert_eq!(
-            loop_state.messages.read()[1].text_content(),
-            Some("trying to use a tool")
+            tool_use,
+            Some(("call_0_0".to_string(), "bash".to_string())),
+            "empty call_id should be synthesized to a stable turn-scoped id and preserved"
         );
-        assert!(!loop_state.messages.read()[1]
-            .blocks
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
-        assert!(!loop_state
-            .messages
-            .read()
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool)));
+        let paired = messages.iter().any(|m| {
+            matches!(m.role, MessageRole::Tool)
+                && m.blocks.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolResult { call_id, .. } if call_id == "call_0_0"
+                    )
+                })
+        });
+        assert!(
+            paired,
+            "synthesized tool_use must pair with a tool_result on the same id"
+        );
     }
 
     /// LLM provider that returns a single empty-name tool call on every invocation.

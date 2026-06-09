@@ -36,7 +36,7 @@ impl ToolExecutor for TodoWriteToolExecutor {
         runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
         let input: TodoWriteInput =
-            serde_json::from_value(call.input.clone()).map_err(|error| {
+            crate::r#impl::tool_input::parse_tool_input(&call.input).map_err(|error| {
                 ToolExecutionError::ExecutionFailed {
                     message: format!("failed to parse todo_write input: {error}"),
                 }

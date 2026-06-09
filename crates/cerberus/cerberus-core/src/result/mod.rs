@@ -2,6 +2,7 @@
 //!
 //! This module defines the data structures that describe execution outcomes.
 
+use crate::audit::{FileAccessRecord, NetworkAccessRecord};
 use std::time::Duration;
 
 /// Describes the result of a command execution.
@@ -20,6 +21,11 @@ pub struct ExecResult {
     pub duration: Duration,
     /// Additional metadata about the execution.
     pub metadata: ExecMetadata,
+    /// File access events collected during execution when policy enables audit.
+    pub file_accesses: Vec<FileAccessRecord>,
+    /// Network access events collected during execution when a network policy
+    /// is active.
+    pub network_accesses: Vec<NetworkAccessRecord>,
 }
 
 /// Metadata about execution behavior and control actions.
@@ -44,6 +50,8 @@ impl ExecResult {
             stderr: Vec::new(),
             duration: Duration::ZERO,
             metadata: ExecMetadata::default(),
+            file_accesses: Vec::new(),
+            network_accesses: Vec::new(),
         }
     }
 
@@ -88,6 +96,18 @@ impl ExecResult {
     /// Sets metadata.
     pub fn metadata(mut self, metadata: ExecMetadata) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Sets collected file access audit records.
+    pub fn file_accesses(mut self, file_accesses: Vec<FileAccessRecord>) -> Self {
+        self.file_accesses = file_accesses;
+        self
+    }
+
+    /// Sets collected network access audit records.
+    pub fn network_accesses(mut self, network_accesses: Vec<NetworkAccessRecord>) -> Self {
+        self.network_accesses = network_accesses;
         self
     }
 }

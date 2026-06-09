@@ -13,7 +13,7 @@
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Raw event from eBPF. Must match the Event struct in bpf/src/main.rs exactly.
 /// Total size: 280 bytes
@@ -80,6 +80,17 @@ pub const NETWORK_ADDRESS_OFFSET: usize = 8;
 pub const NETWORK_PORT_OFFSET: usize = 12;
 /// Network result offset in BpfRawEvent.data
 pub const NETWORK_RESULT_OFFSET: usize = 14;
+
+/// Convert a `SystemTime` to nanoseconds since the Unix epoch, saturating
+/// (rather than panicking) on pre-epoch or overflowing timestamps. Shared by
+/// the serializable audit records (file access and network access).
+pub(crate) fn system_time_to_nanos(timestamp: SystemTime) -> u64 {
+    timestamp
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
 
 /// Network protocol type.
 #[derive(Debug, Clone, PartialEq, Eq)]

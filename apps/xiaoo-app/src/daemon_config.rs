@@ -487,10 +487,13 @@ impl DaemonConfig {
             }
         }
 
-        // Priority 3: Global level (lowest)
+        // Priority 3: User level
         if let Some(home) = dirs::home_dir() {
             skills_dirs.push(home.join(".xiaoo").join("skills"));
         }
+
+        // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+        skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
         SkillsConfig {
             skills_dirs,
