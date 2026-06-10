@@ -43,7 +43,7 @@ pub enum KeyProviderConfig {
         #[serde(default)]
         slot: Option<String>,
     },
-    /// HSM 密钥配置  
+    /// HSM 密钥配置
     Hsm {
         name: String,
         library_path: String,

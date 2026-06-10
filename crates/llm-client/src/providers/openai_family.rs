@@ -1,4 +1,5 @@
 use std::time::Duration;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -12,7 +13,7 @@ use crate::error::{
 };
 use crate::url_fallback::{
     build_base_url_candidates, build_final_candidates, should_try_next_candidate,
-    write_url_fallback_error_log, UrlAttemptRecord,
+    is_configuration_error, is_retryable_network_error, write_url_fallback_error_log, UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -35,6 +36,8 @@ pub(crate) struct OpenAiFamilyProvider {
     default_headers: Vec<(String, String)>,
     capabilities: ProviderCapabilities,
     api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
+    // Cache the successful endpoint URL after first successful call
+    cached_endpoint_url: Arc<RwLock<Option<String>>>,
 }
 
 impl OpenAiFamilyProvider {
@@ -65,6 +68,7 @@ impl OpenAiFamilyProvider {
                 model_name: model,
             },
             api_key_provider,
+            cached_endpoint_url: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -321,6 +325,111 @@ fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
 #[async_trait]
 impl LlmProvider for OpenAiFamilyProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        let cached_url = self.cached_endpoint_url.read().ok().and_then(|guard| guard.clone());
+
+        if let Some(url) = cached_url {
+            tracing::debug!(
+                url,
+                "Using cached endpoint URL from previous successful call"
+            );
+
+            match self.try_single_endpoint(&url, request).await {
+                Ok(response) => {
+                    tracing::debug!(url, "Cached URL succeeded");
+                    return Ok(response);
+                }
+Err(error) => {
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with configuration error - not retrying"
+                        );
+                        return Err(error);
+                    }
+
+                    if is_retryable_network_error(&error) {
+                        tracing::warn!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with retryable network error - will retry 3 times with 1s interval"
+                        );
+
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                            tracing::info!(
+                                url,
+                                attempt,
+                                total_attempts = 3,
+                                "Retrying cached URL"
+                            );
+
+                            match self.try_single_endpoint(&url, request).await {
+                                Ok(response) => {
+                                    tracing::info!(
+                                        url,
+                                        attempt,
+                                        "✓ Cached URL retry succeeded"
+                                    );
+                                    return Ok(response);
+                                }
+                                Err(retry_error) => {
+                                    if is_configuration_error(&retry_error) {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry failed with configuration error - stopping retries"
+                                        );
+                                        return Err(retry_error);
+                                    }
+
+                                    if attempt < 3 {
+                                        tracing::warn!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry attempt failed - will retry again"
+                                        );
+                                    } else {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "All 3 retry attempts failed - returning error"
+                                        );
+                                        return Err(retry_error);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Non-retryable error: RateLimited or other issues
+                        if matches!(error, LlmError::RateLimited { .. }) {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Rate limited - quota exhausted or policy triggered, not retrying"
+                            );
+                        } else {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Cached URL failed with non-retryable error - returning error"
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            original_base = &self.api_base,
+            "No cached URL available - starting URL fallback to find working endpoint"
+        );
+
         let base_candidates = build_base_url_candidates(&self.api_base);
         let final_urls = build_final_candidates(&base_candidates);
 
@@ -329,6 +438,17 @@ impl LlmProvider for OpenAiFamilyProvider {
         for (idx, url) in final_urls.iter().enumerate() {
             match self.try_single_endpoint(url, request).await {
                 Ok(response) => {
+                    tracing::info!(
+                        url,
+                        attempt_number = idx + 1,
+                        total_candidates = final_urls.len(),
+                        "✓ URL fallback succeeded - caching this URL for future calls"
+                    );
+
+                    if let Ok(mut guard) = self.cached_endpoint_url.write() {
+                        *guard = Some(url.clone());
+                    }
+
                     return Ok(response);
                 }
                 Err(error) => {
@@ -358,6 +478,15 @@ impl LlmProvider for OpenAiFamilyProvider {
                         continue;
                     }
 
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Configuration/parameter error detected - not trying more URLs"
+                        );
+                        return Err(error);
+                    }
+
                     let error_msg = write_url_fallback_error_log(
                         &self.api_base,
                         &base_candidates,
@@ -373,6 +502,22 @@ impl LlmProvider for OpenAiFamilyProvider {
             "All {} endpoint URL candidates failed",
             final_urls.len()
         ));
+
+        let last_attempt = attempts.last();
+        if let Some(attempt) = last_attempt {
+            if attempt.error.contains("HTTP 400")
+                || attempt.error.contains("HTTP 403")
+                || attempt.error.contains("Bad Request")
+                || attempt.error.contains("Invalid")
+            {
+                tracing::error!(
+                    url = attempt.url,
+                    error = attempt.error,
+                    "Last candidate failed with configuration error - returning actual error instead of wrapped URL fallback"
+                );
+                return Err(LlmError::ApiError(attempt.error.clone()));
+            }
+        }
 
         let error_msg = write_url_fallback_error_log(
             &self.api_base,
@@ -389,6 +534,111 @@ impl LlmProvider for OpenAiFamilyProvider {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let cached_url = self.cached_endpoint_url.read().ok().and_then(|guard| guard.clone());
+
+        if let Some(url) = cached_url {
+            tracing::debug!(
+                url,
+                "Using cached endpoint URL for streaming request"
+            );
+
+            match self.try_stream_endpoint(&url, request, on_chunk).await {
+                Ok(response) => {
+                    tracing::debug!(url, "Cached URL succeeded for streaming");
+                    return Ok(response);
+                }
+Err(error) => {
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with configuration error for streaming - not retrying"
+                        );
+                        return Err(error);
+                    }
+
+                    if is_retryable_network_error(&error) {
+                        tracing::warn!(
+                            error = error.to_string(),
+                            url,
+                            "Cached URL failed with retryable network error for streaming - will retry 3 times with 1s interval"
+                        );
+
+                        for attempt in 1..=3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                            tracing::info!(
+                                url,
+                                attempt,
+                                total_attempts = 3,
+                                "Retrying cached URL for streaming"
+                            );
+
+                            match self.try_stream_endpoint(&url, request, on_chunk).await {
+                                Ok(response) => {
+                                    tracing::info!(
+                                        url,
+                                        attempt,
+                                        "✓ Cached URL retry succeeded for streaming"
+                                    );
+                                    return Ok(response);
+                                }
+                                Err(retry_error) => {
+                                    if is_configuration_error(&retry_error) {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry failed with configuration error for streaming - stopping retries"
+                                        );
+                                        return Err(retry_error);
+                                    }
+
+                                    if attempt < 3 {
+                                        tracing::warn!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "Retry attempt failed for streaming - will retry again"
+                                        );
+                                    } else {
+                                        tracing::error!(
+                                            error = retry_error.to_string(),
+                                            url,
+                                            attempt,
+                                            "All 3 retry attempts failed for streaming - returning error"
+                                        );
+                                        return Err(retry_error);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Non-retryable error: RateLimited or other issues
+                        if matches!(error, LlmError::RateLimited { .. }) {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Rate limited for streaming - quota exhausted or policy triggered, not retrying"
+                            );
+                        } else {
+                            tracing::error!(
+                                error = error.to_string(),
+                                url,
+                                "Cached URL failed with non-retryable error for streaming - returning error"
+                            );
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            original_base = &self.api_base,
+            "No cached URL available for streaming - starting URL fallback to find working endpoint"
+        );
+
         let base_candidates = build_base_url_candidates(&self.api_base);
         let final_urls = build_final_candidates(&base_candidates);
 
@@ -397,6 +647,17 @@ impl LlmProvider for OpenAiFamilyProvider {
         for (idx, url) in final_urls.iter().enumerate() {
             match self.try_stream_endpoint(url, request, on_chunk).await {
                 Ok(response) => {
+                    tracing::info!(
+                        url,
+                        attempt_number = idx + 1,
+                        total_candidates = final_urls.len(),
+                        "✓ URL fallback succeeded for streaming - caching this URL for future calls"
+                    );
+
+                    if let Ok(mut guard) = self.cached_endpoint_url.write() {
+                        *guard = Some(url.clone());
+                    }
+
                     return Ok(response);
                 }
                 Err(error) => {
@@ -426,6 +687,15 @@ impl LlmProvider for OpenAiFamilyProvider {
                         continue;
                     }
 
+                    if is_configuration_error(&error) {
+                        tracing::error!(
+                            error = error.to_string(),
+                            url,
+                            "Configuration/parameter error detected for streaming - not trying more URLs"
+                        );
+                        return Err(error);
+                    }
+
                     let error_msg = write_url_fallback_error_log(
                         &self.api_base,
                         &base_candidates,
@@ -438,9 +708,25 @@ impl LlmProvider for OpenAiFamilyProvider {
         }
 
         let final_error = LlmError::ApiError(format!(
-            "All {} endpoint URL candidates failed",
+            "All {} endpoint URL candidates failed for streaming",
             final_urls.len()
         ));
+
+        let last_attempt = attempts.last();
+        if let Some(attempt) = last_attempt {
+            if attempt.error.contains("HTTP 400")
+                || attempt.error.contains("HTTP 403")
+                || attempt.error.contains("Bad Request")
+                || attempt.error.contains("Invalid")
+            {
+                tracing::error!(
+                    url = attempt.url,
+                    error = attempt.error,
+                    "Last candidate failed with configuration error for streaming - returning actual error instead of wrapped URL fallback"
+                );
+                return Err(LlmError::ApiError(attempt.error.clone()));
+            }
+        }
 
         let error_msg = write_url_fallback_error_log(
             &self.api_base,

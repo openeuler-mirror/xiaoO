@@ -1,0 +1,33 @@
+# Known model context window lengths (tokens)
+# Format: model_pattern = context_window
+# Matching is case-insensitive, model name contains pattern -> match
+#
+# Only add entries with official documentation links.
+# Unknown models should be excluded and rely on runtime detection.
+
+[models]
+# === DeepSeek ===
+# Official docs: https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+# Context: 1M tokens, Max output: 384K tokens
+"deepseek-v4-flash" = 1_000_000
+"deepseek-v4-pro" = 1_000_000
+"deepseek-chat" = 1_000_000     # alias for deepseek-v4-flash, deprecated after 2026-07-24
+"deepseek-reasoner" = 1_000_000 # alias for deepseek-v4-flash thinking mode, deprecated after 2026-07-24
+
+# === GLM / Zhipu ===
+# Official docs: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.md
+# Context: 200K tokens, Max output: 128K tokens
+"glm-5" = 200_000
+"glm-5.1" = 200_000
+
+# Official docs: https://docs.bigmodel.cn/cn/guide/models/text/glm-4.5.md
+# Context: 128K tokens, Max output: 96K tokens
+"glm-4.5" = 128_000
+
+# =====================================================
+# Template for adding new models:
+#
+# # Vendor name - https://official-docs-url
+# # Context: xxx tokens, Max output: xxx tokens
+# "model-pattern" = xxx_xxx
+# =====================================================
