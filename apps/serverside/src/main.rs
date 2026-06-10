@@ -3,8 +3,6 @@ mod daemon_config;
 mod daemon_runtime;
 mod httpserver;
 
-pub use xiaoo_shared::gateway;
-
 use crate::channels::{
     build_feishu_runtime, build_telegram_runtime, FeishuConfig, FeishuEventTransport,
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramConfig,

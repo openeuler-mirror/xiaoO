@@ -4,6 +4,5 @@ mod polling;
 mod types;
 
 pub use channel::{capabilities, meta, TelegramAdapter};
-pub use client::TelegramClient;
 pub use polling::{TelegramPollingMessageHandler, TelegramPollingService};
-pub use types::{TelegramConfig, TelegramConfigError, TelegramEventTransport};
+pub use types::{TelegramConfig, TelegramEventTransport};

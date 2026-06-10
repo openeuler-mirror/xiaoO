@@ -31,11 +31,13 @@ impl FeishuAdapter {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn get_chat_info(&self, chat_id: &str) -> ChannelResult<FeishuChatInfo> {
         self.client.get_chat_info(chat_id).await
     }
 }
 
+#[allow(dead_code)]
 pub fn runtime(config: FeishuConfig) -> ChannelResult<ChannelRuntime> {
     let adapter: std::sync::Arc<dyn ChannelAdapter> =
         std::sync::Arc::new(FeishuAdapter::new(config)?);

@@ -97,6 +97,7 @@ pub struct FeishuChatMember {
     pub name: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FeishuChatInfo {
     pub owner_id: Option<String>,
@@ -249,6 +250,7 @@ pub(crate) struct SendMessageData {
     pub message_id: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatInfoEnvelope {
     pub code: i32,
@@ -256,6 +258,7 @@ pub(crate) struct ChatInfoEnvelope {
     pub data: Option<ChatInfoData>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChatInfoData {
     pub owner_id: Option<String>,

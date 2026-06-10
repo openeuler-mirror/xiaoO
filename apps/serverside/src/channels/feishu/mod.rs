@@ -4,10 +4,6 @@ mod ingress;
 pub mod types;
 pub mod websocket;
 
-pub use channel::{capabilities, meta, runtime, FeishuAdapter};
-pub use client::FeishuClient;
-pub use types::{
-    FeishuCardRequest, FeishuChatInfo, FeishuChatMember, FeishuConfig, FeishuConfigError,
-    FeishuEventTransport, FeishuSendRequest,
-};
+pub use channel::{capabilities, meta, FeishuAdapter};
+pub use types::{FeishuConfig, FeishuEventTransport};
 pub use websocket::{FeishuWebsocketMessageHandler, FeishuWebsocketService};

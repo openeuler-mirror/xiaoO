@@ -2,11 +2,6 @@ use crate::channels::{
     ChannelAdapter, ChannelError, ChannelOutboundAttachment, ChannelOutboundAttachmentKind,
     ChannelRuntime,
 };
-use crate::gateway::channel_interaction::{
-    resolve_interaction_from_text, ChannelInteractionHandle,
-};
-use crate::gateway::pending_interaction::PendingInteractionStore;
-use crate::gateway::{channel_session_id, ChannelProgressRelayHandle, SessionService};
 use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
 };
@@ -17,6 +12,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::warn;
+use xiaoo_shared::gateway::channel_interaction::{
+    resolve_interaction_from_text, ChannelInteractionHandle,
+};
+use xiaoo_shared::gateway::pending_interaction::PendingInteractionStore;
+use xiaoo_shared::gateway::{channel_session_id, ChannelProgressRelayHandle, SessionService};
 
 #[derive(Debug, Error)]
 pub enum ChannelMessageProcessingError {

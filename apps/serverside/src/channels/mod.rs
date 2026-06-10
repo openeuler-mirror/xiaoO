@@ -2,18 +2,16 @@ pub mod feishu;
 pub mod telegram;
 
 pub use feishu::{
-    capabilities as feishu_capabilities, meta as feishu_meta, FeishuAdapter, FeishuCardRequest,
-    FeishuChatInfo, FeishuChatMember, FeishuClient, FeishuConfig, FeishuConfigError,
-    FeishuEventTransport, FeishuSendRequest, FeishuWebsocketMessageHandler, FeishuWebsocketService,
+    capabilities as feishu_capabilities, meta as feishu_meta, FeishuAdapter, FeishuConfig,
+    FeishuEventTransport, FeishuWebsocketMessageHandler, FeishuWebsocketService,
 };
 pub use telegram::{
-    capabilities as telegram_capabilities, meta as telegram_meta, TelegramAdapter, TelegramClient,
-    TelegramConfig, TelegramConfigError, TelegramEventTransport, TelegramPollingMessageHandler,
-    TelegramPollingService,
+    capabilities as telegram_capabilities, meta as telegram_meta, TelegramAdapter, TelegramConfig,
+    TelegramEventTransport, TelegramPollingMessageHandler, TelegramPollingService,
 };
 pub use xiaoo_shared::channels::{
-    AdapterResponse, ChannelAdapter, ChannelAttachment, ChannelCapabilities, ChannelError,
-    ChannelMember, ChannelMention, ChannelMessage, ChannelMeta, ChannelOutboundAttachment,
+    AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelError, ChannelMember,
+    ChannelMention, ChannelMessage, ChannelMeta, ChannelOutboundAttachment,
     ChannelOutboundAttachmentKind, ChannelProgressSection, ChannelProgressState,
     ChannelProgressUpdate, ChannelResult, ChannelRuntime, ChannelTextFormat,
 };

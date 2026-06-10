@@ -144,6 +144,7 @@ impl FeishuClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn get_chat_info(&self, chat_id: &str) -> ChannelResult<FeishuChatInfo> {
         let token = self.fetch_tenant_access_token().await?;
         let response = self
@@ -554,6 +555,7 @@ fn parse_member_list_payload(
     Ok((members, next_page_token))
 }
 
+#[allow(dead_code)]
 async fn parse_chat_info_response(response: reqwest::Response) -> ChannelResult<FeishuChatInfo> {
     let status = response.status();
     let body = response
@@ -566,6 +568,7 @@ async fn parse_chat_info_response(response: reqwest::Response) -> ChannelResult<
     parse_chat_info_payload(status, &body)
 }
 
+#[allow(dead_code)]
 fn parse_chat_info_payload(status: StatusCode, body: &str) -> ChannelResult<FeishuChatInfo> {
     if !status.is_success() {
         return Err(ChannelError::Delivery {

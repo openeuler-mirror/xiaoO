@@ -1,8 +1,4 @@
-use crate::channels::{
-    build_feishu_runtime, AdapterResponse, ChannelError, ChannelResult, ChannelRuntime,
-    FeishuConfig,
-};
-use crate::gateway::SessionService;
+use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
 use crate::httpserver::channel_ingress::{
     GatewayChannelIngressError, GatewayChannelMention, GatewayChannelMessage,
 };
@@ -33,12 +29,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
+use xiaoo_shared::gateway::SessionService;
 
 #[derive(Clone)]
 pub struct GatewayAppState {
     gateway_service: Arc<GatewayService>,
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Option<Arc<dyn crate::gateway::SessionControlPlane>>,
+    session_control_plane: Option<Arc<dyn xiaoo_shared::gateway::SessionControlPlane>>,
     channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
     channel_processor: ChannelRuntimeProcessor,
     remote_interactions: Arc<RemoteInteractionStore>,
@@ -58,33 +55,14 @@ impl GatewayAppState {
 
     pub fn with_control_plane(
         session_service: Arc<dyn SessionService>,
-        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
     ) -> Self {
         let mut state = Self::new(session_service);
         state.session_control_plane = Some(session_control_plane);
         state
     }
 
-    pub fn with_feishu(
-        session_service: Arc<dyn SessionService>,
-        feishu_config: FeishuConfig,
-    ) -> ChannelResult<Self> {
-        Ok(Self::with_channel_runtime(
-            session_service,
-            build_feishu_runtime(feishu_config)?,
-        ))
-    }
-
-    pub fn with_feishu_and_control_plane(
-        session_service: Arc<dyn SessionService>,
-        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
-        feishu_config: FeishuConfig,
-    ) -> ChannelResult<Self> {
-        let mut state = Self::with_feishu(session_service, feishu_config)?;
-        state.session_control_plane = Some(session_control_plane);
-        Ok(state)
-    }
-
+    #[cfg(test)]
     pub(crate) fn with_channel_runtime(
         session_service: Arc<dyn SessionService>,
         runtime: ChannelRuntime,
@@ -128,7 +106,7 @@ impl GatewayAppState {
 
     pub fn with_channel_runtimes_and_control_plane(
         session_service: Arc<dyn SessionService>,
-        session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+        session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
         runtimes: Vec<ChannelRuntime>,
     ) -> ChannelResult<Self> {
         let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
@@ -281,10 +259,7 @@ pub struct TestChatResponse {
     pub session_id: String,
 }
 
-pub fn create_router(session_service: Arc<dyn SessionService>) -> Router {
-    create_router_with_auth(session_service, None, None)
-}
-
+#[cfg(test)]
 pub fn create_router_with_auth(
     session_service: Arc<dyn SessionService>,
     bearer_auth: Option<HttpBearerAuthConfig>,
@@ -297,52 +272,9 @@ pub fn create_router_with_auth(
     )
 }
 
-pub fn create_router_with_feishu_and_timeout(
-    session_service: Arc<dyn SessionService>,
-    feishu_config: FeishuConfig,
-    interaction_timeout_secs: u64,
-) -> ChannelResult<Router> {
-    create_router_with_feishu_and_timeout_and_auth(
-        session_service,
-        feishu_config,
-        interaction_timeout_secs,
-        None,
-        None,
-    )
-}
-
-pub fn create_router_with_feishu_and_timeout_and_auth(
-    session_service: Arc<dyn SessionService>,
-    feishu_config: FeishuConfig,
-    interaction_timeout_secs: u64,
-    bearer_auth: Option<HttpBearerAuthConfig>,
-    rate_limit: Option<RateLimitConfig>,
-) -> ChannelResult<Router> {
-    let mut state = GatewayAppState::with_feishu(session_service, feishu_config)?;
-    state.set_channel_interaction_timeout(interaction_timeout_secs);
-    Ok(create_router_from_state(state, bearer_auth, rate_limit))
-}
-
-pub fn create_router_with_feishu_control_plane_and_timeout_and_auth(
-    session_service: Arc<dyn SessionService>,
-    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
-    feishu_config: FeishuConfig,
-    interaction_timeout_secs: u64,
-    bearer_auth: Option<HttpBearerAuthConfig>,
-    rate_limit: Option<RateLimitConfig>,
-) -> ChannelResult<Router> {
-    let mut state = GatewayAppState::with_feishu_and_control_plane(
-        session_service,
-        session_control_plane,
-        feishu_config,
-    )?;
-    state.set_channel_interaction_timeout(interaction_timeout_secs);
-    Ok(create_router_from_state(state, bearer_auth, rate_limit))
-}
-
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
     runtimes: Vec<ChannelRuntime>,
     interaction_timeout_secs: u64,
     bearer_auth: Option<HttpBearerAuthConfig>,
@@ -408,7 +340,7 @@ fn create_router_from_state(
 
 pub fn create_router_with_control_plane_and_auth(
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Arc<dyn crate::gateway::SessionControlPlane>,
+    session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
@@ -493,7 +425,7 @@ async fn health_check() -> Json<GatewayHealthResponse> {
 
 async fn handle_session_open(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<crate::gateway::SessionOpenRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::SessionOpenRequest>,
 ) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -514,7 +446,7 @@ async fn handle_session_open(
 async fn handle_session_turn_stream(
     State(state): State<Arc<GatewayAppState>>,
     Path(session_id): Path<String>,
-    Json(payload): Json<crate::gateway::AppTurnRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
 ) -> Response {
     if payload.session_id != session_id {
         return (
@@ -628,10 +560,10 @@ async fn handle_session_close(
     }
 }
 
-fn map_session_error(error: crate::gateway::SessionServiceError) -> Response {
+fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Response {
     let status = match &error {
-        crate::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
-        crate::gateway::SessionServiceError::UnsupportedCapability { .. } => {
+        xiaoo_shared::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+        xiaoo_shared::gateway::SessionServiceError::UnsupportedCapability { .. } => {
             StatusCode::NOT_IMPLEMENTED
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -942,7 +874,6 @@ mod tests {
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
         ChannelMessage, ChannelMeta, ChannelResult, ChannelRuntime, ChannelTextFormat,
     };
-    use crate::gateway::{AppTurnRequest, AppTurnResult, SessionService, SessionServiceError};
     use agent_contracts::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
@@ -954,6 +885,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
+    use xiaoo_shared::gateway::{
+        AppTurnRequest, AppTurnResult, SessionService, SessionServiceError,
+    };
 
     #[test]
     fn rejects_missing_identity_fields() {

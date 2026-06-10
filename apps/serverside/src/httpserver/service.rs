@@ -1,8 +1,8 @@
-use crate::gateway::{AppTurnResult, SessionService, SessionServiceError};
 use crate::httpserver::channel_ingress::{build_channel_turn_request, GatewayChannelMessage};
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use std::sync::Arc;
 use thiserror::Error;
+use xiaoo_shared::gateway::{AppTurnResult, SessionService, SessionServiceError};
 
 #[derive(Debug, Clone)]
 pub struct GatewayTurnResponse {
@@ -63,6 +63,7 @@ impl GatewayService {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn handle_channel_message_with_events(
         &self,
         message: GatewayChannelMessage,

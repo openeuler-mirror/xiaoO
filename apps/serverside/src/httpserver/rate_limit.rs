@@ -19,14 +19,17 @@ pub struct RateLimitConfig {
     #[serde(default = "default_burst")]
     pub burst: u32,
     #[serde(default)]
+    #[allow(dead_code)]
     pub routes: BTreeMap<String, RouteRateLimitOverride>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RouteRateLimitOverride {
     #[serde(default = "default_rps")]
+    #[allow(dead_code)]
     pub requests_per_second: u32,
     #[serde(default = "default_burst")]
+    #[allow(dead_code)]
     pub burst: u32,
 }
 
@@ -104,6 +107,7 @@ impl RateLimitConfig {
     }
 
     /// Per-route limit lookup; falls back to global defaults when route key is absent.
+    #[allow(dead_code)]
     pub fn effective_limit(&self, route_key: &str) -> (u32, u32) {
         self.routes
             .get(route_key)

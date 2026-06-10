@@ -1,6 +1,6 @@
 use crate::channels::ChannelMessage;
-use crate::gateway::{channel_session_id, AppTurnRequest, GatewayEntryContext, TurnMention};
 use thiserror::Error;
+use xiaoo_shared::gateway::{channel_session_id, AppTurnRequest, GatewayEntryContext, TurnMention};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayChannelMention {
@@ -108,7 +108,8 @@ mod tests {
         build_channel_turn_request, build_gateway_channel_message, GatewayChannelIngressError,
         GatewayChannelMention, GatewayChannelMessage,
     };
-    use crate::channels::{ChannelAttachment, ChannelMention, ChannelMessage};
+    use crate::channels::{ChannelMention, ChannelMessage};
+    use xiaoo_shared::channels::ChannelAttachment;
 
     #[test]
     fn builds_channel_turn_request_with_instance_scoped_session_id() {

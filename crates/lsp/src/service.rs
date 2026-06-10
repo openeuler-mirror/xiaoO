@@ -25,6 +25,20 @@ impl LspService {
         }
     }
 
+    pub fn new_with_disabled(
+        extra_configs: Vec<ServerConfig>,
+        disabled_servers: Vec<String>,
+        env: Arc<dyn LspEnv>,
+    ) -> Self {
+        Self {
+            manager: Arc::new(Mutex::new(LspServerManager::new_with_disabled(
+                extra_configs,
+                disabled_servers,
+                env,
+            ))),
+        }
+    }
+
     /// Use exactly the provided configs without adding built-in language servers.
     pub fn new_custom(configs: Vec<ServerConfig>, env: Arc<dyn LspEnv>) -> Self {
         Self {
