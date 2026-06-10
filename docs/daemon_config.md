@@ -209,147 +209,73 @@ Health check endpoint for liveness probes and load balancing.
 
 ---
 
-#### `POST /api/v1/chat`
+#### Session Control Plane
 
-Chat endpoint. Send messages to the Gateway and receive responses.
+The daemon exposes session APIs for remote TUI and other first-class clients.
+These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
 
-**Request Body:**
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
+| `POST /api/v1/sessions/{session_id}/turn/stream` | Run one turn and stream SSE events |
+| `POST /api/v1/sessions/{session_id}/interaction` | Send a user interaction response back to the daemon |
+| `POST /api/v1/sessions/{session_id}/cancel` | Request cancellation of the current turn |
+| `POST /api/v1/sessions/{session_id}/close` | Close the session and fire lifecycle hooks |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `text` | string | ✅ | Message text (must not be empty) |
-| `channel` | string | *Either `channel` or `channel_instance_id`* | Channel identifier (e.g., `feishu`, `telegram`) |
-| `channel_instance_id` | string | *Either `channel` or `channel_instance_id`* | Channel instance ID (for multi-instance session isolation) |
-| `sender_id` | string | ✅ | Sender ID |
-| `conversation_id` | string | ✅ | Conversation/group ID (same value reuses the same session) |
-| `message_id` | string | — | Unique message ID (auto-generated if not specified) |
-| `reply_to_message_id` | string | — | Target message ID being replied to |
-| `root_message_id` | string | — | Root message ID of the thread |
-| `mentions` | array | — | List of @mentions |
-
-`mentions` element structure:
-
-```json
-{
-  "id": "user-or-bot-id",
-  "display_name": "Display name (optional)"
-}
-```
-
-**Example Request:**
+**Open session example:**
 
 ```bash
-curl -X POST http://localhost:18080/api/v1/chat \
+curl -X POST http://localhost:18080/api/v1/sessions/open \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "Hello",
-    "channel": "test",
-    "sender_id": "user-1",
+    "session_id": "tui-demo",
     "conversation_id": "conv-demo",
-    "mentions": [{"id": "bot", "display_name": "XiaoO"}]
+    "sender_id": "user-1",
+    "entry": { "kind": "tui" },
+    "channel": "tui"
   }'
 ```
 
-**Response `200 OK`:**
+**Run turn stream example:**
 
-```json
-{
-  "reply": "Hello! How can I help you?",
-  "raw_reply": "Hello! How can I help you?",
-  "conversation_id": "conv-demo",
-  "session_id": "test:conv-demo"
-}
+```bash
+curl -N -X POST http://localhost:18080/api/v1/sessions/tui-demo/turn/stream \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "tui-demo",
+    "entry": { "kind": "tui" },
+    "channel": "tui",
+    "conversation_id": "conv-demo",
+    "sender_id": "user-1",
+    "text": "Hello",
+    "mentions": []
+  }'
 ```
-
-| Field | Description |
-|-------|-------------|
-| `reply` | Final visible reply text (after post-processing) |
-| `raw_reply` | Raw reply text |
-| `conversation_id` | Conversation ID (same as request) |
-| `session_id` | Internal session identifier (format: `{channel_or_instance}:{conversation_id}`) |
-
-**Error Responses:**
-
-- `400 Bad Request` — Missing required fields or validation failure:
-  ```json
-  { "error": "channel or channel_instance_id is required" }
-  ```
-  ```json
-  { "error": "text must not be empty" }
-  ```
-- `500 Internal Server Error` — Session service internal error
-- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
-- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
-
-> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
-
----
-
-#### `POST /api/v1/chat/stream`
-
-Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **Server-Sent Events (SSE)** stream with real-time updates for LLM text generation and tool execution.
-
-**Request Body:** Same as `/api/v1/chat`.
-
-**Response:** `200 OK`, Content-Type `text/event-stream`
 
 **SSE Event Types:**
 
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `turn_start` | `agent_id`, `turn` | Emitted at the start of each agent loop turn |
-| `text_delta` | `delta`, `snapshot` | Emitted for each LLM text chunk. `delta` is the incremental text, `snapshot` is the cumulative text so far |
+| `text_delta` | `delta`, `snapshot` | Emitted for assistant text updates |
+| `thinking_delta` | `delta`, `snapshot` | Emitted for assistant reasoning updates |
 | `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
-| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `stop_reason` | Emitted when the agent loop finishes. Stream closes after this event |
-| `error` | `error` | Emitted on failure. Stream closes after this event |
+| `interaction_requested` | `request` | Emitted when the daemon needs a user confirmation/input/choice |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
+| `error` | `error` | Emitted on failure |
+| `cancelled` | `session_id` | Emitted as cancellation acknowledgement |
 
-**Example Request:**
+**Common Error Responses:**
 
-```bash
-curl -N -X POST http://localhost:18080/api/v1/chat/stream \
-  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hello",
-    "channel": "test",
-    "sender_id": "user-1",
-    "conversation_id": "conv-demo"
-  }'
-```
+- `400 Bad Request` — malformed request or path/session mismatch
+- `401 Unauthorized` — missing or invalid Bearer token when `[http]` auth is configured
+- `404 Not Found` — session not found
+- `429 Too Many Requests` — rate limit exceeded when `[http.rate_limit]` is enabled
+- `500 Internal Server Error` — session service internal error
 
-**Example SSE Output:**
-
-```
-event: turn_start
-data: {"type":"turn_start","agent_id":"main","turn":1}
-
-event: text_delta
-data: {"type":"text_delta","delta":"Hello","snapshot":"Hello"}
-
-event: text_delta
-data: {"type":"text_delta","delta":"! How can I help you?","snapshot":"Hello! How can I help you?"}
-
-event: done
-data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! How can I help you?","conversation_id":"conv-demo","session_id":"test:conv-demo","turn_count":1,"total_tokens":150,"stop_reason":"complete"}
-```
-
-**Error Responses:**
-
-- `400 Bad Request` — Same validation errors as `/api/v1/chat`
-- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
-- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
-
-**429 Response:**
-
-```json
-{ "error": "rate limit exceeded; retry after 1s" }
-```
-
-| Header | Description |
-|--------|-------------|
-| `Retry-After` | Seconds until quota resets |
-| `X-RateLimit-Remaining` | Remaining requests (always `0` when 429) |
+> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/sessions/*`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
 
 ---
 

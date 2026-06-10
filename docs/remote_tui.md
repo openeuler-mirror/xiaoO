@@ -116,7 +116,7 @@ After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. Th
 
 ## 5. Remote Session API
 
-Remote TUI uses the daemon's session APIs, not the older channel-style `/api/v1/chat` endpoint.
+Remote TUI uses the daemon's session APIs.
 
 | Endpoint | Description |
 |----------|-------------|

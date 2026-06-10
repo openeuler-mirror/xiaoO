@@ -1,11 +1,9 @@
 use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
-use crate::httpserver::channel_ingress::{
-    GatewayChannelIngressError, GatewayChannelMention, GatewayChannelMessage,
-};
+use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
 use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
-use crate::httpserver::{GatewayService, GatewayServiceError};
+use crate::httpserver::GatewayServiceError;
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
@@ -33,7 +31,6 @@ use xiaoo_shared::gateway::SessionService;
 
 #[derive(Clone)]
 pub struct GatewayAppState {
-    gateway_service: Arc<GatewayService>,
     session_service: Arc<dyn SessionService>,
     session_control_plane: Option<Arc<dyn xiaoo_shared::gateway::SessionControlPlane>>,
     channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
@@ -44,7 +41,6 @@ pub struct GatewayAppState {
 impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
             channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
             session_service,
             session_control_plane: None,
@@ -70,7 +66,6 @@ impl GatewayAppState {
         let mut runtimes = HashMap::new();
         runtimes.insert(runtime.channel_id.clone(), runtime);
         Self {
-            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
             channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
             session_service,
             session_control_plane: None,
@@ -95,7 +90,6 @@ impl GatewayAppState {
             }
         }
         Ok(Self {
-            gateway_service: Arc::new(GatewayService::new(session_service.clone())),
             channel_processor: ChannelRuntimeProcessor::new(session_service.clone()),
             session_service,
             session_control_plane: None,
@@ -201,64 +195,6 @@ impl HttpBearerAuthConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TestChatTurnRequest {
-    pub text: String,
-    pub channel: String,
-    #[serde(default)]
-    pub channel_instance_id: Option<String>,
-    pub sender_id: String,
-    #[serde(default)]
-    pub agent: Option<String>,
-    pub conversation_id: String,
-    #[serde(default)]
-    pub message_id: Option<String>,
-    #[serde(default)]
-    pub reply_to_message_id: Option<String>,
-    #[serde(default)]
-    pub root_message_id: Option<String>,
-    #[serde(default)]
-    pub mentions: Vec<TestChatMention>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TestChatRequest {
-    pub text: String,
-    #[serde(default)]
-    pub channel: Option<String>,
-    #[serde(default)]
-    pub channel_instance_id: Option<String>,
-    #[serde(default)]
-    pub sender_id: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
-    pub message_id: Option<String>,
-    #[serde(default)]
-    pub reply_to_message_id: Option<String>,
-    #[serde(default)]
-    pub root_message_id: Option<String>,
-    #[serde(default)]
-    pub mentions: Vec<TestChatMention>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TestChatMention {
-    pub id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct TestChatResponse {
-    pub reply: String,
-    pub raw_reply: String,
-    pub conversation_id: String,
-    pub session_id: String,
-}
-
 #[cfg(test)]
 pub fn create_router_with_auth(
     session_service: Arc<dyn SessionService>,
@@ -294,12 +230,6 @@ fn create_router_from_state(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    let protected_routes = apply_http_bearer_auth(
-        Router::new()
-            .route("/api/v1/chat", post(handle_chat))
-            .route("/api/v1/chat/stream", post(handle_chat_stream)),
-        bearer_auth.clone(),
-    );
     let protected_session_routes = apply_http_bearer_auth(
         Router::new()
             .route("/api/v1/sessions/open", post(handle_session_open))
@@ -328,7 +258,6 @@ fn create_router_from_state(
             "/api/v1/channels/:channel_id/events",
             post(handle_channel_events),
         )
-        .merge(protected_routes)
         .merge(protected_session_routes)
         .with_state(Arc::new(state));
 
@@ -577,133 +506,6 @@ fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Respo
         .into_response()
 }
 
-async fn handle_chat(
-    State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<TestChatRequest>,
-) -> Response {
-    let request = match validate_test_chat_request(payload) {
-        Ok(request) => request,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(GatewayErrorResponse { error }),
-            )
-                .into_response();
-        }
-    };
-
-    let message = GatewayChannelMessage {
-        channel: request.channel,
-        channel_instance_id: request.channel_instance_id,
-        conversation_id: request.conversation_id,
-        sender_id: request.sender_id,
-        agent_preset_id: request.agent,
-        message_id: request
-            .message_id
-            .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
-        text: request.text,
-        channel_identity_prompt: None,
-        reply_to_message_id: request.reply_to_message_id,
-        root_message_id: request.root_message_id,
-        mentions: request
-            .mentions
-            .into_iter()
-            .map(|mention| GatewayChannelMention {
-                id: mention.id,
-                display_name: mention.display_name,
-            })
-            .collect(),
-    };
-
-    match state.gateway_service.handle_channel_message(message).await {
-        Ok(response) => Json(TestChatResponse {
-            reply: response.visible_reply,
-            raw_reply: response.raw_reply,
-            conversation_id: response.conversation_id,
-            session_id: response.session_id,
-        })
-        .into_response(),
-        Err(error) => map_gateway_error(error),
-    }
-}
-
-async fn handle_chat_stream(
-    State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<TestChatRequest>,
-) -> Response {
-    let request = match validate_test_chat_request(payload) {
-        Ok(request) => request,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(GatewayErrorResponse { error }),
-            )
-                .into_response();
-        }
-    };
-
-    let conversation_id = request.conversation_id.clone();
-    let message = GatewayChannelMessage {
-        channel: request.channel,
-        channel_instance_id: request.channel_instance_id,
-        conversation_id,
-        sender_id: request.sender_id,
-        agent_preset_id: request.agent,
-        message_id: request
-            .message_id
-            .unwrap_or_else(|| format!("test-msg-{}", uuid::Uuid::new_v4())),
-        text: request.text,
-        channel_identity_prompt: None,
-        reply_to_message_id: request.reply_to_message_id,
-        root_message_id: request.root_message_id,
-        mentions: request
-            .mentions
-            .into_iter()
-            .map(|mention| GatewayChannelMention {
-                id: mention.id,
-                display_name: mention.display_name,
-            })
-            .collect(),
-    };
-
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
-    let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
-
-    tokio::spawn(async move {
-        match state
-            .gateway_service
-            .handle_channel_message_with_interaction(message, Some(sink.clone()), None, None)
-            .await
-        {
-            Ok(response) => {
-                let summary = sink.take_loop_summary();
-                let _ = tx.send(SseStreamEvent::Done {
-                    reply: response.visible_reply,
-                    raw_reply: response.raw_reply,
-                    conversation_id: response.conversation_id,
-                    session_id: response.session_id,
-                    turn_count: summary.as_ref().map_or(0, |s| s.turn_count),
-                    total_tokens: summary.as_ref().map_or(0, |s| s.total_tokens),
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    estimated_input_tokens: 0,
-                    messages: Vec::new(),
-                    stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
-                });
-            }
-            Err(error) => {
-                let _ = tx.send(SseStreamEvent::Error {
-                    error: error.to_string(),
-                });
-            }
-        }
-    });
-
-    Sse::new(sse_stream_from_receiver(rx))
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
 async fn handle_channel_events(
     State(state): State<Arc<GatewayAppState>>,
     Path(channel_id): Path<String>,
@@ -764,42 +566,6 @@ async fn handle_channel_events(
         }
         Err(error) => map_channel_error(error),
     }
-}
-
-fn validate_test_chat_request(payload: TestChatRequest) -> Result<TestChatTurnRequest, String> {
-    let channel = payload
-        .channel
-        .or(payload.channel_instance_id.clone())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "channel or channel_instance_id is required".to_string())?;
-    let sender_id = payload
-        .sender_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "sender_id is required".to_string())?;
-    let conversation_id = payload
-        .conversation_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "conversation_id is required".to_string())?;
-    let text = payload.text.trim().to_string();
-    if text.is_empty() {
-        return Err("text must not be empty".to_string());
-    }
-
-    Ok(TestChatTurnRequest {
-        text,
-        channel,
-        channel_instance_id: payload.channel_instance_id,
-        sender_id,
-        agent: payload
-            .agent
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        conversation_id,
-        message_id: payload.message_id,
-        reply_to_message_id: payload.reply_to_message_id,
-        root_message_id: payload.root_message_id,
-        mentions: payload.mentions,
-    })
 }
 
 fn map_adapter_response(adapter_response: AdapterResponse) -> Response {
@@ -866,9 +632,8 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, handle_channel_events, validate_test_chat_request,
-        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig, TestChatMention,
-        TestChatRequest,
+        create_router_with_auth, handle_channel_events, GatewayAppState, GatewayErrorResponse,
+        HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -889,52 +654,8 @@ mod tests {
         AppTurnRequest, AppTurnResult, SessionService, SessionServiceError,
     };
 
-    #[test]
-    fn rejects_missing_identity_fields() {
-        let error = validate_test_chat_request(TestChatRequest {
-            text: "hello".to_string(),
-            channel: None,
-            channel_instance_id: None,
-            sender_id: None,
-            agent: None,
-            conversation_id: None,
-            message_id: None,
-            reply_to_message_id: None,
-            root_message_id: None,
-            mentions: Vec::new(),
-        })
-        .expect_err("request should fail fast");
-
-        assert_eq!(error, "channel or channel_instance_id is required");
-    }
-
-    #[test]
-    fn accepts_explicit_test_chat_request() {
-        let request = validate_test_chat_request(TestChatRequest {
-            text: "  hello  ".to_string(),
-            channel: Some("feishu".to_string()),
-            channel_instance_id: Some("ops-feishu".to_string()),
-            sender_id: Some("user-1".to_string()),
-            agent: Some("test-agent".to_string()),
-            conversation_id: Some("conv-1".to_string()),
-            message_id: Some("msg-1".to_string()),
-            reply_to_message_id: None,
-            root_message_id: None,
-            mentions: vec![TestChatMention {
-                id: "bot".to_string(),
-                display_name: Some("XiaoO".to_string()),
-            }],
-        })
-        .expect("request should be valid");
-
-        assert_eq!(request.text, "hello");
-        assert_eq!(request.channel, "feishu");
-        assert_eq!(request.channel_instance_id.as_deref(), Some("ops-feishu"));
-        assert_eq!(request.mentions.len(), 1);
-    }
-
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_rejects_missing_token_for_chat_routes() {
+    async fn bearer_auth_rejects_missing_token_for_session_routes() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -945,10 +666,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/chat")
+                    .uri("/api/v1/sessions/open")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"text":"hello","channel":"test","sender_id":"user-1","conversation_id":"conv-1"}"#,
+                        r#"{"session_id":"session-1","conversation_id":"conv-1","sender_id":"user-1"}"#,
                     ))
                     .expect("request should build"),
             )
@@ -973,10 +694,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_allows_valid_token_for_chat_routes() {
-        let session_service = Arc::new(FakeSessionService::new("处理完成"));
+    async fn bearer_auth_allows_valid_token_for_session_routes() {
         let router = create_router_with_auth(
-            session_service.clone(),
+            Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
             None,
         );
@@ -985,26 +705,41 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/chat")
+                    .uri("/api/v1/sessions/open")
                     .header("authorization", "Bearer secret-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"text":"hello","channel":"test","sender_id":"user-1","conversation_id":"conv-1"}"#,
+                        r#"{"session_id":"session-1","conversation_id":"conv-1","sender_id":"user-1"}"#,
                     ))
                     .expect("request should build"),
             )
             .await
             .expect("router should respond");
 
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            session_service
-                .requests
-                .lock()
-                .expect("session service mutex poisoned")
-                .len(),
-            1
-        );
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_compat_routes_are_not_registered() {
+        let router =
+            create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
+
+        for path in ["/api/v1/chat", "/api/v1/chat/stream"] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("router should respond");
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

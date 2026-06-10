@@ -2,13 +2,10 @@ use crate::httpserver::channel_ingress::{build_channel_turn_request, GatewayChan
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use std::sync::Arc;
 use thiserror::Error;
-use xiaoo_shared::gateway::{AppTurnResult, SessionService, SessionServiceError};
+use xiaoo_shared::gateway::{SessionService, SessionServiceError};
 
 #[derive(Debug, Clone)]
 pub struct GatewayTurnResponse {
-    pub session_id: String,
-    pub conversation_id: String,
-    pub raw_reply: String,
     pub visible_reply: String,
 }
 
@@ -27,14 +24,6 @@ impl GatewayService {
         Self { session_service }
     }
 
-    pub async fn handle_channel_message(
-        &self,
-        message: GatewayChannelMessage,
-    ) -> Result<GatewayTurnResponse, GatewayServiceError> {
-        self.handle_channel_message_with_interaction(message, None, None, None)
-            .await
-    }
-
     pub async fn handle_channel_message_with_interaction(
         &self,
         message: GatewayChannelMessage,
@@ -43,24 +32,13 @@ impl GatewayService {
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<GatewayTurnResponse, GatewayServiceError> {
         let request = build_channel_turn_request(&message);
-        let session_id = request.session_id.clone();
-        let conversation_id = request.conversation_id.clone();
-        let AppTurnResult {
-            raw_reply,
-            visible_reply,
-            messages: _messages,
-            ..
-        } = self
+        let visible_reply = self
             .session_service
             .run_turn_with_interaction(request, event_sink, interaction_handle, channel_file_sender)
-            .await?;
+            .await?
+            .visible_reply;
 
-        Ok(GatewayTurnResponse {
-            session_id,
-            conversation_id,
-            raw_reply,
-            visible_reply,
-        })
+        Ok(GatewayTurnResponse { visible_reply })
     }
 
     #[allow(dead_code)]
