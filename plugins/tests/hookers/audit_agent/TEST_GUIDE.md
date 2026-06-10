@@ -403,28 +403,45 @@ LLM 输出有随机性，同一个 Deny 用例有时 PASS 有时 FAIL，原因�
 
 ## 6. RPM 安装环境测试
 
-通过 RPM 安装 xiaoO-hookers 后，audit_agent 安装到 `/usr/lib/.xiaoo/hookers/audit_agent/`，测试脚本需要额外指定二进制和 plugin.json 路径。
+### 6.1 安装 RPM 包
 
-### 6.1 前置条件
-
-确认 RPM 包已安装：
+需要安装两个包：
 
 ```bash
-rpm -qa | grep xiaoO
+# 安装 xiaoO-hookers（audit_agent 主程序 + plugin.json）
+sudo dnf install ./xiaoO-hookers-*.rpm
+
+# 安装 xiaoO-hookers-tests（测试用例）
+sudo dnf install ./xiaoO-hookers-tests-*.rpm
 ```
 
-预期输出包含 `xiaoO-hookers-*`。
+安装后目录结构：
+
+```
+/usr/lib/.xiaoo/
+├── hookers/audit_agent/           # xiaoO-hookers 安装
+│   ├── plugin.json
+│   ├── audit.py
+│   ├── audit_policy_checker/
+│   └── ...
+└── tests/hookers/audit_agent/     # xiaoO-hookers-tests 安装
+    └── xiaoo/
+        ├── run_rules_tests.py
+        └── rules/
+```
 
 ### 6.2 运行全部 rules 测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/tests/xiaoo
+cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
 
 python3 run_rules_tests.py \
   --api-key "your-api-key" \
   --bin /usr/bin/xiaoo \
   --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
 ```
+
+`--plugin-json` 必须指定，因为测试脚本的 `SCRIPT_DIR` 在 `/usr/lib/.xiaoo/tests/` 下，无法自动推测 `plugin.json` 在 `/usr/lib/.xiaoo/hookers/` 下的位置。
 
 ### 6.3 常用参数
 
@@ -453,18 +470,19 @@ python3 run_rules_tests.py \
 ### 6.4 使用 Shell 脚本测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/tests/xiaoo
+cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
 
 export XIAOO_BIN=/usr/bin/xiaoo
 export XIAOO_CONFIG=~/.config/xiaoo/config.toml
-export ZHIPU_API_KEY="your-api-key"
 bash run-deny-01-passwd.sh
 bash run-allow-01-read-log.sh
 ```
 
+Shell 脚本使用的 API Key 从 `~/.config/xiaoo/config.toml` 的 `api_key_env` 字段读取，需提前 `export` 对应的环境变量。
+
 ### 6.5 注意事项
 
-- **`--plugin-json` 参数是必需的**：RPM 安装路径下，测试脚本无法自动推测 plugin.json 位置，必须显式指定
-- **`--bin` 参数**：RPM 安装后 xiaoo 在 `/usr/bin/xiaoo`，与开发环境不同
+- **`--plugin-json` 参数是必需的**：RPM 环境下测试脚本和 plugin.json 分属两个不同的 RPM 包，路径不连续，必须显式指定
+- **`--bin` 参数**：RPM 安装后 xiaoo 在 `/usr/bin/xiaoo`，与开发环境的 `target/release/xiaoo` 不同
 - **LLM 配置**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM，可省略 `--api-key`、`--provider`、`--model` 等参数，脚本会自动读取
 - **日志位置**：可通过 `AUDIT_LOG_PATH` 环境变量指定 audit_agent 日志路径
