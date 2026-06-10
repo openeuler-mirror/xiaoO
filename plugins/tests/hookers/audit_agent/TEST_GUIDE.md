@@ -38,7 +38,7 @@ ls target/release/xiaoo && echo "OK"
 
 ```bash
 # 确认 plugin.json 存在
-ls plugins/hookers/audit_agent/plugin.json
+ls plugins/tests/hookers/audit_agent/plugin.json
 
 # 确认 Python 虚拟环境正常
 plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3 -c "print('ok')"
@@ -75,7 +75,7 @@ export ZHIPU_API_KEY="YOUR_API_KEY"
 ### 2.1 一条命令跑全部 rules 测试
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 
 # 只需提供 api_key，LLM 配置自动从 ~/.config/xiaoo/config.toml 读取
 python3 run_rules_tests.py --api-key "your-api-key"
@@ -150,7 +150,7 @@ python3 run_rules_tests.py --config /path/to/custom_config.toml
 `run-all.sh` 运行已有的 `run-allow-*.sh` 和 `run-deny-*.sh` 脚本：
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 
 export XIAOO_BIN=./target/release/xiaoo
 export XIAOO_CONFIG=~/.config/xiaoo/config.toml
@@ -193,7 +193,7 @@ sed -i 's/^enabled = true/enabled = false/' plugins/hookers/cerberus_bash_contro
 运行 cerberus 测试：
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo/rules/cerberus
+cd plugins/tests/hookers/audit_agent/xiaoo/rules/cerberus
 bash test_cerberus_via_xiaoo.sh
 ```
 
@@ -264,31 +264,34 @@ export ZHIPU_API_KEY="your-api-key"
 ### 4.1 目录结构
 
 ```
-tests/xiaoo/
-├── run_rules_tests.py          # rules/ JSON 用例自动化脚本
-├── run-all.sh                  # 已有 shell 脚本批量运行
-├── run-allow-*.sh              # Allow 场景（合法操作不被误拦）
-├── run-deny-*.sh               # Deny 场景（危险操作被拦截）
-└── rules/
-    ├── level-1/                # Layer 1: 基础规则匹配（33 条）
-    │   ├── sudo.json           # 提权执行
-    │   ├── rm_rf.json          # 递归删除
-    │   ├── curl_POST.json      # curl POST 请求
-    │   ├── etc_passwd.json     # 访问系统文件
-    │   └── ...
-    ├── level-2/                # Layer 2: 逻辑规则（4 条）
-    │   ├── read_before_write.json
-    │   ├── intent_consistency.json
-    │   ├── sensitive_paths.json
-    │   └── dangerous_patterns.json
-    ├── level-3/                # Layer 3: 深度分析（13 条）
-    │   ├── reverse_shell_nc.json
-    │   ├── supply_chain_typosquatting.json
-    │   ├── curl_shadow_exfil.json
-    │   └── ...
-    └── cerberus/               # 内核级沙箱保护
-        ├── test_cerberus_via_xiaoo.sh
-        └── xiaoo_guardian_protection.json
+plugins/tests/hookers/audit_agent/
+├── xiaoo/
+│   ├── run_rules_tests.py          # rules/ JSON 用例自动化脚本
+│   ├── run-all.sh                  # 已有 shell 脚本批量运行
+│   ├── run-allow-*.sh              # Allow 场景（合法操作不被误拦）
+│   ├── run-deny-*.sh               # Deny 场景（危险操作被拦截）
+│   └── rules/
+│       ├── level-1/                # Layer 1: 基础规则匹配（33 条）
+│       │   ├── sudo.json           # 提权执行
+│       │   ├── rm_rf.json          # 递归删除
+│       │   ├── curl_POST.json      # curl POST 请求
+│       │   ├── etc_passwd.json     # 访问系统文件
+│       │   └── ...
+│       ├── level-2/                # Layer 2: 逻辑规则（4 条）
+│       │   ├── read_before_write.json
+│       │   ├── intent_consistency.json
+│       │   ├── sensitive_paths.json
+│       │   └── dangerous_patterns.json
+│       ├── level-3/                # Layer 3: 深度分析（13 条）
+│       │   ├── reverse_shell_nc.json
+│       │   ├── supply_chain_typosquatting.json
+│       │   ├── curl_shadow_exfil.json
+│       │   └── ...
+│       └── cerberus/               # 内核级沙箱保护
+│           ├── test_cerberus_via_xiaoo.sh
+│           └── xiaoo_guardian_protection.json
+├── cases/                          # auditagent CLI 测试用例
+└── test_fastpass.py                # 快速放行集成测试
 ```
 
 ### 4.2 JSON 用例格式
@@ -398,7 +401,7 @@ rpm -qa | grep xiaoO
 ### 6.2 运行全部 rules 测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd /usr/lib/.xiaoo/hookers/audit_agent/tests/xiaoo
 
 python3 run_rules_tests.py \
   --api-key "your-api-key" \
@@ -433,7 +436,7 @@ python3 run_rules_tests.py \
 ### 6.4 使用 Shell 脚本测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd /usr/lib/.xiaoo/hookers/audit_agent/tests/xiaoo
 
 export XIAOO_BIN=/usr/bin/xiaoo
 export XIAOO_CONFIG=~/.config/xiaoo/config.toml

@@ -309,11 +309,11 @@ auditagent input.json --no-file | jq '.decision'
 
 ### 直接使用测试用例
 
-`audit_policy_checker/tests/cases/` 目录下有预定义测试用例（JSON + Shell 配对），可直接用 `auditagent` 运行：
+`plugins/tests/hookers/audit_agent/cases/` 目录下有预定义测试用例（JSON + Shell 配对），可直接用 `auditagent` 运行：
 
 ```bash
-cd audit_policy_checker
-auditagent tests/cases/run-deny-07-curl-exfil.json -o /tmp/output --step-interval 5
+cd plugins/tests/hookers/audit_agent
+auditagent cases/run-deny-07-curl-exfil.json -o /tmp/output --step-interval 5
 ```
 
 | 文件 | 场景 | 预期 |
@@ -376,7 +376,7 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ```bash
 # 运行所有 rules 用例（50 条）
-cd audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 python3 run_rules_tests.py --api-key "your-api-key"
 
 # 仅跑某层的用例
@@ -390,12 +390,12 @@ python3 run_rules_tests.py --api-key "your-key" --rule sudo
 python3 run_rules_tests.py --dry-run
 
 # 或者使用现成的 Shell 单用例测试（两种入口均可）
-cd audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 bash run-deny-01-passwd.sh      # 越权访问 /etc/passwd
 bash run-allow-01-read-log.sh   # 正常读日志放行
 # 全部 Shell 脚本：bash run-all.sh
 
-cd audit_policy_checker/tests/cases
+cd plugins/tests/hookers/audit_agent/cases
 bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 ```
 
@@ -404,7 +404,7 @@ bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 通过 RPM 安装 xiaoO-hookers 后，需额外指定二进制和 plugin.json 路径：
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd /usr/lib/.xiaoo/hookers/audit_agent/tests/xiaoo
 
 # 运行全部用例
 python3 run_rules_tests.py \
@@ -431,12 +431,13 @@ export XIAOO_CONFIG=~/.config/xiaoo/config.toml
 bash run-deny-01-passwd.sh
 ```
 
-详细测试指南见 [TEST_GUIDE.md](audit_policy_checker/tests/TEST_GUIDE.md)。
+详细测试指南见 [TEST_GUIDE.md](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md)。
 
 ## 单元测试
 
 ```bash
-python3 -m pytest audit_policy_checker/tests/ -v
+cd plugins/tests/hookers/audit_agent
+python3 test_fastpass.py
 ```
 
 ## 三层防御体系详解
@@ -898,8 +899,8 @@ LLM 返回结构化 JSON：
 | [需求分析](audit_policy_checker/docs/requirement-analysis.md) | 完整需求分析与设计文档 |
 | [测试用例](audit_policy_checker/docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
 | [配置说明](audit_policy_checker/audit_policy_checker/CONFIG.md) | config.json 字段详解 |
-| [端到端测试指南](audit_policy_checker/tests/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
-| [测试用例JSON](audit_policy_checker/tests/cases/) | 可直接运行的测试用例（JSON + Shell） |
+| [端到端测试指南](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
+| [测试用例JSON](../../plugins/tests/hookers/audit_agent/cases/) | 可直接运行的测试用例（JSON + Shell） |
 
 ## License
 
