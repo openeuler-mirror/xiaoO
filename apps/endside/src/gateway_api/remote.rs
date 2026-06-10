@@ -299,7 +299,7 @@ async fn run_remote_stream(
     mut interaction_rx: UnboundedReceiver<UserPromptResult>,
 ) {
     let url = format!(
-        "{}/api/v1/sessions/{}/turn/stream",
+        "{}/api/v1/sessions/{}/input",
         remote.base_url, turn_request.session_id
     );
     let mut request = client.post(url).json(&turn_request);
@@ -317,7 +317,7 @@ async fn run_remote_stream(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         let _ = updates_tx.send(SessionTurnUpdate::Err(format!(
-            "remote turn failed: HTTP {status} {body}"
+            "remote input failed: HTTP {status} {body}"
         )));
         return;
     }

@@ -234,8 +234,8 @@ fn create_router_from_state(
         Router::new()
             .route("/api/v1/sessions/open", post(handle_session_open))
             .route(
-                "/api/v1/sessions/:session_id/turn/stream",
-                post(handle_session_turn_stream),
+                "/api/v1/sessions/:session_id/input",
+                post(handle_session_input),
             )
             .route(
                 "/api/v1/sessions/:session_id/interaction",
@@ -372,7 +372,7 @@ async fn handle_session_open(
     }
 }
 
-async fn handle_session_turn_stream(
+async fn handle_session_input(
     State(state): State<Arc<GatewayAppState>>,
     Path(session_id): Path<String>,
     Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
@@ -655,7 +655,7 @@ mod tests {
     };
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_rejects_missing_token_for_session_routes() {
+    async fn bearer_auth_rejects_missing_token_for_session_input() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -666,10 +666,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/open")
+                    .uri("/api/v1/sessions/session-1/input")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"session_id":"session-1","conversation_id":"conv-1","sender_id":"user-1"}"#,
+                        r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
                     ))
                     .expect("request should build"),
             )
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_allows_valid_token_for_session_routes() {
+    async fn bearer_auth_allows_valid_token_for_session_input() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -705,41 +705,18 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/open")
+                    .uri("/api/v1/sessions/session-1/input")
                     .header("authorization", "Bearer secret-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"session_id":"session-1","conversation_id":"conv-1","sender_id":"user-1"}"#,
+                        r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
                     ))
                     .expect("request should build"),
             )
             .await
             .expect("router should respond");
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn chat_compat_routes_are_not_registered() {
-        let router =
-            create_router_with_auth(Arc::new(FakeSessionService::new("unused")), None, None);
-
-        for path in ["/api/v1/chat", "/api/v1/chat/stream"] {
-            let response = router
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(path)
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .expect("request should build"),
-                )
-                .await
-                .expect("router should respond");
-
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test(flavor = "current_thread")]

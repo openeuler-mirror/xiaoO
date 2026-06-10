@@ -86,7 +86,7 @@ impl GatewayRuntime {
                     self.stream_rx = None;
                 }
                 SessionTurnUpdate::Err(error) => {
-                    let display_error = crate::error_log::record_tui_error("turn_stream", &error);
+                    let display_error = crate::error_log::record_tui_error("remote_input", &error);
                     self.stream_reveal_buffer.clear();
                     self.pending_stream_done = None;
                     self.set_stream_message_content(state, display_error, false);
