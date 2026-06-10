@@ -28,3 +28,4 @@ dirs = "5"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 mockito = "1"
+temp-env = "0.3"

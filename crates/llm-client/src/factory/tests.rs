@@ -18,9 +18,11 @@ fn test_unknown_provider() {
 
 #[test]
 fn test_missing_api_key() {
-    let config = LlmProviderConfig::new("openai", "gpt-4o");
-    let result = create_llm_provider(&config, None, None);
-    assert!(result.is_err());
+    temp_env::with_var_unset("OPENAI_API_KEY", || {
+        let config = LlmProviderConfig::new("openai", "gpt-4o");
+        let result = create_llm_provider(&config, None, None);
+        assert!(result.is_err());
+    });
 }
 
 #[test]
