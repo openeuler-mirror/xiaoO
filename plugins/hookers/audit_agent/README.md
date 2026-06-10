@@ -73,7 +73,7 @@ audit_policy_checker/
 ├── parsers.py           # 响应解析 — 从 LLM 输出提取 TOML/JSON/安全判断
 ├── policy_cache.py      # 缓存管理 — session 级 LRU 缓存
 ├── prompt_templates.py  # Prompt 模板 — PROMPT1/安全判断模板实例化
-├── logging_utils.py     # 日志工具 — 基于loguru的审计日志
+├── logging_utils.py     # 日志工具 — 基于logging的审计日志
 ├── config.json          # 配置文件（含API Key，不入Git）
 ├── config.json.example  # 配置示例
 ├── CONFIG.md            # 配置字段说明
@@ -133,7 +133,24 @@ audit_policy_checker/
 - `--disable-llm`：禁用 LLM 分析（仅使用启发式+逻辑规则检测）
 - 环境变量 `AUDIT_ENABLE_LLM=1/0`：通过环境变量控制
 
-### 方式三：手动安装
+### 方式三：通过 RPM 安装
+
+通过 RPM 安装 xiaoO-hookers 包后，audit_agent 安装在 `/usr/lib/.xiaoo/hookers/audit_agent/`：
+
+```bash
+# 第一步：安装 xiaoO-hookers RPM 包
+sudo dnf install ./xiaoO-hookers-0.0.3-1.oe2403sp3.x86_64.rpm
+
+# 第二步：启用 audit_agent 插件（可选：启用/禁用 LLM 分析）
+bash /usr/bin/xiaoo-hookers-install --non-interactive audit_agent
+
+# 如需禁用 audit_agent 插件
+bash /usr/bin/xiaoo-hookers-uninstall
+```
+
+> RPM 安装时 plugin.json 中的路径会自动改为绝对路径，无需手动修改。
+
+### 方式四：手动安装
 
 ```bash
 cd plugins/hookers/audit_agent/audit_policy_checker
@@ -147,12 +164,20 @@ pip install -e .
 **LLM 配置**：如果 xiaoo 已配置 LLM（`~/.config/xiaoo/config.toml`），audit_agent 会自动继承配置。否则需手动创建 `config.json`：
 
 ```bash
+# 源码安装
+cp audit_policy_checker/audit_policy_checker/config.json.example audit_policy_checker/audit_policy_checker/config.json
+
+# RPM 安装（路径在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
 cp audit_policy_checker/config.json.example audit_policy_checker/config.json
 ```
 
 **审计设置**：通过 `audit_settings.json` 配置审计行为：
 
 ```bash
+# 源码安装
+cp audit_settings.json.example audit_settings.json
+
+# RPM 安装（已在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
 cp audit_settings.json.example audit_settings.json
 ```
 
@@ -220,11 +245,12 @@ AuditAgent 自动根据配置的 Provider 注入特殊 HTTP Headers，解决部�
 ```toml
 # ~/.config/xiaoo/config.toml
 [llm]
+api_key_env = "XIAOO_API_KEY"
 provider = "openrouter"
 model = "minimax/minimax-m2.5"
 ```
 
-详细配置说明见 [CONFIG.md](audit_policy_checker/CONFIG.md)。
+详细配置说明见 [CONFIG.md](audit_policy_checker/audit_policy_checker/CONFIG.md)。
 
 ## 使用
 
@@ -283,18 +309,18 @@ auditagent input.json --no-file | jq '.decision'
 
 ### 直接使用测试用例
 
-`tests/cases/` 目录下有预定义测试用例 JSON，可直接用 `auditagent` 运行：
+`audit_policy_checker/tests/cases/` 目录下有预定义测试用例（JSON + Shell 配对），可直接用 `auditagent` 运行：
 
 ```bash
-auditagent tests/cases/TC-ALLOW-01.json -o /tmp/output --step-interval 5
-auditagent tests/cases/TC-DENY-01.json -o /tmp/output
+cd audit_policy_checker
+auditagent tests/cases/run-deny-07-curl-exfil.json -o /tmp/output --step-interval 5
 ```
 
 | 文件 | 场景 | 预期 |
 |------|------|------|
-| `TC-ALLOW-01.json` ~ `TC-ALLOW-06.json` | 正常操作 | Allow |
-| `TC-DENY-01.json` ~ `TC-DENY-10.json` + 特殊 Deny 用例 | 越权/攻击操作 | Deny |
-| `TC-EDGE-01.json` ~ `TC-EDGE-06.json` | 边界场景 | 见文件 |
+| `run-deny-03-chmod.sh` ~ `run-deny-10-skill-script.sh` | 危险命令（chmod、rm -rf、wget、curl POST 等） | Deny |
+| `run-deny-cron-exfil.sh`、`run-deny-git-hooks-backdoor.sh` 等 | 特殊复杂场景（cron 后门、git hooks、配置篡改、注入） | Deny |
+| `run-deny-edge-*.sh` | 边界场景（本地上传、tar 环境变量、curl pipe bash、git force push） | Deny |
 
 ### Python API 调用
 
@@ -346,31 +372,71 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ## 端到端测试
 
+### 源码安装环境
+
 ```bash
-# 运行所有用例
-python3 tests/e2e_test.py
+# 运行所有 rules 用例（50 条）
+cd audit_policy_checker/tests/xiaoo
+python3 run_rules_tests.py --api-key "your-api-key"
 
-# 只运行单个用例（编号1-11）
-python3 tests/e2e_test.py --case 1
+# 仅跑某层的用例
+python3 run_rules_tests.py --api-key "your-key" --level 1          # 仅层1（启发式）
+python3 run_rules_tests.py --api-key "your-key" --level 2 --level 3  # 仅层2+层3
 
-# 指定 Step1/Step2 间隔（避免 API 限流）
-python3 tests/e2e_test.py --case 3 --step-interval 10
+# 只跑某个规则
+python3 run_rules_tests.py --api-key "your-key" --rule sudo
 
-# 按分类运行
-python3 tests/e2e_test.py --allow     # 4个 Allow 用例
-python3 tests/e2e_test.py --deny      # 4个 Deny 用例
-python3 tests/e2e_test.py --edge      # 3个 边界用例
+# 预览有哪些用例（不执行）
+python3 run_rules_tests.py --dry-run
 
-# 显示调试日志
-python3 tests/e2e_test.py --case 1 --debug
+# 或者使用现成的 Shell 单用例测试（两种入口均可）
+cd audit_policy_checker/tests/xiaoo
+bash run-deny-01-passwd.sh      # 越权访问 /etc/passwd
+bash run-allow-01-read-log.sh   # 正常读日志放行
+# 全部 Shell 脚本：bash run-all.sh
+
+cd audit_policy_checker/tests/cases
+bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 ```
 
-详细测试指南见 [E2E_TEST_GUIDE.md](tests/E2E_TEST_GUIDE.md)。
+### RPM 安装环境
+
+通过 RPM 安装 xiaoO-hookers 后，需额外指定二进制和 plugin.json 路径：
+
+```bash
+cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+
+# 运行全部用例
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
+
+# 仅跑某层
+python3 run_rules_tests.py \
+  --api-key "your-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --level 1
+
+# 预览用例
+python3 run_rules_tests.py \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --dry-run
+
+# Shell 脚本测试
+export XIAOO_BIN=/usr/bin/xiaoo
+export XIAOO_CONFIG=~/.config/xiaoo/config.toml
+bash run-deny-01-passwd.sh
+```
+
+详细测试指南见 [TEST_GUIDE.md](audit_policy_checker/tests/TEST_GUIDE.md)。
 
 ## 单元测试
 
 ```bash
-python3 -m pytest tests/test_audit.py -v
+python3 -m pytest audit_policy_checker/tests/ -v
 ```
 
 ## 三层防御体系详解
@@ -829,11 +895,11 @@ LLM 返回结构化 JSON：
 
 | 文档 | 说明 |
 |------|------|
-| [需求分析](docs/requirement-analysis.md) | 完整需求分析与设计文档 |
-| [测试用例](docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
-| [配置说明](audit_policy_checker/CONFIG.md) | config.json 字段详解 |
-| [端到端测试指南](tests/E2E_TEST_GUIDE.md) | e2e_test.py 使用方法 |
-| [测试用例JSON](tests/cases/) | 28个可直接运行的测试用例 |
+| [需求分析](audit_policy_checker/docs/requirement-analysis.md) | 完整需求分析与设计文档 |
+| [测试用例](audit_policy_checker/docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
+| [配置说明](audit_policy_checker/audit_policy_checker/CONFIG.md) | config.json 字段详解 |
+| [端到端测试指南](audit_policy_checker/tests/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
+| [测试用例JSON](audit_policy_checker/tests/cases/) | 可直接运行的测试用例（JSON + Shell） |
 
 ## License
 
