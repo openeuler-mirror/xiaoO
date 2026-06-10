@@ -52,6 +52,7 @@ tower_governor = "0.4"
 parking_lot.workspace = true
 governor = "0.6"
 tracing.workspace = true
+textwrap = "0.16"
 unicode-width = "0.1.14"
 url = "2.5"
 uuid.workspace = true

@@ -22,6 +22,7 @@ use crate::loop_state::LoopState;
 use crate::runtime::AgentRuntime;
 use crate::snapshot::RuntimeSnapshot;
 use crate::suspend::{LoopRunResult, SuspendedToolCall};
+use crate::token_estimator::TokenEstimator;
 
 use crate::spawn_evict;
 
@@ -78,6 +79,7 @@ pub async fn run_agent_loop(
     mut input: AgentLoopInput,
 ) -> Result<LoopRunResult, AgentError> {
     let snapshot = runtime.snapshot();
+    let estimator = TokenEstimator::new();
 
     // Detect `/skill-name` prefix and expand skill prompt inline.
     if input.append_user_message {
@@ -138,6 +140,22 @@ pub async fn run_agent_loop(
                 TraceOutcome::Error,
                 Some(error.to_string()),
                 "prompt_build_error",
+            )
+            .await;
+            return Err(error);
+        }
+        if let Err(error) = pre_check_token_budget(&mut ctx, &estimator).await {
+            end_turn_span(
+                &mut ctx,
+                TraceOutcome::Error,
+                json!({"stop_reason": "pre_check_error"}),
+            )
+            .await;
+            finalize_trace_for_ctx(
+                &ctx,
+                TraceOutcome::Error,
+                Some(error.to_string()),
+                "pre_check_error",
             )
             .await;
             return Err(error);
@@ -431,6 +449,7 @@ async fn end_turn_span(
 enum CompressionTrigger {
     Automatic,
     ContextLimitRetry,
+    PreCheckExceeded,
 }
 
 impl CompressionTrigger {
@@ -438,12 +457,92 @@ impl CompressionTrigger {
         match self {
             Self::Automatic => "automatic",
             Self::ContextLimitRetry => "context_limit_retry",
+            Self::PreCheckExceeded => "pre_check_exceeded",
         }
     }
 
     fn is_forced(self) -> bool {
-        matches!(self, Self::ContextLimitRetry)
+        matches!(self, Self::ContextLimitRetry | Self::PreCheckExceeded)
     }
+}
+
+async fn pre_check_token_budget(
+    ctx: &mut LoopContext<'_>,
+    estimator: &TokenEstimator,
+) -> Result<(), AgentError> {
+    let messages = ctx.state.messages.read().clone();
+    let estimated_input = estimator.estimate_input_tokens(
+        &ctx.snapshot.system_prompt,
+        ctx.snapshot.tool_registry.list_specs().len(),
+        &messages,
+    );
+
+    let context_window = ctx.snapshot.token_budget_config.total_budget;
+    let max_tokens = ctx.snapshot.token_budget_config.reserved_for_output;
+    let reserved_for_system = ctx.snapshot.token_budget_config.reserved_for_system;
+    let available_for_input = context_window
+        .saturating_sub(max_tokens)
+        .saturating_sub(reserved_for_system);
+
+    if estimated_input <= available_for_input {
+        tracing::debug!(
+            estimated_input_tokens = estimated_input,
+            available_tokens = available_for_input,
+            context_window,
+            "Pre-check passed: input tokens within budget"
+        );
+        return Ok(());
+    }
+
+    tracing::warn!(
+        estimated_input_tokens = estimated_input,
+        available_tokens = available_for_input,
+        context_window,
+        max_tokens,
+        trigger = "pre_check_exceeded",
+        "Pre-check failed: input tokens exceed available budget, triggering compression"
+    );
+
+    compress(ctx, CompressionTrigger::PreCheckExceeded).await?;
+    build_messages(ctx).await?;
+
+    let new_messages = ctx.state.messages.read().clone();
+    let new_estimated = estimator.estimate_input_tokens(
+        &ctx.snapshot.system_prompt,
+        ctx.snapshot.tool_registry.list_specs().len(),
+        &new_messages,
+    );
+
+    if new_estimated <= available_for_input {
+        tracing::info!(
+            new_estimated_tokens = new_estimated,
+            available_tokens = available_for_input,
+            "Pre-check passed after compression"
+        );
+        return Ok(());
+    }
+
+    if available_for_input == 0 || max_tokens + reserved_for_system >= context_window {
+        tracing::warn!(
+            estimated_tokens = new_estimated,
+            available_tokens = available_for_input,
+            context_window,
+            max_tokens,
+            reserved_for_system,
+            "Pre-check detected invalid configuration: no available input space. \
+             System will attempt API call to trigger auto-detection of actual context window."
+        );
+        return Ok(()); // Allow API call to proceed for auto-detection
+    }
+
+    tracing::warn!(
+        estimated_tokens = new_estimated,
+        available_tokens = available_for_input,
+        context_window,
+        "Pre-check shows input exceeds budget, but allowing API call for potential auto-adjustment"
+    );
+
+    Ok(())
 }
 
 async fn compress(
@@ -1393,6 +1492,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         timestamp_ms: now_ms(),
         api_usage_tokens: Some(msg.usage.total_tokens),
         reasoning_content: msg.reasoning_content.clone(),
+        estimated_tokens: None,
     });
 }
 
@@ -1459,6 +1559,7 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
         timestamp_ms: now_ms(),
         api_usage_tokens: None,
         reasoning_content: None,
+        estimated_tokens: None,
     }
 }
 
@@ -1698,6 +1799,94 @@ mod tests {
         assert!(!is_valid_tool_call(&msg.tool_calls[0]));
     }
 
+    #[test]
+    fn compression_trigger_as_str() {
+        assert_eq!(CompressionTrigger::Automatic.as_str(), "automatic");
+        assert_eq!(CompressionTrigger::ContextLimitRetry.as_str(), "context_limit_retry");
+        assert_eq!(CompressionTrigger::PreCheckExceeded.as_str(), "pre_check_exceeded");
+    }
+
+    #[test]
+    fn compression_trigger_is_forced() {
+        assert!(!CompressionTrigger::Automatic.is_forced());
+        assert!(CompressionTrigger::ContextLimitRetry.is_forced());
+        assert!(CompressionTrigger::PreCheckExceeded.is_forced());
+    }
+
+    mod token_budget_tests {
+        use super::*;
+        use crate::token_estimator::TokenEstimator;
+        use agent_types::MessageRole;
+
+        #[test]
+        fn test_estimator_basic_calculation() {
+            let estimator = TokenEstimator::new();
+            let messages = vec![
+                ChatMessage::text(MessageRole::User, "Hello world", 0),
+                ChatMessage::text(MessageRole::Assistant, "Hi there", 0),
+            ];
+
+            let estimated = estimator.estimate_input_tokens(
+                "You are a helpful assistant",
+                0,
+                &messages,
+            );
+
+            assert!(estimated > 0);
+        }
+
+        #[test]
+        fn test_budget_calculation_logic() {
+            let config = TokenBudgetConfig {
+                total_budget: 10000,
+                reserved_for_output: 1000,
+                reserved_for_system: 500,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 8500);
+        }
+
+        #[test]
+        fn test_budget_edge_case_zero_available() {
+            let config = TokenBudgetConfig {
+                total_budget: 1000,
+                reserved_for_output: 1000,
+                reserved_for_system: 500,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 0);
+        }
+
+        #[test]
+        fn test_budget_edge_case_over_allocation() {
+            let config = TokenBudgetConfig {
+                total_budget: 1000,
+                reserved_for_output: 800,
+                reserved_for_system: 400,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 0);
+
+            let is_invalid = config.reserved_for_output + config.reserved_for_system >= config.total_budget;
+            assert!(is_invalid);
+        }
+    }
+
     struct StreamingTestProvider {
         capabilities: ProviderCapabilities,
     }
@@ -1842,78 +2031,6 @@ mod tests {
         }
     }
 
-    struct ContextLimitThenSuccessProvider {
-        capabilities: ProviderCapabilities,
-        call_count: Arc<StdMutex<usize>>,
-    }
-
-    impl ContextLimitThenSuccessProvider {
-        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: false,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "context-limit-test".to_string(),
-                },
-                call_count,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ContextLimitThenSuccessProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            _request: &LlmRequest,
-            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            let call_number = {
-                let mut count = self
-                    .call_count
-                    .lock()
-                    .expect("provider call count mutex should not be poisoned");
-                *count += 1;
-                *count
-            };
-
-            if call_number == 1 {
-                return Err(LlmError::ContextLengthExceeded {
-                    message: "provider context limit exceeded".to_string(),
-                });
-            }
-
-            on_chunk(StreamChunk {
-                delta_text: Some("Recovered".to_string()),
-                delta_reasoning: None,
-                delta_tool_call: None,
-            });
-
-            Ok(LlmResponse {
-                message: AssistantMessage {
-                    text: Some("Recovered".to_string()),
-                    reasoning_content: None,
-                    tool_calls: Vec::new(),
-                    usage: Usage {
-                        prompt_tokens: 5,
-                        completion_tokens: 1,
-                        total_tokens: 6,
-                    },
-                    stop_reason: StopReason::EndTurn,
-                },
-                kv_cache_chunk_hashes: vec![],
-            })
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
 
     struct FixedPromptBuilder;
 
@@ -2072,68 +2189,6 @@ mod tests {
             .expect("test runtime should build")
     }
 
-    struct ForceRetryCompressionPipeline {
-        forced_count: Arc<StdMutex<usize>>,
-    }
-
-    impl ForceRetryCompressionPipeline {
-        fn new(forced_count: Arc<StdMutex<usize>>) -> Self {
-            Self { forced_count }
-        }
-    }
-
-    #[async_trait]
-    impl CompressionPipeline for ForceRetryCompressionPipeline {
-        fn analyze(
-            &self,
-            messages: &[ChatMessage],
-            budget: &dyn TokenBudgetPolicy,
-        ) -> agent_types::compression::ContextAnalysis {
-            agent_types::compression::ContextAnalysis {
-                severity: agent_types::compression::ContextSeverity::Normal,
-                estimated_tokens: messages.len(),
-                should_compact: false,
-                total_tokens: messages.len(),
-                available_tokens: budget.available_budget().unwrap_or(0),
-                usage_ratio: 0.0,
-            }
-        }
-
-        async fn compress(
-            &self,
-            messages: &[ChatMessage],
-            _budget: &dyn TokenBudgetPolicy,
-            meta: &agent_types::compression::CompressionMeta,
-        ) -> Result<CompressedView, agent_contracts::CompressionError> {
-            let mut count = self
-                .forced_count
-                .lock()
-                .expect("compression counter mutex should not be poisoned");
-            *count += 1;
-
-            Ok(CompressedView {
-                messages: messages.to_vec(),
-                removed_count: 0,
-                summary: Some("forced retry compression".to_string()),
-                updated_meta: meta.clone(),
-                estimated_tokens: messages.len(),
-            })
-        }
-
-        fn microcompact(
-            &self,
-            messages: &[ChatMessage],
-            _now_ms: u64,
-        ) -> agent_types::compression::MicroCompactResult {
-            agent_types::compression::MicroCompactResult {
-                applied: false,
-                removed_count: 0,
-                removed_call_ids: Vec::new(),
-                messages: messages.to_vec(),
-                token_delta: 0,
-            }
-        }
-    }
 
     #[derive(Default)]
     struct RecordingLoopEventSink {
@@ -2451,168 +2506,6 @@ mod tests {
         );
     }
 
-    /// LLM provider that returns a single empty-name tool call on every invocation.
-    /// Used to exercise the "retry still returns empty name → graceful degrade" path.
-    struct EmptyNameToolCallProvider {
-        capabilities: ProviderCapabilities,
-    }
 
-    impl EmptyNameToolCallProvider {
-        fn new() -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: true,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "empty-name-test".to_string(),
-                },
-            }
-        }
-    }
 
-    #[async_trait]
-    impl LlmProvider for EmptyNameToolCallProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            _request: &LlmRequest,
-            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            // Emit a text delta so the assistant message is non-empty.
-            on_chunk(StreamChunk {
-                delta_text: Some("trying to use a tool".to_string()),
-                delta_reasoning: None,
-                delta_tool_call: None,
-            });
-
-            Ok(LlmResponse {
-                message: AssistantMessage {
-                    text: Some("trying to use a tool".to_string()),
-                    reasoning_content: None,
-                    tool_calls: vec![ToolUseBlock {
-                        call_id: "call_empty_1".to_string(),
-                        tool_name: String::new(), // ← empty name: the trigger
-                        input: serde_json::json!({}),
-                    }],
-                    usage: Usage {
-                        prompt_tokens: 10,
-                        completion_tokens: 5,
-                        total_tokens: 15,
-                    },
-                    stop_reason: StopReason::EndTurn,
-                },
-                kv_cache_chunk_hashes: vec![],
-            })
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
-
-    struct ToolThenDoneProvider {
-        capabilities: ProviderCapabilities,
-        requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>,
-    }
-
-    impl ToolThenDoneProvider {
-        fn new(requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>) -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: true,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "tool-then-done-test".to_string(),
-                },
-                requests,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ToolThenDoneProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            request: &LlmRequest,
-            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            let call_number = {
-                let mut requests = self
-                    .requests
-                    .lock()
-                    .expect("request recorder mutex should not be poisoned");
-                requests.push(request.messages.clone());
-                requests.len()
-            };
-
-            if call_number == 1 {
-                Ok(LlmResponse {
-                    kv_cache_chunk_hashes: vec![],
-                    message: AssistantMessage {
-                        text: Some("checking".to_string()),
-                        reasoning_content: None,
-                        tool_calls: vec![ToolUseBlock {
-                            call_id: "call_1".to_string(),
-                            tool_name: "bash".to_string(),
-                            input: serde_json::json!({"command": "date"}),
-                        }],
-                        usage: Usage {
-                            prompt_tokens: 10,
-                            completion_tokens: 3,
-                            total_tokens: 13,
-                        },
-                        stop_reason: StopReason::ToolUse,
-                    },
-                })
-            } else {
-                Ok(LlmResponse {
-                    kv_cache_chunk_hashes: vec![],
-                    message: AssistantMessage {
-                        text: Some("done".to_string()),
-                        reasoning_content: None,
-                        tool_calls: Vec::new(),
-                        usage: Usage {
-                            prompt_tokens: 20,
-                            completion_tokens: 2,
-                            total_tokens: 22,
-                        },
-                        stop_reason: StopReason::EndTurn,
-                    },
-                })
-            }
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
-
-    struct SecondTurnPendingSource {
-        drain_count: StdMutex<usize>,
-    }
-
-    #[async_trait]
-    impl crate::input::PendingUserMessageSource for SecondTurnPendingSource {
-        async fn drain_pending_user_messages(&self) -> Vec<String> {
-            let mut count = self
-                .drain_count
-                .lock()
-                .expect("pending source mutex should not be poisoned");
-            *count += 1;
-            if *count == 2 {
-                vec!["please use the fresh requirement".to_string()]
-            } else {
-                Vec::new()
-            }
-        }
-    }
 }

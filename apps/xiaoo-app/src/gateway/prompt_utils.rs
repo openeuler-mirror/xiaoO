@@ -48,8 +48,8 @@ fn classify_skill_dir(dir: &str, config_counter: &mut usize) -> (String, String)
         ("Project".to_string(), "Project-specific skills".to_string())
     } else if dir == "/usr/lib/.xiaoo/skills" {
         ("System".to_string(), "Built-in skills".to_string())
-    } else if dir.ends_with("/.xiaoo/skills") 
-        && (dir.starts_with('~') 
+    } else if dir.ends_with("/.xiaoo/skills")
+        && (dir.starts_with('~')
             || dir.starts_with("/home/")
             || dir.starts_with("/root/")) {
         ("User".to_string(), "Personal skills".to_string())
@@ -175,17 +175,17 @@ mod tests {
     #[test]
     fn test_classify_skill_dir_user_variations() {
         let mut counter = 0;
-        
+
         assert_eq!(
             classify_skill_dir("~/.xiaoo/skills", &mut counter),
             ("User".to_string(), "Personal skills".to_string())
         );
-        
+
         assert_eq!(
             classify_skill_dir("/home/test/.xiaoo/skills", &mut counter),
             ("User".to_string(), "Personal skills".to_string())
         );
-        
+
         assert_eq!(
             classify_skill_dir("/root/.xiaoo/skills", &mut counter),
             ("User".to_string(), "Personal skills".to_string())

@@ -263,7 +263,6 @@ pub fn init_on_demand_secret_provider(config_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{init_on_demand_secret_provider, save_llm_secret};
-    use std::path::Path;
 
     #[test]
     fn saved_secret_can_be_retrieved_on_demand() {

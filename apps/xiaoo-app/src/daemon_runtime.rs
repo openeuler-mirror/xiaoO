@@ -78,16 +78,21 @@ impl ConfiguredRuntimeResolver {
             .context("failed to create llm provider")?,
         );
         let effective_context_window = resolve_effective_context_window(
-            config.app.llm.context_window,
             &resolved_provider,
             &agent.model,
             llm_provider.capabilities().max_context_window,
         )
         .await;
         let token_budget = build_token_budget(
-            Some(effective_context_window),
+            effective_context_window,
             config.max_output_tokens(),
-            llm_provider.capabilities().max_context_window,
+        );
+
+        validate_token_budget_config(
+            &token_budget,
+            config.max_output_tokens(),
+            &agent.model,
+            config.config_path(),
         );
 
         let trace = config.resolve_trace_config();
@@ -172,18 +177,21 @@ impl ConfiguredRuntimeResolver {
 }
 
 async fn resolve_effective_context_window(
-    configured_context_window: Option<usize>,
     resolved_provider: &llm_client::ResolvedConfig,
     model: &str,
     static_fallback: usize,
 ) -> usize {
-    if let Some(configured) = configured_context_window.filter(|value| *value > 0) {
-        return configured;
-    }
-
     match resolve_model_context_length(resolved_provider, model).await {
         Ok(Some(context_window)) => match usize::try_from(context_window) {
-            Ok(value) if value > 0 => return value,
+            Ok(value) if value > 0 => {
+                tracing::info!(
+                    context_window = value,
+                    source = "model_catalog",
+                    model = %model,
+                    "Using context_window from model catalog API"
+                );
+                return value;
+            }
             Ok(_) => {}
             Err(_) => {
                 tracing::warn!(
@@ -203,7 +211,14 @@ async fn resolve_effective_context_window(
         }
     }
 
-    static_fallback.max(1)
+    let fallback = static_fallback.max(1);
+    tracing::info!(
+        context_window = fallback,
+        source = "provider_default",
+        model = %model,
+        "Using context_window from provider default"
+    );
+    fallback
 }
 
 #[async_trait]
@@ -329,13 +344,10 @@ fn resolve_allowed_tool_names(
 }
 
 fn build_token_budget(
-    configured_context_window: Option<usize>,
+    total_budget: usize,
     configured_output_tokens: usize,
-    provider_context_window: usize,
 ) -> TokenBudgetConfig {
-    let total_budget = configured_context_window
-        .unwrap_or(provider_context_window)
-        .max(1);
+    let total_budget = total_budget.max(1);
     let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
     let reserved_for_prompt = DEFAULT_MIN_PROMPT_TOKEN_RESERVE.min(
         total_budget
@@ -353,6 +365,40 @@ fn build_token_budget(
         reserved_for_output,
         reserved_for_system,
         hard_limit_ratio: DEFAULT_HARD_LIMIT_RATIO,
+    }
+}
+
+fn validate_token_budget_config(
+    budget: &TokenBudgetConfig,
+    configured_max_tokens: usize,
+    model: &str,
+    config_path: &Path,
+) {
+    let max_reasonable_output_ratio = 0.5;
+    let max_reasonable_output_tokens = (budget.total_budget as f64 * max_reasonable_output_ratio) as usize;
+
+    if configured_max_tokens > max_reasonable_output_tokens {
+        let warning_msg = format!(
+            "Warning: max_tokens {} exceeds 50% of context_window ({} * 0.5 = {}) for model {}. \
+            This may limit input space.",
+            configured_max_tokens, budget.total_budget, max_reasonable_output_tokens, model
+        );
+        tracing::warn!("{}", warning_msg);
+    }
+
+    if configured_max_tokens >= budget.total_budget {
+        let error_msg = format!(
+            "Config Error: max_tokens {} >= context_window {} (from provider/model). \
+            This would leave NO space for input.",
+            configured_max_tokens, budget.total_budget
+        );
+
+        eprintln!("{}", error_msg);
+        eprintln!();
+        eprintln!("Configuration file: {}", config_path.display());
+        eprintln!("Suggestions:");
+        eprintln!("  - Reduce max_tokens (currently {}) in [app.llm] section", configured_max_tokens);
+        std::process::abort();
     }
 }
 
@@ -481,15 +527,15 @@ mod tests {
 
     #[test]
     fn token_budget_caps_output_to_preserve_prompt_budget() {
-        let budget = build_token_budget(None, 150_000, 128_000);
+        let budget = build_token_budget(128_000, 150_000);
         assert_eq!(budget.total_budget, 128_000);
         assert_eq!(budget.reserved_for_output, 123_904);
         assert_eq!(budget.reserved_for_system, 2_048);
     }
 
     #[test]
-    fn token_budget_prefers_configured_context_window() {
-        let budget = build_token_budget(Some(65536), 8192, 128000);
+    fn token_budget_with_explicit_window() {
+        let budget = build_token_budget(65536, 8192);
         assert_eq!(budget.total_budget, 65536);
         assert_eq!(budget.reserved_for_output, 8192);
         assert_eq!(budget.reserved_for_system, 2048);

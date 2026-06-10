@@ -283,12 +283,14 @@ mod tests {
 
     #[test]
     fn test_resolve_missing_api_key() {
-        let input = ResolveInput {
-            provider: Some("openai".to_string()),
-            ..Default::default()
-        };
-        let result = resolve_config(input);
-        assert!(matches!(result, Err(ResolveError::MissingApiKey)));
+        temp_env::with_var_unset("OPENAI_API_KEY", || {
+            let input = ResolveInput {
+                provider: Some("openai".to_string()),
+                ..Default::default()
+            };
+            let result = resolve_config(input);
+            assert!(matches!(result, Err(ResolveError::MissingApiKey)));
+        });
     }
 
     #[test]

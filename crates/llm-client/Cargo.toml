@@ -23,8 +23,10 @@ tokio-util = { version = "0.7", features = ["io"] }
 regex = "1"
 chrono = "0.4"
 dirs = "5"
+toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 mockito = "1"
+temp-env = "0.3"

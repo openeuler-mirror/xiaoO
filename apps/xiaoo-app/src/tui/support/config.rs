@@ -14,7 +14,7 @@ use std::sync::Arc;
 use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 
 const DEFAULT_AGENT_ID: &str = "main";
-const DEFAULT_LLM_MAX_TOKENS: u32 = 128000;
+const DEFAULT_LLM_MAX_TOKENS: u32 = 16384;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LspConfig {
@@ -111,8 +111,6 @@ pub struct LlmConfig {
     #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
-    pub context_window: Option<u32>,
-    #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
     #[serde(default = "default_false")]
     pub kvcache_enabled: bool,
@@ -132,7 +130,6 @@ impl Default for LlmConfig {
             api_key_env: None,
             api_base: String::new(),
             max_tokens: default_llm_max_tokens(),
-            context_window: None,
             reasoning_effort: ReasoningEffort::Off,
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
@@ -363,21 +360,6 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
         );
     }
 
-    if let Some(context_window) = config.llm.context_window {
-        if context_window == 0 {
-            bail!(
-                "invalid TUI config {}: [llm].context_window must be > 0",
-                config_path.display()
-            );
-        }
-        let _ = usize::try_from(context_window).map_err(|_| {
-            anyhow::anyhow!(
-                "invalid TUI config {}: [llm].context_window does not fit platform usize",
-                config_path.display()
-            )
-        })?;
-    }
-
     if config.llm.max_tokens == 0 {
         bail!(
             "invalid TUI config {}: [llm].max_tokens must be > 0",
@@ -517,8 +499,8 @@ fn default_llm_max_tokens() -> u32 {
 }
 
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
-    if let Some(configured) = config.llm.context_window.filter(|value| *value > 0) {
-        return usize::try_from(configured).ok();
+    if let Some(known) = llm_client::get_known_model_context_length(&config.llm.model) {
+        return usize::try_from(known).ok();
     }
 
     match llm_client::resolve_protocol_family(&config.llm.provider)? {
@@ -540,7 +522,6 @@ mod tests {
         config.llm.provider = "openai".to_string();
         config.llm.model = "gpt-4o".to_string();
         config.llm.max_tokens = 128000;
-        config.llm.context_window = Some(128_000);
         config
     }
 
@@ -555,33 +536,8 @@ mod tests {
     }
 
     #[test]
-    fn tui_bootstrap_allows_missing_context_window() {
-        let mut config = valid_config();
-        config.llm.context_window = None;
-
-        require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect("missing context_window should fall back to provider defaults");
-    }
-
-    #[test]
-    fn tui_bootstrap_rejects_zero_context_window() {
-        let mut config = valid_config();
-        config.llm.context_window = Some(0);
-
-        let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect_err("zero context_window should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("[llm].context_window must be > 0"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
     fn resolve_context_window_falls_back_to_provider_default() {
         let mut config = valid_config();
-        config.llm.context_window = None;
         config.llm.provider = "anthropic".to_string();
 
         assert_eq!(resolve_context_window(&config), Some(200_000));

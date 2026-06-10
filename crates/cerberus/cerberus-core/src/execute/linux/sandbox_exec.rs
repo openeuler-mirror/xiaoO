@@ -59,43 +59,65 @@ pub(in crate::execute) fn execute_process_linux(
     };
 
     #[cfg(feature = "ebpf")]
-    let _network_enforcement_handle = if policy.allow_network() {
-        if let Some(np) = &policy.network_policy {
-            if np.is_enabled() {
-                match crate::sandbox::network::initialize_network_enforcement(np.clone()) {
-                    Ok(handle) => Some(handle),
-                    Err(e) => {
-                        return Err(CerberusError::SandboxSetup(
-                            SandboxSetupError::EbpfSetupFailed(format!(
-                                "Network enforcement initialization failed: {}",
-                                e
-                            )),
-                        ));
-                    }
+    let ebpf_session = {
+        use crate::sandbox::ebpf::{EbpfAuditSession, EbpfAuditSessionConfig};
+
+        let network_policy = if policy.allow_network() {
+            policy
+                .network_policy
+                .as_ref()
+                .filter(|np| np.is_enabled())
+                .cloned()
+        } else {
+            None
+        };
+
+        let config = EbpfAuditSessionConfig {
+            network_policy,
+            file_access_audit: policy.file_access_audit,
+            network_audit: policy.network_audit,
+        };
+
+        if config.is_enabled() {
+            match EbpfAuditSession::initialize(config) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    return Err(CerberusError::SandboxSetup(
+                        SandboxSetupError::EbpfSetupFailed(format!(
+                            "eBPF audit session initialization failed: {}",
+                            error
+                        )),
+                    ));
                 }
-            } else {
-                None
             }
         } else {
             None
         }
-    } else {
-        None
     };
 
     #[cfg(not(feature = "ebpf"))]
-    if policy.allow_network()
-        && policy
-            .network_policy
-            .as_ref()
-            .map(|np| np.is_enabled())
-            .unwrap_or(false)
     {
-        return Err(CerberusError::SandboxSetup(
-            SandboxSetupError::EbpfSetupFailed(
-                "Network policy configured but eBPF support is disabled".to_string(),
-            ),
-        ));
+        if policy.file_access_audit {
+            return Err(CerberusError::SandboxSetup(
+                SandboxSetupError::EbpfSetupFailed(
+                    "file_access_audit configured but eBPF support is disabled".to_string(),
+                ),
+            ));
+        }
+
+        if policy.allow_network()
+            && policy
+                .network_policy
+                .as_ref()
+                .map(|np| np.is_enabled())
+                .unwrap_or(false)
+        {
+            return Err(CerberusError::SandboxSetup(
+                SandboxSetupError::EbpfSetupFailed(
+                    "Network policy configured but eBPF support is disabled".to_string(),
+                ),
+            ));
+        }
     }
 
     let pid = unsafe { libc::fork() };
@@ -180,63 +202,86 @@ pub(in crate::execute) fn execute_process_linux(
         _ => None,
     };
 
-    let timeout = policy.timeout();
-    let exit_status = if timeout.as_secs() > 0 {
-        match wait_pid_timeout(pid, timeout)? {
-            Some(status) => status,
-            None => {
-                kill_and_reap(pid);
-                if let Some(reader) = stdout_reader {
-                    let _ = join_pipe_reader(reader);
-                }
-                if let Some(reader) = stderr_reader {
-                    let _ = join_pipe_reader(reader);
-                }
-                close_fd(error_pipe[0]);
+    // Labeled block so both early-success (timeout) and normal exit produce
+    // their ExecResult at the same site, giving us a single #[cfg] pair below
+    // rather than one per exit point.
+    let exec_result: ExecResult = 'exec: {
+        let timeout = policy.timeout();
+        let exit_status = if timeout.as_secs() > 0 {
+            match wait_pid_timeout(pid, timeout)? {
+                Some(status) => status,
+                None => {
+                    kill_and_reap(pid);
+                    if let Some(reader) = stdout_reader {
+                        let _ = join_pipe_reader(reader);
+                    }
+                    if let Some(reader) = stderr_reader {
+                        let _ = join_pipe_reader(reader);
+                    }
+                    close_fd(error_pipe[0]);
 
-                if let Some(ctx) = context {
-                    ctx.emit_timeout(&TimeoutEvent {
-                        duration: timeout,
-                        pid: pid as u32,
-                        timestamp: SystemTime::now(),
-                    })?;
-                }
+                    if let Some(ctx) = context {
+                        ctx.emit_timeout(&TimeoutEvent {
+                            duration: timeout,
+                            pid: pid as u32,
+                            timestamp: SystemTime::now(),
+                        })?;
+                    }
 
-                return Ok(ExecResult::new(-1)
-                    .duration(start.elapsed())
-                    .metadata(ExecMetadata::new().timed_out().killed()));
+                    break 'exec ExecResult::new(-1)
+                        .duration(start.elapsed())
+                        .metadata(ExecMetadata::new().timed_out().killed());
+                }
             }
+        } else {
+            wait_pid(pid)?
+        };
+
+        let duration = start.elapsed();
+        let stdout_bytes = stdout_reader.map_or(Vec::new(), join_pipe_reader);
+        let stderr_bytes = stderr_reader.map_or(Vec::new(), join_pipe_reader);
+
+        if let Some(child_error) = read_child_error(error_pipe[0])? {
+            return Err(child_error);
         }
-    } else {
-        wait_pid(pid)?
+
+        if let Some(error) = stdin_write_error {
+            return Err(
+                ExecutionError::SpawnFailed(format!("Failed to write stdin: {}", error)).into(),
+            );
+        }
+
+        let exit_code = exit_status.code().unwrap_or(-1);
+        let metadata = if let Some(signal) = exit_status.signal() {
+            ExecMetadata::new().killed().signal(signal)
+        } else {
+            ExecMetadata::new()
+        };
+
+        ExecResult::new(exit_code)
+            .stdout(stdout_bytes)
+            .stderr(stderr_bytes)
+            .duration(duration)
+            .metadata(metadata)
     };
 
-    let duration = start.elapsed();
-    let stdout_bytes = stdout_reader.map_or(Vec::new(), join_pipe_reader);
-    let stderr_bytes = stderr_reader.map_or(Vec::new(), join_pipe_reader);
+    #[cfg(feature = "ebpf")]
+    return Ok(finish_exec_result(exec_result, ebpf_session));
+    #[cfg(not(feature = "ebpf"))]
+    Ok(exec_result)
+}
 
-    if let Some(child_error) = read_child_error(error_pipe[0])? {
-        return Err(child_error);
+#[cfg(feature = "ebpf")]
+fn finish_exec_result(
+    mut result: ExecResult,
+    ebpf_session: Option<crate::sandbox::ebpf::EbpfAuditSession>,
+) -> ExecResult {
+    if let Some(session) = ebpf_session {
+        let output = session.finish();
+        result.file_accesses = output.file_accesses;
+        result.network_accesses = output.network_accesses;
     }
-
-    if let Some(error) = stdin_write_error {
-        return Err(
-            ExecutionError::SpawnFailed(format!("Failed to write stdin: {}", error)).into(),
-        );
-    }
-
-    let exit_code = exit_status.code().unwrap_or(-1);
-    let metadata = if let Some(signal) = exit_status.signal() {
-        ExecMetadata::new().killed().signal(signal)
-    } else {
-        ExecMetadata::new()
-    };
-
-    Ok(ExecResult::new(exit_code)
-        .stdout(stdout_bytes)
-        .stderr(stderr_bytes)
-        .duration(duration)
-        .metadata(metadata))
+    result
 }
 
 /// Run the sandboxed child process (called in child after fork).

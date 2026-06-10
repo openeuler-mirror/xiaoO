@@ -25,14 +25,14 @@ pub use auth::{AuthStore, AuthStoreError, FileAuthStore, InMemoryAuthStore};
 pub use factory::{
     create_llm_provider, create_llm_provider_from_resolved, LlmProviderConfig, LlmProviderWrapper,
 };
-pub use models::{create_model_catalog, resolve_model_context_length, ModelCatalog, ModelSummary};
+pub use models::{create_model_catalog, get_known_model_context_length, resolve_model_context_length, ModelCatalog, ModelSummary};
 pub use provider_registry::{
     normalize_api_base, resolve_protocol_family, resolve_provider_profile, supported_providers,
     ProtocolFamily, ProviderProfile,
 };
 pub use url_fallback::{
     build_base_url_candidates, build_final_candidates, is_endpoint_path_error,
-    should_try_next_candidate, UrlAttemptRecord,
+    is_configuration_error, is_retryable_network_error, should_try_next_candidate, UrlAttemptRecord,
 };
 pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};

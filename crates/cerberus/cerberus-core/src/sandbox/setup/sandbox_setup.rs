@@ -30,6 +30,8 @@ pub struct SandboxSetup {
     pub landlock_optional: bool,
     /// Whether to use mount isolation as fallback.
     pub mount_isolation_fallback: bool,
+    /// Whether seccomp filtering is optional (downgrade failure to a warning).
+    pub seccomp_optional: bool,
     /// Environment variable whitelist.
     pub env_whitelist: Vec<String>,
 }
@@ -44,6 +46,7 @@ impl SandboxSetup {
             network_policy: policy.network_policy.clone(),
             landlock_optional: policy.landlock_optional,
             mount_isolation_fallback: policy.mount_isolation_fallback,
+            seccomp_optional: policy.seccomp_optional,
             env_whitelist: policy.environment.whitelist.clone(),
         }
     }
@@ -82,10 +85,26 @@ impl SandboxSetup {
 
         self.setup_filesystem_isolation()?;
         process::apply_resource_limits(&self.resources)?;
-        crate::sandbox::isolation::apply_seccomp_filter()
-            .map_err(|e| SandboxSetupError::SeccompSetupFailed(e.to_string()))?;
+        self.setup_seccomp_isolation()?;
 
         Ok(())
+    }
+
+    /// Apply seccomp syscall filtering, downgrading failures to a warning when
+    /// `seccomp_optional` is set (e.g. emulated/cross-arch runtimes).
+    #[cfg(target_os = "linux")]
+    fn setup_seccomp_isolation(&self) -> Result<(), SandboxSetupError> {
+        match crate::sandbox::isolation::apply_seccomp_filter() {
+            Ok(()) => Ok(()),
+            Err(e) if self.seccomp_optional => {
+                eprintln!(
+                    "Warning: seccomp unavailable ({}), continuing without syscall filtering",
+                    e
+                );
+                Ok(())
+            }
+            Err(e) => Err(SandboxSetupError::SeccompSetupFailed(e.to_string())),
+        }
     }
 
     /// Perform sandbox setup (non-Linux stub).
