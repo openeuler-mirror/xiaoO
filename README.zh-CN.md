@@ -46,7 +46,7 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
 cd xiaoO
-cargo install --path apps/xiaoo-app
+cargo install --path apps/endside
 ```
 
 安装后应用二进制会位于 `~/.cargo/bin`，并尝试安装内置技能。请确认 `~/.cargo/bin` 已加入 `PATH`。
@@ -60,13 +60,13 @@ cargo install --path apps/xiaoo-app
 > - 缺少这些技能可能导致安全功能不可用。
 >
 > **系统级安装**（推荐用于多用户环境）：
-> - 使用 root 权限运行 `cargo install`：`sudo cargo install --path apps/xiaoo-app`
+> - 使用 root 权限运行 `cargo install`：`sudo cargo install --path apps/endside`
 
 ### 卸载
 
 ```bash
 # 卸载二进制文件
-cargo uninstall xiaoo-app
+cargo uninstall xiaoo-endside
 
 # 删除系统级 guardian 技能（需要 root 权限）
 sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
@@ -131,10 +131,10 @@ api_key_env = "LLM_API_KEY"
 
 ```bash
 # 终端 UI
-xiaoo-tui
+xiaoo
 
 # 单次 CLI 调用
-xiaoo run -p "Count the characters in hello world"
+xiaoo --cli run -p "Count the characters in hello world"
 ```
 
 CLI 输出示例：
@@ -175,7 +175,7 @@ CLI 输出示例：
 TUI 状态栏会显示当前值：`Think off/high/max`。按 `Ctrl+T` 可按 `off -> high -> max -> off` 为下一轮切换强度。CLI 模式可使用：
 
 ```bash
-xiaoo run --reasoning-effort high -p "Explain this repository"
+xiaoo --cli run --reasoning-effort high -p "Explain this repository"
 ```
 
 Provider 映射采用 best-effort 策略：OpenAI-compatible provider 在 `high` 和 `max` 时接收 `reasoning_effort`；Anthropic 接收 `thinking.budget_tokens`；Gemini 接收 `thinkingConfig.thinkingBudget`；不支持该能力的 provider 会忽略此设置。`off` 会省略 provider 专用推理字段，使默认请求保留各 provider 的原生行为。
@@ -185,12 +185,12 @@ Provider 映射采用 best-effort 策略：OpenAI-compatible provider 在 `high`
 xiaoO 默认从 `~/.xiaoo/skills` 加载技能。每个技能都是一个由 `SKILL.md` 或 `SKILL.toml` 描述的可复用指令包。
 
 ```bash
-xiaoo skill list
-xiaoo skill show <name>
-xiaoo skill audit <path>
-xiaoo skill install ./my-skill/
-xiaoo skill install https://github.com/user/my-skill.git
-xiaoo skill remove <name>
+xiaoo --cli skill list
+xiaoo --cli skill show <name>
+xiaoo --cli skill audit <path>
+xiaoo --cli skill install ./my-skill/
+xiaoo --cli skill install https://github.com/user/my-skill.git
+xiaoo --cli skill remove <name>
 ```
 
 完整技能工作流请参考 [docs/skill_usage.md](./docs/skill_usage.md)。
@@ -201,10 +201,10 @@ xiaoO 可以作为 daemon 运行，并为 Feishu、Telegram 或自定义服务�
 
 ```bash
 # 默认监听地址：0.0.0.0:18080
-xiaoo-app daemon
+xiaoo-daemon
 
 # 指定配置文件、监听地址和端口
-xiaoo-app daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 HTTP 请求可在 JSON body 中通过 `agent` 选择 Agent 角色预设：

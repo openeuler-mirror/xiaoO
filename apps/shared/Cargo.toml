@@ -1,0 +1,74 @@
+[package]
+name = "xiaoo-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+tee_sdf = ["vault/tee_sdf"]
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
+sysinfo = "0.31"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+toml = "0.8"
+anyhow.workspace = true
+arboard = { workspace = true }
+base64.workspace = true
+async-trait.workspace = true
+axum = "0.7"
+regex = "1.11"
+glob = "0.3"
+reqwest.workspace = true
+mime_guess.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+prost = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-stream.workspace = true
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-util.workspace = true
+tower = { workspace = true }
+tower_governor = "0.4"
+parking_lot.workspace = true
+governor = "0.6"
+tracing.workspace = true
+textwrap = "0.16"
+unicode-width = "0.1.14"
+url = "2.5"
+uuid.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+agent-contracts = { path = "../../crates/agent-contracts" }
+agent-llm = { path = "../../crates/agent-llm" }
+agent-types = { path = "../../crates/agent-types" }
+compact = { path = "../../crates/compact" }
+xiaoo-core = { path = "../../crates/core" }
+hook = { path = "../../crates/hook", features = ["plugin_hook"] }
+llm-client = { path = "../../crates/llm-client" }
+memory = { path = "../../crates/memory" }
+prompt = { path = "../../crates/prompt" }
+skill = { path = "../../crates/skill" }
+tool = { path = "../../crates/tool" }
+subagent = { path = "../../crates/subagent" }
+lsp = { path = "../../crates/lsp" }
+trace = { path = "../../crates/trace" }
+operation_backend = { path = "../../crates/operation_backend" }
+vault = { path = "../vault" }
+aes-gcm.workspace = true
+rand.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

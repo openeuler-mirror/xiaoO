@@ -70,27 +70,27 @@ Use grep and file_read to examine the code, then provide a structured report.
 
 ```bash
 # List installed skills
-xiaoo skill list
+xiaoo --cli skill list
 
 # Show skill details and prompt content
-xiaoo skill show <name>
+xiaoo --cli skill show <name>
 
 # Run a security audit on a skill directory
-xiaoo skill audit <path>
+xiaoo --cli skill audit <path>
 
 # Install from a local directory (auto-audit)
-xiaoo skill install ./my-skill/
+xiaoo --cli skill install ./my-skill/
 
 # Install from a Git repository
-xiaoo skill install https://github.com/user/my-skill.git
+xiaoo --cli skill install https://github.com/user/my-skill.git
 
 # Remove an installed skill
-xiaoo skill remove <name>
+xiaoo --cli skill remove <name>
 ```
 
 ### Built-in Skills
 
-Builtin skills are automatically installed when you run `cargo install --path apps/xiaoo-app`. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
+Builtin skills are automatically installed when you run `cargo install --path apps/endside`. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
 
 **Installation locations** (automatic fallback):
 - **System level** (preferred): `/usr/lib/.xiaoo/skills/` - requires root privileges
@@ -108,7 +108,7 @@ Builtin skills are automatically installed when you run `cargo install --path ap
 > - Without these skills, security features and other capabilities may be unavailable.
 >
 > **For system-wide installation** (recommended for multi-user environments):
-> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/endside`
 
 To remove builtin skills:
 
@@ -125,7 +125,7 @@ rm -rf ~/.xiaoo/skills/block-analyzer
 To completely uninstall all skills along with the application:
 
 ```bash
-cargo uninstall xiaoo-app
+cargo uninstall xiaoo-endside
 sudo rm -rf /usr/lib/.xiaoo/skills
 rm -rf ~/.xiaoo/skills
 ```

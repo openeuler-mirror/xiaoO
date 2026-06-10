@@ -73,7 +73,7 @@ In persistent-connection mode:
 - A Feishu tenant with admin access
 - A custom Feishu app with the **Bot** capability enabled
 - A public domain or public server IP reachable by Feishu
-- A Linux host where you can install and run `xiaoo-app daemon`
+- A Linux host where you can install and run `xiaoo-daemon`
 - Rust toolchain and Cargo available on that host
 - `systemd` available to manage the daemon process
 - `nginx` or another reverse proxy available for public ingress
@@ -134,7 +134,7 @@ Feishu
 
 Typical responsibilities:
 
-- your local machine runs `xiaoo-app daemon`
+- your local machine runs `xiaoo-daemon`
 - a public server exposes the callback route
 - that public server forwards traffic back to your local machine through a secure relay or tunnel
 
@@ -303,38 +303,38 @@ Example:
 git clone <your-repo-url> /opt/xiaoo/src
 cd /opt/xiaoo/src
 git checkout <your-branch>
-cargo build -p xiaoo-app
+cargo build -p xiaoo-serverside
 ```
 
 After a successful build, the binary will usually be created at:
 
 ```text
-target/debug/xiaoo-app
+target/debug/xiaoo-daemon
 ```
 
 For a long-running service, copy or install that binary to a stable runtime path such as:
 
 ```text
-/opt/xiaoo/bin/xiaoo-app
+/opt/xiaoo/bin/xiaoo-daemon
 ```
 
 Example:
 
 ```bash
 mkdir -p /opt/xiaoo/bin
-install -m 755 target/debug/xiaoo-app /opt/xiaoo/bin/xiaoo-app
+install -m 755 target/debug/xiaoo-daemon /opt/xiaoo/bin/xiaoo-daemon
 ```
 
 If you prefer release builds, replace the build command with:
 
 ```bash
-cargo build -p xiaoo-app --release
+cargo build -p xiaoo-serverside --release
 ```
 
 and install:
 
 ```bash
-install -m 755 target/release/xiaoo-app /opt/xiaoo/bin/xiaoo-app
+install -m 755 target/release/xiaoo-daemon /opt/xiaoo/bin/xiaoo-daemon
 ```
 
 ## 5. Prepare Runtime Directories
@@ -354,7 +354,7 @@ mkdir -p /var/lib/xiaoo/agents/main
 Recommended layout:
 
 ```text
-/opt/xiaoo/bin/xiaoo-app
+/opt/xiaoo/bin/xiaoo-daemon
 /opt/xiaoo/config/config.toml
 /opt/xiaoo/config/xiaoo.env
 /opt/xiaoo/app
@@ -769,7 +769,7 @@ Then start xiaoO locally:
 
 ```bash
 cd /path/to/xiaoO
-cargo run -p xiaoo-app -- daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+cargo run -p xiaoo-serverside -- --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 Notes:
@@ -806,7 +806,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/xiaoo
 EnvironmentFile=/opt/xiaoo/config/xiaoo.env
-ExecStart=/opt/xiaoo/bin/xiaoo-app daemon --config /opt/xiaoo/config/config.toml --host 127.0.0.1 --port 18080
+ExecStart=/opt/xiaoo/bin/xiaoo-daemon --config /opt/xiaoo/config/config.toml --host 127.0.0.1 --port 18080
 Restart=always
 RestartSec=5
 
@@ -845,7 +845,7 @@ You can run the daemon directly:
 cd /path/to/xiaoO
 export FEISHU_APP_SECRET=your-real-feishu-app-secret
 export OPENROUTER_API_KEY=your-real-model-key
-cargo run -p xiaoo-app -- daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+cargo run -p xiaoo-serverside -- --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 This is often the fastest way to validate that:
@@ -1018,7 +1018,7 @@ If you are running xiaoO locally from source, use the same idea but watch the lo
 cd /path/to/xiaoO
 export FEISHU_APP_SECRET=your-real-feishu-app-secret
 export OPENROUTER_API_KEY=your-real-model-key
-cargo run -p xiaoo-app -- daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+cargo run -p xiaoo-serverside -- --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 What you want to see:
@@ -1064,7 +1064,7 @@ If you are deploying from source for the first time, one extra check is worth do
 ### 14.9 Confirm the binary you installed is the one you just built
 
 ```bash
-ls -l /opt/xiaoo/bin/xiaoo-app
+ls -l /opt/xiaoo/bin/xiaoo-daemon
 ```
 
 and compare the timestamp with your latest build result in `target/debug/` or `target/release/`.
@@ -1154,7 +1154,7 @@ If Feishu is configured for persistent connection, but xiaoO logs never show web
 For a clean production deployment, use this structure:
 
 ```text
-/opt/xiaoo/bin/xiaoo-app
+/opt/xiaoo/bin/xiaoo-daemon
 /opt/xiaoo/config/config.toml
 /opt/xiaoo/config/xiaoo.env
 /opt/xiaoo/app

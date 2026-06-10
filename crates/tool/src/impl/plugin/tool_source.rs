@@ -419,7 +419,11 @@ args = ["workspace"]
         let source = PluginToolSource::new(Some(workspace.clone()));
         let tools = source.discover();
 
-        assert_eq!(tools.len(), 1, "Should only have one tool after deduplication");
+        assert_eq!(
+            tools.len(),
+            1,
+            "Should only have one tool after deduplication"
+        );
         assert_eq!(tools[0].spec.name().0, "test_tool");
         assert_eq!(
             tools[0].spec.description(),

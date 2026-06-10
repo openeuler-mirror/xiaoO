@@ -46,7 +46,7 @@ The runtime also includes a layered memory and adaptive context-compression syst
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
 cd xiaoO
-cargo install --path apps/xiaoo-app
+cargo install --path apps/endside
 ```
 
 This installs the application binaries into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
@@ -60,13 +60,13 @@ This installs the application binaries into `~/.cargo/bin` and attempts to insta
 > - Without these skills, security features may be unavailable.
 >
 > **For system-wide installation** (recommended for multi-user environments):
-> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/endside`
 
 ### Uninstallation
 
 ```bash
 # Uninstall binaries
-cargo uninstall xiaoo-app
+cargo uninstall xiaoo-endside
 
 # Remove the guardian skill (system level requires root)
 sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
@@ -131,10 +131,10 @@ Run xiaoO:
 
 ```bash
 # Terminal UI
-xiaoo-tui
+xiaoo
 
 # Single-shot CLI
-xiaoo run -p "Count the characters in hello world"
+xiaoo --cli run -p "Count the characters in hello world"
 ```
 
 Example CLI output:
@@ -175,7 +175,7 @@ More details are available in [Memory & Context Compression](./docs/memory_conte
 The TUI status bar shows the current value as `Think off/high/max`. Press `Ctrl+T` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
 
 ```bash
-xiaoo run --reasoning-effort high -p "Explain this repository"
+xiaoo --cli run --reasoning-effort high -p "Explain this repository"
 ```
 
 Provider mapping is best-effort. OpenAI-compatible providers receive `reasoning_effort` for `high` and `max`; Anthropic receives `thinking.budget_tokens`; Gemini receives `thinkingConfig.thinkingBudget`; unsupported providers ignore the setting. `off` omits provider-specific reasoning fields so default requests keep each provider's native behavior.
@@ -185,12 +185,12 @@ Provider mapping is best-effort. OpenAI-compatible providers receive `reasoning_
 xiaoO loads skills from `~/.xiaoo/skills` by default. Each skill is a reusable instruction pack backed by `SKILL.md` or `SKILL.toml`.
 
 ```bash
-xiaoo skill list
-xiaoo skill show <name>
-xiaoo skill audit <path>
-xiaoo skill install ./my-skill/
-xiaoo skill install https://github.com/user/my-skill.git
-xiaoo skill remove <name>
+xiaoo --cli skill list
+xiaoo --cli skill show <name>
+xiaoo --cli skill audit <path>
+xiaoo --cli skill install ./my-skill/
+xiaoo --cli skill install https://github.com/user/my-skill.git
+xiaoo --cli skill remove <name>
 ```
 
 See [docs/skill_usage.md](./docs/skill_usage.md) for the full skill workflow.
@@ -201,10 +201,10 @@ xiaoO can run as a daemon and expose a REST API for external systems such as Fei
 
 ```bash
 # Default address: 0.0.0.0:18080
-xiaoo-app daemon
+xiaoo-daemon
 
 # Specify configuration file, host, and port
-xiaoo-app daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
+xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
 HTTP requests can select an agent role preset by passing `agent` in the JSON body:

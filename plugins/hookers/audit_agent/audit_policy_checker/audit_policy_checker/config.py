@@ -177,7 +177,7 @@ def get_default_config() -> Config:
     return _default_config
 
 
-# Provider 默认 base_url 映射（与 xiaoo-app/src/tui/services/provider.rs 保持一致）
+# Provider 默认 base_url 映射（与 apps/endside/src/services/provider.rs 保持一致）
 PROVIDER_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
@@ -204,7 +204,7 @@ PROVIDER_BASE_URLS: dict[str, str] = {
     "glm-cn": "https://open.bigmodel.cn/api/paas/v4",
 }
 
-# Provider 默认 api_key_env 映射（与 xiaoo-app 保持一致）
+# Provider 默认 api_key_env 映射（与 xiaoo endside 保持一致）
 PROVIDER_API_KEY_ENVS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
