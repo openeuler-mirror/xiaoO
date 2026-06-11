@@ -33,6 +33,11 @@ FULLY_SAFE_TOOLS = frozenset({
     "filemgr-globfiles",
 })
 
+# 内置安全 Skill 白名单：这些是 xiaoO 系统自带的安全 Skill，加载时直接放行
+TRUSTED_SKILLS = frozenset({
+    "xiaoo-guardian",
+})
+
 # 安全但可能访问敏感路径：跳过 Layer 3，保留 Layer 2 敏感路径检测
 READONLY_SENSITIVE_TOOLS = frozenset({
     "read", "file_read", "read_file", "head", "tail", "grep",
@@ -142,6 +147,11 @@ class xiaoOSecBot:
 
         # --- 完全放行：跳过 L2 + L3 ---
         is_fully_safe_tool = action_type in FULLY_SAFE_TOOLS
+        # 内置安全 Skill 直接放行（如 xiaoo-guardian）
+        is_trusted_skill = (
+            action_type == "skill"
+            and action_detail in TRUSTED_SKILLS
+        )
         is_fully_safe_bash = (
             action_type == "bash"
             and is_fully_safe_bash_command(action_detail)
@@ -163,7 +173,7 @@ class xiaoOSecBot:
                     _full_scan.risk_level, _full_scan.reason,
                 )
 
-        if is_fully_safe_tool and no_high_risk:
+        if (is_fully_safe_tool or is_trusted_skill) and no_high_risk:
             logger.info(
                 "完全安全工具快速放行: action_type=%s, heuristic_risk=%s",
                 action_type, heuristic_risk,

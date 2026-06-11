@@ -48,6 +48,7 @@ if logic_result.risk_level in ("high", "critical") and not skip_inline_file_acce
 | `ls` | 目录列表 |
 | `count_text_length` | 文本长度统计 |
 | `filemgr-globfiles` | OpenDesk 文件管理器 glob |
+| `xiaoo-guardian`（内置 Skill） | xiaoO 系统自带的安全防护 Skill |
 
 | Bash 子命令 | 说明 |
 |------------|------|

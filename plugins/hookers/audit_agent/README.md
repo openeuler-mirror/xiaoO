@@ -473,6 +473,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 类型 | 白名单 |
 |------|--------|
 | 工具类型 | `ask_user_question`、`glob`、`list_dir`、`ls`、`count_text_length`、`filemgr-globfiles` |
+| 内置安全 Skill | `xiaoo-guardian`（xiaoO 系统自带的安全防护 Skill） |
 | Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command`、`whoami`、`id`、`hostname`、`uname`、`date`、`env`、`printenv`、`tty`、`arch`、`uptime`、`groups`、`logname` |
 
 #### Tier 2：只读敏感 — 跳过 L3，保留 L2
@@ -941,7 +942,7 @@ LLM 返回结构化 JSON：
 | 文档 | 说明 |
 |------|------|
 | [需求分析](audit_policy_checker/docs/requirement-analysis.md) | 完整需求分析与设计文档 |
-| [测试用例](audit_policy_checker/docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
+| [测试用例](../../plugins/tests/hookers/audit_agent/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
 | [配置说明](audit_policy_checker/audit_policy_checker/CONFIG.md) | config.json 字段详解 |
 | [端到端测试指南](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
 | [测试用例JSON](../../plugins/tests/hookers/audit_agent/cases/) | 可直接运行的测试用例（JSON + Shell） |
