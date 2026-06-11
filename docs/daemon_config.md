@@ -112,6 +112,41 @@ data_dir = "~/.xiaoo"                # Optional, root directory for data storage
 
 ---
 
+### [server.operation_backend] - Daemon Operation Backend
+
+The daemon reads operation backend configuration only from the `server`
+namespace. Top-level `[operation_backend]` is reserved for CLI/TUI-side
+configuration and is ignored by the daemon.
+
+```toml
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"          # Or api_key = "..."
+template_id = "base"
+timeout_secs = 3600
+secure = true
+workspace_root = "/home/user/workspace"
+home_dir = "/home/user"
+temp_root = "/tmp"
+default_shell = "/bin/sh"
+```
+
+Use the local backend in daemon mode by setting `kind = "local"` under the same
+`[server.operation_backend]` namespace.
+
+```toml
+[server.operation_backend]
+kind = "local"
+
+[server.operation_backend.options.isolation]
+kind = "linux_bubblewrap"
+allow_network = false
+```
+
+---
+
 > **Note**: Common configuration items (llm, subagent, trace, compact, etc.) are shown in the "Complete Daemon Configuration Example" below. For detailed descriptions, please refer to [Configuration File Guide](./config_file_guide.md).
 
 ## Complete Daemon Configuration Example
@@ -190,6 +225,15 @@ webhook_secret_token = "your-token"
 # Data storage path (Daemon-specific)
 [paths]
 data_dir = "~/.xiaoo"
+
+# Operation backend (Daemon-specific)
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"
+template_id = "base"
+timeout_secs = 3600
 ```
 
 ### API Endpoints

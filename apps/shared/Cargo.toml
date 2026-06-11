@@ -20,6 +20,7 @@ async-trait.workspace = true
 http = "1"
 glob = "0.3"
 reqwest.workspace = true
+base64.workspace = true
 prost = "0.13"
 tonic = { version = "0.12", features = ["transport"] }
 serde.workspace = true

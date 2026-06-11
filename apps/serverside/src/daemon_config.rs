@@ -46,7 +46,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub lsp: Option<LspConfig>,
     #[serde(default)]
-    pub operation_backend: Option<GatewayBackendConfig>,
+    pub server: ServerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +184,12 @@ pub struct SubagentRoleConfig {
 pub struct PathsConfig {
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ServerConfig {
+    #[serde(default)]
+    pub operation_backend: Option<GatewayBackendConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -358,6 +364,10 @@ impl DaemonConfig {
 
     pub fn interaction_timeout_secs(&self) -> u64 {
         self.app.channels.interaction_timeout_secs.unwrap_or(600)
+    }
+
+    pub fn server_operation_backend(&self) -> Option<GatewayBackendConfig> {
+        self.app.server.operation_backend.clone()
     }
 
     pub fn http_bearer_token(&self) -> Result<Option<String>> {
@@ -800,6 +810,58 @@ mod tests {
             .channel_runtimes()
             .expect("channel runtimes should resolve")
             .is_empty());
+    }
+
+    #[test]
+    fn resolves_server_operation_backend_from_server_namespace() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [server.operation_backend]
+            kind = "e2b"
+
+            [server.operation_backend.options]
+            api_key = "test-key"
+            template_id = "base"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+        let backend = daemon
+            .server_operation_backend()
+            .expect("server backend should resolve");
+
+        assert_eq!(backend.kind, "e2b");
+        assert_eq!(backend.options["api_key"].as_str(), Some("test-key"));
+        assert_eq!(backend.options["template_id"].as_str(), Some("base"));
+    }
+
+    #[test]
+    fn daemon_ignores_top_level_operation_backend() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [operation_backend]
+            kind = "e2b"
+
+            [operation_backend.options]
+            api_key = "test-key"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+
+        assert!(daemon.server_operation_backend().is_none());
     }
 
     #[test]

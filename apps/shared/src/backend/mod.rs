@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod e2b;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBackendConfig {
     pub kind: String,
@@ -408,7 +410,7 @@ fn resolve_session_backend_config(
     config: Option<GatewayBackendConfig>,
 ) -> Result<GatewayBackendConfig, OperationBackendBuildError> {
     match config {
-        Some(config) if config.kind == "local" => Ok(config),
+        Some(config) if config.kind == "local" || config.kind == "e2b" => Ok(config),
         Some(config) => Err(OperationBackendBuildError::UnsupportedBackend { kind: config.kind }),
         None => Ok(GatewayBackendConfig::new(
             "local",
@@ -503,6 +505,30 @@ struct BuildSandboxInput {
 async fn build_managed_backend(
     input: BuildSandboxInput,
 ) -> Result<BackendInstanceEntry, SandboxError> {
+    if input.config.kind == "e2b" {
+        let created = e2b::create_backend(e2b::E2bCreateBackendInput {
+            backend_id: input.backend_id,
+            session_id_for_instance: input.session_id_for_instance,
+            workspace_root_text: input.workspace_root_text.clone(),
+            provider_options: input.config.options.clone(),
+            resource_limits: input.resource_limits,
+            metadata: input.metadata,
+        })
+        .await?;
+        return Ok(BackendInstanceEntry {
+            backend: created.backend,
+            instance: created.instance,
+            config: input.config,
+            workspace_root: input.workspace_root_text,
+            config_hash: input.config_hash,
+            session_ids: input
+                .session_id
+                .map(|session_id| BTreeMap::from([(session_id, ())]))
+                .unwrap_or_default(),
+            expires_at_ms: input.expires_at_ms,
+        });
+    }
+
     let provider = local_provider_for_kind(&input.config.kind)?;
     let lifecycle = provider.lifecycle();
     let instance = lifecycle
@@ -550,6 +576,11 @@ async fn delete_backend_instance(
     instance: BackendInstanceEntry,
     reason: BackendLifecycleReason,
 ) -> Result<(), OperationError> {
+    if instance.config.kind == "e2b" {
+        instance.backend.shutdown().await?;
+        return Ok(());
+    }
+
     let provider = local_provider_for_kind(&instance.config.kind)
         .map_err(SandboxError::into_operation_error)?;
     provider

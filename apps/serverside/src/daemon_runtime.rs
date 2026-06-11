@@ -120,7 +120,7 @@ impl ConfiguredRuntimeResolver {
             hooker: config.app.hooker.clone(),
             skill_registry,
             skills_dirs: skills_config.skills_dirs.clone(),
-            operation_backend: config.app.operation_backend.clone(),
+            operation_backend: config.server_operation_backend(),
             lsp_registry,
         })
     }

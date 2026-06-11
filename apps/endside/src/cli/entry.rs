@@ -187,7 +187,7 @@ where
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
-                operation_backend: None,
+                operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
             };
@@ -838,7 +838,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
         lsp_registry: None,
-        operation_backend: None,
+        operation_backend: config.operation_backend.clone(),
         skills_config: config.skills_config.clone(),
         subagent_roles: config
             .subagent
