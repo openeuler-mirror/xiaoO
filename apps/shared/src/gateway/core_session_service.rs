@@ -121,6 +121,7 @@ impl CoreBackedSessionService {
             runtime: crate::gateway::session_record::SessionRuntimeSnapshot {
                 agent_id: resolved.descriptor.agent_id.clone(),
                 model: resolved.descriptor.model.clone(),
+                llm: resolved.descriptor.llm.clone(),
                 system_prompt: resolved.descriptor.system_prompt.clone(),
                 feature_flags: resolved.descriptor.feature_flags.clone(),
                 token_budget: resolved.descriptor.token_budget.clone(),
@@ -156,6 +157,7 @@ impl CoreBackedSessionService {
             runtime: crate::gateway::session_record::SessionRuntimeSnapshot {
                 agent_id: resolved.descriptor.agent_id.clone(),
                 model: resolved.descriptor.model.clone(),
+                llm: resolved.descriptor.llm.clone(),
                 system_prompt: resolved.descriptor.system_prompt.clone(),
                 feature_flags: resolved.descriptor.feature_flags.clone(),
                 token_budget: resolved.descriptor.token_budget.clone(),
@@ -505,6 +507,7 @@ mod tests {
                 descriptor: SessionRuntimeDescriptor {
                     agent_id: AgentId("test-agent".to_string()),
                     model: "stub-model".to_string(),
+                    llm: None,
                     system_prompt: "test system".to_string(),
                     feature_flags: FeatureFlags::default(),
                     token_budget: TokenBudgetConfig {
@@ -575,6 +578,7 @@ mod tests {
                 entry: GatewayEntryContext::tui(None),
                 channel: None,
                 channel_instance_id: None,
+                llm: None,
             })
             .await
             .expect("open session");
@@ -616,6 +620,7 @@ mod tests {
                 entry: GatewayEntryContext::tui(None),
                 channel: None,
                 channel_instance_id: None,
+                llm: None,
             })
             .await
             .expect("open session");
@@ -656,6 +661,7 @@ mod tests {
                 entry: GatewayEntryContext::tui(None),
                 channel: None,
                 channel_instance_id: None,
+                llm: None,
             })
             .await
             .expect("open session");

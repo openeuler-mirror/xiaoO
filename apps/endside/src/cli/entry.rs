@@ -15,7 +15,8 @@ use skill::types::config::SkillsConfig;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
+    LlmRuntimeConfig, SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver,
+    SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -791,6 +792,13 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         descriptor: SessionRuntimeDescriptor {
             agent_id: AgentId("defaultagent".into()),
             model: config.model.clone(),
+            llm: Some(LlmRuntimeConfig {
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()),
+                api_base: config.api_base.clone(),
+                api_key_env: config.api_key_env.clone(),
+                api_key: None,
+            }),
             system_prompt: config.system_prompt.clone(),
             feature_flags: FeatureFlags {
                 tool_execution: config.enable_tools,
@@ -900,6 +908,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         root_message_id: None,
         mentions: Vec::new(),
         reasoning_effort: config.reasoning_effort,
+        llm: None,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

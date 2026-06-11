@@ -1,8 +1,8 @@
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::session_record::SubagentRoleRecord;
 use crate::gateway::{
-    AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionOpenRequest, SessionRecord,
-    SessionRuntimeBindings,
+    AppTurnRequest, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig, SessionOpenRequest,
+    SessionRecord, SessionRuntimeBindings,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
@@ -22,6 +22,8 @@ use thiserror::Error;
 pub struct SessionRuntimeDescriptor {
     pub agent_id: AgentId,
     pub model: String,
+    #[serde(default)]
+    pub llm: Option<LlmRuntimeConfig>,
     pub system_prompt: String,
     pub feature_flags: FeatureFlags,
     pub token_budget: TokenBudgetConfig,
@@ -56,6 +58,7 @@ pub struct SessionRuntimeBuildInput {
     pub entry: GatewayEntryContext,
     pub agent_id_override: Option<AgentId>,
     pub max_turns_override: Option<u32>,
+    pub llm: Option<LlmRuntimeConfig>,
 }
 
 impl SessionRuntimeBuildInput {
@@ -70,6 +73,7 @@ impl SessionRuntimeBuildInput {
             entry: request.entry.clone(),
             agent_id_override: None,
             max_turns_override: None,
+            llm: request.llm.clone(),
         }
     }
 
@@ -84,6 +88,7 @@ impl SessionRuntimeBuildInput {
             entry: request.entry.clone(),
             agent_id_override: None,
             max_turns_override: None,
+            llm: request.llm.clone(),
         }
     }
 }

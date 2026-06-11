@@ -114,6 +114,7 @@ impl SessionSupervisor {
         session.channel_instance_id = request.channel_instance_id.clone();
         session.runtime.agent_id = resolved.descriptor.agent_id.clone();
         session.runtime.model = resolved.descriptor.model.clone();
+        session.runtime.llm = resolved.descriptor.llm.clone();
         session.runtime.system_prompt = resolved.descriptor.system_prompt.clone();
         session.runtime.feature_flags = resolved.descriptor.feature_flags.clone();
         session.runtime.token_budget = resolved.descriptor.token_budget.clone();
@@ -862,6 +863,7 @@ fn runtime_input_from_session(
         entry: session.entry.clone(),
         agent_id_override: if is_subagent { Some(agent_id) } else { None },
         max_turns_override,
+        llm: session.runtime.llm.clone(),
     }
 }
 

@@ -257,11 +257,14 @@ Health check endpoint for liveness probes and load balancing.
 
 The daemon exposes session APIs for remote TUI and other first-class clients.
 These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
+LLM provider settings are resolved per session/turn: request payloads may pass an
+optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
+config. The daemon does not require the LLM API key at process startup.
 
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
-| `POST /api/v1/sessions/{session_id}/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
 | `POST /api/v1/sessions/{session_id}/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/sessions/{session_id}/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/sessions/{session_id}/close` | Close the session and fire lifecycle hooks |
@@ -277,14 +280,19 @@ curl -X POST http://localhost:18080/api/v1/sessions/open \
     "conversation_id": "conv-demo",
     "sender_id": "user-1",
     "entry": { "kind": "tui" },
-    "channel": "tui"
+    "channel": "tui",
+    "llm": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
   }'
 ```
 
 **Submit input stream example:**
 
 ```bash
-curl -N -X POST http://localhost:18080/api/v1/sessions/tui-demo/input \
+curl -N -X POST http://localhost:18080/api/v1/sessions/input \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -294,7 +302,12 @@ curl -N -X POST http://localhost:18080/api/v1/sessions/tui-demo/input \
     "conversation_id": "conv-demo",
     "sender_id": "user-1",
     "text": "Hello",
-    "mentions": []
+    "mentions": [],
+    "llm": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "api_key_env": "OPENAI_API_KEY"
+    }
   }'
 ```
 

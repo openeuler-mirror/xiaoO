@@ -233,9 +233,10 @@ fn create_router_from_state(
     let protected_session_routes = apply_http_bearer_auth(
         Router::new()
             .route("/api/v1/sessions/open", post(handle_session_open))
+            .route("/api/v1/sessions/input", post(handle_session_input))
             .route(
                 "/api/v1/sessions/:session_id/input",
-                post(handle_session_input),
+                post(handle_session_input_with_path),
             )
             .route(
                 "/api/v1/sessions/:session_id/interaction",
@@ -374,6 +375,13 @@ async fn handle_session_open(
 
 async fn handle_session_input(
     State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
+) -> Response {
+    stream_session_input(state, payload.session_id.clone(), payload).await
+}
+
+async fn handle_session_input_with_path(
+    State(state): State<Arc<GatewayAppState>>,
     Path(session_id): Path<String>,
     Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
 ) -> Response {
@@ -387,6 +395,14 @@ async fn handle_session_input(
             .into_response();
     }
 
+    stream_session_input(state, session_id, payload).await
+}
+
+async fn stream_session_input(
+    state: Arc<GatewayAppState>,
+    session_id: String,
+    payload: xiaoo_shared::gateway::AppTurnRequest,
+) -> Response {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
     let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
@@ -680,7 +696,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/session-1/input")
+                    .uri("/api/v1/sessions/input")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
@@ -719,7 +735,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/session-1/input")
+                    .uri("/api/v1/sessions/input")
                     .header("authorization", "Bearer secret-token")
                     .header("content-type", "application/json")
                     .body(Body::from(

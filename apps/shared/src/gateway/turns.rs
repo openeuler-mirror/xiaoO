@@ -61,6 +61,20 @@ impl GatewayEntryContext {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct LlmRuntimeConfig {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnMention {
     pub id: String,
@@ -85,4 +99,6 @@ pub struct AppTurnRequest {
     pub mentions: Vec<TurnMention>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
+    #[serde(default)]
+    pub llm: Option<LlmRuntimeConfig>,
 }

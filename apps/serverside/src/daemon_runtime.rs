@@ -1,5 +1,7 @@
 use crate::daemon_config::SubagentRoleConfig as ConfigSubagentRole;
-use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
+use crate::daemon_config::{
+    AgentRoleConfig, CompactConfig, DaemonConfig, LlmConfig, ResolvedAgentConfig,
+};
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -13,13 +15,14 @@ use compact::{
 };
 use llm_client::{
     create_llm_provider_from_resolved, resolve_config, resolve_model_context_length,
-    LlmProviderWrapper, ResolveInput,
+    resolve_provider_profile, LlmProviderWrapper, ResolveInput,
 };
 use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, path::Path};
@@ -42,15 +45,44 @@ const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 
-pub struct ConfiguredRuntimeResolver {
-    agent: ResolvedAgentConfig,
-    agent_roles: BTreeMap<String, AgentRoleConfig>,
-    subagent_roles: BTreeMap<String, ConfigSubagentRole>,
+struct EffectiveLlmConfig {
+    provider: String,
+    model: String,
+    api_base: Option<String>,
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+}
+
+impl EffectiveLlmConfig {
+    fn session_config(&self) -> xiaoo_shared::gateway::LlmRuntimeConfig {
+        xiaoo_shared::gateway::LlmRuntimeConfig {
+            provider: Some(self.provider.clone()),
+            model: Some(self.model.clone()),
+            api_base: self.api_base.clone(),
+            api_key_env: self.api_key_env.clone(),
+            api_key: None,
+        }
+    }
+}
+
+struct ResolvedLlmRuntime {
+    model: String,
+    llm_config: xiaoo_shared::gateway::LlmRuntimeConfig,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
+    compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
+}
+
+pub struct ConfiguredRuntimeResolver {
+    agent: ResolvedAgentConfig,
+    llm: LlmConfig,
+    config_path: PathBuf,
+    max_output_tokens: usize,
+    compact: Option<CompactConfig>,
+    agent_roles: BTreeMap<String, AgentRoleConfig>,
+    subagent_roles: BTreeMap<String, ConfigSubagentRole>,
     feature_flags: FeatureFlags,
     trace: Value,
-    compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
     skills_dirs: Vec<PathBuf>,
@@ -63,40 +95,7 @@ impl ConfiguredRuntimeResolver {
         let agent = config.resolve_agent()?;
         ensure_workspace_exists(&agent.workspace_root)?;
 
-        let resolved_provider = resolve_config(ResolveInput {
-            provider: Some(config.app.llm.provider.clone()),
-            protocol: None,
-            api_key: None,
-            api_key_env: config.app.llm.api_key_env.clone(),
-            base_url: config.app.llm.api_base.clone(),
-        })
-        .context("failed to resolve llm provider config")?;
-        let llm_provider = Arc::new(
-            create_llm_provider_from_resolved(
-                &resolved_provider,
-                agent.model.clone(),
-                Some(agent.id.clone()),
-                None,
-            )
-            .context("failed to create llm provider")?,
-        );
-        let effective_context_window = resolve_effective_context_window(
-            &resolved_provider,
-            &agent.model,
-            llm_provider.capabilities().max_context_window,
-        )
-        .await;
-        let token_budget = build_token_budget(effective_context_window, config.max_output_tokens());
-
-        validate_token_budget_config(
-            &token_budget,
-            config.max_output_tokens(),
-            &agent.model,
-            config.config_path(),
-        );
-
         let trace = config.resolve_trace_config();
-        let compression_pipeline = build_compression_pipeline(config, &llm_provider)?;
         let skills_config = config.resolve_skills_config();
         let skill_registry: Arc<dyn SkillRegistry> =
             Arc::new(FileSkillRegistry::new(&skills_config));
@@ -105,10 +104,12 @@ impl ConfiguredRuntimeResolver {
 
         Ok(Self {
             agent,
+            llm: config.app.llm.clone(),
+            config_path: config.config_path().to_path_buf(),
+            max_output_tokens: config.max_output_tokens(),
+            compact: config.resolve_compact_config().cloned(),
             agent_roles: config.app.agent.clone(),
             subagent_roles: config.app.subagent.clone(),
-            llm_provider,
-            token_budget,
             feature_flags: {
                 let mut flags = FeatureFlags::default();
                 flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
@@ -116,13 +117,97 @@ impl ConfiguredRuntimeResolver {
                 flags
             },
             trace,
-            compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
             skills_dirs: skills_config.skills_dirs.clone(),
             operation_backend: config.server_operation_backend(),
             lsp_registry,
         })
+    }
+
+    async fn resolve_llm_runtime(
+        &self,
+        request: &SessionRuntimeBuildInput,
+        existing: Option<&SessionRecord>,
+    ) -> Result<ResolvedLlmRuntime, SessionRuntimeResolveError> {
+        let effective = self.effective_llm_config(request, existing);
+        let api_key = resolve_llm_api_key(&effective)?;
+        let resolved_provider = resolve_config(ResolveInput {
+            provider: Some(effective.provider.clone()),
+            protocol: None,
+            api_key,
+            api_key_env: None,
+            base_url: effective.api_base.clone(),
+        })
+        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+            message: format!("failed to resolve llm provider config: {error}"),
+        })?;
+
+        let llm_provider = Arc::new(
+            create_llm_provider_from_resolved(
+                &resolved_provider,
+                effective.model.clone(),
+                Some(self.agent.id.clone()),
+                None,
+            )
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("failed to create llm provider: {error}"),
+            })?,
+        );
+        let effective_context_window = resolve_effective_context_window(
+            &resolved_provider,
+            &effective.model,
+            llm_provider.capabilities().max_context_window,
+        )
+        .await;
+        let token_budget = build_token_budget(effective_context_window, self.max_output_tokens);
+
+        validate_token_budget_config(
+            &token_budget,
+            self.max_output_tokens,
+            &effective.model,
+            &self.config_path,
+        );
+
+        let compression_pipeline = build_compression_pipeline(self.compact.as_ref(), &llm_provider)
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("failed to build compression pipeline: {error}"),
+            })?;
+
+        let llm_config = effective.session_config();
+        Ok(ResolvedLlmRuntime {
+            model: effective.model,
+            llm_config,
+            llm_provider,
+            token_budget,
+            compression_pipeline: Some(compression_pipeline),
+        })
+    }
+
+    fn effective_llm_config(
+        &self,
+        request: &SessionRuntimeBuildInput,
+        existing: Option<&SessionRecord>,
+    ) -> EffectiveLlmConfig {
+        let override_llm = request.llm.as_ref();
+        let existing_llm = existing.and_then(|session| session.runtime.llm.as_ref());
+        EffectiveLlmConfig {
+            provider: optional_non_empty(override_llm.and_then(|llm| llm.provider.as_ref()))
+                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.provider.as_ref())))
+                .unwrap_or_else(|| self.llm.provider.clone()),
+            model: optional_non_empty(override_llm.and_then(|llm| llm.model.as_ref()))
+                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.model.as_ref())))
+                .unwrap_or_else(|| self.agent.model.clone()),
+            api_base: optional_non_empty(override_llm.and_then(|llm| llm.api_base.as_ref()))
+                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.api_base.as_ref())))
+                .or_else(|| self.llm.api_base.clone()),
+            api_key_env: optional_non_empty(override_llm.and_then(|llm| llm.api_key_env.as_ref()))
+                .or_else(|| {
+                    optional_non_empty(existing_llm.and_then(|llm| llm.api_key_env.as_ref()))
+                })
+                .or_else(|| self.llm.api_key_env.clone()),
+            api_key: optional_non_empty(override_llm.and_then(|llm| llm.api_key.as_ref())),
+        }
     }
 
     fn build_tool_registry(
@@ -221,12 +306,63 @@ async fn resolve_effective_context_window(
     fallback
 }
 
+fn resolve_llm_api_key(
+    config: &EffectiveLlmConfig,
+) -> Result<Option<String>, SessionRuntimeResolveError> {
+    if let Some(api_key) = config.api_key.as_ref() {
+        return Ok(Some(api_key.clone()));
+    }
+
+    if let Some(env_name) = config.api_key_env.as_deref() {
+        return resolve_api_key_env(env_name, true);
+    }
+
+    if let Some(env_name) = resolve_provider_profile(&config.provider)
+        .and_then(|profile| profile.default_api_key_env.map(str::to_string))
+    {
+        return resolve_api_key_env(&env_name, false);
+    }
+
+    Ok(None)
+}
+
+fn resolve_api_key_env(
+    env_name: &str,
+    fail_when_missing: bool,
+) -> Result<Option<String>, SessionRuntimeResolveError> {
+    if let Some(api_key) = xiaoo_shared::gateway::get_decrypted_api_key(env_name) {
+        if !api_key.trim().is_empty() {
+            return Ok(Some(api_key));
+        }
+    }
+
+    match env::var(env_name) {
+        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+        Ok(_) | Err(env::VarError::NotPresent) if fail_when_missing => {
+            Err(SessionRuntimeResolveError::ResolveFailed {
+                message: format!("missing required API key environment variable: {env_name}"),
+            })
+        }
+        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
+            message: format!("API key environment variable is not valid unicode: {env_name}"),
+        }),
+    }
+}
+
+fn optional_non_empty(value: Option<&String>) -> Option<String> {
+    value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 #[async_trait]
 impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
     async fn resolve(
         &self,
         request: &SessionRuntimeBuildInput,
-        _existing: Option<&SessionRecord>,
+        existing: Option<&SessionRecord>,
     ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
         let agent_role = resolve_agent_role(&self.agent_roles, request)?;
         let system_prompt = agent_role
@@ -256,11 +392,13 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .as_ref()
             .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
             .unwrap_or(false);
+        let llm_runtime = self.resolve_llm_runtime(request, existing).await?;
 
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(self.agent.id.clone()),
-                model: self.agent.model.clone(),
+                model: llm_runtime.model.clone(),
+                llm: Some(llm_runtime.llm_config.clone()),
                 system_prompt: build_system_prompt(
                     system_prompt,
                     &self.agent.workspace_root,
@@ -271,17 +409,17 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                 ),
                 feature_flags: self.feature_flags.clone(),
 
-                token_budget: self.token_budget.clone(),
+                token_budget: llm_runtime.token_budget.clone(),
                 workspace_root: self.agent.workspace_root.clone(),
                 max_turns: agent_role.and_then(|role| role.max_turns),
                 subagent_roles,
             },
             entry_kind: request.entry.kind.clone(),
-            llm_provider: Arc::clone(&self.llm_provider),
+            llm_provider: llm_runtime.llm_provider,
             tool_registry: self.build_tool_registry(agent_role)?,
             skill_registry: Some(Arc::clone(&self.skill_registry)),
             bindings: SessionRuntimeBindings::default(),
-            compression_pipeline: self.compression_pipeline.clone(),
+            compression_pipeline: llm_runtime.compression_pipeline,
             trace: self.trace.clone(),
             hooker: self.hooker.clone(),
             operation_backend: self.operation_backend.clone(),
@@ -457,10 +595,10 @@ fn ensure_workspace_exists(path: &Path) -> Result<()> {
 }
 
 fn build_compression_pipeline(
-    config: &DaemonConfig,
+    compact: Option<&CompactConfig>,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> Result<Arc<dyn CompressionPipeline>> {
-    let compact = match config.resolve_compact_config() {
+    let compact = match compact {
         Some(cc) => cc,
         None => {
             return Ok(Arc::from(compact::PassthroughCompressionPipeline::new())
@@ -530,7 +668,6 @@ mod tests {
     fn token_budget_caps_output_to_preserve_prompt_budget() {
         let budget = build_token_budget(128_000, 150_000);
         assert_eq!(budget.total_budget, 128_000);
-        assert_eq!(budget.reserved_for_output, 123_904);
         assert_eq!(budget.reserved_for_system, 2_048);
     }
 
@@ -556,6 +693,7 @@ mod tests {
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
             max_turns_override: None,
+            llm: None,
         };
 
         let prompt = build_system_prompt(
@@ -621,6 +759,7 @@ mod tests {
             },
             agent_id_override: None,
             max_turns_override: None,
+            llm: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)

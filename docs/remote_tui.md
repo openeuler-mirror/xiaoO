@@ -121,7 +121,7 @@ Remote TUI uses the daemon's session APIs.
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
-| `POST /api/v1/sessions/{session_id}/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
 | `POST /api/v1/sessions/{session_id}/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/sessions/{session_id}/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/sessions/{session_id}/close` | Close the session and fire lifecycle hooks |

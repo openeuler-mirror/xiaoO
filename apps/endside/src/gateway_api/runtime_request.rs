@@ -9,8 +9,8 @@ use crate::app_state::AppState;
 use crate::chat::Message;
 use crate::config::Config;
 use crate::gateway::{
-    AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig, SessionOpenRequest,
-    SessionRuntimeDescriptor,
+    AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig, LlmRuntimeConfig,
+    SessionOpenRequest, SessionRuntimeDescriptor,
 };
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -178,6 +178,7 @@ impl GatewayRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(agent_id),
                 model: state.agent_config.llm.model.clone(),
+                llm: Some(llm_runtime_config_from_state(state)),
                 system_prompt,
                 feature_flags: {
                     let mut flags = FeatureFlags::default();
@@ -262,6 +263,7 @@ impl GatewayRuntime {
             entry: tui_entry_context(state),
             channel: None,
             channel_instance_id: None,
+            llm: None,
         })
     }
 
@@ -281,7 +283,19 @@ impl GatewayRuntime {
             root_message_id: None,
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
+            llm: None,
         })
+    }
+}
+
+pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {
+    LlmRuntimeConfig {
+        provider: Some(state.agent_config.llm.provider.clone()),
+        model: Some(state.agent_config.llm.model.clone()),
+        api_base: (!state.agent_config.llm.api_base.trim().is_empty())
+            .then(|| state.agent_config.llm.api_base.clone()),
+        api_key_env: state.agent_config.llm.api_key_env.clone(),
+        api_key: None,
     }
 }
 

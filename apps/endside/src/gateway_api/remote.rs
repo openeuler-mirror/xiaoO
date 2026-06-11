@@ -284,6 +284,7 @@ impl GatewayRuntime {
             entry: GatewayEntryContext::tui(base_url),
             channel: None,
             channel_instance_id: None,
+            llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
         })
     }
 
@@ -307,6 +308,7 @@ impl GatewayRuntime {
             root_message_id: None,
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
+            llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
         })
     }
 }
@@ -319,10 +321,7 @@ async fn run_remote_stream(
     updates_tx: UnboundedSender<SessionTurnUpdate>,
     mut interaction_rx: UnboundedReceiver<UserPromptResult>,
 ) {
-    let url = format!(
-        "{}/api/v1/sessions/{}/input",
-        remote.base_url, turn_request.session_id
-    );
+    let url = format!("{}/api/v1/sessions/input", remote.base_url);
     let mut request = client.post(url).json(&turn_request);
     if let Some(token) = token.as_ref() {
         request = request.bearer_auth(token);

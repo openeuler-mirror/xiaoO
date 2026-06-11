@@ -1,4 +1,4 @@
-use crate::gateway::{AppTurnRequest, GatewayEntryContext};
+use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,8 @@ pub struct SessionOpenRequest {
     pub channel: Option<String>,
     #[serde(default)]
     pub channel_instance_id: Option<String>,
+    #[serde(default)]
+    pub llm: Option<LlmRuntimeConfig>,
 }
 
 impl SessionOpenRequest {
@@ -40,6 +42,7 @@ impl SessionOpenRequest {
             root_message_id: None,
             mentions: Vec::new(),
             reasoning_effort: Default::default(),
+            llm: self.llm,
         }
     }
 }

@@ -43,6 +43,7 @@ pub use session_record::{SessionLifecycleStatus, SessionRecord};
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turns::{
-    AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, TurnMention,
+    AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig,
+    TurnMention,
 };
 pub use workspace_prompt::compose_workspace_system_prompt;

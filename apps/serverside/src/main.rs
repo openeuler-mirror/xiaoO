@@ -37,6 +37,12 @@ async fn main() -> Result<()> {
 
 async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
+    xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path).with_context(|| {
+        format!(
+            "failed to initialize LLM secrets from {}",
+            config_path.display()
+        )
+    })?;
     let config = DaemonConfig::load_from(&config_path)?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);

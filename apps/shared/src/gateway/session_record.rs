@@ -1,4 +1,4 @@
-use crate::gateway::GatewayEntryContext;
+use crate::gateway::{GatewayEntryContext, LlmRuntimeConfig};
 use agent_contracts::backend::BackendInstance;
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -32,6 +32,8 @@ pub struct SubagentRoleRecord {
 pub struct SessionRuntimeSnapshot {
     pub agent_id: AgentId,
     pub model: String,
+    #[serde(default)]
+    pub llm: Option<LlmRuntimeConfig>,
     pub system_prompt: String,
     pub feature_flags: FeatureFlags,
     pub token_budget: TokenBudgetConfig,
