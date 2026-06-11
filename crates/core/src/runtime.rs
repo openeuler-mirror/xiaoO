@@ -42,7 +42,7 @@ struct Replaceable {
 struct Frozen {
     compression_pipeline: Arc<dyn CompressionPipeline>,
     max_turns: u32,
-    token_budget_config: TokenBudgetConfig,
+    token_budget_config: RwLock<TokenBudgetConfig>,
     token_budget_policy: Arc<dyn TokenBudgetPolicy>,
 }
 
@@ -135,7 +135,7 @@ impl AgentRuntime {
             feature_flags: self.feature_flags(),
             compression_pipeline: Arc::clone(&self.frozen.compression_pipeline),
             max_turns: self.frozen.max_turns,
-            token_budget_config: self.frozen.token_budget_config.clone(),
+            token_budget_config: self.frozen.token_budget_config.read().unwrap().clone(),
             token_budget_policy: Arc::clone(&self.frozen.token_budget_policy),
         }
     }
@@ -277,7 +277,7 @@ impl AgentRuntimeBuilder {
             frozen: Frozen {
                 compression_pipeline,
                 max_turns,
-                token_budget_config,
+                token_budget_config: RwLock::new(token_budget_config),
                 token_budget_policy,
             },
         })

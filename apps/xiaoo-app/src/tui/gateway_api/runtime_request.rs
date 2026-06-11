@@ -20,6 +20,7 @@ use super::runtime::GatewayRuntime;
 use xiaoo_core::spawn_prefetch;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_system_prompt.txt");
+const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
@@ -171,6 +172,7 @@ impl GatewayRuntime {
             })?;
         let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
             .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
+        let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
 
         Ok(HostedSessionRuntimeConfig {
             descriptor: SessionRuntimeDescriptor {
@@ -186,7 +188,7 @@ impl GatewayRuntime {
                 token_budget: TokenBudgetConfig {
                     total_budget,
                     reserved_for_output,
-                    reserved_for_system: reserved_for_output,
+                    reserved_for_system,
                     hard_limit_ratio: 1.0,
                 },
                 workspace_root: state.workspace.clone(),

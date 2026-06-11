@@ -17,7 +17,7 @@ use xiaoo_app::channels::{
 use xiaoo_app::gateway::backend::GatewayBackendConfig;
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
-const DEFAULT_OUTPUT_TOKENS: usize = 128000;
+const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,8 +59,6 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default)]
     pub max_tokens: Option<usize>,
-    #[serde(default)]
-    pub context_window: Option<usize>,
     #[serde(default)]
     pub kvcache_enabled: Option<bool>,
     #[serde(default)]

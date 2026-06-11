@@ -8,16 +8,16 @@
 - LLM 分析在 skip_llm 时应被跳过
 
 使用方式：
-    cd /home/hkl/gitcode/xiaoO/plugins/hookers/audit_agent/audit_policy_checker
-    python3 ../test_fastpass.py
+    cd plugins/tests/hookers/audit_agent
+    python3 test_fastpass.py
 """
 
 import sys
 import time
 from pathlib import Path
 
-# 添加包路径
-sys.path.insert(0, str(Path(__file__).parent / "audit_policy_checker"))
+# 添加包路径：指向源码中的 audit_policy_checker 包
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "hookers" / "audit_agent" / "audit_policy_checker"))
 
 from audit_policy_checker.config import Config, LLMConfig, SecurityConfig
 from audit_policy_checker.security.audit_agent import judge_security

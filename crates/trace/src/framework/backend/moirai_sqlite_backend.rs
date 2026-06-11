@@ -116,7 +116,7 @@ impl TraceBackend for MoiraiSqliteBackend {
             .await
             .ok()
             .unwrap_or_else(|| span.span_id().to_string());
-        
+
         self.active_spans.lock().await.insert(persisted_span_id);
     }
 

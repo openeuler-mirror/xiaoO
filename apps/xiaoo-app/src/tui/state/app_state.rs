@@ -149,6 +149,9 @@ pub struct RenderState {
     /// entry (the "▎ Role  HH:MM:SS" header).  These lines are excluded from
     /// copied text even when visually highlighted.
     pub line_is_header: Vec<bool>,
+    /// Index of the first visible agent tab in the header.
+    /// Used for horizontal scrolling when there are many agent tabs.
+    pub first_visible_agent_tab: usize,
 }
 
 #[derive(Default)]

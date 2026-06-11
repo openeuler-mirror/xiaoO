@@ -18,9 +18,11 @@ fn test_unknown_provider() {
 
 #[test]
 fn test_missing_api_key() {
-    let config = LlmProviderConfig::new("openai", "gpt-4o");
-    let result = create_llm_provider(&config, None, None);
-    assert!(result.is_err());
+    temp_env::with_var_unset("OPENAI_API_KEY", || {
+        let config = LlmProviderConfig::new("openai", "gpt-4o");
+        let result = create_llm_provider(&config, None, None);
+        assert!(result.is_err());
+    });
 }
 
 #[test]
@@ -77,6 +79,7 @@ mod wrapper_tests {
                 timestamp_ms: 0,
                 api_usage_tokens: None,
                 reasoning_content: None,
+                estimated_tokens: None,
             }],
             tools: vec![],
             tool_choice: Default::default(),
@@ -236,10 +239,6 @@ mod wrapper_tests {
                 hookers: map,
                 enabled,
             }
-        }
-
-        fn empty() -> Self {
-            Self::with_hookers(vec![])
         }
     }
 
@@ -485,6 +484,7 @@ mod wrapper_tests {
                         timestamp_ms: 0,
                         api_usage_tokens: None,
                         reasoning_content: None,
+                        estimated_tokens: None,
                     }];
                     Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                         modified_request: req,
@@ -852,6 +852,7 @@ mod wrapper_tests {
                             timestamp_ms: 0,
                             api_usage_tokens: None,
                             reasoning_content: None,
+                            estimated_tokens: None,
                         }];
                         Ok(HookInvokeOutput::LlmPre(PreLlmHookResult::Transform {
                             modified_request: req,

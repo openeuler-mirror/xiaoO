@@ -7,6 +7,7 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
+use textwrap::{Options, WordSplitter, WordSeparator, wrap};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
@@ -361,7 +362,105 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
     }
 }
 
-fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+struct StyleRange {
+    start: usize,
+    end: usize,
+    style: Style,
+}
+
+fn merge_spans_with_styles(line: &Line<'static>) -> (String, Vec<StyleRange>) {
+    let mut full_text = String::new();
+    let mut style_ranges = Vec::new();
+    let mut char_offset = 0;
+
+    for span in &line.spans {
+        let span_text = &span.content;
+        let span_len = span_text.chars().count();
+
+        style_ranges.push(StyleRange {
+            start: char_offset,
+            end: char_offset + span_len,
+            style: span.style,
+        });
+
+        full_text.push_str(span_text);
+        char_offset += span_len;
+    }
+
+    (full_text, style_ranges)
+}
+
+fn find_style_at_position(style_ranges: &[StyleRange], pos: usize) -> Style {
+    for range in style_ranges {
+        if pos >= range.start && pos < range.end {
+            return range.style;
+        }
+    }
+    Style::default()
+}
+
+fn rebuild_lines_with_styles(
+    wrapped_lines: Vec<std::borrow::Cow<'_, str>>,
+    style_ranges: &[StyleRange],
+    original_line: &Line<'static>,
+) -> Vec<Line<'static>> {
+    let mut result = Vec::new();
+    let mut global_char_offset = 0;
+
+    for wrapped_text in wrapped_lines {
+        let line_text = wrapped_text.into_owned();
+        let line_char_count = line_text.chars().count();
+
+        let mut spans = Vec::new();
+        let mut current_style: Option<Style> = None;
+        let mut segment_text = String::new();
+        let mut local_char_idx = 0;
+
+        for ch in line_text.chars() {
+            let global_pos = global_char_offset + local_char_idx;
+            let style = find_style_at_position(style_ranges, global_pos);
+
+            if current_style != Some(style) {
+                if current_style.is_some() && !segment_text.is_empty() {
+                    spans.push(Span::styled(segment_text.clone(), current_style.unwrap()));
+                    segment_text.clear();
+                }
+
+                current_style = Some(style);
+            }
+
+            segment_text.push(ch);
+            local_char_idx += 1;
+        }
+
+        if !segment_text.is_empty() {
+            if let Some(style) = current_style {
+                spans.push(Span::styled(segment_text, style));
+            }
+        }
+
+        let rebuilt_line = Line::from(spans);
+        result.push(preserve_line_metadata(rebuilt_line, original_line));
+
+        global_char_offset += line_char_count;
+    }
+
+    result
+}
+
+fn is_special_width_line(line: &Line<'static>) -> bool {
+    for span in &line.spans {
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width > 1 || width == 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn wrap_line_by_character(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
     let width = width.max(1) as usize;
     if line.spans.is_empty() {
         return vec![preserve_line_metadata(Line::from(String::new()), line)];
@@ -413,6 +512,34 @@ fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'stat
     }
 
     rows
+}
+
+fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+
+    if line.spans.is_empty() {
+        return vec![preserve_line_metadata(Line::from(String::new()), line)];
+    }
+
+    if is_special_width_line(line) {
+        return wrap_line_by_character(line, width as u16);
+    }
+
+    let (full_text, style_ranges) = merge_spans_with_styles(line);
+
+    let has_chinese = full_text.chars().any(|c| c > '\u{7F}');
+    let word_separator = if has_chinese {
+        WordSeparator::UnicodeBreakProperties
+    } else {
+        WordSeparator::AsciiSpace
+    };
+
+    let options = Options::new(width)
+        .word_splitter(WordSplitter::NoHyphenation)
+        .word_separator(word_separator);
+    let wrapped_lines = wrap(&full_text, &options);
+
+    rebuild_lines_with_styles(wrapped_lines, &style_ranges, line)
 }
 
 fn preserve_line_metadata(mut rebuilt: Line<'static>, original: &Line<'static>) -> Line<'static> {
