@@ -1,4 +1,4 @@
-use crate::backend::ExternalBackendManager;
+use crate::backend::BackendManager;
 use crate::gateway::session_backend::{lease_session_backend, sync_session_backend_instance};
 use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{
@@ -68,7 +68,7 @@ struct LaneTerminal {
 pub struct SessionSupervisor {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-    backend_manager: Arc<ExternalBackendManager>,
+    backend_manager: Arc<BackendManager>,
     coordinator: SubagentCoordinator,
     session: Mutex<SessionRecord>,
     pending_joins: Mutex<HashMap<String, PendingJoinWaiter>>,
@@ -81,7 +81,7 @@ impl SessionSupervisor {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-        backend_manager: Arc<ExternalBackendManager>,
+        backend_manager: Arc<BackendManager>,
         session: SessionRecord,
     ) -> Self {
         Self {

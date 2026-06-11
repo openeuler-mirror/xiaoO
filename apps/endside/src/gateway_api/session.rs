@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::backend::ExternalBackendManager;
+use crate::backend::BackendManager;
 use crate::chat::ToolExecutionUpdate;
 use crate::gateway::{InMemorySessionStore, SessionControlPlane};
 use crate::interaction_prompt::PromptRequest;
@@ -48,7 +48,7 @@ pub struct SessionGateway {
         Arc<tokio::sync::Mutex<Option<Arc<dyn SessionControlPlane>>>>,
     /// Session IDs that have been opened and not yet closed.
     pub(super) active_session_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
-    pub(super) backend_manager: Arc<ExternalBackendManager>,
+    pub(super) backend_manager: Arc<BackendManager>,
 }
 
 impl Default for SessionGateway {
@@ -57,7 +57,7 @@ impl Default for SessionGateway {
             session_store: Arc::new(InMemorySessionStore::default()),
             lifecycle_control_plane: Arc::new(tokio::sync::Mutex::new(None)),
             active_session_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            backend_manager: Arc::new(ExternalBackendManager::new()),
+            backend_manager: Arc::new(BackendManager::new()),
         }
     }
 }

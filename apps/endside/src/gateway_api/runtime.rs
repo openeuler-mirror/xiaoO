@@ -94,10 +94,10 @@ impl GatewayRuntime {
         self.session_gateway.session_store.clone()
     }
 
-    /// Closes all active sessions, firing the SessionClosed hook for each.
-    /// Should be called before the application exits.
+    /// Closes local active sessions before exit.
+    /// Remote sessions are left on the daemon so they can be reattached later.
     pub async fn close_sessions(&mut self, session_id: &str) {
-        self.close_remote_session(session_id).await;
+        let _ = session_id;
         self.session_gateway.close_all_sessions().await;
         if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {
             tracing::warn!(error = %error, "failed to shutdown TUI backend manager");

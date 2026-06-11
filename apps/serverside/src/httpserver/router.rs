@@ -249,7 +249,7 @@ fn create_router_from_state(
                 "/api/v1/sessions/:session_id/close",
                 post(handle_session_close),
             ),
-        bearer_auth,
+        bearer_auth.clone(),
     );
 
     let router = Router::new()

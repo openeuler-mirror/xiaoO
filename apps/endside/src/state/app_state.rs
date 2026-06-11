@@ -23,6 +23,7 @@ pub enum InputMode {
     Editing,
     ProviderSelection,
     SandboxSelection,
+    RemoteSessionSelection,
     SessionSnapshotSelection,
     InteractionPrompt,
     TurnDelete,
@@ -187,6 +188,7 @@ pub struct AppState {
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
     pub sandbox_dialog: Option<SandboxDialog>,
+    pub remote_session_dialog: Option<crate::remote_sessions_service::RemoteSessionDialog>,
     pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
@@ -225,6 +227,7 @@ impl AppState {
             should_quit: false,
             provider_dialog: None,
             sandbox_dialog: None,
+            remote_session_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -264,6 +267,7 @@ impl AppState {
             should_quit: false,
             provider_dialog: None,
             sandbox_dialog: None,
+            remote_session_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -297,6 +301,7 @@ impl AppState {
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
         self.sandbox_dialog = None;
+        self.remote_session_dialog = None;
         self.session_snapshot_dialog = None;
         self.delete_dialog = None;
         self.api_key_dialog = None;

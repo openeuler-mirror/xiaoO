@@ -20,14 +20,14 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::backend::ExternalBackendManager;
+use crate::backend::BackendManager;
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     sessions_handler: Mutex<HashMap<String, SessionHandle>>,
     hooker_registry: Arc<dyn HookerRegistry>,
-    backend_manager: Arc<ExternalBackendManager>,
+    backend_manager: Arc<BackendManager>,
 }
 
 impl CoreBackedSessionService {
@@ -35,7 +35,7 @@ impl CoreBackedSessionService {
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
-        backend_manager: Arc<ExternalBackendManager>,
+        backend_manager: Arc<BackendManager>,
     ) -> Self {
         Self {
             session_store,
@@ -562,7 +562,7 @@ mod tests {
             store.clone(),
             resolver,
             HookerRegistryConfig::default(),
-            Arc::new(ExternalBackendManager::new()),
+            Arc::new(BackendManager::new()),
         )
         .expect("dependencies");
 
@@ -581,6 +581,7 @@ mod tests {
         let instance = record.backend_instance.expect("backend instance");
         assert_eq!(instance.state, BackendLifecycleState::Active);
         assert_eq!(instance.session_id, "s1");
+        assert_eq!(instance.backend_id.0, "s1");
 
         let saved = store.load("s1").await.expect("saved session");
         let saved_instance = saved.backend_instance.expect("saved backend instance");
@@ -601,7 +602,7 @@ mod tests {
             store,
             resolver,
             HookerRegistryConfig::default(),
-            Arc::new(ExternalBackendManager::new()),
+            Arc::new(BackendManager::new()),
         )
         .expect("dependencies");
 
@@ -641,7 +642,7 @@ mod tests {
             store,
             resolver,
             HookerRegistryConfig::default(),
-            Arc::new(ExternalBackendManager::new()),
+            Arc::new(BackendManager::new()),
         )
         .expect("dependencies");
 

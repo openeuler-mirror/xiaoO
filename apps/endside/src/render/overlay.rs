@@ -12,6 +12,10 @@ use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode, SandboxDialog};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
+use crate::remote_sessions_service::{
+    daemon_display, format_remote_time, RemoteSessionDialog, RemoteSessionDialogEntry,
+    RemoteSessionDialogMode,
+};
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
@@ -297,6 +301,8 @@ impl App {
             " Enter 连接 | Esc 取消 "
         } else if self.state.session_snapshot_dialog.is_some() {
             " ↑↓ 选择快照 | Enter 读取 | Esc 取消 "
+        } else if self.state.remote_session_dialog.is_some() {
+            " ↑↓ 选择 remote session | Enter 确认 | Esc 取消 "
         } else if self.state.delete_dialog.is_some() {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 "
         } else if self.state.provider_dialog.is_some() {
@@ -356,12 +362,14 @@ impl App {
             && self.state.api_key_dialog.is_none()
             && self.state.provider_dialog.is_none()
             && self.state.sandbox_dialog.is_none()
+            && self.state.remote_session_dialog.is_none()
             && self.state.session_snapshot_dialog.is_none()
             && matches!(
                 self.state.input_mode,
                 InputMode::Editing
                     | InputMode::ProviderSelection
                     | InputMode::SandboxSelection
+                    | InputMode::RemoteSessionSelection
                     | InputMode::SessionSnapshotSelection
             )
         {
@@ -548,6 +556,161 @@ impl App {
         let hint = Paragraph::new("↑↓ 选择  Enter 应用  Esc 取消")
             .style(Style::default().fg(self.state.theme.muted));
         frame.render_widget(hint, hint_area);
+    }
+
+    pub(crate) fn render_remote_session_dialog(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        dialog: &RemoteSessionDialog,
+    ) {
+        let dialog_width = area.width.min(92).max(56);
+        let desired_height = match dialog.mode {
+            RemoteSessionDialogMode::List => (dialog.entries.len() as u16 + 4).clamp(8, 22),
+            RemoteSessionDialogMode::NewUrl => 9,
+        };
+        let dialog_height = area.height.min(desired_height).max(8);
+        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+        let dialog_area = Rect {
+            x: dialog_x,
+            y: dialog_y,
+            width: dialog_width,
+            height: dialog_height,
+        };
+
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        let block = Block::default()
+            .title(" Remote Sessions ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(self.state.theme.border_style(true))
+            .style(Style::default().bg(self.state.theme.background))
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        match dialog.mode {
+            RemoteSessionDialogMode::List => {
+                let list_area = Rect {
+                    x: inner.x,
+                    y: inner.y,
+                    width: inner.width,
+                    height: inner.height.saturating_sub(1),
+                };
+                let hint_area = Rect {
+                    x: inner.x,
+                    y: inner.y + inner.height.saturating_sub(1),
+                    width: inner.width,
+                    height: 1,
+                };
+                let daemon_width = (list_area.width / 3).clamp(16, 28) as usize;
+                let time_width = 12usize;
+                let preview_width = list_area
+                    .width
+                    .saturating_sub(daemon_width as u16)
+                    .saturating_sub(time_width as u16)
+                    .saturating_sub(6) as usize;
+                let items: Vec<ListItem> = dialog
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        let selected = index == dialog.selected;
+                        let style = if selected {
+                            Style::default()
+                                .fg(self.state.theme.foreground)
+                                .bg(self.state.theme.selection)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(self.state.theme.foreground)
+                        };
+                        match entry {
+                            RemoteSessionDialogEntry::Existing(record) => {
+                                let daemon =
+                                    truncate_chars(&daemon_display(&record.base_url), daemon_width);
+                                let time = format_remote_time(record.last_active_at_ms);
+                                let preview = record
+                                    .first_message_preview
+                                    .as_deref()
+                                    .filter(|value| !value.trim().is_empty())
+                                    .unwrap_or("No messages yet");
+                                let preview = truncate_chars(preview, preview_width.max(8));
+                                ListItem::new(Line::from(vec![
+                                    Span::styled(format!("{daemon:<daemon_width$}"), style),
+                                    Span::styled("  ", style),
+                                    Span::styled(format!("{time:<time_width$}"), style),
+                                    Span::styled("  ", style),
+                                    Span::styled(preview, style),
+                                ]))
+                            }
+                            RemoteSessionDialogEntry::New => ListItem::new(Line::from(vec![
+                                Span::styled("New remote session...", style),
+                                Span::styled(
+                                    "  configure daemon URL",
+                                    Style::default().fg(self.state.theme.muted),
+                                ),
+                            ])),
+                        }
+                    })
+                    .collect();
+                let mut list_state = ListState::default();
+                list_state.select(Some(dialog.selected));
+                frame.render_stateful_widget(List::new(items), list_area, &mut list_state);
+
+                let hint = Paragraph::new("Enter 继续/新建  Esc 取消")
+                    .style(Style::default().fg(self.state.theme.muted));
+                frame.render_widget(hint, hint_area);
+            }
+            RemoteSessionDialogMode::NewUrl => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1),
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                    ])
+                    .split(inner);
+                frame.render_widget(
+                    Paragraph::new("Daemon URL / IP:port")
+                        .style(Style::default().fg(self.state.theme.muted)),
+                    chunks[0],
+                );
+                let input_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(self.state.theme.border_style(true))
+                    .padding(Padding::horizontal(1));
+                let input_inner = input_block.inner(chunks[1]);
+                frame.render_widget(
+                    Paragraph::new(dialog.url_input.value())
+                        .style(self.state.theme.default_style())
+                        .block(input_block),
+                    chunks[1],
+                );
+                let cursor_x = input_inner.x.saturating_add(
+                    line_prefix_width(dialog.url_input.value(), dialog.url_input.cursor())
+                        .min(input_inner.width.saturating_sub(1) as usize)
+                        as u16,
+                );
+                frame.set_cursor_position((cursor_x, input_inner.y));
+
+                if let Some(error) = dialog.error.as_ref() {
+                    frame.render_widget(
+                        Paragraph::new(error.as_str())
+                            .style(Style::default().fg(self.state.theme.error)),
+                        chunks[2],
+                    );
+                }
+                frame.render_widget(
+                    Paragraph::new("Enter 连接并创建新的本地 session  Esc 返回列表")
+                        .style(Style::default().fg(self.state.theme.muted))
+                        .wrap(Wrap { trim: true }),
+                    chunks[3],
+                );
+            }
+        }
     }
 
     pub(crate) fn render_session_snapshot_dialog(

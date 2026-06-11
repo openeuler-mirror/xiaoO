@@ -72,6 +72,7 @@ impl App {
 
         if self.state.provider_dialog.is_none()
             && self.state.sandbox_dialog.is_none()
+            && self.state.remote_session_dialog.is_none()
             && self.state.api_key_dialog.is_none()
             && self.state.session_snapshot_dialog.is_none()
         {
@@ -83,6 +84,9 @@ impl App {
         }
         if let Some(dialog) = self.state.sandbox_dialog.as_ref() {
             self.render_sandbox_dialog(frame, frame.area(), dialog);
+        }
+        if let Some(dialog) = self.state.remote_session_dialog.clone() {
+            self.render_remote_session_dialog(frame, frame.area(), &dialog);
         }
         if let Some(dialog) = self.state.session_snapshot_dialog.as_ref() {
             self.render_session_snapshot_dialog(frame, frame.area(), dialog);

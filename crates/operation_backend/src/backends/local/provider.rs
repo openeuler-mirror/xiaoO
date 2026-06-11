@@ -124,6 +124,7 @@ impl LocalBackendProvider {
     }
 
     fn active_instance(
+        backend_id: BackendId,
         session_id: String,
         workspace_root: agent_contracts::backend::BackendPath,
         provider_options: Value,
@@ -133,7 +134,7 @@ impl LocalBackendProvider {
         updated_at_ms: u64,
     ) -> BackendInstance {
         BackendInstance {
-            backend_id: Self::backend_id(session_id.as_str()),
+            backend_id,
             provider: Self::provider_kind(),
             instance_id: Self::instance_id(session_id.as_str()),
             session_id,
@@ -175,6 +176,9 @@ impl BackendLifecycle for LocalBackendProvider {
         debug_assert_eq!(state, BackendLifecycleState::Active);
         let now = current_time_ms();
         Ok(Self::active_instance(
+            request
+                .requested_backend_id
+                .unwrap_or_else(|| Self::backend_id(request.session_id.as_str())),
             request.session_id,
             request.workspace_root,
             request.provider_options,
@@ -203,6 +207,7 @@ impl BackendLifecycle for LocalBackendProvider {
         debug_assert_eq!(state, BackendLifecycleState::Active);
         let now = current_time_ms();
         Ok(Self::active_instance(
+            Self::backend_id(request.session_id.as_str()),
             request.session_id,
             request.workspace_root,
             request.provider_options,
@@ -401,6 +406,7 @@ mod tests {
 
         let instance = runtime
             .block_on(provider.create_sandbox(BackendCreateRequest {
+                requested_backend_id: None,
                 session_id: "session".to_string(),
                 conversation_id: None,
                 workspace_root,

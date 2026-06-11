@@ -14,6 +14,10 @@ use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
     validate_and_connect_api_key,
 };
+use crate::remote_sessions_service::{
+    list_remote_sessions, record_remote_session, RemoteSessionDialog, RemoteSessionDialogEntry,
+    RemoteSessionDialogMode, RemoteSessionRecord,
+};
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{
     apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
@@ -93,6 +97,10 @@ impl App {
             return self.handle_sandbox_selection_key(key);
         }
 
+        if self.state.input_mode == InputMode::RemoteSessionSelection {
+            return self.handle_remote_session_selection_key(key).await;
+        }
+
         if self.state.input_mode == InputMode::TurnDelete {
             return self.handle_turn_delete_key(key).await;
         }
@@ -101,6 +109,7 @@ impl App {
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
             InputMode::SandboxSelection => Ok(()),
+            InputMode::RemoteSessionSelection => Ok(()),
             InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
             InputMode::TurnDelete => Ok(()),
@@ -374,9 +383,6 @@ impl App {
         }
 
         if trimmed.eq_ignore_ascii_case("/new") {
-            self.gateway
-                .close_remote_session(&self.state.session_id)
-                .await;
             self.gateway.reset_for_new_session(&mut self.state);
             self.state.reset_for_new_session();
             if let Some(base_url) = self.gateway.remote_base_url() {
@@ -618,20 +624,31 @@ impl App {
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
+        let Some(arg) = arg else {
+            self.open_remote_session_dialog();
+            return;
+        };
+
         let message = match arg {
-            None | Some("status") => {
-                crate::chat::Message::system(self.gateway.remote_status(&self.state).await)
-            }
-            Some("off") => match self.gateway.disconnect_remote(&mut self.state).await {
+            "status" => crate::chat::Message::system(self.gateway.remote_status(&self.state).await),
+            "off" => match self.gateway.disconnect_remote(&mut self.state).await {
                 Ok(()) => crate::chat::Message::system(format!(
-                    "Remote backend disabled. Backend: {}.",
+                    "Remote disconnected. Remote sessions are kept on the daemon. Backend: {}.",
                     sandbox_display_name(&self.state.agent_config.operation_backend)
                 )),
                 Err(error) => {
                     crate::chat::Message::error(format!("Remote disconnect failed: {error}"))
                 }
             },
-            Some(base_url) => {
+            "close" => {
+                let session_id = self.state.session_id.clone();
+                self.gateway.close_remote_session(&session_id).await;
+                crate::chat::Message::system(format!(
+                    "Remote session closed on daemon: {session_id}"
+                ))
+            }
+            base_url => {
+                let base_url = normalize_remote_url_input(base_url);
                 let token_env = self
                     .state
                     .agent_config
@@ -641,10 +658,23 @@ impl App {
                     .and_then(|remote| remote.bearer_token_env.clone());
                 match self
                     .gateway
-                    .connect_remote(&mut self.state, base_url.to_string(), token_env)
+                    .connect_remote(&mut self.state, base_url.clone(), token_env)
                     .await
                 {
-                    Ok(message) => crate::chat::Message::system(message),
+                    Ok(message) => {
+                        let _ = record_remote_session(
+                            &self.state.session_id,
+                            &base_url,
+                            self.state
+                                .agent_config
+                                .tui
+                                .remote
+                                .as_ref()
+                                .and_then(|remote| remote.bearer_token_env.clone()),
+                            None,
+                        );
+                        crate::chat::Message::system(message)
+                    }
                     Err(error) => {
                         crate::chat::Message::error(format!("Remote connect failed: {error}"))
                     }
@@ -653,6 +683,180 @@ impl App {
         };
         self.state.chat_state.messages.push(message);
         self.state.chat_state.stick_to_bottom = true;
+    }
+
+    fn open_remote_session_dialog(&mut self) {
+        match list_remote_sessions() {
+            Ok(records) => {
+                self.state.input_mode = InputMode::RemoteSessionSelection;
+                self.state.remote_session_dialog = Some(RemoteSessionDialog::new(records));
+            }
+            Err(error) => {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(format!(
+                        "Remote session history failed: {error:#}"
+                    )));
+                self.state.chat_state.stick_to_bottom = true;
+            }
+        }
+    }
+
+    async fn handle_remote_session_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(mode) = self
+            .state
+            .remote_session_dialog
+            .as_ref()
+            .map(|dialog| dialog.mode)
+        else {
+            self.state.input_mode = InputMode::Editing;
+            return Ok(());
+        };
+
+        match mode {
+            RemoteSessionDialogMode::List => self.handle_remote_session_list_key(key).await,
+            RemoteSessionDialogMode::NewUrl => self.handle_remote_session_new_url_key(key).await,
+        }
+    }
+
+    async fn handle_remote_session_list_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Editing;
+                self.state.remote_session_dialog = None;
+            }
+            KeyCode::Up => {
+                if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                    dialog.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                    dialog.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .state
+                    .remote_session_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.selected_entry().cloned());
+                match selected {
+                    Some(RemoteSessionDialogEntry::Existing(record)) => {
+                        self.state.input_mode = InputMode::Editing;
+                        self.state.remote_session_dialog = None;
+                        self.activate_remote_session(record).await;
+                    }
+                    Some(RemoteSessionDialogEntry::New) => {
+                        if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                            dialog.enter_new_url_mode();
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_remote_session_new_url_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                    dialog.mode = RemoteSessionDialogMode::List;
+                    dialog.error = None;
+                }
+            }
+            KeyCode::Enter => {
+                let url = self
+                    .state
+                    .remote_session_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.url_input.value().trim().to_string())
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                        dialog.error =
+                            Some("请输入 daemon URL，例如 http://127.0.0.1:8070".to_string());
+                    }
+                    return Ok(());
+                }
+                self.create_new_remote_session(normalize_remote_url_input(&url))
+                    .await;
+            }
+            _ => {
+                if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                    dialog.url_input.handle_event(&Event::Key(key));
+                    dialog.error = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn activate_remote_session(&mut self, record: RemoteSessionRecord) {
+        self.gateway.reset_for_new_session(&mut self.state);
+        self.state.reset_for_new_session();
+        self.state.session_id = record.session_id.clone();
+        self.gateway.configure_remote(
+            &mut self.state,
+            record.base_url.clone(),
+            record.bearer_token_env.clone(),
+        );
+        let _ = record_remote_session(
+            &record.session_id,
+            &record.base_url,
+            record.bearer_token_env.clone(),
+            None,
+        );
+        self.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(format!(
+                "Remote session selected: {} ({})",
+                record.session_id, record.base_url
+            )));
+        self.state.chat_state.stick_to_bottom = true;
+    }
+
+    async fn create_new_remote_session(&mut self, base_url: String) {
+        let token_env = self
+            .state
+            .agent_config
+            .tui
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.bearer_token_env.clone());
+        match self
+            .gateway
+            .connect_remote(&mut self.state, base_url.clone(), token_env.clone())
+            .await
+        {
+            Ok(message) => {
+                self.gateway.reset_for_new_session(&mut self.state);
+                self.state.reset_for_new_session();
+                self.gateway
+                    .configure_remote(&mut self.state, base_url.clone(), token_env.clone());
+                let session_id = self.state.session_id.clone();
+                let _ = record_remote_session(&session_id, &base_url, token_env, None);
+                self.state.input_mode = InputMode::Editing;
+                self.state.remote_session_dialog = None;
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(format!(
+                        "{message}\nNew remote session: {session_id}"
+                    )));
+                self.state.chat_state.stick_to_bottom = true;
+            }
+            Err(error) => {
+                if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
+                    dialog.error = Some(format!("Remote connect failed: {error}"));
+                }
+            }
+        }
     }
 
     fn handle_provider_selection_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -812,7 +1016,7 @@ impl App {
                         .chat_state
                         .messages
                         .push(crate::chat::Message::system(format!(
-                            "Sandbox backend: {name}. Applies from the next local turn."
+                            "Sandbox backend: {name}. Applies to new local sessions. Use /new to start one."
                         )));
                     self.state.chat_state.stick_to_bottom = true;
                 }
@@ -1018,5 +1222,14 @@ fn slash_command_argument<'a>(trimmed: &'a str, command: &str) -> Option<&'a str
         None
     } else {
         Some(rest)
+    }
+}
+
+fn normalize_remote_url_input(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.contains("://") || trimmed.is_empty() {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
     }
 }

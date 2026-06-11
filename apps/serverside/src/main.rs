@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
-use xiaoo_shared::backend::ExternalBackendManager;
+use xiaoo_shared::backend::BackendManager;
 use xiaoo_shared::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
 
 #[tokio::main]
@@ -43,7 +43,7 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let backend_manager = Arc::new(ExternalBackendManager::new());
+    let backend_manager = Arc::new(BackendManager::new());
     let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
         session_store,
         resolver,

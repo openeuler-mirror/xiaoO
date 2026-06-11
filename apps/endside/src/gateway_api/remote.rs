@@ -9,6 +9,7 @@ use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{AppTurnRequest, GatewayEntryContext, SessionOpenRequest};
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
+use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
 
 use super::runtime::GatewayRuntime;
@@ -121,7 +122,6 @@ impl GatewayRuntime {
     }
 
     pub async fn disconnect_remote(&mut self, state: &mut AppState) -> Result<(), String> {
-        self.close_remote_session(&state.session_id).await;
         self.remote = None;
         self.remote_session_open = false;
         state
@@ -154,8 +154,8 @@ impl GatewayRuntime {
             Err(error) => error.to_string(),
         };
         format!(
-            "Backend: Remote {}\nSession open: {}\nHealth: {}",
-            remote.base_url, self.remote_session_open, health
+            "Backend: Remote {}\nSession: {}\nSession open: {}\nHealth: {}",
+            remote.base_url, state.session_id, self.remote_session_open, health
         )
     }
 
@@ -198,6 +198,17 @@ impl GatewayRuntime {
             state.chat_state.messages.push(Message::user(prompt));
             state.chat_state.input.reset();
         }
+        let _ = record_remote_session(
+            &state.session_id,
+            &remote.base_url,
+            remote.bearer_token_env.clone(),
+            state
+                .chat_state
+                .messages
+                .iter()
+                .find(|message| message.role == crate::chat::MessageRole::User)
+                .map(|message| message.content.as_str()),
+        );
         state.chat_state.is_loading = true;
         state
             .chat_state
@@ -255,12 +266,22 @@ impl GatewayRuntime {
     }
 
     fn remote_session_open_request(&self, state: &AppState) -> Result<SessionOpenRequest, String> {
+        Self::remote_session_open_request_for(
+            state,
+            self.remote.as_ref().map(|remote| remote.base_url.clone()),
+        )
+    }
+
+    fn remote_session_open_request_for(
+        state: &AppState,
+        base_url: Option<String>,
+    ) -> Result<SessionOpenRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
         Ok(SessionOpenRequest {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
-            entry: GatewayEntryContext::tui(self.remote.as_ref().map(|r| r.base_url.clone())),
+            entry: GatewayEntryContext::tui(base_url),
             channel: None,
             channel_instance_id: None,
         })

@@ -1,8 +1,8 @@
-use crate::backend::{BackendEnsureSessionRequest, BackendLease, ExternalBackendManager};
+use crate::backend::{BackendEnsureSessionRequest, BackendLease, BackendManager};
 use crate::gateway::{ResolvedSessionRuntime, SessionRecord, SessionServiceError};
 
 pub(super) async fn lease_session_backend(
-    backend_manager: &ExternalBackendManager,
+    backend_manager: &BackendManager,
     session: &SessionRecord,
     resolved: &ResolvedSessionRuntime,
 ) -> Result<BackendLease, SessionServiceError> {

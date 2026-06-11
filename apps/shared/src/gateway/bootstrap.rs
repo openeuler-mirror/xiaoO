@@ -1,4 +1,4 @@
-use crate::backend::ExternalBackendManager;
+use crate::backend::BackendManager;
 use crate::gateway::{
     CoreBackedSessionService, SessionControlPlane, SessionRuntimeResolver, SessionService,
     SessionStore,
@@ -13,7 +13,7 @@ use thiserror::Error;
 pub struct AppDependencies {
     pub session_service: Arc<dyn SessionService>,
     pub session_control_plane: Arc<dyn SessionControlPlane>,
-    pub backend_manager: Arc<ExternalBackendManager>,
+    pub backend_manager: Arc<BackendManager>,
 }
 
 pub struct AppBootstrap;
@@ -51,7 +51,7 @@ impl AppBootstrap {
     pub fn lifecycle_only(
         session_store: Arc<dyn SessionStore>,
         hooker_config: HookerRegistryConfig,
-        backend_manager: Arc<ExternalBackendManager>,
+        backend_manager: Arc<BackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
         let resolver: Arc<dyn SessionRuntimeResolver> = Arc::new(NoopSessionRuntimeResolver);
         Self::from_session_components_with_hooks_and_backend_manager(
@@ -82,7 +82,7 @@ impl AppBootstrap {
             session_store,
             runtime_resolver,
             hooker_config,
-            Arc::new(ExternalBackendManager::new()),
+            Arc::new(BackendManager::new()),
         )
     }
 
@@ -90,7 +90,7 @@ impl AppBootstrap {
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_config: HookerRegistryConfig,
-        backend_manager: Arc<ExternalBackendManager>,
+        backend_manager: Arc<BackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
         let hooker_registry = HookerRegistryBuilderImpl::new()
             .with_config(hooker_config)

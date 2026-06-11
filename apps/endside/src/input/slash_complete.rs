@@ -42,7 +42,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/remote",
-        summary: "连接远端 gateway daemon，或使用 off/status 管理远端模式。",
+        summary: "连接远端 gateway daemon，或使用 off/status/close 管理远端模式。",
     },
     SlashCommandSpec {
         name: "/sandbox",
