@@ -244,7 +244,7 @@ impl ToolEventSink for SharedToolEventSink {
 }
 
 fn operation_backend_exec_isolation(
-    config: Option<&crate::gateway::backend::GatewayBackendConfig>,
+    config: Option<&crate::backend::GatewayBackendConfig>,
 ) -> Option<&'static str> {
     let config = config?;
     if config.kind != "local" {

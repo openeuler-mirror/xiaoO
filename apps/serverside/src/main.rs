@@ -21,9 +21,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
-use xiaoo_shared::gateway::{
-    backend::ExternalBackendManager, AppBootstrap, InMemorySessionStore, SessionStore,
-};
+use xiaoo_shared::backend::ExternalBackendManager;
+use xiaoo_shared::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
 
 #[tokio::main]
 async fn main() -> Result<()> {

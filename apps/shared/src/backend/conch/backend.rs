@@ -1,4 +1,4 @@
-use crate::gateway::backend::conch::{
+use crate::backend::conch::{
     exec::ConchExec, filesystem::ConchFileSystem, path::ConchPathResolver, search::ConchSearch,
 };
 use agent_contracts::backend::{
@@ -252,7 +252,7 @@ impl OperationBackend for ConchOperationBackend {
         if !self.exec.state().begin_shutdown()? {
             return Ok(());
         }
-        match crate::gateway::backend::conch::control::delete_sandbox(self.exec.state()).await {
+        match crate::backend::conch::control::delete_sandbox(self.exec.state()).await {
             Ok(()) => {
                 self.exec.state().finish_shutdown()?;
                 Ok(())

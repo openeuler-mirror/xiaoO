@@ -1,4 +1,4 @@
-use crate::gateway::backend::ExternalBackendManager;
+use crate::backend::ExternalBackendManager;
 use crate::gateway::session_backend::{lease_session_backend, sync_session_backend_instance};
 use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{

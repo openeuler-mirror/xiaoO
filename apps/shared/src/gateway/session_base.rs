@@ -11,8 +11,6 @@ pub fn channel_session_id(
     format!("{scope}:{conversation_id}")
 }
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionOpenRequest {
     pub session_id: String,

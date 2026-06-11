@@ -1,6 +1,6 @@
+use agent_types::ChatMessage;
 use agent_types::ReasoningEffort;
 use serde::{Deserialize, Serialize};
-use agent_types::ChatMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,7 +22,6 @@ pub struct AppTurnResult {
     pub total_tokens: u64,
     pub estimated_input_tokens: u64,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct GatewayEntryContext {

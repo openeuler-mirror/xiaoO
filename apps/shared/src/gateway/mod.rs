@@ -1,4 +1,3 @@
-pub mod backend;
 pub mod bootstrap;
 pub mod channel_interaction;
 pub mod core_session_service;
@@ -37,9 +36,13 @@ pub use runtime_resolver::{
     ResolvedSessionRuntime, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
-pub use session_base:: {channel_session_id, SessionInput, SessionInputKind, SessionOpenRequest, SessionSubmitReceipt} ;
+pub use session_base::{
+    channel_session_id, SessionInput, SessionInputKind, SessionOpenRequest, SessionSubmitReceipt,
+};
 pub use session_record::{SessionLifecycleStatus, SessionRecord};
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
-pub use turns::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, TurnMention, AppTurnResult};
+pub use turns::{
+    AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, TurnMention,
+};
 pub use workspace_prompt::compose_workspace_system_prompt;

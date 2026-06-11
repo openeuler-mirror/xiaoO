@@ -1,5 +1,5 @@
-use crate::gateway::backend::conch::backend::{shell_quote, ConchBackendState};
-use crate::gateway::backend::conch::exec::ConchExec;
+use crate::backend::conch::backend::{shell_quote, ConchBackendState};
+use crate::backend::conch::exec::ConchExec;
 use agent_contracts::backend::{
     capability::{
         search::{GlobRequest, GrepMode, GrepRequest, GrepResult},

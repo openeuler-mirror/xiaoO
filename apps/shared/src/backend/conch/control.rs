@@ -1,4 +1,4 @@
-use crate::gateway::backend::conch::backend::{
+use crate::backend::conch::backend::{
     ConchBackendState, ConchControlTransport, ConchSandboxHandle,
 };
 use agent_contracts::backend::{OperationBackendBuildError, OperationError};

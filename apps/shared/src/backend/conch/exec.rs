@@ -1,6 +1,6 @@
-use crate::gateway::backend::conch::agent;
-use crate::gateway::backend::conch::backend::shell_quote;
-use crate::gateway::backend::conch::backend::{
+use crate::backend::conch::agent;
+use crate::backend::conch::backend::shell_quote;
+use crate::backend::conch::backend::{
     ConchBackendState, ConchExecOutput, ConchStartProcess,
 };
 use agent_contracts::backend::{
@@ -171,7 +171,7 @@ impl OperationExec for ConchExec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::backend::conch::backend::{
+    use crate::backend::conch::backend::{
         ConchControlPlane, ConchControlTransport, ConchLifecycle, ConchSandboxHandle,
     };
     use agent_contracts::backend::BackendPath;

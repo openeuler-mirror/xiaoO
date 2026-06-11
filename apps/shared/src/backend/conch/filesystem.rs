@@ -1,6 +1,6 @@
-use crate::gateway::backend::conch::agent;
-use crate::gateway::backend::conch::backend::{shell_quote, ConchBackendState, ConchUploadFile};
-use crate::gateway::backend::conch::exec::ConchExec;
+use crate::backend::conch::agent;
+use crate::backend::conch::backend::{shell_quote, ConchBackendState, ConchUploadFile};
+use crate::backend::conch::exec::ConchExec;
 use agent_contracts::backend::{
     capability::{
         export::ExportFileRequest,

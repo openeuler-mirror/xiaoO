@@ -17,8 +17,8 @@ fn compile_conch_proto() {
     tonic_build::configure()
         .build_server(false)
         .compile_protos(
-            &["src/gateway/backend/conch/proto/agent.proto"],
-            &["src/gateway/backend/conch/proto"],
+            &["src/backend/conch/proto/agent.proto"],
+            &["src/backend/conch/proto"],
         )
         .expect("compile conch agent proto");
 }

@@ -12,7 +12,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::PathBuf;
 
-pub use xiaoo_shared::gateway;
+pub use xiaoo_shared::{backend, gateway};
 
 mod app;
 mod cli;

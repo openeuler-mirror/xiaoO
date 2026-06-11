@@ -1,4 +1,4 @@
-use crate::gateway::backend::GatewayBackendConfig;
+use crate::backend::GatewayBackendConfig;
 use crate::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use crate::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,

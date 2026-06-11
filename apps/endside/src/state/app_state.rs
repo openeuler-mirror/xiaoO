@@ -6,9 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::backend::GatewayBackendConfig;
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
-use crate::gateway::backend::GatewayBackendConfig;
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
@@ -1004,8 +1004,8 @@ mod tests {
         current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState,
         AppState, RuntimeStatusLight,
     };
+    use crate::backend::GatewayBackendConfig;
     use crate::config::{AgentRoleConfig, Config};
-    use crate::gateway::backend::GatewayBackendConfig;
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
     use agent_types::ReasoningEffort;

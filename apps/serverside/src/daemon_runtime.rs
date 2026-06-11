@@ -27,14 +27,15 @@ use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
     ToolRuntimeServices,
 };
+use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::gateway::prompt_utils::{
     compose_subagent_delegation_rules, generate_skills_dirs_table,
 };
 use xiaoo_shared::gateway::session_record::SubagentRoleRecord;
 use xiaoo_shared::gateway::{
-    backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
-    SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
-    SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
+    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
+    SessionRuntimeResolver,
 };
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;

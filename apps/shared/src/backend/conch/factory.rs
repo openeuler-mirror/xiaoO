@@ -1,9 +1,9 @@
-use crate::gateway::backend::conch::agent;
-use crate::gateway::backend::conch::backend::{
+use crate::backend::conch::agent;
+use crate::backend::conch::backend::{
     normalize_backend_path, ConchBackendState, ConchControlPlane, ConchControlTransport,
     ConchLifecycle, ConchOperationBackend, ConchSandboxHandle,
 };
-use crate::gateway::backend::conch::control::{self, ConchCreateOptions};
+use crate::backend::conch::control::{self, ConchCreateOptions};
 use agent_contracts::backend::{
     BackendPath, OperationBackend, OperationBackendBuildError, OperationBackendConfig,
 };

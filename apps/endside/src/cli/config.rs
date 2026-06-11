@@ -1,4 +1,4 @@
-use crate::gateway::backend::GatewayBackendConfig;
+use crate::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;

@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::backend::ExternalBackendManager;
 use crate::chat::ToolExecutionUpdate;
-use crate::gateway::{backend::ExternalBackendManager, InMemorySessionStore, SessionControlPlane};
+use crate::gateway::{InMemorySessionStore, SessionControlPlane};
 use crate::interaction_prompt::PromptRequest;
 
 use agent_types::common::ids::AgentId;

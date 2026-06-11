@@ -20,7 +20,7 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::gateway::backend::ExternalBackendManager;
+use crate::backend::ExternalBackendManager;
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
@@ -446,9 +446,10 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::GatewayBackendConfig;
     use crate::gateway::{
-        backend::GatewayBackendConfig, AppBootstrap, GatewayEntryContext, InMemorySessionStore,
-        SessionInput, SessionInputKind, SessionRuntimeBindings, SessionRuntimeDescriptor,
+        AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionInput, SessionInputKind,
+        SessionRuntimeBindings, SessionRuntimeDescriptor,
     };
     use agent_contracts::backend::BackendLifecycleState;
     use agent_contracts::{LlmProvider, ProviderCapabilities};

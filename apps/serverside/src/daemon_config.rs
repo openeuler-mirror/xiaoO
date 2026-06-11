@@ -14,8 +14,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
-use xiaoo_shared::gateway::backend::GatewayBackendConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");

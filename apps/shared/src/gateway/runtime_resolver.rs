@@ -1,4 +1,4 @@
-use crate::gateway::backend::GatewayBackendConfig;
+use crate::backend::GatewayBackendConfig;
 use crate::gateway::session_record::SubagentRoleRecord;
 use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionOpenRequest, SessionRecord,

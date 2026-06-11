@@ -1,6 +1,7 @@
+use crate::backend::ExternalBackendManager;
 use crate::gateway::{
-    backend::ExternalBackendManager, CoreBackedSessionService, SessionControlPlane,
-    SessionRuntimeResolver, SessionService, SessionStore,
+    CoreBackedSessionService, SessionControlPlane, SessionRuntimeResolver, SessionService,
+    SessionStore,
 };
 use agent_types::hook::HookerRegistryConfig;
 use async_trait::async_trait;
