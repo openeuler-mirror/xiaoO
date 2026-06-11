@@ -246,8 +246,16 @@ impl GatewayRuntime {
             return;
         };
         let client = reqwest::Client::new();
-        let path = format!("/api/v1/sessions/{session_id}/close");
-        let _ = post_empty(&client, &remote, token.as_deref(), &path).await;
+        let _ = post_json(
+            &client,
+            &remote,
+            token.as_deref(),
+            "/api/v1/sessions/close",
+            &crate::gateway::SessionCloseRequest {
+                session_id: session_id.to_string(),
+            },
+        )
+        .await;
         self.remote_session_open = false;
     }
 

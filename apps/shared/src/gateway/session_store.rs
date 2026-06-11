@@ -15,6 +15,7 @@ pub enum SessionStoreError {
 pub trait SessionStore: Send + Sync {
     async fn load(&self, session_id: &str) -> Option<SessionRecord>;
     async fn save(&self, record: SessionRecord);
+    async fn delete(&self, session_id: &str) -> Option<SessionRecord>;
     async fn transition(
         &self,
         session_id: &str,
@@ -40,6 +41,10 @@ impl SessionStore for InMemorySessionStore {
             .write()
             .await
             .insert(record.session_id.clone(), record);
+    }
+
+    async fn delete(&self, session_id: &str) -> Option<SessionRecord> {
+        self.records.write().await.remove(session_id)
     }
 
     async fn transition(

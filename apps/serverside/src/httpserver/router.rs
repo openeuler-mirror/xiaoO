@@ -246,10 +246,7 @@ fn create_router_from_state(
                 "/api/v1/sessions/:session_id/cancel",
                 post(handle_session_cancel),
             )
-            .route(
-                "/api/v1/sessions/:session_id/close",
-                post(handle_session_close),
-            ),
+            .route("/api/v1/sessions/close", post(handle_session_close)),
         bearer_auth.clone(),
     );
 
@@ -497,7 +494,7 @@ async fn handle_session_cancel(
 
 async fn handle_session_close(
     State(state): State<Arc<GatewayAppState>>,
-    Path(session_id): Path<String>,
+    Json(payload): Json<xiaoo_shared::gateway::SessionCloseRequest>,
 ) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -509,7 +506,7 @@ async fn handle_session_close(
             .into_response();
     };
 
-    match control_plane.force_close_session(&session_id).await {
+    match control_plane.force_close_session(&payload.session_id).await {
         Ok(record) => Json(record).into_response(),
         Err(error) => map_session_error(error),
     }
@@ -747,6 +744,53 @@ mod tests {
             .expect("router should respond");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_close_uses_body_session_id_route() {
+        let router = create_router_with_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/close")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"session_id":"session-1"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_close_old_path_is_not_registered() {
+        let router = create_router_with_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/session-1/close")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -363,6 +363,9 @@ impl SessionControlPlane for CoreBackedSessionService {
             .await;
         }
 
+        self.session_store.delete(session_id).await;
+        self.sessions_handler.lock().await.remove(session_id);
+
         Ok(closed)
     }
 
@@ -636,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_close_session_closes_handle_snapshot() {
+    async fn force_close_session_removes_session_record() {
         let workspace = TempDir::new().expect("workspace");
         let store = Arc::new(InMemorySessionStore::default());
         let resolver = Arc::new(StubRuntimeResolver {
@@ -677,8 +680,7 @@ mod tests {
             .session_control_plane
             .resume_session("s-close")
             .await
-            .expect("resume closed session")
-            .expect("session should still exist");
-        assert_eq!(resumed.status, SessionLifecycleStatus::Closed);
+            .expect("resume closed session");
+        assert!(resumed.is_none());
     }
 }

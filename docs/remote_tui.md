@@ -124,7 +124,7 @@ Remote TUI uses the daemon's session APIs.
 | `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
 | `POST /api/v1/sessions/{session_id}/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/sessions/{session_id}/cancel` | Request cancellation of the current turn |
-| `POST /api/v1/sessions/{session_id}/close` | Close the session and fire lifecycle hooks |
+| `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
 
 SSE event types:
 
