@@ -22,6 +22,7 @@ use subagent::{
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
 use tokio::sync::{oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_core::agent_loop::build_tool_result_message;
 use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};
@@ -54,6 +55,7 @@ struct LaneRunInput {
     loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
     interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
     channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 struct LaneTerminal {
@@ -300,6 +302,7 @@ impl SessionSupervisor {
         loop_event_sink_override: Option<Arc<dyn LoopEventSink>>,
         interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
+        cancellation_token: Option<CancellationToken>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let _guard = self.root_turn_lock.lock().await;
         self.set_session_status(SessionLifecycleStatus::Running, None)
@@ -321,6 +324,7 @@ impl SessionSupervisor {
                 loop_event_sink_override,
                 interaction_handle_override,
                 channel_file_sender_override,
+                cancellation_token,
             })
             .await;
 
@@ -377,6 +381,7 @@ impl SessionSupervisor {
                 loop_state: loop_state.clone(),
                 memory_snapshot: memory_snapshot.clone(),
                 tool_manifest: tool_manifest.clone(),
+                cancellation_token: input.cancellation_token.clone(),
             })
             .await?;
 
@@ -591,6 +596,7 @@ impl SessionSupervisor {
                     loop_event_sink_override: None,
                     interaction_handle_override: Some(interaction_handle),
                     channel_file_sender_override: None,
+                    cancellation_token: None,
                 })
                 .await;
 

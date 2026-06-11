@@ -12,6 +12,7 @@ pub mod runtime_bindings;
 pub mod runtime_factory;
 pub mod runtime_resolver;
 mod session_backend;
+mod session_handle;
 pub mod session_keys;
 pub mod session_protocol;
 pub mod session_record;

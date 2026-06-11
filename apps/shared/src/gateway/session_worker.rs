@@ -31,6 +31,7 @@ pub struct SessionWorkerInput {
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 pub struct SessionWorkerResult {
@@ -73,12 +74,15 @@ impl SessionWorker {
             .as_ref()
             .map(|snapshot| snapshot.session_id)
             .unwrap_or_else(uuid::Uuid::new_v4);
-        let cancel = CancellationToken::new();
+        let cancel = input
+            .cancellation_token
+            .clone()
+            .unwrap_or_else(CancellationToken::new);
         let mut loop_state = input
             .loop_state
             .clone()
             .map(|snapshot| LoopState::from_snapshot(snapshot, cancel.clone()))
-            .unwrap_or_else(|| LoopState::new(loop_session_id));
+            .unwrap_or_else(|| LoopState::new_with_cancel(loop_session_id, cancel));
 
         // Share message storage with runtime_view
         let messages = loop_state.messages_arc();

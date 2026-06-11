@@ -465,7 +465,17 @@ async fn handle_session_cancel(
             }),
         )
             .into_response(),
-        _ => Json(SseStreamEvent::Cancelled { session_id }).into_response(),
+        Ok(Some(_)) => match control_plane
+            .submit_input(
+                &session_id,
+                xiaoo_shared::gateway::SessionInput::CancelActiveTurn,
+            )
+            .await
+        {
+            Ok(_) => Json(SseStreamEvent::Cancelled { session_id }).into_response(),
+            Err(error) => map_session_error(error),
+        },
+        Err(error) => map_session_error(error),
     }
 }
 
@@ -492,6 +502,10 @@ async fn handle_session_close(
 fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Response {
     let status = match &error {
         xiaoo_shared::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+        xiaoo_shared::gateway::SessionServiceError::SessionBusy { .. } => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        xiaoo_shared::gateway::SessionServiceError::SessionClosed { .. } => StatusCode::CONFLICT,
         xiaoo_shared::gateway::SessionServiceError::UnsupportedCapability { .. } => {
             StatusCode::NOT_IMPLEMENTED
         }

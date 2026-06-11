@@ -25,6 +25,10 @@ pub enum SessionServiceError {
     UnsupportedCapability { capability: String },
     #[error("session not found: {session_id}")]
     SessionNotFound { session_id: String },
+    #[error("session busy: {session_id}: {message}")]
+    SessionBusy { session_id: String, message: String },
+    #[error("session closed: {session_id}")]
+    SessionClosed { session_id: String },
 }
 
 #[async_trait]

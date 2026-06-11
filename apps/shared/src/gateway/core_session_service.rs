@@ -1,5 +1,5 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionInput,
     SessionLifecycleStatus, SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput,
     SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
     SessionStore, SessionStoreError,
@@ -18,13 +18,14 @@ use tokio::sync::Mutex;
 use xiaoo_core::NoopRuntimeView;
 
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
+use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
 use crate::gateway::backend::ExternalBackendManager;
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-    supervisors: Mutex<HashMap<String, Arc<SessionSupervisor>>>,
+    sessions_handler: Mutex<HashMap<String, SessionHandle>>,
     hooker_registry: Arc<dyn HookerRegistry>,
     backend_manager: Arc<ExternalBackendManager>,
 }
@@ -39,7 +40,7 @@ impl CoreBackedSessionService {
         Self {
             session_store,
             runtime_resolver,
-            supervisors: Mutex::new(HashMap::new()),
+            sessions_handler: Mutex::new(HashMap::new()),
             hooker_registry,
             backend_manager,
         }
@@ -69,9 +70,8 @@ impl CoreBackedSessionService {
         }
     }
 
-    async fn get_or_create_supervisor(&self, session: SessionRecord) -> Arc<SessionSupervisor> {
-        let mut supervisors = self.supervisors.lock().await;
-        if let Some(existing) = supervisors.get(&session.session_id) {
+    async fn get_or_create_session_handle(&self, session: SessionRecord) -> SessionHandle {
+        if let Some(existing) = self.sessions_handler.lock().await.get(&session.session_id).cloned() {
             return existing.clone();
         }
 
@@ -81,17 +81,22 @@ impl CoreBackedSessionService {
             Arc::clone(&self.backend_manager),
             session.clone(),
         ));
-        supervisors.insert(session.session_id.clone(), supervisor.clone());
-        supervisor
+        let handle = SessionHandle::new(session.session_id.clone(), supervisor).await;
+        let mut sessions = self.sessions_handler.lock().await;
+        if let Some(existing) = sessions.get(&session.session_id) {
+            return existing.clone();
+        }
+        sessions.insert(session.session_id.clone(), handle.clone());
+        handle
     }
 
-    async fn supervisor_for_session(&self, session_id: &str) -> Option<Arc<SessionSupervisor>> {
-        if let Some(existing) = self.supervisors.lock().await.get(session_id).cloned() {
+    async fn handle_for_session(&self, session_id: &str) -> Option<SessionHandle> {
+        if let Some(existing) = self.sessions_handler.lock().await.get(session_id).cloned() {
             return Some(existing);
         }
 
         let session = self.session_store.load(session_id).await?;
-        Some(self.get_or_create_supervisor(session).await)
+        Some(self.get_or_create_session_handle(session).await)
     }
 
     fn build_session_for_turn(
@@ -183,8 +188,12 @@ impl CoreBackedSessionService {
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
         let backend_lease =
             lease_session_backend(self.backend_manager.as_ref(), &seed_session, &resolved).await?;
-        if sync_session_backend_instance(&mut seed_session, &backend_lease) {
+        let backend_updated = sync_session_backend_instance(&mut seed_session, &backend_lease);
+        if backend_updated {
             seed_session.updated_at_ms = current_time_ms();
+        }
+        if is_new_session || backend_updated {
+            self.session_store.save(seed_session.clone()).await;
         }
 
         if is_new_session {
@@ -205,10 +214,9 @@ impl CoreBackedSessionService {
             .await;
         }
 
-        let supervisor = self.get_or_create_supervisor(seed_session).await;
-        supervisor.prepare_root_turn(&request, &resolved).await;
-        supervisor
-            .run_root_turn(
+        let handle = self.get_or_create_session_handle(seed_session).await;
+        handle
+            .run_turn(
                 request,
                 resolved,
                 event_sink,
@@ -254,8 +262,8 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
-        if let Some(supervisor) = self.supervisor_for_session(&request.session_id).await {
-            return Ok(supervisor.snapshot().await);
+        if let Some(handle) = self.handle_for_session(&request.session_id).await {
+            return handle.snapshot().await;
         }
 
         let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
@@ -284,19 +292,18 @@ impl SessionControlPlane for CoreBackedSessionService {
         )
         .await;
 
-        Ok(self
-            .get_or_create_supervisor(session)
+        self.get_or_create_session_handle(session)
             .await
             .snapshot()
-            .await)
+            .await
     }
 
     async fn resume_session(
         &self,
         session_id: &str,
     ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        match self.supervisor_for_session(session_id).await {
-            Some(supervisor) => Ok(Some(supervisor.snapshot().await)),
+        match self.handle_for_session(session_id).await {
+            Some(handle) => Ok(Some(handle.snapshot().await?)),
             None => Ok(None),
         }
     }
@@ -305,19 +312,23 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         session_id: &str,
     ) -> Result<SessionRecord, SessionServiceError> {
-        let closed = if let Some(supervisor) = self.supervisor_for_session(session_id).await {
-            supervisor.force_close().await
-        } else {
-            let Some(mut existing) = self.session_store.load(session_id).await else {
-                return Err(SessionServiceError::SessionNotFound {
-                    session_id: session_id.to_string(),
-                });
+        let (closed, was_already_closed) =
+            if let Some(handle) = self.handle_for_session(session_id).await {
+                let before = handle.snapshot().await?;
+                let was_already_closed = before.status == SessionLifecycleStatus::Closed;
+                (handle.force_close().await?, was_already_closed)
+            } else {
+                let Some(mut existing) = self.session_store.load(session_id).await else {
+                    return Err(SessionServiceError::SessionNotFound {
+                        session_id: session_id.to_string(),
+                    });
+                };
+                let was_already_closed = existing.status == SessionLifecycleStatus::Closed;
+                existing.status = SessionLifecycleStatus::Closed;
+                existing.updated_at_ms = current_time_ms();
+                self.session_store.save(existing.clone()).await;
+                (existing, was_already_closed)
             };
-            existing.status = SessionLifecycleStatus::Closed;
-            existing.updated_at_ms = current_time_ms();
-            self.session_store.save(existing.clone()).await;
-            existing
-        };
         if let Err(error) = self.backend_manager.release_session(session_id).await {
             tracing::warn!(
                 session_id = %session_id,
@@ -326,23 +337,51 @@ impl SessionControlPlane for CoreBackedSessionService {
             );
         }
 
-        let hook_point = HookPointId(format!(
-            "{}.Session.lifecycle.closed",
-            closed.runtime.agent_id.0
-        ));
-        self.fire_session_hooks(
-            HookInvokeInput::SessionClosed {
-                input: SessionClosedHookInput {
-                    session_id: closed.session_id.clone(),
-                    sender_id: closed.sender_id.clone(),
+        if !was_already_closed {
+            let hook_point = HookPointId(format!(
+                "{}.Session.lifecycle.closed",
+                closed.runtime.agent_id.0
+            ));
+            self.fire_session_hooks(
+                HookInvokeInput::SessionClosed {
+                    input: SessionClosedHookInput {
+                        session_id: closed.session_id.clone(),
+                        sender_id: closed.sender_id.clone(),
+                    },
+                    metadata: HookInvokeMetadata::default(),
                 },
-                metadata: HookInvokeMetadata::default(),
-            },
-            hook_point,
-        )
-        .await;
+                hook_point,
+            )
+            .await;
+        }
 
         Ok(closed)
+    }
+
+    async fn submit_input(
+        &self,
+        session_id: &str,
+        input: SessionInput,
+    ) -> Result<crate::gateway::SessionSubmitReceipt, SessionServiceError> {
+        match input {
+            SessionInput::CancelActiveTurn => {
+                let Some(handle) = self.handle_for_session(session_id).await else {
+                    return Err(SessionServiceError::SessionNotFound {
+                        session_id: session_id.to_string(),
+                    });
+                };
+                handle.cancel_active_turn().await
+            }
+            SessionInput::Turn { .. } => Err(SessionServiceError::UnsupportedCapability {
+                capability: "submit_input.turn".to_string(),
+            }),
+            SessionInput::Interaction { .. } => Err(SessionServiceError::UnsupportedCapability {
+                capability: "submit_input.interaction".to_string(),
+            }),
+            SessionInput::InputChunk { .. } => Err(SessionServiceError::UnsupportedCapability {
+                capability: "submit_input.input_chunk".to_string(),
+            }),
+        }
     }
 }
 
@@ -352,11 +391,12 @@ impl SubagentControl for CoreBackedSessionService {
         &self,
         request: SpawnSubagentRequest,
     ) -> Result<SpawnSubagentResult, SubagentControlError> {
-        let Some(supervisor) = self.supervisor_for_session(&request.session_id).await else {
+        let Some(handle) = self.handle_for_session(&request.session_id).await else {
             return Err(SubagentControlError::Unavailable {
                 message: format!("session '{}' is not available", request.session_id),
             });
         };
+        let supervisor = handle.supervisor();
         supervisor.spawn_subagent(request).await
     }
 
@@ -364,11 +404,12 @@ impl SubagentControl for CoreBackedSessionService {
         &self,
         request: JoinSubagentRequest,
     ) -> Result<JoinSubagentResult, SubagentControlError> {
-        let Some(supervisor) = self.supervisor_for_session(&request.session_id).await else {
+        let Some(handle) = self.handle_for_session(&request.session_id).await else {
             return Err(SubagentControlError::Unavailable {
                 message: format!("session '{}' is not available", request.session_id),
             });
         };
+        let supervisor = handle.supervisor();
         supervisor.join_subagent(request).await
     }
 }
@@ -401,7 +442,7 @@ mod tests {
     use super::*;
     use crate::gateway::{
         backend::GatewayBackendConfig, AppBootstrap, GatewayEntryContext, InMemorySessionStore,
-        SessionRuntimeBindings, SessionRuntimeDescriptor,
+        SessionInput, SessionInputKind, SessionRuntimeBindings, SessionRuntimeDescriptor,
     };
     use agent_contracts::backend::BackendLifecycleState;
     use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -538,5 +579,91 @@ mod tests {
         let saved_instance = saved.backend_instance.expect("saved backend instance");
         assert_eq!(saved_instance.state, BackendLifecycleState::Active);
         assert_eq!(saved_instance.backend_id, instance.backend_id);
+    }
+
+    #[tokio::test]
+    async fn submit_cancel_active_turn_routes_through_session_handle() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(ExternalBackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(SessionOpenRequest {
+                session_id: "s-cancel".to_string(),
+                conversation_id: "c1".to_string(),
+                sender_id: "u1".to_string(),
+                entry: GatewayEntryContext::tui(None),
+                channel: None,
+                channel_instance_id: None,
+            })
+            .await
+            .expect("open session");
+
+        let receipt = dependencies
+            .session_control_plane
+            .submit_input("s-cancel", SessionInput::CancelActiveTurn)
+            .await
+            .expect("cancel should be accepted");
+
+        assert_eq!(receipt.session_id, "s-cancel");
+        assert_eq!(receipt.accepted_kind, SessionInputKind::CancelActiveTurn);
+    }
+
+    #[tokio::test]
+    async fn force_close_session_closes_handle_snapshot() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(ExternalBackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(SessionOpenRequest {
+                session_id: "s-close".to_string(),
+                conversation_id: "c1".to_string(),
+                sender_id: "u1".to_string(),
+                entry: GatewayEntryContext::tui(None),
+                channel: None,
+                channel_instance_id: None,
+            })
+            .await
+            .expect("open session");
+
+        let closed = dependencies
+            .session_control_plane
+            .force_close_session("s-close")
+            .await
+            .expect("close session");
+        assert_eq!(closed.status, SessionLifecycleStatus::Closed);
+
+        let resumed = dependencies
+            .session_control_plane
+            .resume_session("s-close")
+            .await
+            .expect("resume closed session")
+            .expect("session should still exist");
+        assert_eq!(resumed.status, SessionLifecycleStatus::Closed);
     }
 }
