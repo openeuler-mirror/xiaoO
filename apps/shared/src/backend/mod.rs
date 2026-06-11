@@ -57,6 +57,8 @@ pub struct SandboxCreateRequest {
 pub struct SandboxConnectRequest {
     #[serde(default)]
     pub timeout: Option<u64>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,6 +77,8 @@ pub struct SandboxInfo {
     pub metadata: Value,
     pub resources: BackendResourceAllocation,
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
     pub expires_at_ms: Option<u64>,
 }
 
@@ -116,7 +120,7 @@ struct BackendInstanceEntry {
     config: GatewayBackendConfig,
     workspace_root: String,
     config_hash: u64,
-    session_id: Option<String>,
+    session_ids: BTreeMap<String, ()>,
     expires_at_ms: Option<u64>,
 }
 
@@ -141,7 +145,7 @@ impl BackendManager {
         request: SandboxCreateRequest,
     ) -> Result<SandboxInfo, SandboxError> {
         let config = resolve_sandbox_backend_config(request.provider.clone(), request.options)?;
-        let backend_id = requested_backend_id(request.backend_id, request.session_id.as_deref())?;
+        let backend_id = requested_backend_id(request.backend_id)?;
         let workspace_root = workspace_root_string(&request.workspace_root)
             .map_err(SandboxError::from_build_error)?;
         let config_hash = hash_config(&config);
@@ -179,10 +183,9 @@ impl BackendManager {
         })
         .await?;
         let info = entry.info();
-        if let Some(session_id) = entry.session_id.as_ref() {
-            state
-                .session_index
-                .insert(session_id.clone(), backend_id.clone());
+        let session_ids = entry.session_ids.keys().cloned().collect::<Vec<_>>();
+        for session_id in session_ids {
+            state.session_index.insert(session_id, backend_id.clone());
         }
         state.sandboxes.insert(backend_id, entry);
         Ok(info)
@@ -194,16 +197,39 @@ impl BackendManager {
         request: SandboxConnectRequest,
     ) -> Result<SandboxInfo, SandboxError> {
         let mut state = self.state.lock().await;
-        let entry = state
-            .sandboxes
-            .get_mut(&BackendId(backend_id.to_string()))
-            .ok_or_else(|| SandboxError::NotFound {
-                backend_id: backend_id.to_string(),
-            })?;
-        if let Some(timeout) = request.timeout {
-            entry.expires_at_ms = Some(expires_at_ms_from_timeout(timeout));
+        let backend_id = BackendId(backend_id.to_string());
+        if let Some(session_id) = request.session_id.as_ref() {
+            if let Some(existing_backend_id) = state.session_index.get(session_id) {
+                if existing_backend_id != &backend_id {
+                    return Err(SandboxError::Conflict {
+                        message: format!(
+                            "session_id {session_id} is already bound to backend_id {existing_backend_id}"
+                        ),
+                    });
+                }
+            }
         }
-        Ok(entry.info())
+        let session_id = request.session_id;
+        let info = {
+            let entry =
+                state
+                    .sandboxes
+                    .get_mut(&backend_id)
+                    .ok_or_else(|| SandboxError::NotFound {
+                        backend_id: backend_id.0.clone(),
+                    })?;
+            if let Some(timeout) = request.timeout {
+                entry.expires_at_ms = Some(expires_at_ms_from_timeout(timeout));
+            }
+            if let Some(session_id) = session_id.as_ref() {
+                entry.session_ids.insert(session_id.clone(), ());
+            }
+            entry.info()
+        };
+        if let Some(session_id) = session_id {
+            state.session_index.insert(session_id, backend_id);
+        }
+        Ok(info)
     }
 
     pub async fn get_sandbox(&self, backend_id: &str) -> Result<SandboxInfo, SandboxError> {
@@ -238,7 +264,7 @@ impl BackendManager {
                     .ok_or_else(|| SandboxError::NotFound {
                         backend_id: backend_id.0.clone(),
                     })?;
-            if let Some(session_id) = entry.session_id.as_ref() {
+            for session_id in entry.session_ids.keys() {
                 state.session_index.remove(session_id);
             }
             entry
@@ -253,28 +279,24 @@ impl BackendManager {
         request: BackendEnsureSessionRequest,
     ) -> Result<BackendLease, OperationBackendBuildError> {
         let config = resolve_session_backend_config(request.config.clone())?;
-        let backend_id = BackendId(request.session_id.clone());
         let workspace_root = workspace_root_string(&request.workspace_root)?;
         let config_hash = hash_config(&config);
         let mut state = self.state.lock().await;
 
         if let Some(existing_backend_id) = state.session_index.get(&request.session_id) {
-            if existing_backend_id != &backend_id {
-                return Err(OperationBackendBuildError::BuildFailed {
+            let entry = state.sandboxes.get(existing_backend_id).ok_or_else(|| {
+                OperationBackendBuildError::BuildFailed {
                     message: format!(
-                        "session {} is already bound to backend {}",
+                        "session {} is bound to missing backend {}",
                         request.session_id, existing_backend_id
                     ),
-                });
-            }
-        }
-
-        if let Some(entry) = state.sandboxes.get(&backend_id) {
+                }
+            })?;
             if entry.workspace_root != workspace_root || entry.config_hash != config_hash {
                 return Err(OperationBackendBuildError::BuildFailed {
                     message: format!(
                         "session {} is already bound to backend {} with different workspace or config",
-                        request.session_id, backend_id
+                        request.session_id, existing_backend_id
                     ),
                 });
             }
@@ -284,6 +306,7 @@ impl BackendManager {
             });
         }
 
+        let backend_id = new_backend_id();
         let entry = build_managed_backend(BuildSandboxInput {
             backend_id: backend_id.clone(),
             config,
@@ -310,10 +333,18 @@ impl BackendManager {
     pub async fn release_session(&self, session_id: &str) -> Result<(), OperationError> {
         let removed = {
             let mut state = self.state.lock().await;
-            state
-                .session_index
-                .remove(session_id)
-                .and_then(|backend_id| state.sandboxes.remove(&backend_id))
+            let Some(backend_id) = state.session_index.remove(session_id) else {
+                return Ok(());
+            };
+            let Some(entry) = state.sandboxes.get_mut(&backend_id) else {
+                return Ok(());
+            };
+            entry.session_ids.remove(session_id);
+            if entry.session_ids.is_empty() {
+                state.sandboxes.remove(&backend_id)
+            } else {
+                None
+            }
         };
 
         if let Some(instance) = removed {
@@ -417,20 +448,18 @@ fn resolve_sandbox_backend_config(
         .map_err(SandboxError::from_build_error)
 }
 
-fn requested_backend_id(
-    backend_id: Option<String>,
-    session_id: Option<&str>,
-) -> Result<BackendId, SandboxError> {
-    match (backend_id, session_id) {
-        (Some(backend_id), Some(session_id)) if backend_id != session_id => {
-            Err(SandboxError::InvalidRequest {
-                message: "backend_id must match session_id when both are provided".to_string(),
-            })
-        }
-        (Some(backend_id), _) => Ok(BackendId(backend_id)),
-        (None, Some(session_id)) => Ok(BackendId(session_id.to_string())),
-        (None, None) => Ok(BackendId(format!("sbx_{}", uuid::Uuid::new_v4().simple()))),
+fn requested_backend_id(backend_id: Option<String>) -> Result<BackendId, SandboxError> {
+    match backend_id {
+        Some(backend_id) if backend_id.trim().is_empty() => Err(SandboxError::InvalidRequest {
+            message: "backend_id cannot be empty".to_string(),
+        }),
+        Some(backend_id) => Ok(BackendId(backend_id)),
+        None => Ok(new_backend_id()),
     }
+}
+
+fn new_backend_id() -> BackendId {
+    BackendId(format!("sbx_{}", uuid::Uuid::new_v4().simple()))
 }
 
 fn expires_at_ms_from_timeout(timeout_secs: u64) -> u64 {
@@ -498,7 +527,10 @@ async fn build_managed_backend(
         config: input.config,
         workspace_root: input.workspace_root_text,
         config_hash: input.config_hash,
-        session_id: input.session_id,
+        session_ids: input
+            .session_id
+            .map(|session_id| BTreeMap::from([(session_id, ())]))
+            .unwrap_or_default(),
         expires_at_ms: input.expires_at_ms,
     })
 }
@@ -545,6 +577,7 @@ fn control_error_to_operation_error(error: BackendControlError) -> OperationErro
 
 impl BackendInstanceEntry {
     fn info(&self) -> SandboxInfo {
+        let session_ids = self.session_ids.keys().cloned().collect::<Vec<_>>();
         SandboxInfo {
             backend_id: self.instance.backend_id.0.clone(),
             provider: self.instance.provider.0.clone(),
@@ -554,7 +587,12 @@ impl BackendInstanceEntry {
             endpoint: self.instance.endpoint.clone(),
             metadata: self.instance.metadata.clone(),
             resources: self.instance.resources,
-            session_id: self.session_id.clone(),
+            session_id: if session_ids.len() == 1 {
+                session_ids.first().cloned()
+            } else {
+                None
+            },
+            session_ids,
             expires_at_ms: self.expires_at_ms,
         }
     }
@@ -698,12 +736,13 @@ mod tests {
         let first_backend = first.backend();
         let second_backend = second.backend();
         assert_eq!(first.instance(), second.instance());
-        assert_eq!(first.instance().backend_id.0, "s1");
+        assert!(first.instance().backend_id.0.starts_with("sbx_"));
+        assert_ne!(first.instance().backend_id.0, "s1");
         assert!(Arc::ptr_eq(&first_backend, &second_backend));
     }
 
     #[tokio::test]
-    async fn manager_splits_backends_by_session_but_rejects_same_session_config_drift() {
+    async fn manager_does_not_implicitly_reuse_backend_across_sessions() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let root = workspace.path().to_path_buf();
@@ -785,10 +824,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_create_requires_matching_session_and_backend_ids() {
+    async fn sandbox_create_allows_session_id_and_independent_backend_id() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
-        let result = manager
+        let created = manager
             .create_sandbox(SandboxCreateRequest {
                 workspace_root: workspace.path().to_path_buf(),
                 backend_id: Some("backend-a".to_string()),
@@ -799,9 +838,56 @@ mod tests {
                 resource_limits: BackendResourceLimits::default(),
                 options: Some(temp_options(&workspace)),
             })
-            .await;
+            .await
+            .expect("create sandbox");
 
-        assert!(matches!(result, Err(SandboxError::InvalidRequest { .. })));
+        assert_eq!(created.backend_id, "backend-a");
+        assert_eq!(created.session_id.as_deref(), Some("session-a"));
+        assert_eq!(created.session_ids, vec!["session-a".to_string()]);
+
+        let lease = manager
+            .ensure_session_backend(local_request(
+                "session-a",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("session lease");
+        assert_eq!(lease.instance().backend_id.0, "backend-a");
+    }
+
+    #[tokio::test]
+    async fn connect_sandbox_explicitly_attaches_session_to_existing_backend() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new();
+        let root = workspace.path().to_path_buf();
+        let first = manager
+            .ensure_session_backend(local_request("s1", root.clone(), temp_options(&workspace)))
+            .await
+            .expect("first lease");
+        let backend_id = first.instance().backend_id.0;
+
+        let connected = manager
+            .connect_sandbox(
+                &backend_id,
+                SandboxConnectRequest {
+                    timeout: None,
+                    session_id: Some("s2".to_string()),
+                },
+            )
+            .await
+            .expect("connect sandbox");
+        assert_eq!(
+            connected.session_ids,
+            vec!["s1".to_string(), "s2".to_string()]
+        );
+
+        let second = manager
+            .ensure_session_backend(local_request("s2", root, temp_options(&workspace)))
+            .await
+            .expect("second lease");
+        assert_eq!(first.instance(), second.instance());
+        assert!(Arc::ptr_eq(&first.backend(), &second.backend()));
     }
 
     #[tokio::test]

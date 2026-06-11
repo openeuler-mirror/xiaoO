@@ -581,7 +581,8 @@ mod tests {
         let instance = record.backend_instance.expect("backend instance");
         assert_eq!(instance.state, BackendLifecycleState::Active);
         assert_eq!(instance.session_id, "s1");
-        assert_eq!(instance.backend_id.0, "s1");
+        assert!(instance.backend_id.0.starts_with("sbx_"));
+        assert_ne!(instance.backend_id.0, "s1");
 
         let saved = store.load("s1").await.expect("saved session");
         let saved_instance = saved.backend_instance.expect("saved backend instance");
