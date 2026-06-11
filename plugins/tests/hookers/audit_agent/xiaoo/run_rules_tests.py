@@ -39,7 +39,7 @@ from pathlib import Path
 
 # ── 默认值 ──────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parents[5]  # 回到 xiaoO 根目录
+PROJECT_ROOT = SCRIPT_DIR.parents[4]  # 回到 xiaoO 根目录
 DEFAULT_BIN = PROJECT_ROOT / "target" / "release" / "xiaoo"
 DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_TURNS = 3

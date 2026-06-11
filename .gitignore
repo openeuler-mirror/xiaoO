@@ -17,6 +17,7 @@ __pycache__/
 .xiaoo
 
 **/tests/
+!plugins/tests/
 
 .claude/
 .vscode/

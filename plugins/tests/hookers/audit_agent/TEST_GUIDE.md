@@ -38,7 +38,7 @@ ls target/release/xiaoo && echo "OK"
 
 ```bash
 # 确认 plugin.json 存在
-ls plugins/hookers/audit_agent/plugin.json
+ls plugins/tests/hookers/audit_agent/plugin.json
 
 # 确认 Python 虚拟环境正常
 plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3 -c "print('ok')"
@@ -75,7 +75,7 @@ export ZHIPU_API_KEY="YOUR_API_KEY"
 ### 2.1 一条命令跑全部 rules 测试
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 
 # 只需提供 api_key，LLM 配置自动从 ~/.config/xiaoo/config.toml 读取
 python3 run_rules_tests.py --api-key "your-api-key"
@@ -150,7 +150,7 @@ python3 run_rules_tests.py --config /path/to/custom_config.toml
 `run-all.sh` 运行已有的 `run-allow-*.sh` 和 `run-deny-*.sh` 脚本：
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd plugins/tests/hookers/audit_agent/xiaoo
 
 export XIAOO_BIN=./target/release/xiaoo
 export XIAOO_CONFIG=~/.config/xiaoo/config.toml
@@ -193,7 +193,7 @@ sed -i 's/^enabled = true/enabled = false/' plugins/hookers/cerberus_bash_contro
 运行 cerberus 测试：
 
 ```bash
-cd plugins/hookers/audit_agent/audit_policy_checker/tests/xiaoo/rules/cerberus
+cd plugins/tests/hookers/audit_agent/xiaoo/rules/cerberus
 bash test_cerberus_via_xiaoo.sh
 ```
 
@@ -264,31 +264,34 @@ export ZHIPU_API_KEY="your-api-key"
 ### 4.1 目录结构
 
 ```
-tests/xiaoo/
-├── run_rules_tests.py          # rules/ JSON 用例自动化脚本
-├── run-all.sh                  # 已有 shell 脚本批量运行
-├── run-allow-*.sh              # Allow 场景（合法操作不被误拦）
-├── run-deny-*.sh               # Deny 场景（危险操作被拦截）
-└── rules/
-    ├── level-1/                # Layer 1: 基础规则匹配（33 条）
-    │   ├── sudo.json           # 提权执行
-    │   ├── rm_rf.json          # 递归删除
-    │   ├── curl_POST.json      # curl POST 请求
-    │   ├── etc_passwd.json     # 访问系统文件
-    │   └── ...
-    ├── level-2/                # Layer 2: 逻辑规则（4 条）
-    │   ├── read_before_write.json
-    │   ├── intent_consistency.json
-    │   ├── sensitive_paths.json
-    │   └── dangerous_patterns.json
-    ├── level-3/                # Layer 3: 深度分析（13 条）
-    │   ├── reverse_shell_nc.json
-    │   ├── supply_chain_typosquatting.json
-    │   ├── curl_shadow_exfil.json
-    │   └── ...
-    └── cerberus/               # 内核级沙箱保护
-        ├── test_cerberus_via_xiaoo.sh
-        └── xiaoo_guardian_protection.json
+plugins/tests/hookers/audit_agent/
+├── xiaoo/
+│   ├── run_rules_tests.py          # rules/ JSON 用例自动化脚本
+│   ├── run-all.sh                  # 已有 shell 脚本批量运行
+│   ├── run-allow-*.sh              # Allow 场景（合法操作不被误拦）
+│   ├── run-deny-*.sh               # Deny 场景（危险操作被拦截）
+│   └── rules/
+│       ├── level-1/                # Layer 1: 基础规则匹配（33 条）
+│       │   ├── sudo.json           # 提权执行
+│       │   ├── rm_rf.json          # 递归删除
+│       │   ├── curl_POST.json      # curl POST 请求
+│       │   ├── etc_passwd.json     # 访问系统文件
+│       │   └── ...
+│       ├── level-2/                # Layer 2: 逻辑规则（4 条）
+│       │   ├── read_before_write.json
+│       │   ├── intent_consistency.json
+│       │   ├── sensitive_paths.json
+│       │   └── dangerous_patterns.json
+│       ├── level-3/                # Layer 3: 深度分析（13 条）
+│       │   ├── reverse_shell_nc.json
+│       │   ├── supply_chain_typosquatting.json
+│       │   ├── curl_shadow_exfil.json
+│       │   └── ...
+│       └── cerberus/               # 内核级沙箱保护
+│           ├── test_cerberus_via_xiaoo.sh
+│           └── xiaoo_guardian_protection.json
+├── cases/                          # auditagent CLI 测试用例
+└── test_fastpass.py                # 快速放行集成测试
 ```
 
 ### 4.2 JSON 用例格式
@@ -379,32 +382,66 @@ LLM 输出有随机性，同一个 Deny 用例有时 PASS 有时 FAIL，原因�
 - 网络隔离（eBPF）：需要 root 或 `CAP_BPF`
 - 无 root 时禁用 eBPF 网络策略即可（不影响文件保护测试）
 
+### Q: 同一用例多次运行，拦截层级不同，是否正常？
+
+正常。LLM 模型对相同 prompt 的工具调用行为存在不确定性，会导致 audit_agent 的拦截层级不同，但不影响安全性。
+
+**典型场景：用户 prompt 包含敏感路径（如 "读取/etc/passwd"）**
+
+模型可能产生两种行为：
+
+| 模型行为 | audit_agent 拦截层级 | 结果 |
+|----------|---------------------|------|
+| 模型调用 `file_read /etc/passwd` | Layer 1.1 启发式检测（正则匹配 `/etc/passwd`）| 直接 Deny |
+| 模型调用 `skill("xiaoo-guardian")` | Layer 1.3 LLM 分析（判断意图不一致） | 兜底 Deny |
+
+**两种情况下敏感操作均未成功执行，安全性不受影响。**
+
+由于模型行为不确定，同一用例多次运行可能产生不同的拦截日志。这属于正常现象，不影响测试结果判定——只要敏感操作被拦截（无论哪一层），用例即为 PASS。
+
 ---
 
 ## 6. RPM 安装环境测试
 
-通过 RPM 安装 xiaoO-hookers 后，audit_agent 安装到 `/usr/lib/.xiaoo/hookers/audit_agent/`，测试脚本需要额外指定二进制和 plugin.json 路径。
+### 6.1 安装 RPM 包
 
-### 6.1 前置条件
-
-确认 RPM 包已安装：
+需要安装两个包：
 
 ```bash
-rpm -qa | grep xiaoO
+# 安装 xiaoO-hookers（audit_agent 主程序 + plugin.json）
+sudo dnf install ./xiaoO-hookers-*.rpm
+
+# 安装 xiaoO-hookers-tests（测试用例）
+sudo dnf install ./xiaoO-hookers-tests-*.rpm
 ```
 
-预期输出包含 `xiaoO-hookers-*`。
+安装后目录结构：
+
+```
+/usr/lib/.xiaoo/
+├── hookers/audit_agent/           # xiaoO-hookers 安装
+│   ├── plugin.json
+│   ├── audit.py
+│   ├── audit_policy_checker/
+│   └── ...
+└── tests/hookers/audit_agent/     # xiaoO-hookers-tests 安装
+    └── xiaoo/
+        ├── run_rules_tests.py
+        └── rules/
+```
 
 ### 6.2 运行全部 rules 测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
 
 python3 run_rules_tests.py \
   --api-key "your-api-key" \
   --bin /usr/bin/xiaoo \
   --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
 ```
+
+`--plugin-json` 必须指定，因为测试脚本的 `SCRIPT_DIR` 在 `/usr/lib/.xiaoo/tests/` 下，无法自动推测 `plugin.json` 在 `/usr/lib/.xiaoo/hookers/` 下的位置。
 
 ### 6.3 常用参数
 
@@ -433,18 +470,19 @@ python3 run_rules_tests.py \
 ### 6.4 使用 Shell 脚本测试
 
 ```bash
-cd /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker/tests/xiaoo
+cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
 
 export XIAOO_BIN=/usr/bin/xiaoo
 export XIAOO_CONFIG=~/.config/xiaoo/config.toml
-export ZHIPU_API_KEY="your-api-key"
 bash run-deny-01-passwd.sh
 bash run-allow-01-read-log.sh
 ```
 
+Shell 脚本使用的 API Key 从 `~/.config/xiaoo/config.toml` 的 `api_key_env` 字段读取，需提前 `export` 对应的环境变量。
+
 ### 6.5 注意事项
 
-- **`--plugin-json` 参数是必需的**：RPM 安装路径下，测试脚本无法自动推测 plugin.json 位置，必须显式指定
-- **`--bin` 参数**：RPM 安装后 xiaoo 在 `/usr/bin/xiaoo`，与开发环境不同
+- **`--plugin-json` 参数是必需的**：RPM 环境下测试脚本和 plugin.json 分属两个不同的 RPM 包，路径不连续，必须显式指定
+- **`--bin` 参数**：RPM 安装后 xiaoo 在 `/usr/bin/xiaoo`，与开发环境的 `target/release/xiaoo` 不同
 - **LLM 配置**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM，可省略 `--api-key`、`--provider`、`--model` 等参数，脚本会自动读取
 - **日志位置**：可通过 `AUDIT_LOG_PATH` 环境变量指定 audit_agent 日志路径
