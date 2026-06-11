@@ -473,7 +473,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 类型 | 白名单 |
 |------|--------|
 | 工具类型 | `ask_user_question`、`glob`、`list_dir`、`ls`、`count_text_length`、`filemgr-globfiles` |
-| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command` |
+| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command`、`whoami`、`id`、`hostname`、`uname`、`date`、`env`、`printenv`、`tty`、`arch`、`uptime`、`groups`、`logname` |
 
 #### Tier 2：只读敏感 — 跳过 L3，保留 L2
 
@@ -488,6 +488,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 - 管道命令（`|`）和链式命令（`&&`/`||`）只提取第一段命令进行匹配
 - 白名单匹配不区分大小写
 - 层1 命中 high/critical 时，即使工具在白名单中也会被拦截（安全优先）
+- **安全兜底**：白名单放行前，用 `CommandPatternScanner` 扫描完整命令，如果管道尾部包含 high/critical 危险模式（如 `echo ... | passwd`），则不允许白名单放行，避免管道前段命令（`echo`）被误判为安全导致绕过
 
 **性能效果**：
 
@@ -523,6 +524,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 2.2 意图一致性 | 对比 `prompt_session` 与 `a_next` | 需要用户原始 prompt |
 | 2.3 敏感路径访问 | 路径匹配 | `action_detail` 中的路径 |
 | 2.4 危险操作模式 | 通配符+重定向模式 | `action_detail` 中的操作模式 |
+| 2.5 密码修改授权 | 非交互式密码修改 + `ask_user_question` 历史 | `action_detail` + `action_history` |
 
 **本质**：动作与上下文的**逻辑关系审查**，"你说的和做的是不是一回事"。
 
@@ -621,6 +623,12 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `curl POST ... env/secret/key` | high | curl POST 外传敏感信息 |
 | `/dev/zero`/`/dev/random` 等 | high | 访问设备文件 |
 | `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录（系统级/用户级） |
+| `\| passwd` | high | 管道方式非交互式密码修改 |
+| `passwd --stdin` | high | passwd --stdin 非交互式密码输入 |
+| `chpasswd` | high | 批量密码修改 |
+| `newusers` | high | 批量用户添加 |
+| `passwd -d` | high | 删除用户密码 |
+| `passwd -l` | high | 锁定用户账户 |
 
 **扫描示例**：
 ```
@@ -738,6 +746,25 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 重定向覆盖关键目录 | `> /etc/xxx`、`> /boot/xxx`、`> /proc/xxx` | critical |
 
 > 注意：`file_write`/`file_edit` 类型动作豁免此检测，因为 `action_detail` 包含文件内容而非命令，避免误判。
+
+#### 2.5 密码修改授权检测
+
+非交互式密码修改命令（`echo ... | passwd`、`chpasswd`、`passwd --stdin`、`passwd -d`、`passwd -l` 等）必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码，否则拦截。交互式 `passwd`（无参数）不在此列，因为 LLM 无法完成交互式输入。
+
+**扫描示例**：
+```
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = []
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 未发现 ask_user_question 操作
+结果: Deny, reason="执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作"
+
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = [{"action_type": "ask_user_question", "output": "newpass"}]
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 发现 ask_user_question 且用户已返回密码
+结果: 通过（用户已授权）
+```
 
 **扫描示例**：
 ```
@@ -867,6 +894,7 @@ LLM 返回结构化 JSON：
               │  │ 2.2 意图一致性检测               ││
               │  │ 2.3 敏感路径访问检测             ││
               │  │ 2.4 危险操作模式检测             ││
+              │  │ 2.5 密码修改授权检测             ││
               │  └──────────────┬──────────────────┘│
               └─────────────────┼───────────────────┘
                     high/critical?──── Yes ───→ Deny
