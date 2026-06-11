@@ -1,6 +1,5 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, SessionOpenRequest, SessionRecord, SessionStreamMode,
-    SessionSubmitReceipt, SessionSubscription,
+    AppTurnRequest, AppTurnResult, SessionOpenRequest, SessionRecord, SessionSubmitReceipt,
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
@@ -91,16 +90,6 @@ pub trait SessionControlPlane: Send + Sync {
     ) -> Result<SessionSubmitReceipt, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
             capability: "submit_input".to_string(),
-        })
-    }
-
-    async fn subscribe(
-        &self,
-        _session_id: &str,
-        _mode: SessionStreamMode,
-    ) -> Result<SessionSubscription, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "subscribe".to_string(),
         })
     }
 }

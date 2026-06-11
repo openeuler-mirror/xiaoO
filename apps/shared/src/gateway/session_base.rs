@@ -1,6 +1,17 @@
-use crate::gateway::{AppTurnRequest, AppTurnResult, GatewayEntryContext, SessionRecord};
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use crate::gateway::{AppTurnRequest, GatewayEntryContext};
+use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
+
+pub fn channel_session_id(
+    channel: &str,
+    channel_instance_id: Option<&str>,
+    conversation_id: &str,
+) -> String {
+    let scope = channel_instance_id.unwrap_or(channel);
+    format!("{scope}:{conversation_id}")
+}
+
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionOpenRequest {
@@ -35,13 +46,6 @@ impl SessionOpenRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionStreamMode {
-    StructuredEvents,
-    TextDeltas,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionInput {
@@ -73,48 +77,4 @@ pub enum SessionInputKind {
 pub struct SessionSubmitReceipt {
     pub session_id: String,
     pub accepted_kind: SessionInputKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionSubscription {
-    pub session_id: String,
-    pub subscription_id: String,
-    pub stream_mode: SessionStreamMode,
-}
-
-#[derive(Debug, Clone)]
-pub enum SessionEvent {
-    SessionOpened {
-        record: SessionRecord,
-    },
-    SessionResumed {
-        record: SessionRecord,
-    },
-    SessionStatusChanged {
-        session_id: String,
-        status: crate::gateway::SessionLifecycleStatus,
-    },
-    TurnAccepted {
-        session_id: String,
-    },
-    TextDelta {
-        session_id: String,
-        delta: String,
-    },
-    InteractionRequested {
-        session_id: String,
-        request: InteractionRequest,
-    },
-    TurnCompleted {
-        session_id: String,
-        result: AppTurnResult,
-    },
-    TurnFailed {
-        session_id: String,
-        error: String,
-    },
-    SessionClosed {
-        record: SessionRecord,
-        forced: bool,
-    },
 }

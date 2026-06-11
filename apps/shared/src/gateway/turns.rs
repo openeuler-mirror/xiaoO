@@ -1,5 +1,6 @@
 use agent_types::ReasoningEffort;
 use serde::{Deserialize, Serialize};
+use agent_types::ChatMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -10,6 +11,18 @@ pub enum GatewayEntryKind {
     ScheduledJob,
     Cli,
 }
+
+#[derive(Debug, Clone)]
+pub struct AppTurnResult {
+    pub raw_reply: String,
+    pub visible_reply: String,
+    pub messages: Vec<ChatMessage>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_input_tokens: u64,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct GatewayEntryContext {

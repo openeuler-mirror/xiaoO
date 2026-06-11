@@ -12,17 +12,15 @@ pub mod runtime_bindings;
 pub mod runtime_factory;
 pub mod runtime_resolver;
 mod session_backend;
+pub mod session_base;
 mod session_handle;
-pub mod session_keys;
-pub mod session_protocol;
 pub mod session_record;
 pub mod session_service;
 pub mod session_store;
 pub mod session_supervisor;
 pub mod session_worker;
 pub mod subagent_interaction;
-pub mod turn_request;
-pub mod turn_result;
+pub mod turns;
 pub mod workspace_prompt;
 
 pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
@@ -39,14 +37,9 @@ pub use runtime_resolver::{
     ResolvedSessionRuntime, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
-pub use session_keys::channel_session_id;
-pub use session_protocol::{
-    SessionEvent, SessionInput, SessionInputKind, SessionOpenRequest, SessionStreamMode,
-    SessionSubmitReceipt, SessionSubscription,
-};
+pub use session_base:: {channel_session_id, SessionInput, SessionInputKind, SessionOpenRequest, SessionSubmitReceipt} ;
 pub use session_record::{SessionLifecycleStatus, SessionRecord};
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
-pub use turn_request::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, TurnMention};
-pub use turn_result::AppTurnResult;
+pub use turns::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, TurnMention, AppTurnResult};
 pub use workspace_prompt::compose_workspace_system_prompt;

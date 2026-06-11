@@ -71,7 +71,13 @@ impl CoreBackedSessionService {
     }
 
     async fn get_or_create_session_handle(&self, session: SessionRecord) -> SessionHandle {
-        if let Some(existing) = self.sessions_handler.lock().await.get(&session.session_id).cloned() {
+        if let Some(existing) = self
+            .sessions_handler
+            .lock()
+            .await
+            .get(&session.session_id)
+            .cloned()
+        {
             return existing.clone();
         }
 
