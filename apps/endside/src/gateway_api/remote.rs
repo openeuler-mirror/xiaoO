@@ -7,7 +7,10 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
-use crate::gateway::{AppTurnRequest, GatewayEntryContext, SessionOpenRequest};
+use crate::gateway::{
+    AppTurnRequest, GatewayEntryContext, SessionCancelRequest, SessionInteractionRequest,
+    SessionOpenRequest,
+};
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
@@ -268,8 +271,14 @@ impl GatewayRuntime {
         };
         tokio::spawn(async move {
             let client = reqwest::Client::new();
-            let path = format!("/api/v1/sessions/{session_id}/cancel");
-            let _ = post_empty(&client, &remote, token.as_deref(), &path).await;
+            let _ = post_json(
+                &client,
+                &remote,
+                token.as_deref(),
+                "/api/v1/sessions/cancel",
+                &SessionCancelRequest { session_id },
+            )
+            .await;
         });
     }
 
@@ -448,8 +457,17 @@ async fn handle_remote_event(
                 }
                 let response = map_response(&request, result)
                     .unwrap_or_else(|| default_interaction_response(&request));
-                let path = format!("/api/v1/sessions/{session_id}/interaction");
-                let _ = post_json(client, remote, token, &path, &response).await;
+                let _ = post_json(
+                    client,
+                    remote,
+                    token,
+                    "/api/v1/sessions/interaction",
+                    &SessionInteractionRequest {
+                        session_id: session_id.to_string(),
+                        response,
+                    },
+                )
+                .await;
                 break;
             }
         }
@@ -494,24 +512,6 @@ fn resolve_bearer_token(env_name: Option<&str>) -> Result<Option<String>, String
         return Err(format!("remote bearer token env var {env_name} is empty"));
     }
     Ok(Some(value))
-}
-
-async fn post_empty(
-    client: &reqwest::Client,
-    remote: &RemoteRuntimeConfig,
-    token: Option<&str>,
-    path: &str,
-) -> Result<(), String> {
-    let mut request = client.post(format!("{}{}", remote.base_url, path));
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().await.map_err(|error| error.to_string())?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(format!("HTTP {}", response.status()))
-    }
 }
 
 async fn post_json<T: Serialize + ?Sized>(

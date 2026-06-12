@@ -235,17 +235,10 @@ fn create_router_from_state(
             .route("/api/v1/sessions/open", post(handle_session_open))
             .route("/api/v1/sessions/input", post(handle_session_input))
             .route(
-                "/api/v1/sessions/:session_id/input",
-                post(handle_session_input_with_path),
-            )
-            .route(
-                "/api/v1/sessions/:session_id/interaction",
+                "/api/v1/sessions/interaction",
                 post(handle_session_interaction),
             )
-            .route(
-                "/api/v1/sessions/:session_id/cancel",
-                post(handle_session_cancel),
-            )
+            .route("/api/v1/sessions/cancel", post(handle_session_cancel))
             .route("/api/v1/sessions/close", post(handle_session_close)),
         bearer_auth.clone(),
     );
@@ -377,24 +370,6 @@ async fn handle_session_input(
     stream_session_input(state, payload.session_id.clone(), payload).await
 }
 
-async fn handle_session_input_with_path(
-    State(state): State<Arc<GatewayAppState>>,
-    Path(session_id): Path<String>,
-    Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
-) -> Response {
-    if payload.session_id != session_id {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(GatewayErrorResponse {
-                error: "path session_id does not match request session_id".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    stream_session_input(state, session_id, payload).await
-}
-
 async fn stream_session_input(
     state: Arc<GatewayAppState>,
     session_id: String,
@@ -446,10 +421,13 @@ async fn stream_session_input(
 
 async fn handle_session_interaction(
     State(state): State<Arc<GatewayAppState>>,
-    Path(session_id): Path<String>,
-    Json(payload): Json<InteractionResponse>,
+    Json(payload): Json<xiaoo_shared::gateway::SessionInteractionRequest>,
 ) -> Response {
-    if state.remote_interactions.answer(&session_id, payload).await {
+    if state
+        .remote_interactions
+        .answer(&payload.session_id, payload.response)
+        .await
+    {
         StatusCode::NO_CONTENT.into_response()
     } else {
         (
@@ -464,8 +442,9 @@ async fn handle_session_interaction(
 
 async fn handle_session_cancel(
     State(state): State<Arc<GatewayAppState>>,
-    Path(session_id): Path<String>,
+    Json(payload): Json<xiaoo_shared::gateway::SessionCancelRequest>,
 ) -> Response {
+    let session_id = payload.session_id;
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return Json(SseStreamEvent::Cancelled { session_id }).into_response();
     };
