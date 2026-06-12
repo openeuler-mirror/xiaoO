@@ -38,6 +38,15 @@ impl Input {
         self.cursor
     }
 
+    /// Get display value (for password input, return masked string like "****")
+    pub fn display_value(&self, is_secret: bool) -> String {
+        if is_secret {
+            "*".repeat(self.value.chars().count())
+        } else {
+            self.value.clone()
+        }
+    }
+
     pub fn visual_cursor(&self) -> usize {
         self.value
             .chars()

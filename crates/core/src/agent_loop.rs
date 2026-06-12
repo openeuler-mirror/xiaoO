@@ -556,7 +556,7 @@ async fn compress(
         .map(|id| id.0.clone())
         .unwrap_or_default();
 
-    // begin span — 记录开始时的基础元数据
+    // begin span — record baseline metadata at start
     let compression_span = if let Some(rv) = ctx.input.runtime_view.clone() {
         Some(
             rv.trace_recorder()
@@ -592,7 +592,7 @@ async fn compress(
         "compression analysis"
     );
 
-    // update span — 记录分析结果
+    // update span — record analysis results
     if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span.as_ref()) {
         rv.trace_recorder()
             .update_span(
@@ -610,7 +610,7 @@ async fn compress(
     }
 
     if !trigger.is_forced() && !analysis.needs_compression() {
-        // end span — 无需压缩，正常结束
+        // end span — no compression needed, normal end
         if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
             rv.trace_recorder()
                 .end_span(span, TraceOutcome::Ok, json!({ "skipped": true }))
@@ -648,7 +648,7 @@ async fn compress(
                 "context compression triggered"
             );
 
-            // end span — 压缩成功，记录输出信息
+            // end span — compression succeeded, record output info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -674,7 +674,7 @@ async fn compress(
             Ok(())
         }
         Err(e) => {
-            // end span — 压缩失败，记录错误信息
+            // end span — compression failed, record error info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), compression_span) {
                 rv.trace_recorder()
                     .end_span(span, TraceOutcome::Error, json!({ "error": e.to_string() }))
@@ -715,7 +715,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         .map(|id| id.0.clone())
         .unwrap_or_default();
 
-    // begin span — 记录开始时的基础元数据
+    // begin span — record baseline metadata at start
     let prompt_build_span = if let Some(rv) = ctx.input.runtime_view.clone() {
         Some(
             rv.trace_recorder()
@@ -751,7 +751,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         budget: ctx.snapshot.token_budget_config.clone(),
     };
 
-    // update span — 记录构建完成的 input 维度信息
+    // update span — record input dimension info after build completion
     if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span.as_ref()) {
         rv.trace_recorder()
             .update_span(
@@ -776,7 +776,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
     match result {
         Ok(mut result) => {
             result.request.reasoning_effort = ctx.input.reasoning_effort;
-            // end span — 成功，记录估算 token 数等输出信息
+            // end span — success, record estimated token count and other output info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -794,7 +794,7 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
             Ok(())
         }
         Err(e) => {
-            // end span — 失败，记录错误信息
+            // end span — failure, record error info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
                     .end_span(
@@ -828,6 +828,11 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
+
+    // Extract secrets from message history to filter in assistant messages
+    let messages = ctx.state.messages.read().clone();
+    let secrets = extract_secrets_from_messages(&messages);
+
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
         ctx.snapshot
             .llm_provider
@@ -857,6 +862,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                     &streamed_text,
                     &streamed_reasoning,
                     chunk,
+                    &secrets,
                 );
             })
             .await?
@@ -891,7 +897,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             if streamed_text != *text {
                 let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
                 let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
-                sink.on_assistant_message(agent_id, text);
+                let filtered_text = filter_secrets_in_text(text, &secrets);
+                sink.on_assistant_message(agent_id, &filtered_text);
             }
         }
     }
@@ -1071,6 +1078,7 @@ fn stream_assistant_chunk(
     streamed_text: &Mutex<String>,
     streamed_reasoning: &Mutex<String>,
     chunk: StreamChunk,
+    secrets: &[String],
 ) {
     if let Some(delta_reasoning) = chunk.delta_reasoning {
         let snapshot = {
@@ -1081,7 +1089,8 @@ fn stream_assistant_chunk(
             full_reasoning.clone()
         };
         if let Some(sink) = sink {
-            sink.on_assistant_reasoning(agent_id, &snapshot);
+            let filtered_reasoning = filter_secrets_in_text(&snapshot, secrets);
+            sink.on_assistant_reasoning(agent_id, &filtered_reasoning);
         }
     }
 
@@ -1095,7 +1104,8 @@ fn stream_assistant_chunk(
         };
 
         if let Some(sink) = sink {
-            sink.on_assistant_message(agent_id, &snapshot);
+            let filtered_text = filter_secrets_in_text(&snapshot, secrets);
+            sink.on_assistant_message(agent_id, &filtered_text);
         }
     }
 }
@@ -1216,6 +1226,17 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         if let Some(ref sink) = ctx.input.event_sink {
             let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
             let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+
+            let messages = ctx.state.messages.read().clone();
+            let secrets = extract_secrets_from_messages(&messages);
+            let args_preview = serde_json::to_string_pretty(&inv.input)
+                .unwrap_or_else(|_| inv.input.to_string());
+            let filtered_args_preview = if inv.tool_name == "bash" {
+                filter_bash_args_preview(&args_preview, &secrets)
+            } else {
+                args_preview
+            };
+
             sink.on_tool_result(
                 agent_id,
                 &ToolResultEvent {
@@ -1223,8 +1244,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                     tool_name: inv.tool_name.clone(),
                     output_preview: invalid_tool_call_message(inv),
                     is_error: true,
-                    args_preview: serde_json::to_string_pretty(&inv.input)
-                        .unwrap_or_else(|_| inv.input.to_string()),
+                    args_preview: filtered_args_preview,
                 },
             );
         }
@@ -1374,7 +1394,15 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
     let (output_preview, is_error) = match result {
         ToolExecutionResult::Completed { raw_outcome, .. } => {
             let preview = match raw_outcome {
-                RawToolOutcome::Success { output } => output.chars().take(200).collect(),
+                RawToolOutcome::Success { output } => {
+                    // Filter password for ask_user_question tool
+                    let tool_name = result.tool_name();
+                    if tool_name == "ask_user_question" {
+                        filter_ask_user_question_output(output)
+                    } else {
+                        output.chars().take(200).collect()
+                    }
+                }
                 RawToolOutcome::Error { message } => message.chars().take(200).collect(),
             };
             (preview, false)
@@ -1395,6 +1423,18 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
     if should_emit {
         let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
         let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+
+        // Extract secrets and filter args_preview for bash commands
+        let messages = ctx.state.messages.read().clone();
+        let secrets = extract_secrets_from_messages(&messages);
+        let args_preview = serde_json::to_string_pretty(&result.final_call().input)
+            .unwrap_or_else(|_| result.final_call().input.to_string());
+        let filtered_args_preview = if result.tool_name() == "bash" {
+            filter_bash_args_preview(&args_preview, &secrets)
+        } else {
+            args_preview
+        };
+
         sink.on_tool_result(
             agent_id,
             &ToolResultEvent {
@@ -1402,11 +1442,116 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
                 tool_name: result.tool_name().to_string(),
                 output_preview,
                 is_error,
-                args_preview: serde_json::to_string_pretty(&result.final_call().input)
-                    .unwrap_or_else(|_| result.final_call().input.to_string()),
+                args_preview: filtered_args_preview,
             },
         );
     }
+}
+
+/// Filter password in ask_user_question output for display
+fn filter_ask_user_question_output(output: &str) -> String {
+    // Try to parse as AskUserQuestionOutput and filter display_value
+    if let Ok(mut json_value) = serde_json::from_str::<serde_json::Value>(output) {
+        if let Some(answers) = json_value.get_mut("answers") {
+            if let Some(answers_array) = answers.as_array_mut() {
+                for answer in answers_array {
+                    // For Text type answers with display_value, use display_value instead of value
+                    if let Some(kind) = answer.get("kind") {
+                        if kind.as_str() == Some("text") {
+                            // Get display_value first
+                            let display_value = answer.get("display_value").and_then(|v| {
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.clone())
+                                }
+                            });
+
+                            // If display_value exists, replace value
+                            if let Some(display_val) = display_value {
+                                if let Some(obj) = answer.as_object_mut() {
+                                    obj["value"] = display_val;
+                                    obj.remove("display_value");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Serialize back and take first 200 chars
+        if let Ok(filtered_output) = serde_json::to_string(&json_value) {
+            return filtered_output.chars().take(200).collect();
+        }
+    }
+    // Fallback: original output (first 200 chars)
+    output.chars().take(200).collect()
+}
+
+/// Extract secret values from message history for filtering in assistant messages
+fn extract_secrets_from_messages(messages: &[ChatMessage]) -> Vec<String> {
+    use agent_types::llm::ContentBlock;
+
+    messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Tool)
+        .flat_map(|m| m.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_name, output, .. } => {
+                if tool_name == "ask_user_question" {
+                    Some(output)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .filter_map(|output| serde_json::from_str::<serde_json::Value>(output).ok())
+        .filter_map(|json| json.get("answers").and_then(|a| a.as_array()).cloned())
+        .flatten()
+        .filter_map(|answer| {
+            let is_text = answer.get("kind").and_then(|k| k.as_str()) == Some("text");
+            let value = answer.get("value").and_then(|v| v.as_str());
+            // Only extract as secret if has display_value field (is_secret=true was used)
+            let has_display_value = answer.get("display_value")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            if is_text && has_display_value && value.map(|v| !v.is_empty()).unwrap_or(false) {
+                value.map(|v| v.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Filter secrets (passwords) in text by replacing them with <SECRET>
+fn filter_secrets_in_text(text: &str, secrets: &[String]) -> String {
+    let mut filtered = text.to_string();
+    for secret in secrets {
+        if filtered.contains(secret) {
+            filtered = filtered.replace(secret, "<SECRET>");
+        }
+    }
+    filtered
+}
+
+/// Filter password in bash args_preview (command field)
+fn filter_bash_args_preview(args_preview: &str, secrets: &[String]) -> String {
+    if let Ok(mut json_value) = serde_json::from_str::<serde_json::Value>(args_preview) {
+        if let Some(command) = json_value.get("command").and_then(|c| c.as_str()) {
+            let filtered_command = filter_secrets_in_text(command, secrets);
+            if let Some(obj) = json_value.as_object_mut() {
+                obj["command"] = serde_json::Value::String(filtered_command);
+            }
+        }
+        if let Ok(filtered) = serde_json::to_string_pretty(&json_value) {
+            return filtered;
+        }
+    }
+    // Fallback: filter entire string
+    filter_secrets_in_text(args_preview, secrets)
 }
 
 fn decide(ctx: &mut LoopContext<'_>) {
@@ -2500,12 +2645,171 @@ mod tests {
                     )
                 })
         });
-        assert!(
+assert!(
             paired,
             "synthesized tool_use must pair with a tool_result on the same id"
         );
     }
 
+    #[test]
+    fn test_filter_ask_user_question_output() {
+        // Test with display_value
+        let input_with_display = json!({
+            "answers": [{
+                "kind": "text",
+                "prompt": "Enter password",
+                "value": "real_password_123",
+                "display_value": "<SECRET>"
+            }]
+        }).to_string();
 
+        let filtered = filter_ask_user_question_output(&input_with_display);
 
+        // Should replace value with display_value
+        let filtered_json: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+        assert_eq!(filtered_json["answers"][0]["value"], "<SECRET>");
+        assert!(filtered_json["answers"][0].get("display_value").is_none());
+
+        // Test without display_value
+        let input_without_display = json!({
+            "answers": [{
+                "kind": "text",
+                "prompt": "Enter name",
+                "value": "John"
+            }]
+        }).to_string();
+
+        let filtered2 = filter_ask_user_question_output(&input_without_display);
+        let filtered2_json: serde_json::Value = serde_json::from_str(&filtered2).unwrap();
+        assert_eq!(filtered2_json["answers"][0]["value"], "John");
+
+        // Test with non-text type
+        let input_choice = json!({
+            "answers": [{
+                "kind": "choice",
+                "prompt": "Select option",
+                "value": "option1"
+            }]
+        }).to_string();
+
+        let filtered3 = filter_ask_user_question_output(&input_choice);
+        let filtered3_json: serde_json::Value = serde_json::from_str(&filtered3).unwrap();
+        assert_eq!(filtered3_json["answers"][0]["value"], "option1");
+
+        // Test with invalid JSON
+        let invalid = "not a json";
+        let filtered4 = filter_ask_user_question_output(invalid);
+        assert_eq!(filtered4, "not a json");
+    }
+
+    #[test]
+    fn test_extract_secrets_from_messages() {
+        use agent_types::llm::ContentBlock;
+
+        // Test 1: Only extract secrets with display_value (is_secret=true)
+        let message_with_secret = ChatMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                call_id: "call_1".to_string(),
+                tool_name: "ask_user_question".to_string(),
+                output: json!({
+                    "answers": [{
+                        "kind": "text",
+                        "prompt": "Password",
+                        "value": "secret123",
+                        "display_value": "<SECRET>"
+                    }]
+                }).to_string(),
+                is_error: false,
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        };
+
+        let message_with_normal_text = ChatMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                call_id: "call_2".to_string(),
+                tool_name: "ask_user_question".to_string(),
+                output: json!({
+                    "answers": [{
+                        "kind": "text",
+                        "prompt": "Username",
+                        "value": "john"
+                    }]
+                }).to_string(),
+                is_error: false,
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        };
+
+        let messages = vec![message_with_secret, message_with_normal_text];
+        let secrets = extract_secrets_from_messages(&messages);
+
+        // Should only extract the secret with display_value
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0], "secret123");
+        assert!(!secrets.contains(&"john".to_string()));
+
+        // Test 2: Multiple secrets in one answer
+        let message_multiple = ChatMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                call_id: "call_3".to_string(),
+                tool_name: "ask_user_question".to_string(),
+                output: json!({
+                    "answers": [
+                        {
+                            "kind": "text",
+                            "prompt": "Username",
+                            "value": "admin"
+                        },
+                        {
+                            "kind": "text",
+                            "prompt": "Password",
+                            "value": "pass123",
+                            "display_value": "<SECRET>"
+                        }
+                    ]
+                }).to_string(),
+                is_error: false,
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        };
+
+        let secrets2 = extract_secrets_from_messages(&vec![message_multiple]);
+        assert_eq!(secrets2.len(), 1);
+        assert_eq!(secrets2[0], "pass123");
+        assert!(!secrets2.contains(&"admin".to_string()));
+
+        // Test 3: Non-ask_user_question tool results should not be extracted
+        let message_other_tool = ChatMessage {
+            role: MessageRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                call_id: "call_4".to_string(),
+                tool_name: "bash".to_string(),
+                output: "some output with password123".to_string(),
+                is_error: false,
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        };
+
+        let secrets3 = extract_secrets_from_messages(&vec![message_other_tool]);
+        assert_eq!(secrets3.len(), 0);
+    }
 }

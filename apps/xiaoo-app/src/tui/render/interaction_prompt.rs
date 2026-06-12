@@ -1,10 +1,10 @@
-//! 交互式选项 + 可选补充输入（TUI 输入区上方）。
+//! Interactive options + optional supplementary input (above TUI input area).
 //!
-//! ## 与后端接线（预埋）
-//! - **入站**：任一线程构造 [`PromptRequest`] 后调用 `App::open_interaction_prompt`（见 `app.rs`）。
-//! - **出站**：通过打开时传入的 `UnboundedSender<UserPromptResult>` 将用户选择发回；
-//!   上层可写入会话、HTTP POST 或合并进下一轮 `ChatMessage`。
-//! - 入站：`SessionTurnUpdate::InteractionPrompt` 由 `poll_stream_updates` 打开本面板。
+//! ## Backend wiring (pre-built)
+//! - **Inbound**: Any thread constructs [`PromptRequest`] and calls `App::open_interaction_prompt` (see `app.rs`).
+//! - **Outbound**: Pass user selection back via `UnboundedSender<UserPromptResult>` passed during opening;
+//!   upper layer can write to session, HTTP POST, or merge into next `ChatMessage`.
+//! - Inbound: `SessionTurnUpdate::InteractionPrompt` opens this panel via `poll_stream_updates`.
 
 use crate::input::Input;
 use ratatui::{
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::theme::Theme;
 use super::utils::sanitize_terminal_text;
 
-/// 单个可选项（可与 JSON 对齐）。
+/// Single selectable option (can align with JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptChoice {
     pub id: String,
@@ -27,7 +27,7 @@ pub struct PromptChoice {
     pub description: Option<String>,
 }
 
-/// 后端 → TUI：请求用户从列表中选择，并可选择是否允许补充输入。
+/// Backend → TUI: Request user to select from list, optionally allow supplementary input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptRequest {
     pub request_id: String,
@@ -36,13 +36,16 @@ pub struct PromptRequest {
     pub choices: Vec<PromptChoice>,
     #[serde(default)]
     pub allow_custom_input: bool,
-    /// 多选：列表中 Space 切换选中，Enter 提交 `PromptResolution::Multi`。
+    /// Multi-select: Space toggles selection in list, Enter submits `PromptResolution::Multi`.
     #[serde(default)]
     pub multi_select: bool,
     pub default_index: Option<usize>,
+    /// Whether this is password input (hide display)
+    #[serde(default)]
+    pub is_secret: bool,
 }
 
-/// 用户操作结果（TUI → 后端 / 会话）。
+/// User operation result (TUI → backend / session).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPromptResult {
     pub request_id: String,
@@ -56,7 +59,7 @@ pub enum PromptResolution {
         choice_id: String,
         supplement: Option<String>,
     },
-    /// 预留，与 `PromptRequest::multi_select` 对应。
+    /// Reserved, corresponds to `PromptRequest::multi_select`.
     Multi {
         choice_ids: Vec<String>,
     },
@@ -69,11 +72,11 @@ pub enum PromptFocus {
     Supplement,
 }
 
-/// 运行时 UI 状态（不参与序列化）。
+/// Runtime UI state (not involved in serialization).
 pub struct InteractionPromptState {
     pub request: PromptRequest,
     pub selected: usize,
-    /// 列表首行对应 `choices` 的下标（用于滚动）。
+    /// Index in `choices` corresponding to first visible list row (for scrolling).
     pub list_scroll: usize,
     pub focus: PromptFocus,
     pub supplement: Input,
@@ -179,7 +182,7 @@ impl InteractionPromptState {
     }
 }
 
-/// 计算提示块占用高度（含边框），用于 `Constraint::Length`。
+/// Calculate prompt block height (including border), for use in `Constraint::Length`.
 pub fn interaction_prompt_outer_height(req: &PromptRequest) -> u16 {
     let border = 2u16;
     let body_h = if req.body.as_ref().map_or(false, |s| !s.is_empty()) {
@@ -308,10 +311,15 @@ pub fn render_interaction_prompt(
             } else {
                 theme.border
             }))
-            .title(" 补充（可选） ")
+            .title(if state.request.is_secret {
+                " 密码输入 "
+            } else {
+                " 补充（可选） "
+            })
             .padding(Padding::horizontal(1));
         let sup_inner = sup_block.inner(sup_area);
-        let val = state.supplement.value().to_string();
+        // Use display_value for password masking
+        let val = state.supplement.display_value(state.request.is_secret);
         let p = Paragraph::new(val)
             .style(Style::default().fg(theme.foreground).bg(theme.input_bg))
             .block(sup_block);
