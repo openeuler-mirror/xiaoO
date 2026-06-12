@@ -176,7 +176,7 @@ impl PluginToolHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
-        // 获取 session_id（用于缓存 key）
+        // Get session_id (for cache key)
         let session_id = runtime
             .agent_context()
             .metadata()
@@ -184,10 +184,10 @@ impl PluginToolHookerAdaptor {
             .clone()
             .unwrap_or_else(|| input.call.call_id.clone());
 
-        // 从 runtime_view 获取 recent_messages
+        // Get recent_messages from runtime_view
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
-        // 获取第一条 user message 作为 prompt_session（用于意图一致性检测）
+        // Get the first user message as prompt_session (for intent consistency check)
         let prompt_session = recent_messages
             .iter()
             .find(|m| m.role == MessageRole::User)
@@ -199,13 +199,13 @@ impl PluginToolHookerAdaptor {
             })
             .unwrap_or_default();
 
-        // 获取已完成的工具调用历史（用于 read_before_write 等规则）
-        // 收集 ToolUse（包含输入参数如文件路径）和 ToolResult（包含执行结果）
+        // Get completed tool call history (for read_before_write rules)
+        // Collect ToolUse (with input params like file paths) and ToolResult (with execution results)
         let messages = recent_messages;
         let mut tool_use_map: std::collections::HashMap<&String, Value> =
             std::collections::HashMap::new();
 
-        // 先收集所有 ToolUse，记录 call_id -> input 映射
+        // First collect all ToolUse, record call_id -> input mapping
         for m in messages.iter() {
             for block in &m.blocks {
                 if let agent_types::llm::ContentBlock::ToolUse {
@@ -225,7 +225,7 @@ impl PluginToolHookerAdaptor {
             }
         }
 
-        // 然后收集 ToolResult，合并输入和输出
+        // Then collect ToolResult, merge input and output
         let action_history: Vec<Value> = messages
             .iter()
             .flat_map(|m| m.blocks.iter())
@@ -236,7 +236,7 @@ impl PluginToolHookerAdaptor {
                     output,
                     is_error,
                 } => {
-                    // 合并 ToolUse 的输入信息
+                    // Merge ToolUse input info
                     let mut entry = tool_use_map.get(call_id).cloned().unwrap_or_else(|| {
                         json!({
                             "action_type": tool_name,
@@ -475,7 +475,11 @@ impl PluginToolHookerAdaptor {
                 InteractionRequest::Confirm { prompt, source }
             }
             PluginAskUserRequest::TextInput { prompt, source: _ } => {
-                InteractionRequest::TextInput { prompt, source }
+                InteractionRequest::TextInput {
+                    prompt,
+                    source,
+                    is_secret: false,  // Default to false for plugin requests
+                }
             }
             PluginAskUserRequest::Choice {
                 prompt,
@@ -961,6 +965,7 @@ else:
                         hooker_name,
                         hook_point,
                     }),
+                is_secret: _,  // Ignore is_secret in test
             } => {
                 assert_eq!(prompt, "who approved this?");
                 assert_eq!(hooker_name, "plugin_pre_ask");

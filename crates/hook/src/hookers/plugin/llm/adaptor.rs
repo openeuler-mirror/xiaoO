@@ -434,7 +434,11 @@ impl PluginLlmHookerAdaptor {
                 InteractionRequest::Confirm { prompt, source }
             }
             PluginAskUserRequest::TextInput { prompt, source: _ } => {
-                InteractionRequest::TextInput { prompt, source }
+                InteractionRequest::TextInput {
+                    prompt,
+                    source,
+                    is_secret: false,  // Default to false for plugin requests
+                }
             }
             PluginAskUserRequest::Choice {
                 prompt,

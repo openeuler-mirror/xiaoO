@@ -4,6 +4,7 @@ pub mod error_code {
     pub const CWD_NOT_DIRECTORY: u32 = 3;
     pub const TIMEOUT_INVALID: u32 = 4;
     pub const TIMEOUT_EXCEEDS_MAX: u32 = 5;
+    pub const INTERACTIVE_COMMAND: u32 = 6;
 }
 
 use agent_contracts::backend::{PathKind, PathStat};

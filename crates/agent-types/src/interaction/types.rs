@@ -23,6 +23,8 @@ pub enum InteractionRequest {
     TextInput {
         prompt: String,
         source: Option<InteractionSource>,
+        #[serde(default)]
+        is_secret: bool,
     },
     Choice {
         prompt: String,
@@ -36,6 +38,10 @@ pub enum InteractionRequest {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InteractionResponse {
     Confirmed { allowed: bool },
-    Text { value: Option<String> },
+    Text {
+        value: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_value: Option<String>,
+    },
     Choice { value: Option<String> },
 }
