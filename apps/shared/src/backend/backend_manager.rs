@@ -1,14 +1,33 @@
+use agent_contracts::backend::{
+    BackendId, BackendLifecycleReason, BackendResourceLimits, OperationBackendBuildError,
+    OperationError,
+};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::{SandboxCreateRequest, SandboxInfo, SandboxError, resolve_sandbox_backend_config, requested_backend_id, workspace_root_string, hash_config, expires_at_ms_from_timeout, SandboxLineageEntry, SandboxListFilter, SandboxTreeNode, SandboxForkRequest, SandboxForkResult, BackendEnsureSessionRequest, BackendLease, OperationBackendBuildError, OperationError};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use super::{
+    build_managed_backend, current_time_ms, delete_backend_instance, detach_from_parent, e2b,
+    expires_at_ms_from_timeout, fork_metadata, forked_provider_options, hash_config,
+    insert_forked_child, metadata_matches_filter, new_backend_id, requested_backend_id,
+    resolve_parent_backend_id, resolve_sandbox_backend_config, resolve_session_backend_config,
+    sandbox_tree_node, workspace_root_string, BackendEnsureSessionRequest, BackendInstanceEntry,
+    BackendLease, BuildSandboxInput, ParentForkSource, SandboxConnectRequest, SandboxCreateRequest,
+    SandboxError, SandboxForkRequest, SandboxForkResult, SandboxInfo, SandboxLineageEntry,
+    SandboxListFilter, SandboxTreeNode,
+};
 
 #[derive(Default)]
 pub struct BackendManager {
-    state: Mutex<BackendManagerState>,
+    pub(super) state: Mutex<BackendManagerState>,
 }
 
+#[derive(Default)]
+pub(super) struct BackendManagerState {
+    pub(super) sandboxes: HashMap<BackendId, BackendInstanceEntry>,
+    pub(super) session_index: HashMap<String, BackendId>,
+}
 
 impl BackendManager {
     pub fn new() -> Self {

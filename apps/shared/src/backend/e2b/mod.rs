@@ -6,6 +6,5 @@ mod provider;
 mod search;
 
 pub(crate) use provider::{
-    create_backend, E2bCreateBackendInput,
+    create_backend, create_snapshot, E2bCreateBackendInput, E2bSnapshotInput,
 };
-

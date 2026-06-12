@@ -4,15 +4,17 @@ use agent_contracts::backend::{
     OperationBackend, OperationBackendBuildError, OperationError,
 };
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod backend_manager;
 mod base;
 mod e2b;
-mod backend_manager;
 
+pub use backend_manager::BackendManager;
+use backend_manager::BackendManagerState;
 pub use base::{
     BackendEnsureSessionRequest, BackendLease, GatewayBackendConfig, SandboxConnectRequest,
     SandboxCreateRequest, SandboxError, SandboxForkRequest, SandboxForkResult, SandboxInfo,
@@ -38,12 +40,6 @@ struct SandboxLineageEntry {
     forked_snapshot_names: Vec<String>,
     forked_at_ms: Option<u64>,
 }
-
-// #[derive(Default)]
-// struct BackendManagerState {
-//     sandboxes: HashMap<BackendId, BackendInstanceEntry>,
-//     session_index: HashMap<String, BackendId>,
-// }
 
 fn workspace_root_string(path: &PathBuf) -> Result<String, OperationBackendBuildError> {
     path.to_str()
@@ -536,14 +532,14 @@ mod tests {
     #[tokio::test]
     async fn manager_reuses_backend_for_same_session_and_config() {
         let workspace = TempDir::new().expect("workspace");
-        let manager = backend_manager::BackendManager::new();
+        let manager = BackendManager::new();
         let request = local_request(
             "s1",
             workspace.path().to_path_buf(),
             temp_options(&workspace),
         );
 
-        let first = BackendManager::new()
+        let first = manager
             .ensure_session_backend(request.clone())
             .await
             .expect("first lease");
@@ -792,14 +788,14 @@ mod tests {
     #[tokio::test]
     async fn release_session_deletes_local_backend_cache() {
         let workspace = TempDir::new().expect("workspace");
-        let manager = backend_manager::BackendManager::new();
+        let manager = BackendManager::new();
         let request = local_request(
             "s1",
             workspace.path().to_path_buf(),
             temp_options(&workspace),
         );
 
-        let first_backend: Arc<_, _> = manager
+        let first_backend: Arc<_> = manager
             .ensure_session_backend(request.clone())
             .await
             .expect("first lease")
