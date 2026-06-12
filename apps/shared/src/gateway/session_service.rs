@@ -83,6 +83,15 @@ pub trait SessionControlPlane: Send + Sync {
         })
     }
 
+    async fn fork_session(
+        &self,
+        _request: crate::gateway::SessionForkRequest,
+    ) -> Result<crate::gateway::SessionForkResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "fork_session".to_string(),
+        })
+    }
+
     async fn submit_input(
         &self,
         _session_id: &str,

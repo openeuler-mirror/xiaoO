@@ -1,8 +1,8 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionInput,
-    SessionLifecycleStatus, SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput,
-    SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
-    SessionStore, SessionStoreError,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionForkRequest,
+    SessionForkResult, SessionInput, SessionLifecycleStatus, SessionOpenRequest, SessionRecord,
+    SessionRuntimeBuildInput, SessionRuntimeResolveError, SessionRuntimeResolver, SessionService,
+    SessionServiceError, SessionStore, SessionStoreError,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
@@ -20,7 +20,7 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::backend::BackendManager;
+use crate::backend::{BackendManager, SandboxForkRequest};
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
@@ -367,6 +367,123 @@ impl SessionControlPlane for CoreBackedSessionService {
         self.sessions_handler.lock().await.remove(session_id);
 
         Ok(closed)
+    }
+
+    async fn fork_session(
+        &self,
+        request: SessionForkRequest,
+    ) -> Result<SessionForkResult, SessionServiceError> {
+        let parent = if let Some(handle) = self.handle_for_session(&request.parent_session_id).await
+        {
+            let status = handle.status();
+            if status.phase != super::session_handle::SessionPhase::Idle || status.queue_depth > 0 {
+                return Err(SessionServiceError::SessionBusy {
+                    session_id: request.parent_session_id.clone(),
+                    message: "session must be idle before it can be forked".to_string(),
+                });
+            }
+            handle.snapshot().await?
+        } else {
+            let Some(parent) = self.session_store.load(&request.parent_session_id).await else {
+                return Err(SessionServiceError::SessionNotFound {
+                    session_id: request.parent_session_id.clone(),
+                });
+            };
+            if parent.status == SessionLifecycleStatus::Running {
+                return Err(SessionServiceError::SessionBusy {
+                    session_id: request.parent_session_id.clone(),
+                    message: "session must be idle before it can be forked".to_string(),
+                });
+            }
+            parent
+        };
+
+        let Some(parent_backend) = parent.backend_instance.as_ref() else {
+            return Err(SessionServiceError::UnsupportedCapability {
+                capability: "fork_session.backend_missing".to_string(),
+            });
+        };
+
+        let child_session_id = format!(
+            "{}:fork:{}",
+            request.parent_session_id,
+            uuid::Uuid::new_v4().simple()
+        );
+        if self.session_store.load(&child_session_id).await.is_some() {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: child_session_id,
+                message: "child session already exists".to_string(),
+            });
+        }
+
+        let backend_fork = self
+            .backend_manager
+            .fork_sandbox(SandboxForkRequest {
+                parent_backend_id: Some(parent_backend.backend_id.0.clone()),
+                parent_session_id: Some(request.parent_session_id.clone()),
+                backend_id: None,
+                session_id: Some(child_session_id.clone()),
+                timeout: None,
+                metadata: serde_json::json!({
+                    "xiaoo_fork_parent_session_id": request.parent_session_id.clone(),
+                    "xiaoo_fork_child_session_id": child_session_id.clone(),
+                }),
+                resource_limits: Default::default(),
+                options: None,
+                snapshot_name: request.snapshot_name,
+            })
+            .await
+            .map_err(|error| SessionServiceError::RuntimeBuild {
+                message: format!("failed to fork session backend: {error}"),
+            })?;
+
+        let backend_lease = self
+            .backend_manager
+            .lease_bound_session(&child_session_id)
+            .await
+            .map_err(|error| SessionServiceError::RuntimeBuild {
+                message: format!("failed to lease forked backend: {error}"),
+            })?;
+
+        let now_ms = current_time_ms();
+        let mut child = parent.clone();
+        child.session_id = child_session_id;
+        if let Some(conversation_id) = request.conversation_id {
+            child.conversation_id = conversation_id;
+        }
+        if let Some(sender_id) = request.sender_id {
+            child.sender_id = sender_id;
+        }
+        child.status = SessionLifecycleStatus::Idle;
+        child.backend_instance = Some(backend_lease.instance());
+        child.last_error = None;
+        child.created_at_ms = now_ms;
+        child.updated_at_ms = now_ms;
+
+        self.session_store.save(child.clone()).await;
+
+        let hook_point = HookPointId(format!(
+            "{}.Session.lifecycle.created",
+            child.runtime.agent_id.0
+        ));
+        self.fire_session_hooks(
+            HookInvokeInput::SessionCreated {
+                input: SessionCreatedHookInput {
+                    session_id: child.session_id.clone(),
+                    sender_id: child.sender_id.clone(),
+                },
+                metadata: HookInvokeMetadata::default(),
+            },
+            hook_point,
+        )
+        .await;
+        self.get_or_create_session_handle(child.clone()).await;
+
+        Ok(SessionForkResult {
+            parent,
+            child,
+            backend_fork,
+        })
     }
 
     async fn submit_input(

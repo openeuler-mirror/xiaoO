@@ -239,6 +239,7 @@ fn create_router_from_state(
                 post(handle_session_interaction),
             )
             .route("/api/v1/sessions/cancel", post(handle_session_cancel))
+            .route("/api/v1/sessions/fork", post(handle_session_fork))
             .route("/api/v1/sessions/close", post(handle_session_close)),
         bearer_auth.clone(),
     );
@@ -487,6 +488,26 @@ async fn handle_session_close(
 
     match control_plane.force_close_session(&payload.session_id).await {
         Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_fork(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::gateway::SessionForkRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.fork_session(payload).await {
+        Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
     }
 }

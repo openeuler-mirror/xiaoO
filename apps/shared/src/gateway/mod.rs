@@ -37,8 +37,9 @@ pub use runtime_resolver::{
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 pub use session_base::{
-    channel_session_id, SessionCancelRequest, SessionCloseRequest, SessionInput, SessionInputKind,
-    SessionInteractionRequest, SessionOpenRequest, SessionSubmitReceipt,
+    channel_session_id, SessionCancelRequest, SessionCloseRequest, SessionForkRequest,
+    SessionForkResult, SessionInput, SessionInputKind, SessionInteractionRequest,
+    SessionOpenRequest, SessionSubmitReceipt,
 };
 pub use session_record::{SessionLifecycleStatus, SessionRecord};
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};

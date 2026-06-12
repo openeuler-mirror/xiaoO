@@ -5,4 +5,7 @@ mod path;
 mod provider;
 mod search;
 
-pub(crate) use provider::{create_backend, E2bCreateBackendInput};
+pub(crate) use provider::{
+    create_backend, E2bCreateBackendInput,
+};
+
