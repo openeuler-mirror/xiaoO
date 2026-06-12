@@ -39,8 +39,16 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": "/dev/urandom", "risk_level": "medium", "desc": "伪随机数设备"},
     {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备"},
     {"path": "/dev/kmsg", "risk_level": "high", "desc": "内核消息缓冲区"},
-    # xiaoO 系统级安全 Skill（保护目录及所有子目录/文件）
-    {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 安全防护 Skill 目录"},
+    # xiaoO 系统级安全 Skill（系统级路径 - 所有用户共享的内置 skill）
+    {"path": "/usr/lib/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 系统级安全防护 Skill 目录"},
+    # xiaoO 用户级安全 Skill（用户级路径 - 兼容旧版本）
+    {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 用户级安全防护 Skill 目录"},
+    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免部分匹配误报）
+    {"path": "credentials.yml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
+    {"path": "credentials.yaml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
+    {"path": "secrets.yml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
+    {"path": "secrets.yaml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
+    {"path": ".env", "risk_level": "high", "desc": "环境变量/凭据配置文件", "credential": True},
 ]
 
 # ==================== 写入操作关键词 ====================
@@ -56,6 +64,16 @@ READ_KEYWORDS = [
     "read", "读取", "cat", "head", "tail", "less", "more",
     "view", "查看", "open", "打开", "load", "加载",
     "grep", "search", "搜索", "find", "查找",
+]
+
+# ==================== 非交互式密码修改命令模式 ====================
+PASSWORD_MODIFY_PATTERNS: list[str] = [
+    r"\|\s*passwd\b",              # echo pass | passwd
+    r"\bpasswd\s+--stdin\b",       # passwd --stdin
+    r"\bchpasswd\b",               # 批量改密码
+    r"\bnewusers\b",               # 批量添加用户
+    r"\bpasswd\s+-[a-zA-Z]*d\b",   # 删除密码 (passwd -d)
+    r"\bpasswd\s+-[a-zA-Z]*l\b",   # 锁定账户 (passwd -l)
 ]
 
 # ==================== 意图偏离关键词对 ====================
@@ -116,6 +134,11 @@ class LogicRulesChecker:
         if dangerous_result.hit:
             return dangerous_result
 
+        # 5. 密码修改授权检测
+        consent_result = self._check_password_consent(action_history, a_next)
+        if consent_result.hit:
+            return consent_result
+
         return LogicRuleResult(hit=False)
 
     def _check_read_before_write(
@@ -136,6 +159,16 @@ class LogicRulesChecker:
 
         # 判断是否为写入操作
         is_write = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
+
+        # 补充检测 shell 重定向写入（>、>>）
+        # 排除只读命令后的重定向（如 cat file > /dev/null 不是写入意图）
+        if not is_write and ">" in action_detail:
+            read_only_cmds = {"cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
+                              "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump"}
+            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
+            if first_word not in read_only_cmds:
+                is_write = True
+
         if not is_write:
             return LogicRuleResult(hit=False)
 
@@ -168,9 +201,12 @@ class LogicRulesChecker:
                 path == rp or path.startswith(rp) or rp.startswith(path)
                 for rp in history_read_paths
             ):
-                # 排除新文件创建：检查 reason 或 action_detail 中是否有创建/新建关键词
-                create_keywords = ["创建", "新建", "create", "new file", "touch"]
-                is_create = any(kw in reason.lower() or kw in action_detail for kw in create_keywords)
+                # 排除新文件创建：文件不存在于磁盘时视为新建，直接放行
+                # 同时检查 reason/action_detail 中是否有创建/新建关键词
+                is_create = not os.path.exists(path)
+                if not is_create:
+                    create_keywords = ["创建", "新建", "create", "new file", "touch"]
+                    is_create = any(kw in reason.lower() or kw in action_detail for kw in create_keywords)
                 if not is_create:
                     unread_paths.append(path)
 
@@ -231,9 +267,19 @@ class LogicRulesChecker:
         for sp in SENSITIVE_PATHS:
             raw_path = sp["path"]
             path = raw_path.lower()
+            is_credential = sp.get("credential", False)
 
             # 检查路径是否在操作中出现
-            path_match = path in action_detail
+            if is_credential:
+                # 凭据文件使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
+                # 以 . 开头的文件（如 .env）在 . 前 \b 不匹配，用 (?:^|[\s/\\]) 替代
+                escaped = re.escape(path)
+                if path.startswith("."):
+                    path_match = bool(re.search(rf"(?:^|[\s/\\]){escaped}\b", action_detail))
+                else:
+                    path_match = bool(re.search(rf"\b{escaped}\b", action_detail))
+            else:
+                path_match = path in action_detail
 
             # 如果路径以 ~ 开头， also 检查展开后的绝对路径
             if not path_match and raw_path.startswith("~"):
@@ -249,6 +295,15 @@ class LogicRulesChecker:
                             path_match = True
 
             if path_match:
+                # 凭据文件：无论读写都拦截（读凭据文件同样危险）
+                if is_credential:
+                    return LogicRuleResult(
+                        hit=True,
+                        violated_rule="sensitive_path_access",
+                        risk_level=sp["risk_level"],
+                        reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
+                        risk_type="file_access",
+                    )
                 # 对于 xiaoo-guardian 保护目录：只拦截写入/删除操作，读取操作放行
                 if raw_path.startswith("~") and not is_write_op:
                     continue  # 允许读取操作
@@ -301,6 +356,47 @@ class LogicRulesChecker:
                 )
 
         return LogicRuleResult(hit=False)
+
+    def _check_password_consent(
+        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+    ) -> LogicRuleResult:
+        """
+        密码修改授权检测：
+        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户返回了密码。
+        交互式 passwd（无参数）不在此列，因为 LLM 无法完成交互式输入。
+        """
+        action_detail = a_next.get("action_detail", "").lower()
+        action_type = a_next.get("action_type", "").lower()
+
+        # 只检测 bash 工具中的密码修改命令
+        if action_type != "bash":
+            return LogicRuleResult(hit=False)
+
+        is_password_modify = any(
+            re.search(p, action_detail, re.IGNORECASE) for p in PASSWORD_MODIFY_PATTERNS
+        )
+        if not is_password_modify:
+            return LogicRuleResult(hit=False)
+
+        # 检查 action_history 中是否有 ask_user_question 且用户返回了答案
+        for action in action_history:
+            if not isinstance(action, dict):
+                continue
+            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
+            output = str(action.get("output", ""))
+            if hist_type == "ask_user_question" and output.strip():
+                return LogicRuleResult(hit=False)  # 用户已授权，放行
+
+        return LogicRuleResult(
+            hit=True,
+            violated_rule="password_modify_requires_consent",
+            risk_level="high",
+            reason=(
+                "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 "
+                "ask_user_question 操作，可能存在未授权的密码修改风险"
+            ),
+            risk_type="consent_missing",
+        )
 
     @staticmethod
     def _extract_file_paths(text: str) -> list[str]:

@@ -14,12 +14,13 @@ use crate::gateway::{
 };
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use tool::load_tool_sources;
+use tool::{load_tool_sources_with_services, ToolRuntimeServices};
 
 use super::runtime::GatewayRuntime;
 use xiaoo_core::spawn_prefetch;
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../../prompts/tui_default_system_prompt.txt");
+const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
@@ -76,10 +77,17 @@ impl GatewayRuntime {
         if let Some(env_name) = state.agent_config.llm.api_key_env.as_deref() {
             let trimmed = env_name.trim();
             if !trimmed.is_empty() {
-                let env_value = std::env::var(trimmed).unwrap_or_default();
-                if env_value.trim().is_empty() {
+                let has_api_key = if let Some(key) = crate::gateway::get_decrypted_api_key(trimmed)
+                {
+                    !key.trim().is_empty()
+                } else {
+                    std::env::var(trimmed)
+                        .map(|v| !v.trim().is_empty())
+                        .unwrap_or(false)
+                };
+                if !has_api_key {
                     return Err(format!(
-                        "env var {} is not set. Please configure your API key with /connect or set the environment variable.",
+                        "API key for {} is not set. Please configure your API key with /connect or set the environment variable.",
                         trimmed
                     ));
                 }
@@ -164,6 +172,7 @@ impl GatewayRuntime {
             })?;
         let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
             .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
+        let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
 
         Ok(HostedSessionRuntimeConfig {
             descriptor: SessionRuntimeDescriptor {
@@ -179,13 +188,30 @@ impl GatewayRuntime {
                 token_budget: TokenBudgetConfig {
                     total_budget,
                     reserved_for_output,
-                    reserved_for_system: reserved_for_output,
+                    reserved_for_system,
                     hard_limit_ratio: 1.0,
                 },
                 workspace_root: state.workspace.clone(),
                 max_turns: state
                     .active_agent_role_config()
                     .and_then(|role| role.max_turns),
+                subagent_roles: state
+                    .agent_config
+                    .subagent
+                    .iter()
+                    .map(|(role_id, config)| {
+                        (
+                            role_id.clone(),
+                            crate::gateway::session_record::SubagentRoleRecord {
+                                role_id: role_id.clone(),
+                                description: config.description.clone(),
+                                prompt: config.prompt.clone(),
+                                max_turns: config.max_turns,
+                                tools: config.tools.clone(),
+                            },
+                        )
+                    })
+                    .collect(),
             },
             provider: state.agent_config.llm.provider.clone(),
             model: state.agent_config.llm.model.clone(),
@@ -208,6 +234,22 @@ impl GatewayRuntime {
             operation_backend: state.agent_config.operation_backend.clone(),
             lsp_registry: state.agent_config.build_lsp_registry(),
             skills_config: state.agent_config.resolve_skills_config(),
+            subagent_roles: state
+                .agent_config
+                .subagent
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        crate::gateway::SubagentRoleConfigEntry {
+                            description: v.description.clone(),
+                            prompt: v.prompt.clone(),
+                            max_turns: v.max_turns,
+                            tools: v.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         })
     }
 
@@ -255,11 +297,14 @@ fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
         return None;
     }
 
-    let all_tool_names: BTreeSet<String> = load_tool_sources()
-        .iter()
-        .flat_map(|source| source.discover())
-        .map(|tool| tool.spec.name().0.clone())
-        .collect();
+    let all_tool_names: BTreeSet<String> = load_tool_sources_with_services(ToolRuntimeServices {
+        workspace_root: Some(state.workspace.clone()),
+        ..ToolRuntimeServices::default()
+    })
+    .iter()
+    .flat_map(|source| source.discover())
+    .map(|tool| tool.spec.name().0.clone())
+    .collect();
     let mut visible_tool_names = all_tool_names.clone();
 
     for (configured_name, enabled) in &role.tools {

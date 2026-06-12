@@ -22,7 +22,9 @@ xiaoO 的安全审计插件，在 Agent 执行动作前进行权限校验：根�
 │                          │  │                                        │ │  │
 │                          │  │  层1: 启发式静态检测                    │ │  │
 │                          │  │    关键命令 + 注入检测 + 用户敏感规则     │ │  │
-│                          │  │    → high/critical → 直接 Deny          │ │  │
+│                          │  │    → high/critical → Deny               │ │  │
+│                          │  │    → 内联脚本 file_access 转层3          │ │  │
+│                          │  │      （避免 'cat /etc/shadow' 假阳性）   │ │  │
 │                          │  │                                        │ │  │
 │                          │  │  层2: 逻辑规则检测                      │ │  │
 │                          │  │    read_before_write + 意图一致性        │ │  │
@@ -71,7 +73,7 @@ audit_policy_checker/
 ├── parsers.py           # 响应解析 — 从 LLM 输出提取 TOML/JSON/安全判断
 ├── policy_cache.py      # 缓存管理 — session 级 LRU 缓存
 ├── prompt_templates.py  # Prompt 模板 — PROMPT1/安全判断模板实例化
-├── logging_utils.py     # 日志工具 — 基于loguru的审计日志
+├── logging_utils.py     # 日志工具 — 基于logging的审计日志
 ├── config.json          # 配置文件（含API Key，不入Git）
 ├── config.json.example  # 配置示例
 ├── CONFIG.md            # 配置字段说明
@@ -131,7 +133,24 @@ audit_policy_checker/
 - `--disable-llm`：禁用 LLM 分析（仅使用启发式+逻辑规则检测）
 - 环境变量 `AUDIT_ENABLE_LLM=1/0`：通过环境变量控制
 
-### 方式三：手动安装
+### 方式三：通过 RPM 安装
+
+通过 RPM 安装 xiaoO-hookers 包后，audit_agent 安装在 `/usr/lib/.xiaoo/hookers/audit_agent/`：
+
+```bash
+# 第一步：安装 xiaoO-hookers RPM 包
+sudo dnf install ./xiaoO-hookers-0.0.3-1.oe2403sp3.x86_64.rpm
+
+# 第二步：启用 audit_agent 插件（可选：启用/禁用 LLM 分析）
+bash /usr/bin/xiaoo-hookers-install --non-interactive audit_agent
+
+# 如需禁用 audit_agent 插件
+bash /usr/bin/xiaoo-hookers-uninstall
+```
+
+> RPM 安装时 plugin.json 中的路径会自动改为绝对路径，无需手动修改。
+
+### 方式四：手动安装
 
 ```bash
 cd plugins/hookers/audit_agent/audit_policy_checker
@@ -145,12 +164,20 @@ pip install -e .
 **LLM 配置**：如果 xiaoo 已配置 LLM（`~/.config/xiaoo/config.toml`），audit_agent 会自动继承配置。否则需手动创建 `config.json`：
 
 ```bash
+# 源码安装
+cp audit_policy_checker/audit_policy_checker/config.json.example audit_policy_checker/audit_policy_checker/config.json
+
+# RPM 安装（路径在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
 cp audit_policy_checker/config.json.example audit_policy_checker/config.json
 ```
 
 **审计设置**：通过 `audit_settings.json` 配置审计行为：
 
 ```bash
+# 源码安装
+cp audit_settings.json.example audit_settings.json
+
+# RPM 安装（已在 /usr/lib/.xiaoo/hookers/audit_agent/ 下）
 cp audit_settings.json.example audit_settings.json
 ```
 
@@ -218,11 +245,12 @@ AuditAgent 自动根据配置的 Provider 注入特殊 HTTP Headers，解决部�
 ```toml
 # ~/.config/xiaoo/config.toml
 [llm]
+api_key_env = "XIAOO_API_KEY"
 provider = "openrouter"
 model = "minimax/minimax-m2.5"
 ```
 
-详细配置说明见 [CONFIG.md](audit_policy_checker/CONFIG.md)。
+详细配置说明见 [CONFIG.md](audit_policy_checker/audit_policy_checker/CONFIG.md)。
 
 ## 使用
 
@@ -281,18 +309,18 @@ auditagent input.json --no-file | jq '.decision'
 
 ### 直接使用测试用例
 
-`tests/cases/` 目录下有预定义测试用例 JSON，可直接用 `auditagent` 运行：
+`plugins/tests/hookers/audit_agent/cases/` 目录下有预定义测试用例（JSON + Shell 配对），可直接用 `auditagent` 运行：
 
 ```bash
-auditagent tests/cases/TC-ALLOW-01.json -o /tmp/output --step-interval 5
-auditagent tests/cases/TC-DENY-01.json -o /tmp/output
+cd plugins/tests/hookers/audit_agent
+auditagent cases/run-deny-07-curl-exfil.json -o /tmp/output --step-interval 5
 ```
 
 | 文件 | 场景 | 预期 |
 |------|------|------|
-| `TC-ALLOW-01.json` ~ `TC-ALLOW-06.json` | 正常操作 | Allow |
-| `TC-DENY-01.json` ~ `TC-DENY-10.json` + 特殊 Deny 用例 | 越权/攻击操作 | Deny |
-| `TC-EDGE-01.json` ~ `TC-EDGE-06.json` | 边界场景 | 见文件 |
+| `run-deny-03-chmod.sh` ~ `run-deny-10-skill-script.sh` | 危险命令（chmod、rm -rf、wget、curl POST 等） | Deny |
+| `run-deny-cron-exfil.sh`、`run-deny-git-hooks-backdoor.sh` 等 | 特殊复杂场景（cron 后门、git hooks、配置篡改、注入） | Deny |
+| `run-deny-edge-*.sh` | 边界场景（本地上传、tar 环境变量、curl pipe bash、git force push） | Deny |
 
 ### Python API 调用
 
@@ -344,36 +372,132 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ## 端到端测试
 
+### 源码安装环境
+
 ```bash
-# 运行所有用例
-python3 tests/e2e_test.py
+# 运行所有 rules 用例（50 条）
+cd plugins/tests/hookers/audit_agent/xiaoo
+python3 run_rules_tests.py --api-key "your-api-key"
 
-# 只运行单个用例（编号1-11）
-python3 tests/e2e_test.py --case 1
+# 仅跑某层的用例
+python3 run_rules_tests.py --api-key "your-key" --level 1          # 仅层1（启发式）
+python3 run_rules_tests.py --api-key "your-key" --level 2 --level 3  # 仅层2+层3
 
-# 指定 Step1/Step2 间隔（避免 API 限流）
-python3 tests/e2e_test.py --case 3 --step-interval 10
+# 只跑某个规则
+python3 run_rules_tests.py --api-key "your-key" --rule sudo
 
-# 按分类运行
-python3 tests/e2e_test.py --allow     # 4个 Allow 用例
-python3 tests/e2e_test.py --deny      # 4个 Deny 用例
-python3 tests/e2e_test.py --edge      # 3个 边界用例
+# 预览有哪些用例（不执行）
+python3 run_rules_tests.py --dry-run
 
-# 显示调试日志
-python3 tests/e2e_test.py --case 1 --debug
+# 或者使用现成的 Shell 单用例测试（两种入口均可）
+cd plugins/tests/hookers/audit_agent/xiaoo
+bash run-deny-01-passwd.sh      # 越权访问 /etc/passwd
+bash run-allow-01-read-log.sh   # 正常读日志放行
+# 全部 Shell 脚本：bash run-all.sh
+
+cd plugins/tests/hookers/audit_agent/cases
+bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 ```
 
-详细测试指南见 [E2E_TEST_GUIDE.md](tests/E2E_TEST_GUIDE.md)。
+### RPM 安装环境
+
+需安装两个 RPM 包：
+
+```bash
+sudo dnf install ./xiaoO-hookers-*.rpm       # audit_agent 主程序
+sudo dnf install ./xiaoO-hookers-tests-*.rpm  # 测试用例（安装到 /usr/lib/.xiaoo/tests/）
+```
+
+`--plugin-json` 参数是必需的，因为测试用例和 plugin.json 分属两个不同的 RPM 包，路径不连续：
+
+```bash
+cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
+
+# 运行全部用例（完整示例）
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json
+
+# 仅跑某层
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --level 1
+
+# 只跑某个规则
+python3 run_rules_tests.py \
+  --api-key "your-api-key" \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --rule sudo
+
+# 预览用例
+python3 run_rules_tests.py \
+  --bin /usr/bin/xiaoo \
+  --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
+  --dry-run
+
+# Shell 脚本测试
+export XIAOO_BIN=/usr/bin/xiaoo
+export XIAOO_CONFIG=~/.config/xiaoo/config.toml
+bash run-deny-01-passwd.sh
+```
+
+> **提示**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM（含 `api_key_env`），可省略 `--api-key`，脚本会自动读取。
+
+详细测试指南见 [TEST_GUIDE.md](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md)。
 
 ## 单元测试
 
 ```bash
-python3 -m pytest tests/test_audit.py -v
+cd plugins/tests/hookers/audit_agent
+python3 test_fastpass.py
 ```
 
 ## 三层防御体系详解
 
-AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，层层递进、逐级深入。前一层发现 high/critical 风险时直接 Deny，无需等待后续检测；low/medium 风险则传递给下一层做更深入分析。
+AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，层层递进、逐级深入。前一层发现 high/critical 风险时直接 Deny，无需等待后续检测；low/medium 风险则传递给下一层做更深入分析。内联脚本命令（`python -c` 等）中的 file_access 风险（如 `/etc/shadow`）不会在层1/层2 立即拦截，转交层3 LLM 做语义判断，避免字符串字面量中的敏感路径被误拦截。
+
+### 快速放行优化（Fast-Pass）
+
+为降低安全检测延迟，系统在层1检测后引入**两级白名单快速放行**机制。已知安全的工具和命令可跳过后续检测层，将响应时间从秒级（LLM 调用）降至毫秒级。
+
+**放行条件**：层1 启发式检测未命中 high/critical 风险 + 工具/命令匹配白名单。
+
+#### Tier 1：完全安全 — 跳过 L2 + L3
+
+不具备读取文件内容能力的工具，直接放行，跳过逻辑规则检测和 LLM 分析。
+
+| 类型 | 白名单 |
+|------|--------|
+| 工具类型 | `ask_user_question`、`glob`、`list_dir`、`ls`、`count_text_length`、`filemgr-globfiles` |
+| 内置安全 Skill | `xiaoo-guardian`（xiaoO 系统自带的安全防护 Skill） |
+| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command`、`whoami`、`id`、`hostname`、`uname`、`date`、`env`、`printenv`、`tty`、`arch`、`uptime`、`groups`、`logname` |
+
+#### Tier 2：只读敏感 — 跳过 L3，保留 L2
+
+可读取文件内容但不修改的工具，跳过 LLM 分析，但保留层2 逻辑规则检测（如敏感路径访问）。
+
+| 类型 | 白名单 |
+|------|--------|
+| 工具类型 | `read`、`file_read`、`read_file`、`head`、`tail`、`grep`、`filemgr-readfile`、`filemgr-grepfiles` |
+| Bash 子命令 | `cat`、`head`、`tail`、`less`、`more`、`wc`、`grep`、`find`、`ag`、`rg`、`awk`、`sed`、`cut`、`sort`、`uniq` |
+
+**关键设计**：
+- 管道命令（`|`）和链式命令（`&&`/`||`）只提取第一段命令进行匹配
+- 白名单匹配不区分大小写
+- 层1 命中 high/critical 时，即使工具在白名单中也会被拦截（安全优先）
+- **安全兜底**：白名单放行前，用 `CommandPatternScanner` 扫描完整命令，如果管道尾部包含 high/critical 危险模式（如 `echo ... | passwd`），则不允许白名单放行，避免管道前段命令（`echo`）被误判为安全导致绕过
+
+**性能效果**：
+
+| 场景 | 无快速放行 | Tier 1 放行 | Tier 2 放行 |
+|------|-----------|------------|------------|
+| `echo hello world` | ~12s（LLM） | ~2ms | — |
+| `cat /tmp/test.txt` | ~12s（LLM） | — | ~5ms（L2 规则） |
+| `read /etc/shadow` | ~12s（LLM） | — | ~2ms（L1 拦截） |
 
 ### 层1 与 层2 的核心区别
 
@@ -401,6 +525,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 2.2 意图一致性 | 对比 `prompt_session` 与 `a_next` | 需要用户原始 prompt |
 | 2.3 敏感路径访问 | 路径匹配 | `action_detail` 中的路径 |
 | 2.4 危险操作模式 | 通配符+重定向模式 | `action_detail` 中的操作模式 |
+| 2.5 密码修改授权 | 非交互式密码修改 + `ask_user_question` 历史 | `action_detail` + `action_history` |
 
 **本质**：动作与上下文的**逻辑关系审查**，"你说的和做的是不是一回事"。
 
@@ -479,7 +604,11 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 | 模式 | 风险等级 | 说明 |
 |------|----------|------|
-| `rm -rf /` | critical | 递归强制删除根目录或关键路径 |
+| `rm -rf /` | critical | 递归强制删除根目录 |
+| `rm -rf <绝对路径>` | critical | 递归强制删除绝对路径 |
+| `rm -r/-f <关键系统目录>` | critical | 删除 /etc、/var、/home 等关键系统目录 |
+| `rm -r <绝对路径>` | high | 递归删除操作（无 -f） |
+| `rm -f <绝对路径>` | medium | 强制删除文件（无 -r） |
 | `chmod 777` | critical | 全权限设置 |
 | `chown root` | high | 修改文件所有者为 root |
 | `sudo` | high | 提权执行 |
@@ -494,15 +623,23 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `git push --force` | high | 强制推送，可能覆盖远程提交历史 |
 | `curl POST ... env/secret/key` | high | curl POST 外传敏感信息 |
 | `/dev/zero`/`/dev/random` 等 | high | 访问设备文件 |
-| `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录 |
+| `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录（系统级/用户级） |
+| `\| passwd` | high | 管道方式非交互式密码修改 |
+| `passwd --stdin` | high | passwd --stdin 非交互式密码输入 |
+| `chpasswd` | high | 批量密码修改 |
+| `newusers` | high | 批量用户添加 |
+| `passwd -d` | high | 删除用户密码 |
+| `passwd -l` | high | 锁定用户账户 |
 
 **扫描示例**：
 ```
 输入: a_next = {"action_type": "shell_command", "action_detail": "sudo rm -rf /var/log"}
 匹配: sudo → risk_level=high, risk_type=script_execution, reason="检测到提权执行 (sudo)"
-匹配: rm -rf / → risk_level=critical, risk_type=script_execution, reason="检测到递归强制删除根目录或关键路径"
+匹配: rm -rf /var → risk_level=critical, risk_type=script_execution, reason="检测到递归强制删除绝对路径 (rm -rf /...); 检测到删除关键系统目录"
 结果: Deny (取最高风险等级 critical)
 ```
+
+> **rm 命令分级说明**：`rm` 无 flag（如 `rm /tmp/test.sh`）不触发 L1.1 拦截，由 L2/L3 综合判断意图一致性后放行。`rm -r /tmp/test.sh`（high）和 `rm -f /tmp/test.sh`（medium）同理，不直接拦截但会降低 L3 的通过概率。
 
 #### 1.3 Prompt 注入检测（Injection Keyword Checker）
 
@@ -544,7 +681,8 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 - 自动从 `action_detail` 中提取文件路径（Unix 路径、引号内路径、Windows 路径）
 - 对比 `action_history` 中读取操作涉及的路径
-- 新文件创建（历史中不存在的路径）豁免
+- 目标文件不存在于磁盘时视为新建文件，自动豁免
+- `reason` 或 `action_detail` 包含创建关键词（"创建"、"新建"、"create"、"new file"、"touch"）时豁免
 - **非写入工具豁免**：`ask_user_question`、`glob`、`grep`、`list_dir`、`count_text_length`、`search` 等工具不会触发此检测，避免误判
 
 **扫描示例**：
@@ -586,16 +724,18 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 #### 2.3 敏感路径访问检测
 
-检查 `a_next.action_detail` 中是否包含对系统关键文件/目录的访问。
+检查 `a_next.action_detail` 中是否包含对系统关键文件/目录的访问。对 `file_write`/`file_edit`/`file_read` 工具，`action_detail` 仅包含 `file_path` 字段，不包含文件内容，避免内容中提及敏感路径触发误报。
 
 - **认证与密钥**（critical）：`/etc/shadow`、`/etc/sudoers`、`.ssh/id_rsa`、`.ssh/id_ed25519`
 - **认证与密钥**（high）：`.ssh/authorized_keys`
 - **系统配置**（high/medium）：`/etc/passwd`、`/etc/hosts`、`/etc/crontab`、`/etc/systemd/`、`/etc/ssh/sshd_config`
 - **危险目录**（critical/high）：`/boot/`、`/proc/sys/`、`/sys/`
 - **设备文件**（critical/high/medium）：`/dev/mem`、`/dev/zero`、`/dev/null`、`/dev/random` 等
-- **安全防护目录**（critical）：`~/.xiaoo/skills/xiaoo-guardian/`（区分读写：写入/删除操作拦截，读取操作放行）
+- **安全防护目录**（critical）：
+  - `/usr/lib/.xiaoo/skills/xiaoo-guardian/`（系统级，区分读写：写入/删除操作拦截，读取操作放行）
+  - `~/.xiaoo/skills/xiaoo-guardian/`（用户级，区分读写：写入/删除操作拦截，读取操作放行）
 
-> 注意：对 xiaoo-guardian 安全防护目录，区分读写操作：读取和执行放行，写入/删除/修改操作拦截。
+> 注意：对 xiaoo-guardian 安全防护目录（系统级和用户级），区分读写操作：读取和执行放行，写入/删除/修改操作拦截。
 
 #### 2.4 危险操作模式检测
 
@@ -607,6 +747,25 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 重定向覆盖关键目录 | `> /etc/xxx`、`> /boot/xxx`、`> /proc/xxx` | critical |
 
 > 注意：`file_write`/`file_edit` 类型动作豁免此检测，因为 `action_detail` 包含文件内容而非命令，避免误判。
+
+#### 2.5 密码修改授权检测
+
+非交互式密码修改命令（`echo ... | passwd`、`chpasswd`、`passwd --stdin`、`passwd -d`、`passwd -l` 等）必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码，否则拦截。交互式 `passwd`（无参数）不在此列，因为 LLM 无法完成交互式输入。
+
+**扫描示例**：
+```
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = []
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 未发现 ask_user_question 操作
+结果: Deny, reason="执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作"
+
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = [{"action_type": "ask_user_question", "output": "newpass"}]
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 发现 ask_user_question 且用户已返回密码
+结果: 通过（用户已授权）
+```
 
 **扫描示例**：
 ```
@@ -736,6 +895,7 @@ LLM 返回结构化 JSON：
               │  │ 2.2 意图一致性检测               ││
               │  │ 2.3 敏感路径访问检测             ││
               │  │ 2.4 危险操作模式检测             ││
+              │  │ 2.5 密码修改授权检测             ││
               │  └──────────────┬──────────────────┘│
               └─────────────────┼───────────────────┘
                     high/critical?──── Yes ───→ Deny
@@ -759,13 +919,15 @@ LLM 返回结构化 JSON：
 ```
 
 **关键设计**：
-- **短路机制**：high/critical 风险直接 Deny，不等待后续检测
+- **短路机制**：层1/层2 检测到 high/critical 风险时直接 Deny（除非是内联脚本命令的 file_access 风险——此时转层3 LLM 语义判断，避免字符串字面量中的敏感路径被误拦截）。
+- **快速放行**：Tier 1 工具跳过 L2+L3（~2ms），Tier 2 工具跳过 L3 保留 L2（~5ms）
 - **信息传递**：前两层的检测结果作为提示信息注入层3的 LLM prompt，帮助 LLM 做出更准确的判断
 - **Fail-closed + warn-allow**：LLM 故障时，前序已拦截则 Deny，前序无违规则 Allow
 
 ## 安全设计原则
 
 - **三层防御**：启发式静态检测 → 逻辑规则检测 → LLM + Skill 深度分析，层层递进
+- **快速放行**：两级白名单机制，已知安全工具/命令跳过深度检测，响应时间从秒级降至毫秒级
 - **最小权限**：仅开放 prompt 任务所需的最低权限
 - **默认拒绝**：path_groups 默认全部 false，network 默认 false
 - **Fail-closed + warn-allow**：前序检测已拦截时 LLM 故障返回 Deny；前序检测无违规时 LLM 故障返回 Allow，避免误拦截
@@ -779,11 +941,11 @@ LLM 返回结构化 JSON：
 
 | 文档 | 说明 |
 |------|------|
-| [需求分析](docs/requirement-analysis.md) | 完整需求分析与设计文档 |
-| [测试用例](docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
-| [配置说明](audit_policy_checker/CONFIG.md) | config.json 字段详解 |
-| [端到端测试指南](tests/E2E_TEST_GUIDE.md) | e2e_test.py 使用方法 |
-| [测试用例JSON](tests/cases/) | 28个可直接运行的测试用例 |
+| [需求分析](audit_policy_checker/docs/requirement-analysis.md) | 完整需求分析与设计文档 |
+| [测试用例](../../plugins/tests/hookers/audit_agent/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
+| [配置说明](audit_policy_checker/audit_policy_checker/CONFIG.md) | config.json 字段详解 |
+| [端到端测试指南](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
+| [测试用例JSON](../../plugins/tests/hookers/audit_agent/cases/) | 可直接运行的测试用例（JSON + Shell） |
 
 ## License
 

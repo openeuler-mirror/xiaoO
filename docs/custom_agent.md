@@ -1,5 +1,8 @@
 # Custom Agent Development Guide
 
+> **Note**: This document focuses on Agent role development (TUI/Daemon multi-role switching).
+> For Subagent role configuration, please refer to the `[subagent]` section in [Configuration File Guide](./config_file_guide.md).
+
 This document describes how to configure custom Agents in xiaoo. An Agent configuration consists of two parts: **TOML configuration** (required, defines system prompt and permission control) and **command** (optional, defines custom quick command).
 
 ---
@@ -35,6 +38,9 @@ Edit `[agent.<name>]` and `[agent.<name>.tools]`
 
 Example:
 ```toml
+[tui]
+agent_order = ["Agent1", "Core", "Agent2, "plan"]
+
 [agent.code-reviewer]
 description = "Reviews code for best practices and potential issues"
 prompt = "You are a code reviewer. Focus on security, performance, and maintainability."
@@ -43,6 +49,8 @@ prompt = "You are a code reviewer. Focus on security, performance, and maintaina
 file_write = false
 file_edit = false
 ```
+
+`[tui].agent_order` is optional. It controls the full Agent tab order. Include `Core` to place the default agent anywhere in the tab bar; if `Core` is omitted, it stays first for backward compatibility. Roles omitted from the list are appended in the default alphabetical order.
 
 ### 2.3 Configuration Reference
 

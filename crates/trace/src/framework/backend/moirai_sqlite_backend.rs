@@ -4,18 +4,21 @@ use async_trait::async_trait;
 use moirai::{AgentContext, ContextConfig, SqliteStorage};
 use serde_json::Value;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::super::config::TraceRecorderConfig;
 use super::backend_trait::TraceBackend;
 
+static STORAGE_CACHE: LazyLock<Mutex<HashMap<String, Arc<SqliteStorage>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 pub(crate) struct MoiraiSqliteBackend {
     context: AgentContext<SqliteStorage>,
-    active_spans: Mutex<HashSet<String>>,
-    trace_finalized: Mutex<bool>,
+    active_spans: AsyncMutex<HashSet<String>>,
+    trace_finalized: AsyncMutex<bool>,
 }
 
 impl MoiraiSqliteBackend {
@@ -39,16 +42,28 @@ impl MoiraiSqliteBackend {
                 field: "agent_id".to_string(),
             })?;
 
-        let storage = Arc::new({
-            if let Some(parent) = Path::new(&db_path).parent() {
-                std::fs::create_dir_all(parent).map_err(|error| BuildError::DependencyError {
-                    message: format!("failed to create trace db parent directory: {error}"),
+        if let Some(parent) = Path::new(&db_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|error| BuildError::DependencyError {
+                message: format!("failed to create trace db parent directory: {error}"),
+            })?;
+        }
+
+        let storage = {
+            let mut cache = STORAGE_CACHE
+                .lock()
+                .map_err(|_| BuildError::DependencyError {
+                    message: "trace storage cache poisoned".to_string(),
                 })?;
-            }
-            SqliteStorage::new(&db_path).map_err(|error| BuildError::DependencyError {
-                message: format!("failed to create moirai sqlite storage: {error}"),
-            })?
-        });
+            cache
+                .entry(db_path.clone())
+                .or_insert_with(|| {
+                    Arc::new(
+                        SqliteStorage::new(&db_path)
+                            .expect("failed to create shared moirai sqlite storage"),
+                    )
+                })
+                .clone()
+        };
         let context = AgentContext::new_user_with_explicit_trace(
             agent_id,
             trace_id,
@@ -66,8 +81,8 @@ impl MoiraiSqliteBackend {
 
         Ok(Self {
             context,
-            active_spans: Mutex::new(HashSet::new()),
-            trace_finalized: Mutex::new(false),
+            active_spans: AsyncMutex::new(HashSet::new()),
+            trace_finalized: AsyncMutex::new(false),
         })
     }
 }
@@ -99,7 +114,8 @@ impl TraceBackend for MoiraiSqliteBackend {
                 span.parent_span_id().map(ToString::to_string),
             )
             .await
-            .unwrap_or_else(|error| panic!("moirai begin_span failed: {error}"));
+            .ok()
+            .unwrap_or_else(|| span.span_id().to_string());
 
         self.active_spans.lock().await.insert(persisted_span_id);
     }
@@ -126,8 +142,7 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await
-            .unwrap_or_else(|error| panic!("moirai update_span failed: {error}"));
+            .await.ok();
     }
 
     async fn end_span(
@@ -159,13 +174,11 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await
-            .unwrap_or_else(|error| panic!("moirai end_span update failed: {error}"));
+            .await.ok();
 
         self.context
             .end_span_at(span.span_id(), occurred_at_ms as i64)
-            .await
-            .unwrap_or_else(|error| panic!("moirai end_span failed: {error}"));
+            .await.ok();
     }
 
     async fn finalize_trace(
@@ -199,8 +212,7 @@ impl TraceBackend for MoiraiSqliteBackend {
 
         self.context
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
-            .await
-            .unwrap_or_else(|error| panic!("moirai trace finalization failed: {error}"));
+            .await.ok();
 
         *finalized = true;
     }

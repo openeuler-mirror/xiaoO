@@ -1,4 +1,4 @@
-use agent_contracts::backend::OperationBackendConfig;
+use crate::gateway::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
@@ -7,14 +7,14 @@ use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_app::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 
 const DEFAULT_AGENT_ID: &str = "main";
-const DEFAULT_LLM_MAX_TOKENS: u32 = 128000;
+const DEFAULT_LLM_MAX_TOKENS: u32 = 16384;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LspConfig {
@@ -42,17 +42,21 @@ pub struct Config {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
+    pub vault: VaultConfig,
+    #[serde(default)]
     pub trace: Option<Value>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
     #[serde(default)]
+    pub subagent: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default)]
     pub agents: AgentsConfig,
     #[serde(default)]
     pub hooker: HookerRegistryConfig,
     #[serde(default)]
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
     #[serde(default)]
     pub lsp: Option<LspConfig>,
     #[serde(default)]
@@ -63,6 +67,8 @@ pub struct Config {
 pub struct TuiConfig {
     #[serde(default)]
     pub remote: Option<RemoteConfig>,
+    #[serde(default)]
+    pub agent_order: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -73,6 +79,23 @@ pub struct RemoteConfig {
     pub bearer_token_env: Option<String>,
     #[serde(default)]
     pub auto_connect: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_sdf: bool,
+}
+
+impl Default for VaultConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            use_sdf: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,8 +110,6 @@ pub struct LlmConfig {
     pub api_base: String,
     #[serde(default = "default_llm_max_tokens")]
     pub max_tokens: u32,
-    #[serde(default)]
-    pub context_window: Option<u32>,
     #[serde(default)]
     pub reasoning_effort: ReasoningEffort,
     #[serde(default = "default_false")]
@@ -109,7 +130,6 @@ impl Default for LlmConfig {
             api_key_env: None,
             api_base: String::new(),
             max_tokens: default_llm_max_tokens(),
-            context_window: None,
             reasoning_effort: ReasoningEffort::Off,
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
@@ -134,6 +154,18 @@ pub struct AgentConfig {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentRoleConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SubagentRoleConfig {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -223,7 +255,34 @@ impl Config {
     }
 
     pub fn agent_role_ids(&self) -> Vec<String> {
-        self.agent.keys().cloned().collect()
+        let mut ordered = Vec::new();
+        let mut seen = BTreeSet::new();
+
+        for configured_role_id in &self.tui.agent_order {
+            let configured_role_id = configured_role_id.trim();
+            if configured_role_id.is_empty() {
+                continue;
+            }
+
+            if let Some(role_id) = self
+                .agent
+                .keys()
+                .find(|role_id| role_id.eq_ignore_ascii_case(configured_role_id))
+                .cloned()
+            {
+                if seen.insert(role_id.clone()) {
+                    ordered.push(role_id);
+                }
+            }
+        }
+
+        for role_id in self.agent.keys() {
+            if seen.insert(role_id.clone()) {
+                ordered.push(role_id.clone());
+            }
+        }
+
+        ordered
     }
 
     pub fn agent_role(&self, role_id: &str) -> Option<&AgentRoleConfig> {
@@ -240,15 +299,26 @@ impl Config {
         if let Some(skills) = self.skills.as_ref() {
             if let Some(extra_dirs) = skills.dirs.as_ref() {
                 for dir in extra_dirs {
-                    skills_dirs.push(PathBuf::from(dir));
+                    let path = PathBuf::from(dir);
+                    let dir_str = path.to_string_lossy();
+                    if dir_str != ".xiaoo/skills"
+                        && !dir_str.ends_with("/.xiaoo/skills")
+                        && !dir_str.ends_with("\\.xiaoo\\skills")
+                        && dir_str != "/usr/lib/.xiaoo/skills"
+                    {
+                        skills_dirs.push(path);
+                    }
                 }
             }
         }
 
-        // Priority 3: Global level (lowest)
+        // Priority 3: User level
         if let Some(home) = dirs::home_dir() {
             skills_dirs.push(home.join(".xiaoo").join("skills"));
         }
+
+        // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+        skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
         ResolvedSkillsConfig {
             skills_dirs,
@@ -288,21 +358,6 @@ pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) 
             "invalid TUI config {}: missing [llm].model",
             config_path.display()
         );
-    }
-
-    if let Some(context_window) = config.llm.context_window {
-        if context_window == 0 {
-            bail!(
-                "invalid TUI config {}: [llm].context_window must be > 0",
-                config_path.display()
-            );
-        }
-        let _ = usize::try_from(context_window).map_err(|_| {
-            anyhow::anyhow!(
-                "invalid TUI config {}: [llm].context_window does not fit platform usize",
-                config_path.display()
-            )
-        })?;
     }
 
     if config.llm.max_tokens == 0 {
@@ -350,8 +405,47 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     xiaoo_app::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
-pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
-    xiaoo_app::llm_secrets::inject_llm_secrets_into_env(config_path)
+pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
+    let config = match Config::load_from(config_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+
+    let secrets_path = xiaoo_app::llm_secrets::llm_secrets_path(config_path);
+    let file_existed_before = secrets_path.exists();
+
+    if !should_initialize_secret_provider(&config, file_existed_before) {
+        tracing::debug!("vault.enabled=false, skipping secrets loading");
+        return Ok(());
+    }
+
+    if config.vault.enabled {
+        xiaoo_app::llm_secrets::auto_save_from_env(config_path)?;
+    } else {
+        tracing::info!(
+            "existing llm_secrets.json found while vault.enabled=false; initializing secret provider"
+        );
+    }
+
+    crate::gateway::init_secret_provider(secrets_path.clone(), config.vault.use_sdf);
+    tracing::info!(
+        "secrets provider initialized for on-demand decryption (use_sdf={})",
+        config.vault.use_sdf
+    );
+
+    if !file_existed_before {
+        if secrets_path.exists() {
+            tracing::info!(
+                "secrets file created this run, skipping load (will load on next startup)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn should_initialize_secret_provider(config: &Config, secrets_file_exists: bool) -> bool {
+    config.vault.enabled || secrets_file_exists
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
@@ -405,8 +499,8 @@ fn default_llm_max_tokens() -> u32 {
 }
 
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
-    if let Some(configured) = config.llm.context_window.filter(|value| *value > 0) {
-        return usize::try_from(configured).ok();
+    if let Some(known) = llm_client::get_known_model_context_length(&config.llm.model) {
+        return usize::try_from(known).ok();
     }
 
     match llm_client::resolve_protocol_family(&config.llm.provider)? {
@@ -428,7 +522,6 @@ mod tests {
         config.llm.provider = "openai".to_string();
         config.llm.model = "gpt-4o".to_string();
         config.llm.max_tokens = 128000;
-        config.llm.context_window = Some(128_000);
         config
     }
 
@@ -443,36 +536,27 @@ mod tests {
     }
 
     #[test]
-    fn tui_bootstrap_allows_missing_context_window() {
-        let mut config = valid_config();
-        config.llm.context_window = None;
-
-        require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect("missing context_window should fall back to provider defaults");
-    }
-
-    #[test]
-    fn tui_bootstrap_rejects_zero_context_window() {
-        let mut config = valid_config();
-        config.llm.context_window = Some(0);
-
-        let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
-            .expect_err("zero context_window should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("[llm].context_window must be > 0"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
     fn resolve_context_window_falls_back_to_provider_default() {
         let mut config = valid_config();
-        config.llm.context_window = None;
         config.llm.provider = "anthropic".to_string();
 
         assert_eq!(resolve_context_window(&config), Some(200_000));
+    }
+
+    #[test]
+    fn secret_provider_initializes_when_existing_secrets_file_is_present() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(super::should_initialize_secret_provider(&config, true));
+    }
+
+    #[test]
+    fn secret_provider_skips_when_vault_disabled_and_no_secrets_file_exists() {
+        let mut config = valid_config();
+        config.vault.enabled = false;
+
+        assert!(!super::should_initialize_secret_provider(&config, false));
     }
 
     #[test]

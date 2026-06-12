@@ -11,13 +11,13 @@ use crate::types::{
     SubagentControlError,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SpawnDecision {
     pub result: SpawnSubagentResult,
     pub actions: Vec<HostAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum JoinDecision {
     Immediate {
         result: JoinSubagentResult,
@@ -52,6 +52,15 @@ impl SubagentPromptBuilder {
             .replace("{{task_goal}}", task_goal)
             .replace("{{task_context}}", task_context)
             .replace("{{output_schema_section}}", &schema_section)
+    }
+
+    pub fn build_with_predefined_prompt(predefined_prompt: &str, task_context: &str) -> String {
+        let context_section = if task_context.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nAdditional Task Context:\n{}", task_context)
+        };
+        format!("{}{}", predefined_prompt, context_section)
     }
 }
 
@@ -123,11 +132,15 @@ impl SubagentCoordinator {
             });
         }
 
-        let built_prompt = SubagentPromptBuilder::build(
-            &request.task_goal,
-            &request.task_context,
-            request.output_schema.as_ref(),
-        );
+        let built_prompt = if let Some(predefined) = &request.predefined_prompt {
+            SubagentPromptBuilder::build_with_predefined_prompt(predefined, &request.task_context)
+        } else {
+            SubagentPromptBuilder::build(
+                &request.task_goal,
+                &request.task_context,
+                request.output_schema.as_ref(),
+            )
+        };
 
         state.agents.insert(
             child_agent_id.0.clone(),
@@ -154,6 +167,7 @@ impl SubagentCoordinator {
                 description: request.description.clone(),
                 prompt: built_prompt,
                 output_schema: request.output_schema.clone(),
+                max_turns: request.max_turns,
             }],
         })
     }
@@ -297,10 +311,13 @@ mod tests {
         SpawnSubagentRequest {
             session_id: "test-session".to_string(),
             parent_agent_id: parent_id.clone(),
+            description: desc.to_string(),
             task_goal: desc.to_string(),
             task_context: String::new(),
             output_schema: None,
-            description: desc.to_string(),
+            subagent_role_id: None,
+            predefined_prompt: None,
+            max_turns: None,
         }
     }
 
@@ -440,7 +457,7 @@ mod tests {
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from xiaoo-guardian following the three-level priority system (project/config/global) for security policy enforcement.\n\n\
+            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
 You are a subagent summoned by a parent agent. Your primary goal is:\n\
 Count files\n\n\
 Task Context:\n\
@@ -456,7 +473,7 @@ You MUST conclude your task by producing a final result that strictly adheres to
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from xiaoo-guardian following the three-level priority system (project/config/global) for security policy enforcement.\n\n\
+            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
 You are a subagent summoned by a parent agent. Your primary goal is:\n\
 Summarize logs\n\n\
 Task Context:\n\

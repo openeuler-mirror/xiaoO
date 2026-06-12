@@ -123,14 +123,14 @@ pub struct CliConfig {
     pub system_prompt: String,
     pub max_turns: u32,
     pub enable_tools: bool,
-    pub context_window: Option<usize>,
     pub reasoning_effort: ReasoningEffort,
     pub kvcache_enabled: bool,
     pub kvcache_debug_enabled: bool,
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
-    pub operation_backend: Option<agent_contracts::backend::OperationBackendConfig>,
+    pub operation_backend: Option<crate::gateway::backend::GatewayBackendConfig>,
     pub skills_config: skill::SkillsConfig,
+    pub subagent: std::collections::BTreeMap<String, config::SubagentRoleConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +208,6 @@ pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> usize {
-    if let Some(configured) = config.context_window.filter(|value| *value > 0) {
-        return configured;
-    }
-
     let resolved = resolve_config(ResolveInput {
         provider: Some(config.provider.clone()),
         protocol: None,
@@ -291,6 +287,7 @@ mod tests {
 
     fn test_config() -> CliConfig {
         CliConfig {
+            skills_config: skill::SkillsConfig::default(),
             kvcache_debug_enabled: false,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
@@ -301,12 +298,12 @@ mod tests {
             system_prompt: "test".to_string(),
             max_turns: 1,
             enable_tools: false,
-            context_window: None,
             reasoning_effort: Default::default(),
             kvcache_enabled: true,
             compact: crate::cli::config::CompactSection::default(),
             hooker: Default::default(),
             operation_backend: None,
+            subagent: Default::default(),
         }
     }
 
@@ -324,15 +321,6 @@ mod tests {
             None,
             None,
         ))
-    }
-
-    #[tokio::test]
-    async fn cli_context_window_prefers_explicit_config() {
-        let mut config = test_config();
-        config.context_window = Some(54321);
-
-        let resolved = resolve_effective_context_window(&config, &test_provider(12345)).await;
-        assert_eq!(resolved, 54321);
     }
 
     #[tokio::test]

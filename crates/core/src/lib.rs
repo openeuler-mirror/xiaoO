@@ -8,6 +8,7 @@ pub mod runtime;
 pub mod runtime_support;
 pub mod snapshot;
 pub mod suspend;
+pub mod token_estimator;
 
 pub use agent_loop::run_agent_loop;
 pub use error::BuildError;
@@ -22,3 +23,4 @@ pub use runtime_support::{
 };
 pub use snapshot::RuntimeSnapshot;
 pub use suspend::{LoopRunResult, LoopSuspendReason, SuspendedToolCall};
+pub use token_estimator::TokenEstimator;

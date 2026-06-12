@@ -5,7 +5,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 
-use crate::app_state::AppState;
+use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{AppTurnRequest, GatewayEntryContext, SessionOpenRequest};
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
@@ -124,14 +124,19 @@ impl GatewayRuntime {
         self.close_remote_session(&state.session_id).await;
         self.remote = None;
         self.remote_session_open = false;
-        state.status_panel.set_backend("Local");
+        state
+            .status_panel
+            .set_backend(sandbox_display_name(&state.agent_config.operation_backend));
         state.status_panel.set_workspace(&state.workspace);
         Ok(())
     }
 
-    pub async fn remote_status(&self) -> String {
+    pub async fn remote_status(&self, state: &AppState) -> String {
         let Some(remote) = self.remote.as_ref() else {
-            return "Backend: Local".to_string();
+            return format!(
+                "Backend: {}",
+                sandbox_display_name(&state.agent_config.operation_backend)
+            );
         };
 
         let token = match resolve_bearer_token(remote.bearer_token_env.as_deref()) {
@@ -631,7 +636,9 @@ mod tests {
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {
-        let mut buffer = String::from("event: text_delta\ndata: {\"type\":\"text_delta\",\"delta\":\"he\",\"snapshot\":\"he\"}\n\nrest");
+        let mut buffer = String::from(
+            "event: text_delta\ndata: {\"type\":\"text_delta\",\"delta\":\"he\",\"snapshot\":\"he\"}\n\nrest",
+        );
         let frame = take_sse_frame(&mut buffer).expect("frame");
         let parsed = parse_sse_frame(&frame).expect("parse").expect("event");
         match parsed {

@@ -2,16 +2,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    },
     Frame,
 };
 
 use crate::app::App;
-use crate::app_state::{ApiKeyDialogState, InputMode};
+use crate::app_state::{ApiKeyDialogState, InputMode, SandboxDialog};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
-use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 use crate::services::turn_delete::DeleteDialog;
+use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
 use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
 
@@ -353,11 +355,13 @@ impl App {
             && self.state.interaction_prompt.is_none()
             && self.state.api_key_dialog.is_none()
             && self.state.provider_dialog.is_none()
+            && self.state.sandbox_dialog.is_none()
             && self.state.session_snapshot_dialog.is_none()
             && matches!(
                 self.state.input_mode,
                 InputMode::Editing
                     | InputMode::ProviderSelection
+                    | InputMode::SandboxSelection
                     | InputMode::SessionSnapshotSelection
             )
         {
@@ -466,6 +470,84 @@ impl App {
                 .padding(Padding::horizontal(1)),
         );
         frame.render_widget(model_list, right);
+    }
+
+    pub(crate) fn render_sandbox_dialog(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        dialog: &SandboxDialog,
+    ) {
+        let dialog_width = area.width.min(72).max(48);
+        let visible = dialog.options.len() as u16;
+        let dialog_height = area.height.min(visible + 4).max(7);
+        let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+        let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+        let dialog_area = Rect {
+            x: dialog_x,
+            y: dialog_y,
+            width: dialog_width,
+            height: dialog_height,
+        };
+
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        let block = Block::default()
+            .title(" Sandbox ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(self.state.theme.border_active))
+            .style(Style::default().bg(self.state.theme.background))
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
+
+        let list_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height.saturating_sub(1),
+        };
+        let hint_area = Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        };
+
+        let name_width = dialog
+            .options
+            .iter()
+            .map(|option| option.name.chars().count())
+            .max()
+            .unwrap_or(0);
+        let items: Vec<ListItem> = dialog
+            .options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                let style = if index == dialog.selected {
+                    Style::default()
+                        .fg(self.state.theme.foreground)
+                        .bg(self.state.theme.selection)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.state.theme.foreground)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<name_width$}", option.name), style),
+                    Span::styled("  ", style),
+                    Span::styled(option.description, style),
+                ]))
+            })
+            .collect();
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(dialog.selected));
+        frame.render_stateful_widget(List::new(items), list_area, &mut list_state);
+
+        let hint = Paragraph::new("↑↓ 选择  Enter 应用  Esc 取消")
+            .style(Style::default().fg(self.state.theme.muted));
+        frame.render_widget(hint, hint_area);
     }
 
     pub(crate) fn render_session_snapshot_dialog(
@@ -678,10 +760,7 @@ impl App {
 
                 if *subsequent_count > 0 {
                     lines.push(Line::from(Span::styled(
-                        format!(
-                            "⚠ 该轮次之后还有 {} 轮对话，",
-                            subsequent_count
-                        ),
+                        format!("⚠ 该轮次之后还有 {} 轮对话，", subsequent_count),
                         Style::default().fg(self.state.theme.error),
                     )));
                     lines.push(Line::from(Span::styled(

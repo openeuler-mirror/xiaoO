@@ -36,6 +36,7 @@ impl From<std::io::Error> for NotebookError {
     }
 }
 
+#[allow(dead_code)]
 pub async fn read_notebook<P: AsRef<Path>>(
     file_path: P,
     max_size: Option<u64>,

@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tracing::warn;
 use ulid::Ulid;
 
 use crate::span_types;
@@ -329,10 +330,9 @@ impl<S: SpanStorage> Drop for AgentContext<S> {
         let has_ended = self.ended.load(Ordering::SeqCst);
 
         if is_last_reference && !has_ended {
-            eprintln!(
-                "[moirai] WARNING: AgentContext dropped without calling end() \
-                 (trace_id={}). Call ctx.end(success, message) before dropping.",
-                self.trace_id.as_str()
+            warn!(
+                trace_id = %self.trace_id.as_str(),
+                "AgentContext dropped without calling end(). Call ctx.end(success, message) before dropping."
             );
         }
     }

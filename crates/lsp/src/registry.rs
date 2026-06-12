@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agent_contracts::backend::{OperationBackend, OperationBackendKind};
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::lsp::LspProvider;
 
 use crate::host::LocalLspEnv;
@@ -30,15 +30,13 @@ impl LspServiceRegistry {
 
     /// Return the cached service for `backend`, or create and cache a new one.
     ///
-    /// Returns `None` for backend kinds that are not yet supported (conch,
-    /// docker, remote). Only [`OperationBackendKind::Local`] is live today.
+    /// Returns `None` for backends that do not advertise LSP support.
     pub fn get_or_create(
         &self,
         backend: Arc<dyn OperationBackend>,
     ) -> Option<Arc<dyn LspProvider>> {
-        match backend.backend_kind() {
-            OperationBackendKind::Local => {}
-            _ => return None,
+        if !backend.capabilities().supports_lsp {
+            return None;
         }
 
         let backend_id = backend.backend_id().to_string();

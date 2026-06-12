@@ -18,6 +18,12 @@ use crate::audit::{
     FORK_CHILD_PID_OFFSET, FORK_COUNT_OFFSET, FORK_PARENT_PID_OFFSET,
 };
 
+/// Idle sleep between poll sweeps in the async perf-buffer poller when no
+/// events were drained. Slightly longer than the sync-thread equivalent in
+/// `session.rs` (1 ms) to yield cooperatively to the Tokio runtime between
+/// rounds, reducing CPU burn without materially increasing event latency.
+const PERF_POLL_IDLE_MS: u64 = 2;
+
 /// Tracepoints to attach for monitoring.
 const TRACEPOINTS: [(&str, &str, &str); 20] = [
     ("syscalls", "sys_enter_openat", "syscalls_sys_enter_openat"),
@@ -140,6 +146,15 @@ impl EbpfLoader {
             }
         }
 
+        if std::env::var_os("CERBERUS_EBPF_DEBUG").is_some() {
+            eprintln!(
+                "[ebpf-debug] attached {}/{} tracepoints (failed: {})",
+                attached_count,
+                TRACEPOINTS.len(),
+                failed_tracepoints.join(",")
+            );
+        }
+
         if attached_count == 0 {
             return Err(EbpfLoadError::AttachError(format!(
                 "Failed to attach any tracepoints. All {} attempts failed.",
@@ -191,6 +206,48 @@ impl EbpfLoader {
         Ok(())
     }
 
+    /// Open one raw perf buffer per online CPU for synchronous polling.
+    ///
+    /// Unlike [`open_perf_buffers`], this does not spawn any async tasks; the
+    /// caller is expected to poll the returned buffers (e.g. from a dedicated
+    /// thread). The perf fds in some runtimes (containers, emulation) do not
+    /// reliably signal epoll readiness, so synchronous polling is more robust.
+    pub fn open_perf_buffers_raw(
+        &mut self,
+        page_count: usize,
+    ) -> Result<Vec<aya::maps::perf::PerfEventArrayBuffer<aya::maps::MapData>>, EbpfLoadError> {
+        let events_map = self
+            .bpf
+            .take_map("EVENTS")
+            .ok_or_else(|| EbpfLoadError::MapNotFound("EVENTS".to_string()))?;
+
+        let mut perf_array: PerfEventArray<aya::maps::MapData> =
+            PerfEventArray::try_from(events_map)
+                .map_err(|e| EbpfLoadError::PerfEventArrayError(e.to_string()))?;
+
+        let cpus = online_cpus().map_err(|e| {
+            EbpfLoadError::PerfEventArrayError(format!("Failed to get online CPUs: {}", e.1))
+        })?;
+
+        let mut bufs = Vec::with_capacity(cpus.len());
+        for cpu_id in cpus {
+            let buf = perf_array.open(cpu_id, Some(page_count)).map_err(|e| {
+                EbpfLoadError::PerfEventArrayError(format!(
+                    "Failed to open perf buffer for CPU {}: {:?}",
+                    cpu_id, e
+                ))
+            })?;
+            bufs.push(buf);
+        }
+
+        Ok(bufs)
+    }
+
+    /// Parse and convert a single raw perf record into an audit event.
+    pub fn decode_event(data: &[u8]) -> Option<EbpfAuditEvent> {
+        Self::convert_event(Self::parse_raw_event(data))
+    }
+
     /// Open perf buffers for receiving events from the kernel.
     pub fn open_perf_buffers(
         &mut self,
@@ -211,6 +268,11 @@ impl EbpfLoader {
             EbpfLoadError::PerfEventArrayError(format!("Failed to get online CPUs: {}", e.1))
         })?;
 
+        if std::env::var_os("CERBERUS_EBPF_DEBUG").is_some() {
+            eprintln!("[ebpf-debug] opening perf buffers on {} cpus", cpus.len());
+        }
+
+        let mut bufs = Vec::with_capacity(cpus.len());
         for cpu_id in cpus {
             let buf = perf_array.open(cpu_id, None).map_err(|e| {
                 EbpfLoadError::PerfEventArrayError(format!(
@@ -218,67 +280,78 @@ impl EbpfLoader {
                     cpu_id, e
                 ))
             })?;
-
-            let tx = event_tx.clone();
-            tokio::spawn(async move {
-                Self::read_perf_events_loop(buf, tx).await;
-            });
+            bufs.push(buf);
         }
+
+        // Drain every per-CPU buffer from a single task. Spawning one task per
+        // CPU can starve buffers when the runtime has fewer workers than CPUs,
+        // dropping events; a single round-robin poller drains all of them
+        // fairly. The kernel perf fds in this environment don't reliably signal
+        // epoll readiness, so we poll instead of using AsyncFd.
+        tokio::spawn(async move {
+            Self::poll_perf_buffers_loop(bufs, event_tx).await;
+        });
 
         Ok(event_rx)
     }
 
-    async fn read_perf_events_loop(
-        buf: aya::maps::perf::PerfEventArrayBuffer<aya::maps::MapData>,
+    async fn poll_perf_buffers_loop(
+        mut bufs: Vec<aya::maps::perf::PerfEventArrayBuffer<aya::maps::MapData>>,
         event_tx: mpsc::Sender<EbpfAuditEvent>,
     ) {
-        let mut async_buf =
-            match tokio::io::unix::AsyncFd::with_interest(buf, tokio::io::Interest::READABLE) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::error!("Failed to create async perf buffer: {:?}", e);
-                    return;
-                }
-            };
+        let debug = std::env::var_os("CERBERUS_EBPF_DEBUG").is_some();
+        if debug {
+            eprintln!(
+                "[ebpf-debug] perf poller started over {} buffers",
+                bufs.len()
+            );
+        }
 
         let mut buffers: Vec<BytesMut> = std::iter::repeat_with(|| BytesMut::with_capacity(4096))
-            .take(10)
+            .take(64)
             .collect();
 
         loop {
-            let mut guard = match async_buf.readable_mut().await {
-                Ok(g) => g,
-                Err(_) => {
-                    log::warn!("Perf buffer closed, stopping event loop");
-                    return;
-                }
-            };
-
-            loop {
-                let events = match guard.get_inner_mut().read_events(&mut buffers) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        log::error!("Failed to read perf events: {:?}", e);
-                        break;
-                    }
-                };
-
-                for buf in buffers.iter_mut().take(events.read) {
-                    let raw_event = Self::parse_raw_event(buf);
-                    if let Some(event) = Self::convert_event(raw_event) {
-                        if event_tx.send(event).await.is_err() {
-                            log::warn!("Event channel closed, stopping event loop");
+            let mut total_read = 0usize;
+            for buf in bufs.iter_mut() {
+                loop {
+                    let events = match buf.read_events(&mut buffers) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            log::error!("Failed to read perf events: {:?}", e);
                             return;
                         }
-                    }
-                }
+                    };
 
-                if events.read != buffers.len() {
-                    break;
+                    if events.read == 0 {
+                        break;
+                    }
+                    total_read += events.read;
+
+                    for raw in buffers.iter_mut().take(events.read) {
+                        let raw_event = Self::parse_raw_event(raw);
+                        if let Some(event) = Self::convert_event(raw_event) {
+                            if event_tx.send(event).await.is_err() {
+                                log::warn!("Event channel closed, stopping event loop");
+                                return;
+                            }
+                        }
+                    }
+
+                    // Drained fewer than the batch size -> this buffer is empty.
+                    if events.read < buffers.len() {
+                        break;
+                    }
                 }
             }
 
-            guard.clear_ready();
+            if debug && total_read > 0 {
+                eprintln!("[ebpf-debug] poller drained {} events", total_read);
+            }
+
+            if total_read == 0 {
+                tokio::time::sleep(Duration::from_millis(PERF_POLL_IDLE_MS)).await;
+            }
         }
     }
 
@@ -402,8 +475,10 @@ impl EbpfLoader {
         let addr_bytes = [data[8], data[9], data[10], data[11]];
         let address = Ipv4Addr::from(addr_bytes);
 
-        // Parse port (offset 12, u16 in network byte order)
-        let port = u16::from_be_bytes([data[12], data[13]]);
+        // Parse port (offset 12). The eBPF side already converts sin_port from
+        // network to host order (`u16::from_be`) before writing the buffer, so
+        // here we read it back in native order like every other field above.
+        let port = u16::from_ne_bytes([data[12], data[13]]);
 
         // Result is always Allowed at parsing time (enforcement happens in user-space later)
         let result = NetworkAccessResult::Allowed;

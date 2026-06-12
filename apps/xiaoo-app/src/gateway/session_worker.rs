@@ -1,24 +1,27 @@
 use crate::builtin_agent_roles::PLAN_AGENT_ID;
 use crate::gateway::{
-    AppRuntimeFactory, AppRuntimeFactoryError, SessionRecord, SessionRuntimeBuildInput,
-    SessionRuntimeResolver, SessionServiceError,
+    AppRuntimeFactory, AppRuntimeFactoryError, ResolvedSessionRuntime, SessionRecord,
+    SessionRuntimeBuildInput, SessionServiceError,
 };
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
+use agent_types::ReasoningEffort;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
-use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_core::{
-    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
+    AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule, run_agent_loop,
 };
 
 pub struct SessionWorkerInput {
     pub runtime_input: SessionRuntimeBuildInput,
+    pub resolved_runtime: ResolvedSessionRuntime,
     pub session: SessionRecord,
     pub agent_id: AgentId,
+    pub operation_backend: Arc<dyn OperationBackend>,
     pub user_message: String,
     pub append_user_message: bool,
     pub reasoning_effort: ReasoningEffort,
@@ -41,20 +44,14 @@ pub struct SessionWorker;
 
 impl SessionWorker {
     pub async fn run(
-        runtime_resolver: &dyn SessionRuntimeResolver,
         input: SessionWorkerInput,
     ) -> Result<SessionWorkerResult, SessionServiceError> {
         let is_root_lane = input.agent_id == input.session.runtime.agent_id;
-        let mut runtime_input = input.runtime_input.clone();
-        runtime_input.agent_id_override = Some(input.agent_id.clone());
-
-        let mut resolved = runtime_resolver
-            .resolve(&runtime_input, Some(&input.session))
-            .await?;
+        let mut resolved = input.resolved_runtime;
         if !is_root_lane {
             resolved.bindings.loop_event_sink = None;
             resolved.bindings.tool_event_sink = None;
-            resolved.bindings.interaction_handle = None;
+            resolved.bindings.interaction_handle = input.interaction_handle_override.clone();
             resolved.bindings.pending_user_messages = None;
         } else {
             // Merge overrides: override takes precedence.
@@ -90,6 +87,7 @@ impl SessionWorker {
             &input.session,
             messages,
             input.tool_manifest.clone(),
+            input.operation_backend.clone(),
         )
         .await?;
         let tool_manifest = assembly.tool_manifest.clone();

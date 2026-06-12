@@ -51,6 +51,7 @@ SKILL_KEYWORD_MAP: dict[str, list[str]] = {
         "cron", "crontab", "定时", "scheduled", "startup", "启动项",
         "service", "服务", "daemon", "守护", "registry", "注册表",
         "backdoor", "后门", "persist", "持久化", "authorized_keys",
+        "bashrc", "zshrc", "profile", ".rc", "shell config", "shell 配置",
     ],
     "resource_exhaustion_guard": [
         "fork", "bomb", "炸弹", "memory", "内存", "disk", "磁盘",

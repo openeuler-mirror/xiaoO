@@ -2,7 +2,7 @@ use std::env;
 
 use crate::error::LlmError;
 use crate::provider_registry::{
-    normalize_api_base, resolve_provider_profile, ApiBaseStyle, ProtocolFamily, ProviderProfile,
+    normalize_api_base, resolve_provider_profile, ProtocolFamily, ProviderProfile,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -101,11 +101,7 @@ pub fn resolve_config(input: ResolveInput) -> Result<ResolvedConfig, ResolveErro
         }
     }
 
-    let api_base_style = profile
-        .as_ref()
-        .map(|p| p.api_base_style)
-        .unwrap_or(ApiBaseStyle::Preserve);
-    let base_url = resolve_base_url(&input.base_url, profile.as_ref(), api_base_style)?;
+    let base_url = resolve_base_url(&input.base_url, profile.as_ref())?;
 
     let api_key_required = profile.as_ref().map(|p| p.api_key_required).unwrap_or(true);
     let api_key = resolve_api_key(
@@ -145,18 +141,17 @@ fn resolve_protocol(
 fn resolve_base_url(
     explicit: &Option<String>,
     profile: Option<&ProviderProfile>,
-    style: ApiBaseStyle,
 ) -> Result<String, ResolveError> {
     if let Some(ref url) = explicit {
         let url = url.trim();
         if url.is_empty() {
             return Err(ResolveError::MissingBaseUrl);
         }
-        return Ok(normalize_api_base(url, style));
+        return Ok(normalize_api_base(url));
     }
     if let Some(p) = profile {
         if let Some(url) = p.default_base_url {
-            return Ok(normalize_api_base(url, style));
+            return Ok(normalize_api_base(url));
         }
     }
     Err(ResolveError::MissingBaseUrl)
@@ -224,6 +219,32 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_preserves_openai_explicit_base_url() {
+        let input = ResolveInput {
+            provider: Some("openai".to_string()),
+            base_url: Some("https://proxy.example.com".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_config(input).unwrap();
+        assert_eq!(config.base_url, "https://proxy.example.com");
+    }
+
+    #[test]
+    fn test_resolve_preserves_deepseek_explicit_v1_base_url() {
+        let input = ResolveInput {
+            provider: Some("deepseek".to_string()),
+            base_url: Some("https://api.deepseek.com/v1".to_string()),
+            api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
+
+        let config = resolve_config(input).unwrap();
+        assert_eq!(config.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
     fn test_resolve_with_protocol_only() {
         let input = ResolveInput {
             protocol: Some("anthropic".to_string()),
@@ -262,12 +283,14 @@ mod tests {
 
     #[test]
     fn test_resolve_missing_api_key() {
-        let input = ResolveInput {
-            provider: Some("openai".to_string()),
-            ..Default::default()
-        };
-        let result = resolve_config(input);
-        assert!(matches!(result, Err(ResolveError::MissingApiKey)));
+        temp_env::with_var_unset("OPENAI_API_KEY", || {
+            let input = ResolveInput {
+                provider: Some("openai".to_string()),
+                ..Default::default()
+            };
+            let result = resolve_config(input);
+            assert!(matches!(result, Err(ResolveError::MissingApiKey)));
+        });
     }
 
     #[test]

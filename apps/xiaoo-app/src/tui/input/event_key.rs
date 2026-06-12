@@ -2,7 +2,11 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
 use crate::app::App;
-use crate::app_state::{ApiKeyDialogState, InputMode};
+use crate::app_state::{
+    current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, InputMode,
+    SandboxDialog,
+};
+use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
@@ -11,10 +15,10 @@ use crate::provider_service::{
     validate_and_connect_api_key,
 };
 use crate::services::turn_delete::DeleteDialog;
-use crate::gateway::SessionStore;
 use crate::session_snapshot_service::{
-    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, save_snapshot,
-    snapshot_name_from_command, SessionSnapshotDialog,
+    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
+    save_snapshot_with_chain, snapshot_name_from_command, SessionSnapshotDialog,
+    SessionSnapshotListEntry,
 };
 use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
@@ -85,6 +89,10 @@ impl App {
             return self.handle_session_snapshot_selection_key(key).await;
         }
 
+        if self.state.input_mode == InputMode::SandboxSelection {
+            return self.handle_sandbox_selection_key(key);
+        }
+
         if self.state.input_mode == InputMode::TurnDelete {
             return self.handle_turn_delete_key(key).await;
         }
@@ -92,6 +100,7 @@ impl App {
         match self.state.input_mode {
             InputMode::Editing => self.handle_editing_mode_key(key).await,
             InputMode::ProviderSelection => self.handle_provider_selection_key(key),
+            InputMode::SandboxSelection => Ok(()),
             InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
             InputMode::TurnDelete => Ok(()),
@@ -271,16 +280,9 @@ impl App {
             return Ok(());
         }
 
-        if key.code == KeyCode::BackTab {
-            if crate::slash_complete::slash_typed_prefix(
-                self.state.chat_state.input.value(),
-                self.state.chat_state.input.cursor(),
-            )
-            .is_none()
-            {
-                self.state.cycle_reasoning_effort();
-                return Ok(());
-            }
+        if key.code == KeyCode::Char('t') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            self.state.cycle_reasoning_effort();
+            return Ok(());
         }
 
         if self.state.slash_menu_visible() {
@@ -350,18 +352,22 @@ impl App {
         if trimmed.eq_ignore_ascii_case("/delete") {
             self.state.chat_state.input.reset();
             if self.state.chat_state.is_loading {
-                self.state.chat_state.messages.push(
-                    crate::chat::Message::system(
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
                         "当前任务仍在运行。请等待它结束，或先按 Esc 取消。".to_string(),
-                    ),
-                );
+                    ));
             } else if let Some(dialog) = DeleteDialog::new(&self.state.chat_state.messages) {
                 self.state.input_mode = InputMode::TurnDelete;
                 self.state.delete_dialog = Some(dialog);
             } else {
-                self.state.chat_state.messages.push(
-                    crate::chat::Message::system("当前会话没有可删除的对话。".to_string()),
-                );
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        "当前会话没有可删除的对话。".to_string(),
+                    ));
             }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
@@ -412,16 +418,25 @@ impl App {
             match snapshot_name_from_command(trimmed, "/save") {
                 Ok(name) => {
                     let record = self.gateway.session_snapshot(&self.state.session_id).await;
-                    let parent_snapshot = self
+                    let parent_chain = self
                         .state
-                        .current_snapshot_name
+                        .current_snapshot_context
                         .as_ref()
-                        .filter(|parent| !parent.eq_ignore_ascii_case(&name))
-                        .cloned();
-                    let snapshot = build_snapshot(&self.state, record, parent_snapshot);
-                    match save_snapshot(&name, &snapshot) {
+                        .filter(|ctx| !ctx.name.eq_ignore_ascii_case(&name))
+                        .map(|ctx| {
+                            let mut chain = ctx.parent_chain.clone();
+                            chain.push(ctx.name.clone());
+                            chain
+                        })
+                        .unwrap_or_default();
+                    let snapshot = build_snapshot(&self.state, record, parent_chain.clone());
+                    match save_snapshot_with_chain(&name, &snapshot, Some(&parent_chain)) {
                         Ok(path) => {
-                            self.state.current_snapshot_name = Some(name.clone());
+                            self.state.current_snapshot_context =
+                                Some(crate::session_snapshot_service::SnapshotContext {
+                                    name: name.clone(),
+                                    parent_chain,
+                                });
                             self.state
                                 .chat_state
                                 .messages
@@ -459,11 +474,37 @@ impl App {
                 self.open_load_snapshot_dialog();
             } else {
                 match snapshot_name_from_command(trimmed, "/load").and_then(|name| {
-                    let snapshot = load_snapshot(&name)?;
-                    Ok((name, snapshot))
+                    let matches = load_snapshot(&name)?;
+                    Ok((name, matches))
                 }) {
-                    Ok((name, snapshot)) => {
-                        self.load_snapshot_into_state(&name, snapshot).await;
+                    Ok((name, matches)) => {
+                        if matches.len() == 1 {
+                            let (_, snapshot, parent_chain) = matches.into_iter().next().unwrap();
+                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
+                                .await;
+                        } else {
+                            let entries: Vec<SessionSnapshotListEntry> = matches
+                                .into_iter()
+                                .map(|(snapshot_key, _, parent_chain)| SessionSnapshotListEntry {
+                                    name: name.clone(),
+                                    snapshot_key,
+                                    saved_at_ms: 0,
+                                    parent_name: parent_chain.last().cloned(),
+                                    parent_chain,
+                                    depth: 0,
+                                })
+                                .collect();
+                            self.state.session_snapshot_dialog =
+                                Some(SessionSnapshotDialog::new(entries));
+                            self.state.input_mode = InputMode::SessionSnapshotSelection;
+                            self.state
+                                .chat_state
+                                .messages
+                                .push(crate::chat::Message::system(format!(
+                                    "Multiple snapshots named '{}' found. Please select one.",
+                                    name
+                                )));
+                        }
                     }
                     Err(error) => self
                         .state
@@ -486,6 +527,12 @@ impl App {
 
         if is_named_slash_command(trimmed, "/remote") {
             self.handle_remote_command(trimmed).await;
+            return Ok(());
+        }
+
+        if trimmed.eq_ignore_ascii_case("/sandbox") {
+            self.state.chat_state.input.reset();
+            self.open_sandbox_selection_dialog();
             return Ok(());
         }
 
@@ -535,20 +582,22 @@ impl App {
         if let Some(body) = self.external_command_body(trimmed) {
             self.state.chat_state.input.reset();
             if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+                let display_error = crate::error_log::record_tui_error("start_turn", &error);
                 self.state
                     .chat_state
                     .messages
-                    .push(crate::chat::Message::error(error));
+                    .push(crate::chat::Message::error(display_error));
                 self.state.chat_state.stick_to_bottom = true;
             }
             return Ok(());
         }
 
         if let Err(error) = self.gateway.start_turn(&mut self.state, user_input).await {
+            let display_error = crate::error_log::record_tui_error("start_turn", &error);
             self.state
                 .chat_state
                 .messages
-                .push(crate::chat::Message::error(error));
+                .push(crate::chat::Message::error(display_error));
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())
@@ -571,10 +620,13 @@ impl App {
 
         let message = match arg {
             None | Some("status") => {
-                crate::chat::Message::system(self.gateway.remote_status().await)
+                crate::chat::Message::system(self.gateway.remote_status(&self.state).await)
             }
             Some("off") => match self.gateway.disconnect_remote(&mut self.state).await {
-                Ok(()) => crate::chat::Message::system("Remote backend disabled. Backend: Local."),
+                Ok(()) => crate::chat::Message::system(format!(
+                    "Remote backend disabled. Backend: {}.",
+                    sandbox_display_name(&self.state.agent_config.operation_backend)
+                )),
                 Err(error) => {
                     crate::chat::Message::error(format!("Remote disconnect failed: {error}"))
                 }
@@ -708,6 +760,68 @@ impl App {
         self.state.chat_state.stick_to_bottom = true;
     }
 
+    fn open_sandbox_selection_dialog(&mut self) {
+        if self.gateway.remote_base_url().is_some() {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(
+                    "Remote backend is active. Use /remote off before switching local sandbox."
+                        .to_string(),
+                ));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+        let current = current_sandbox_id(&self.state.agent_config);
+        self.state.input_mode = InputMode::SandboxSelection;
+        self.state.sandbox_dialog = Some(SandboxDialog::new(current));
+    }
+
+    fn handle_sandbox_selection_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.state.input_mode = InputMode::Editing;
+                self.state.sandbox_dialog = None;
+            }
+            KeyCode::Up => {
+                if let Some(dialog) = self.state.sandbox_dialog.as_mut() {
+                    dialog.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = self.state.sandbox_dialog.as_mut() {
+                    dialog.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .state
+                    .sandbox_dialog
+                    .as_ref()
+                    .and_then(|dialog| dialog.selected())
+                    .map(|option| (option.id, option.name));
+                self.state.input_mode = InputMode::Editing;
+                self.state.sandbox_dialog = None;
+                if let Some((id, name)) = selected {
+                    self.state.agent_config.operation_backend =
+                        sandbox_backend_config(id, &self.state.agent_config.operation_backend);
+                    self.state.status_panel.set_backend(sandbox_display_name(
+                        &self.state.agent_config.operation_backend,
+                    ));
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(format!(
+                            "Sandbox backend: {name}. Applies from the next local turn."
+                        )));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn handle_session_snapshot_selection_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
@@ -725,17 +839,20 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                let selected_name = self
+                let selected = self
                     .state
                     .session_snapshot_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.selected_entry())
-                    .map(|entry| entry.name.clone());
+                    .map(|entry| (entry.name.clone(), entry.snapshot_key.clone()));
                 self.state.input_mode = InputMode::Editing;
                 self.state.session_snapshot_dialog = None;
-                if let Some(name) = selected_name {
-                    match load_snapshot(&name) {
-                        Ok(snapshot) => self.load_snapshot_into_state(&name, snapshot).await,
+                if let Some((name, snapshot_key)) = selected {
+                    match load_snapshot_by_key(&snapshot_key) {
+                        Ok((snapshot, parent_chain)) => {
+                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
+                                .await
+                        }
                         Err(error) => {
                             self.state
                                 .chat_state
@@ -757,10 +874,20 @@ impl App {
         &mut self,
         name: &str,
         snapshot: crate::session_snapshot_service::TuiSessionSnapshot,
+        parent_chain: Vec<String>,
     ) {
         self.gateway.reset_for_new_session(&mut self.state);
         let record = apply_snapshot(&mut self.state, snapshot);
-        self.state.current_snapshot_name = Some(name.to_string());
+        let chain_display = if parent_chain.is_empty() {
+            name.to_string()
+        } else {
+            format!("{} → {}", parent_chain.join(" → "), name)
+        };
+        self.state.current_snapshot_context =
+            Some(crate::session_snapshot_service::SnapshotContext {
+                name: name.to_string(),
+                parent_chain,
+            });
         if let Some(record) = record {
             self.gateway.import_session_snapshot(record).await;
         }
@@ -768,7 +895,7 @@ impl App {
             .chat_state
             .messages
             .push(crate::chat::Message::system(format!(
-                "Session snapshot loaded: {name}"
+                "Session snapshot loaded: {chain_display}"
             )));
     }
 
@@ -783,20 +910,12 @@ impl App {
     }
 
     fn attempt_local_model_fetch(&mut self) {
-        let should_fetch = self
-            .state
-            .provider_dialog
-            .as_ref()
-            .map_or(false, |d| {
-                !d.local_models_loading
-                    && d.providers
-                        .get(d.selected_provider)
-                        .map_or(false, |p| {
-                            p.name == "local"
-                                && p.models.len() == 1
-                                && p.models[0].name.contains("(Local)")
-                        })
-            });
+        let should_fetch = self.state.provider_dialog.as_ref().map_or(false, |d| {
+            !d.local_models_loading
+                && d.providers.get(d.selected_provider).map_or(false, |p| {
+                    p.name == "local" && p.models.len() == 1 && p.models[0].name.contains("(Local)")
+                })
+        });
         if !should_fetch {
             return;
         }
@@ -839,8 +958,7 @@ impl App {
                             dialog.advance_to_confirm();
                             None
                         } else {
-                            dialog.selected_turn()
-                                .map(|t| (t.msg_range, t.turn_index))
+                            dialog.selected_turn().map(|t| (t.msg_range, t.turn_index))
                         }
                     }
                     None => None,

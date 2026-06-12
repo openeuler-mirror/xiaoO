@@ -1,6 +1,6 @@
 use crate::gateway::{
-    CoreBackedSessionService, SessionControlPlane, SessionRuntimeResolver, SessionService,
-    SessionStore,
+    backend::ExternalBackendManager, CoreBackedSessionService, SessionControlPlane,
+    SessionRuntimeResolver, SessionService, SessionStore,
 };
 use agent_types::hook::HookerRegistryConfig;
 use async_trait::async_trait;
@@ -12,6 +12,7 @@ use thiserror::Error;
 pub struct AppDependencies {
     pub session_service: Arc<dyn SessionService>,
     pub session_control_plane: Arc<dyn SessionControlPlane>,
+    pub backend_manager: Arc<ExternalBackendManager>,
 }
 
 pub struct AppBootstrap;
@@ -49,9 +50,15 @@ impl AppBootstrap {
     pub fn lifecycle_only(
         session_store: Arc<dyn SessionStore>,
         hooker_config: HookerRegistryConfig,
+        backend_manager: Arc<ExternalBackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
         let resolver: Arc<dyn SessionRuntimeResolver> = Arc::new(NoopSessionRuntimeResolver);
-        Self::from_session_components_with_hooks(session_store, resolver, hooker_config)
+        Self::from_session_components_with_hooks_and_backend_manager(
+            session_store,
+            resolver,
+            hooker_config,
+            backend_manager,
+        )
     }
 
     pub fn from_session_components(
@@ -70,6 +77,20 @@ impl AppBootstrap {
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_config: HookerRegistryConfig,
     ) -> Result<AppDependencies, AppBootstrapError> {
+        Self::from_session_components_with_hooks_and_backend_manager(
+            session_store,
+            runtime_resolver,
+            hooker_config,
+            Arc::new(ExternalBackendManager::new()),
+        )
+    }
+
+    pub fn from_session_components_with_hooks_and_backend_manager(
+        session_store: Arc<dyn SessionStore>,
+        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+        hooker_config: HookerRegistryConfig,
+        backend_manager: Arc<ExternalBackendManager>,
+    ) -> Result<AppDependencies, AppBootstrapError> {
         let hooker_registry = HookerRegistryBuilderImpl::new()
             .with_config(hooker_config)
             .build()?;
@@ -77,6 +98,7 @@ impl AppBootstrap {
             session_store,
             runtime_resolver.clone(),
             Arc::from(hooker_registry),
+            Arc::clone(&backend_manager),
         ));
         runtime_resolver.bind_subagent_control(
             session_components.clone() as Arc<dyn subagent::SubagentControl>,
@@ -86,6 +108,7 @@ impl AppBootstrap {
         Ok(AppDependencies {
             session_service,
             session_control_plane,
+            backend_manager,
         })
     }
 }

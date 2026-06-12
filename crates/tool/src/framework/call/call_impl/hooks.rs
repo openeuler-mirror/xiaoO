@@ -73,12 +73,12 @@ impl ToolCallImpl {
             let output = match hooker.invoke(input, runtime).await {
                 Ok(output) => output,
                 Err(error) => {
-                    eprintln!(
-                        "pre-hook invoke failed for hooker '{}' on tool call '{}' (tool='{}'): {}",
-                        hooker.id(),
-                        state.final_call.call_id,
-                        state.final_call.tool_name,
-                        error
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        tool = %state.final_call.tool_name,
+                        error = %error,
+                        "pre-hook invoke failed"
                     );
                     runtime
                         .trace_recorder()
@@ -95,11 +95,11 @@ impl ToolCallImpl {
             let pre_result = match output {
                 HookInvokeOutput::Pre(pre_result) => pre_result,
                 other => {
-                    eprintln!(
-                        "pre-hooker '{}' returned non-pre output {:?} for tool call '{}'",
-                        hooker.id(),
-                        other,
-                        state.final_call.call_id
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        output = ?other,
+                        "pre-hooker returned non-pre output"
                     );
                     runtime
                         .trace_recorder()
@@ -229,45 +229,48 @@ impl ToolCallImpl {
                 metadata: hook_invoke_metadata(&hook_span),
             };
 
-            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
-                ToolExecutionError::ExecutionFailed {
-                    message: e.to_string(),
-                }
-            }) {
-                Ok(o) => o,
-                Err(e) => {
+            let output = match hooker.invoke(input, runtime).await {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        tool = %state.final_call.tool_name,
+                        error = %error,
+                        "post-hook invoke failed"
+                    );
                     runtime
                         .trace_recorder()
                         .end_span(
                             hook_span,
                             TraceOutcome::Error,
-                            json!({"error": e.to_string()}),
+                            json!({"error": error.to_string()}),
                         )
                         .await;
-                    return Err(e);
+                    continue;
                 }
             };
 
             let post_result = match output {
                 HookInvokeOutput::Post(post_result) => post_result,
                 other => {
-                    let err = ToolExecutionError::ExecutionFailed {
-                        message: format!(
-                            "post-hooker '{}' returned non-post output {:?} for tool call '{}'",
-                            hooker.id(),
-                            other,
-                            state.final_call.call_id
-                        ),
-                    };
+                    let error = format!(
+                        "post-hooker '{}' returned non-post output {:?} for tool call '{}'",
+                        hooker.id(),
+                        other,
+                        state.final_call.call_id
+                    );
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        output = ?other,
+                        "post-hooker returned non-post output"
+                    );
                     runtime
                         .trace_recorder()
-                        .end_span(
-                            hook_span,
-                            TraceOutcome::Error,
-                            json!({"error": err.to_string()}),
-                        )
+                        .end_span(hook_span, TraceOutcome::Error, json!({"error": error}))
                         .await;
-                    return Err(err);
+                    continue;
                 }
             };
 
@@ -355,45 +358,48 @@ impl ToolCallImpl {
                 metadata: hook_invoke_metadata(&hook_span),
             };
 
-            let output = match hooker.invoke(input, runtime).await.map_err(|e| {
-                ToolExecutionError::ExecutionFailed {
-                    message: e.to_string(),
-                }
-            }) {
-                Ok(o) => o,
-                Err(e) => {
+            let output = match hooker.invoke(input, runtime).await {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        tool = %state.final_call.tool_name,
+                        error = %error,
+                        "error-hook invoke failed"
+                    );
                     runtime
                         .trace_recorder()
                         .end_span(
                             hook_span,
                             TraceOutcome::Error,
-                            json!({"error": e.to_string()}),
+                            json!({"error": error.to_string()}),
                         )
                         .await;
-                    return Err(e);
+                    continue;
                 }
             };
 
             let error_result = match output {
                 HookInvokeOutput::Error(error_result) => error_result,
                 other => {
-                    let err = ToolExecutionError::ExecutionFailed {
-                        message: format!(
-                            "error-hooker '{}' returned non-error output {:?} for tool call '{}'",
-                            hooker.id(),
-                            other,
-                            state.final_call.call_id
-                        ),
-                    };
+                    let error = format!(
+                        "error-hooker '{}' returned non-error output {:?} for tool call '{}'",
+                        hooker.id(),
+                        other,
+                        state.final_call.call_id
+                    );
+                    tracing::warn!(
+                        hooker_id = %hooker.id(),
+                        call_id = %state.final_call.call_id,
+                        output = ?other,
+                        "error-hooker returned non-error output"
+                    );
                     runtime
                         .trace_recorder()
-                        .end_span(
-                            hook_span,
-                            TraceOutcome::Error,
-                            json!({"error": err.to_string()}),
-                        )
+                        .end_span(hook_span, TraceOutcome::Error, json!({"error": error}))
                         .await;
-                    return Err(err);
+                    continue;
                 }
             };
 
@@ -424,9 +430,11 @@ impl ToolCallImpl {
         {
             Ok(error_hook_results) => state.error_hook_results = error_hook_results,
             Err(error_hook_failure) => {
-                eprintln!(
-                    "error-hook phase failed for tool call '{}' (tool='{}') after begin: {}",
-                    state.final_call.call_id, state.final_call.tool_name, error_hook_failure
+                tracing::warn!(
+                    call_id = %state.final_call.call_id,
+                    tool = %state.final_call.tool_name,
+                    error = %error_hook_failure,
+                    "error-hook phase failed after begin"
                 );
             }
         }

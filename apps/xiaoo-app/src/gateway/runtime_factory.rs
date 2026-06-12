@@ -1,6 +1,4 @@
-use agent_contracts::backend::{
-    OperationBackend, OperationBackendBuildInput, OperationBackendBuilder,
-};
+use agent_contracts::backend::OperationBackend;
 use agent_contracts::context::budget::TokenBudgetPolicy;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolSpecView, ToolStateStoreBuilder};
@@ -17,7 +15,6 @@ use async_trait::async_trait;
 use compact::{CompactionPolicy, PassthroughCompressionPipeline};
 use hook::framework::HookerRegistryBuilderImpl;
 use hook::HookerRegistryBuilder;
-use operation_backend::OperationBackendBuilderImpl;
 use prompt::PromptBuilderImpl;
 use serde_json::Value;
 use std::sync::Arc;
@@ -31,6 +28,7 @@ use xiaoo_core::{
     NoopInteractionHandle, NoopToolEventSink,
 };
 
+use crate::gateway::permission_backend::PermissionAwareOperationBackend;
 use crate::gateway::{GatewayEntryKind, ResolvedSessionRuntime, SessionRecord};
 use llm_client::LlmProviderWrapper;
 use parking_lot::RwLock;
@@ -40,7 +38,6 @@ pub struct AppRuntimeAssembly {
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
-    operation_backend: Option<Arc<dyn OperationBackend>>,
     llm_provider: Arc<LlmProviderWrapper>,
 }
 
@@ -51,17 +48,12 @@ impl AppRuntimeAssembly {
             runtime_view,
             visible_tools: _,
             tool_manifest: _,
-            operation_backend,
             llm_provider,
         } = self;
 
         llm_provider.clear_runtime_view();
         drop(runtime_view);
         drop(runtime);
-
-        if let Some(operation_backend) = operation_backend {
-            operation_backend.shutdown().await?;
-        }
 
         Ok(())
     }
@@ -83,6 +75,7 @@ impl AppRuntimeFactory {
         session: &SessionRecord,
         messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,
         existing_tool_manifest: Option<Vec<ToolSpecSnapshot>>,
+        operation_backend: Arc<dyn OperationBackend>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl::new());
         let compression_pipeline: Arc<dyn CompressionPipeline> = resolved
@@ -121,16 +114,6 @@ impl AppRuntimeFactory {
         });
         let visible_tools = tool_specs_from_snapshot(&tool_manifest);
 
-        let operation_backend = build_operation_backend(
-            resolved.operation_backend.as_ref(),
-            &resolved.descriptor,
-            session,
-        )
-        .await
-        .map_err(|error| BuildError::DependencyError {
-            message: format!("failed to build operation backend: {error}"),
-        })?;
-
         let runtime_view = {
             let hookers = HookerRegistryBuilderImpl::new()
                 .with_config(resolved.hooker.clone())
@@ -162,6 +145,15 @@ impl AppRuntimeFactory {
                 .from_json(trace_config)?
                 .build()
                 .await?;
+            let interaction_handle: Arc<dyn InteractionHandle> = Arc::new(
+                SharedInteractionHandle::new(resolved.bindings.interaction_handle.clone()),
+            );
+            let operation_backend: Arc<dyn OperationBackend> =
+                Arc::new(PermissionAwareOperationBackend::new(
+                    operation_backend,
+                    Arc::clone(&interaction_handle),
+                    operation_backend_exec_isolation(resolved.operation_backend.as_ref()),
+                ));
             let inner = BasicRuntimeView::new(
                 ToolStateStoreBuilderImpl::new()
                     .with_config(tool_state_store_config_for_entry_kind(
@@ -173,9 +165,7 @@ impl AppRuntimeFactory {
                 )),
                 trace_recorder,
                 Box::new(agent_context),
-                Box::new(SharedInteractionHandle::new(
-                    resolved.bindings.interaction_handle.clone(),
-                )),
+                Box::new(ArcInteractionHandle::new(interaction_handle)),
                 hookers,
                 Some(operation_backend.clone()),
             );
@@ -214,7 +204,6 @@ impl AppRuntimeFactory {
             runtime_view,
             visible_tools,
             tool_manifest,
-            operation_backend: Some(operation_backend),
             llm_provider: Arc::clone(&resolved.llm_provider),
         })
     }
@@ -232,26 +221,6 @@ fn tool_state_store_config_for_entry_kind(
         backend: Value::String(backend.to_string()),
         retention: Value::Null,
     }
-}
-
-async fn build_operation_backend(
-    config: Option<&agent_contracts::backend::OperationBackendConfig>,
-    descriptor: &crate::gateway::SessionRuntimeDescriptor,
-    session: &SessionRecord,
-) -> Result<Arc<dyn OperationBackend>, agent_contracts::backend::OperationBackendBuildError> {
-    let builder = OperationBackendBuilderImpl::new();
-    let input = OperationBackendBuildInput {
-        config: config.cloned(),
-        workspace_root: Some(descriptor.workspace_root.clone()),
-        agent_id: Some(descriptor.agent_id.0.clone()),
-        session_id: Some(session.session_id.clone()),
-        conversation_id: Some(session.conversation_id.clone()),
-        sender_id: Some(session.sender_id.clone()),
-        channel: session.channel.clone(),
-        channel_instance_id: session.channel_instance_id.clone(),
-    };
-
-    builder.build(&input).await
 }
 
 struct SharedToolEventSink {
@@ -274,6 +243,25 @@ impl ToolEventSink for SharedToolEventSink {
     }
 }
 
+fn operation_backend_exec_isolation(
+    config: Option<&crate::gateway::backend::GatewayBackendConfig>,
+) -> Option<&'static str> {
+    let config = config?;
+    if config.kind != "local" {
+        return None;
+    }
+    match config
+        .options
+        .get("isolation")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
+    {
+        Some("macos_seatbelt") => Some("macos_seatbelt"),
+        Some("linux_bubblewrap") => Some("linux_bubblewrap"),
+        _ => None,
+    }
+}
+
 struct SharedInteractionHandle {
     inner: Option<Arc<dyn InteractionHandle>>,
 }
@@ -291,6 +279,23 @@ impl InteractionHandle for SharedInteractionHandle {
             return inner.ask(request).await;
         }
         NoopInteractionHandle::new().ask(request).await
+    }
+}
+
+struct ArcInteractionHandle {
+    inner: Arc<dyn InteractionHandle>,
+}
+
+impl ArcInteractionHandle {
+    fn new(inner: Arc<dyn InteractionHandle>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl InteractionHandle for ArcInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        self.inner.ask(request).await
     }
 }
 

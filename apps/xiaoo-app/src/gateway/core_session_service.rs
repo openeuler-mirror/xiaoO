@@ -17,13 +17,16 @@ use subagent::{
 use tokio::sync::Mutex;
 use xiaoo_core::NoopRuntimeView;
 
+use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_supervisor::SessionSupervisor;
+use crate::gateway::backend::ExternalBackendManager;
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     supervisors: Mutex<HashMap<String, Arc<SessionSupervisor>>>,
     hooker_registry: Arc<dyn HookerRegistry>,
+    backend_manager: Arc<ExternalBackendManager>,
 }
 
 impl CoreBackedSessionService {
@@ -31,12 +34,14 @@ impl CoreBackedSessionService {
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
+        backend_manager: Arc<ExternalBackendManager>,
     ) -> Self {
         Self {
             session_store,
             runtime_resolver,
             supervisors: Mutex::new(HashMap::new()),
             hooker_registry,
+            backend_manager,
         }
     }
 
@@ -73,6 +78,7 @@ impl CoreBackedSessionService {
         let supervisor = Arc::new(SessionSupervisor::new(
             self.session_store.clone(),
             self.runtime_resolver.clone(),
+            Arc::clone(&self.backend_manager),
             session.clone(),
         ));
         supervisors.insert(session.session_id.clone(), supervisor.clone());
@@ -110,7 +116,9 @@ impl CoreBackedSessionService {
                 workspace_root: resolved.descriptor.workspace_root.clone(),
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
+                subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
+            backend_instance: None,
             loop_state: None,
             memory_snapshot: None,
             agents: BTreeMap::new(),
@@ -143,7 +151,9 @@ impl CoreBackedSessionService {
                 workspace_root: resolved.descriptor.workspace_root.clone(),
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
+                subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
+            backend_instance: None,
             loop_state: None,
             memory_snapshot: None,
             agents: BTreeMap::new(),
@@ -169,8 +179,13 @@ impl CoreBackedSessionService {
             .resolve(&runtime_input, existing.as_ref())
             .await?;
 
-        let seed_session =
+        let mut seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
+        let backend_lease =
+            lease_session_backend(self.backend_manager.as_ref(), &seed_session, &resolved).await?;
+        if sync_session_backend_instance(&mut seed_session, &backend_lease) {
+            seed_session.updated_at_ms = current_time_ms();
+        }
 
         if is_new_session {
             let hook_point = HookPointId(format!(
@@ -193,7 +208,13 @@ impl CoreBackedSessionService {
         let supervisor = self.get_or_create_supervisor(seed_session).await;
         supervisor.prepare_root_turn(&request, &resolved).await;
         supervisor
-            .run_root_turn(request, event_sink, interaction_handle, channel_file_sender)
+            .run_root_turn(
+                request,
+                resolved,
+                event_sink,
+                interaction_handle,
+                channel_file_sender,
+            )
             .await
     }
 }
@@ -239,7 +260,12 @@ impl SessionControlPlane for CoreBackedSessionService {
 
         let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
         let resolved = self.runtime_resolver.resolve(&runtime_input, None).await?;
-        let session = Self::build_session_for_open(&request, &resolved);
+        let mut session = Self::build_session_for_open(&request, &resolved);
+        let backend_lease =
+            lease_session_backend(self.backend_manager.as_ref(), &session, &resolved).await?;
+        if sync_session_backend_instance(&mut session, &backend_lease) {
+            session.updated_at_ms = current_time_ms();
+        }
         self.session_store.save(session.clone()).await;
 
         let hook_point = HookPointId(format!(
@@ -278,18 +304,27 @@ impl SessionControlPlane for CoreBackedSessionService {
     async fn force_close_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+    ) -> Result<SessionRecord, SessionServiceError> {
         let closed = if let Some(supervisor) = self.supervisor_for_session(session_id).await {
             supervisor.force_close().await
         } else {
             let Some(mut existing) = self.session_store.load(session_id).await else {
-                return Ok(None);
+                return Err(SessionServiceError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                });
             };
             existing.status = SessionLifecycleStatus::Closed;
             existing.updated_at_ms = current_time_ms();
             self.session_store.save(existing.clone()).await;
             existing
         };
+        if let Err(error) = self.backend_manager.release_session(session_id).await {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to release session backends"
+            );
+        }
 
         let hook_point = HookPointId(format!(
             "{}.Session.lifecycle.closed",
@@ -307,7 +342,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         )
         .await;
 
-        Ok(Some(closed))
+        Ok(closed)
     }
 }
 
@@ -359,4 +394,149 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::{
+        AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionRuntimeBindings,
+        SessionRuntimeDescriptor, backend::GatewayBackendConfig,
+    };
+    use agent_contracts::backend::BackendLifecycleState;
+    use agent_contracts::{LlmProvider, ProviderCapabilities};
+    use agent_types::common::ids::AgentId;
+    use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+    use agent_types::hook::HookerRegistryConfig;
+    use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
+    use llm_client::LlmProviderWrapper;
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+
+    struct StubLlmProvider {
+        capabilities: ProviderCapabilities,
+    }
+
+    #[async_trait]
+    impl LlmProvider for StubLlmProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                message: "stub provider is not expected to complete in session tests".to_string(),
+            })
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                message: "stub provider is not expected to stream in session tests".to_string(),
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    struct StubRuntimeResolver {
+        workspace_root: std::path::PathBuf,
+        backend_options: Value,
+        llm_provider: Arc<LlmProviderWrapper>,
+    }
+
+    #[async_trait]
+    impl SessionRuntimeResolver for StubRuntimeResolver {
+        async fn resolve(
+            &self,
+            request: &SessionRuntimeBuildInput,
+            _existing: Option<&SessionRecord>,
+        ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+            Ok(ResolvedSessionRuntime {
+                descriptor: SessionRuntimeDescriptor {
+                    agent_id: AgentId("test-agent".to_string()),
+                    model: "stub-model".to_string(),
+                    system_prompt: "test system".to_string(),
+                    feature_flags: FeatureFlags::default(),
+                    token_budget: TokenBudgetConfig {
+                        total_budget: 4096,
+                        reserved_for_output: 1024,
+                        reserved_for_system: 256,
+                        hard_limit_ratio: 0.9,
+                    },
+                    workspace_root: self.workspace_root.clone(),
+                    max_turns: None,
+                    subagent_roles: BTreeMap::new(),
+                },
+                entry_kind: request.entry.kind.clone(),
+                llm_provider: Arc::clone(&self.llm_provider),
+                tool_registry: None,
+                skill_registry: None,
+                bindings: SessionRuntimeBindings::default(),
+                compression_pipeline: None,
+                trace: Value::Null,
+                hooker: Default::default(),
+                operation_backend: Some(GatewayBackendConfig::new(
+                    "local",
+                    self.backend_options.clone(),
+                )),
+            })
+        }
+    }
+
+    fn stub_llm_provider() -> Arc<LlmProviderWrapper> {
+        Arc::new(LlmProviderWrapper::new(
+            Arc::new(StubLlmProvider {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: false,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "stub-model".to_string(),
+                },
+            }),
+            None,
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn open_session_persists_active_backend_instance() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(ExternalBackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let record = dependencies
+            .session_control_plane
+            .open_session(SessionOpenRequest {
+                session_id: "s1".to_string(),
+                conversation_id: "c1".to_string(),
+                sender_id: "u1".to_string(),
+                entry: GatewayEntryContext::tui(None),
+                channel: None,
+                channel_instance_id: None,
+            })
+            .await
+            .expect("open session");
+        let instance = record.backend_instance.expect("backend instance");
+        assert_eq!(instance.state, BackendLifecycleState::Active);
+        assert_eq!(instance.session_id, "s1");
+
+        let saved = store.load("s1").await.expect("saved session");
+        let saved_instance = saved.backend_instance.expect("saved backend instance");
+        assert_eq!(saved_instance.state, BackendLifecycleState::Active);
+        assert_eq!(saved_instance.backend_id, instance.backend_id);
+    }
 }

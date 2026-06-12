@@ -78,6 +78,7 @@ fn parse_page_range(pages: &str, max_pages: u32) -> Result<Vec<u32>, PdfError> {
     Ok(result)
 }
 
+#[allow(dead_code)]
 pub async fn read_pdf<P: AsRef<Path>>(file_path: P) -> Result<PdfOutput, PdfError> {
     let file_path = file_path.as_ref();
     let file_path_str = file_path.to_string_lossy().to_string();
@@ -169,6 +170,7 @@ pub(crate) fn plan_pdf_parts_from_bytes(
     ))
 }
 
+#[allow(dead_code)]
 pub async fn extract_pdf_pages<P: AsRef<Path>>(
     file_path: P,
     pages: &str,

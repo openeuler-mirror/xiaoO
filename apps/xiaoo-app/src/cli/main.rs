@@ -13,9 +13,9 @@ use xiaoo_app::cli::{
     CliEventSink,
 };
 use xiaoo_app::gateway::{
-    AppBootstrap, AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, InMemorySessionStore, SessionRuntimeBindings,
-    SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
+    session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
+    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
+    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -129,7 +129,7 @@ async fn main() {
             reasoning_effort,
         } => {
             if let Some(path) = config_path.as_ref() {
-                if let Err(error) = xiaoo_app::llm_secrets::inject_llm_secrets_into_env(path) {
+                if let Err(error) = xiaoo_app::llm_secrets::init_on_demand_secret_provider(path) {
                     eprintln!(
                         "Failed to initialize LLM secrets from {}: {}",
                         path.display(),
@@ -150,13 +150,15 @@ async fn main() {
             let model = model
                 .or_else(|| llm.and_then(|l| l.model.clone()))
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-            let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
+            let api_key = api_key.or_else(|| {
+                llm.and_then(|l| l.api_key_env.clone())
+                    .and_then(|env_name| {
+                        xiaoo_app::gateway::get_decrypted_api_key(env_name.as_str())
+                    })
+            });
             let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
-            let context_window = llm.and_then(|l| l.context_window);
-            let reasoning_effort = reasoning_effort
-                .or_else(|| llm.and_then(|l| l.reasoning_effort))
-                .unwrap_or_default();
+            let reasoning_effort = reasoning_effort.unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
 
@@ -173,7 +175,6 @@ async fn main() {
                 system_prompt: system,
                 max_turns,
                 enable_tools: !no_tools,
-                context_window,
                 reasoning_effort,
                 kvcache_enabled: llm.and_then(|l| l.kvcache_enabled).unwrap_or(false),
                 kvcache_debug_enabled: llm.and_then(|l| l.kvcache_debug_enabled).unwrap_or(false),
@@ -182,8 +183,9 @@ async fn main() {
                     default: HookerDefaultMode::None,
                     ..HookerRegistryConfig::default()
                 }),
-                operation_backend: file_cfg.operation_backend.clone(),
+                operation_backend: None,
                 skills_config,
+                subagent: file_cfg.subagent.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -195,7 +197,7 @@ async fn main() {
 }
 
 fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> skill::SkillsConfig {
-    // Build complete skills_dirs with all three levels
+    // Build complete skills_dirs with four levels
     let mut skills_dirs = Vec::new();
 
     // Priority 1: Project level (highest)
@@ -208,19 +210,24 @@ fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> skill::SkillsConfig
                 let path = PathBuf::from(dir);
                 // Avoid duplicates with default dirs
                 let dir_str = path.to_string_lossy();
-                if dir_str != ".xiaoo/skills" &&
-                   !dir_str.ends_with("/.xiaoo/skills") &&
-                   !dir_str.ends_with("\\.xiaoo\\skills") {
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                    && dir_str != "/usr/lib/.xiaoo/skills"
+                {
                     skills_dirs.push(path);
                 }
             }
         }
     }
 
-    // Priority 3: Global level (lowest)
+    // Priority 3: User level
     if let Some(home) = dirs::home_dir() {
         skills_dirs.push(home.join(".xiaoo").join("skills"));
     }
+
+    // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+    skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
     skill::SkillsConfig {
         skills_dirs,
@@ -245,21 +252,26 @@ fn resolve_all_skills_dirs() -> Vec<PathBuf> {
         if let Some(extra_dirs) = skills.dirs.as_ref() {
             for dir in extra_dirs {
                 let path = PathBuf::from(dir);
-                // Avoid duplicates with project/global dirs
+                // Avoid duplicates with project/user/system dirs
                 let dir_str = path.to_string_lossy();
-                if dir_str != ".xiaoo/skills" &&
-                   !dir_str.ends_with("/.xiaoo/skills") &&
-                   !dir_str.ends_with("\\.xiaoo\\skills") {
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                    && dir_str != "/usr/lib/.xiaoo/skills"
+                {
                     dirs.push(path);
                 }
             }
         }
     }
 
-    // Priority 3: Global level (lowest)
+    // Priority 3: User level
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".xiaoo").join("skills"));
     }
+
+    // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+    dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
     dirs
 }
@@ -286,8 +298,12 @@ fn project_skills_dir() -> PathBuf {
     PathBuf::from(".xiaoo/skills")
 }
 
-fn global_skills_dir() -> Option<PathBuf> {
+fn user_skills_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".xiaoo").join("skills"))
+}
+
+fn system_skills_dir() -> PathBuf {
+    PathBuf::from("/usr/lib/.xiaoo/skills")
 }
 
 fn default_skills_config() -> SkillsConfig {
@@ -374,11 +390,7 @@ fn handle_skill_command(command: SkillCommands) {
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .strip_suffix(".git")
-                    .unwrap_or(
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown"),
-                    )
+                    .unwrap_or(p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"))
                     .to_string()
             };
 
@@ -389,14 +401,21 @@ fn handle_skill_command(command: SkillCommands) {
 
             // Check all skill directories for existing skill BEFORE cloning
             let project_dest = project_skills_dir().join(&skill_name);
-            let global_dest = global_skills_dir().as_ref().map(|d| d.join(&skill_name));
+            let user_dest = user_skills_dir().as_ref().map(|d| d.join(&skill_name));
+            let system_dest = system_skills_dir().join(&skill_name);
 
             // Check config file directories
             let config_dests = {
                 let file_cfg = FileConfig::load(None, false);
-                file_cfg.skills.as_ref()
+                file_cfg
+                    .skills
+                    .as_ref()
                     .and_then(|s| s.dirs.as_ref())
-                    .map(|dirs| dirs.iter().map(|d| PathBuf::from(d).join(&skill_name)).collect::<Vec<_>>())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&skill_name))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
             };
 
@@ -422,16 +441,26 @@ fn handle_skill_command(command: SkillCommands) {
                 }
             }
 
-            // Check global level (lowest priority)
-            if let Some(ref global_d) = global_dest {
-                if global_d.exists() {
+            // Check user level
+            if let Some(ref user_d) = user_dest {
+                if user_d.exists() {
                     eprintln!(
-                        "Skill '{}' already installed at {} (global level, lowest priority)",
+                        "Skill '{}' already installed at {} (user level)",
                         skill_name,
-                        global_d.display()
+                        user_d.display()
                     );
                     std::process::exit(1);
                 }
+            }
+
+            // Check system level (lowest priority, for built-in skills only)
+            if system_dest.exists() {
+                eprintln!(
+                    "Skill '{}' already installed at {} (system level, built-in skill)",
+                    skill_name,
+                    system_dest.display()
+                );
+                std::process::exit(1);
             }
 
             // Now clone/copy the source
@@ -471,7 +500,8 @@ fn handle_skill_command(command: SkillCommands) {
             };
 
             // Validate that source directory contains a valid skill (SKILL.md or SKILL.toml)
-            let has_manifest = src_dir.join("SKILL.md").exists() || src_dir.join("SKILL.toml").exists();
+            let has_manifest =
+                src_dir.join("SKILL.md").exists() || src_dir.join("SKILL.toml").exists();
             if !has_manifest {
                 eprintln!("Error: Source directory is not a valid skill directory.");
                 eprintln!("A valid skill directory must contain either SKILL.md or SKILL.toml.");
@@ -481,9 +511,10 @@ fn handle_skill_command(command: SkillCommands) {
                 std::process::exit(1);
             }
 
-            // Install to global directory by default (lowest priority)
+            // Install to user directory by default
             // Users can manually copy to project level or config directories to override
-            let dest = global_dest.unwrap_or_else(|| project_skills_dir().join(&skill_name));
+            // System level (/usr/lib/.xiaoo/skills) is reserved for built-in skills only
+            let dest = user_dest.unwrap_or_else(|| project_skills_dir().join(&skill_name));
 
             // Audit is currently disabled by default; use `xiaoo skill audit <path>` for manual checks.
 
@@ -506,14 +537,21 @@ fn handle_skill_command(command: SkillCommands) {
             }
 
             let project_dir = project_skills_dir().join(&name);
-            let global_dir = global_skills_dir().as_ref().map(|d| d.join(&name));
+            let user_dir = user_skills_dir().as_ref().map(|d| d.join(&name));
+            let system_dir = system_skills_dir().join(&name);
 
             // Get config file directories
             let config_dirs = {
                 let file_cfg = FileConfig::load(None, false);
-                file_cfg.skills.as_ref()
+                file_cfg
+                    .skills
+                    .as_ref()
                     .and_then(|s| s.dirs.as_ref())
-                    .map(|dirs| dirs.iter().map(|d| PathBuf::from(d).join(&name)).collect::<Vec<_>>())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&name))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default()
             };
 
@@ -524,28 +562,41 @@ fn handle_skill_command(command: SkillCommands) {
                     eprintln!("Failed to remove from project: {}", e);
                     std::process::exit(1);
                 }
-                println!("Removed skill '{}' from {} (project level, highest priority).", name, project_dir.display());
+                println!(
+                    "Removed skill '{}' from {} (project level, highest priority).",
+                    name,
+                    project_dir.display()
+                );
 
                 // Warn if config dirs still exist
                 for config_dir in &config_dirs {
                     if config_dir.is_dir() {
                         eprintln!(
-                            "Warning: Skill '{}' still exists at {} (config directory, medium priority).",
+                            "Warning: Skill '{}' still exists at {} (config directory).",
                             name,
                             config_dir.display()
                         );
                     }
                 }
 
-                // Warn if global still exists
-                if let Some(ref global_d) = global_dir {
-                    if global_d.is_dir() {
+                // Warn if user level still exists
+                if let Some(ref user_d) = user_dir {
+                    if user_d.is_dir() {
                         eprintln!(
-                            "Warning: Skill '{}' still exists at {} (global level, lowest priority).",
+                            "Warning: Skill '{}' still exists at {} (user level).",
                             name,
-                            global_d.display()
+                            user_d.display()
                         );
                     }
+                }
+
+                // Warn if system level still exists
+                if system_dir.is_dir() {
+                    eprintln!(
+                        "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                        name,
+                        system_dir.display()
+                    );
                 }
                 return;
             }
@@ -557,9 +608,13 @@ fn handle_skill_command(command: SkillCommands) {
                         eprintln!("Failed to remove from config directory: {}", e);
                         std::process::exit(1);
                     }
-                    println!("Removed skill '{}' from {} (config directory, medium priority).", name, config_dir.display());
+                    println!(
+                        "Removed skill '{}' from {} (config directory).",
+                        name,
+                        config_dir.display()
+                    );
 
-                    // Warn if other config dirs or global still exist
+                    // Warn if other config dirs or user/system still exist
                     for other_config_dir in &config_dirs {
                         if other_config_dir != config_dir && other_config_dir.is_dir() {
                             eprintln!(
@@ -570,41 +625,75 @@ fn handle_skill_command(command: SkillCommands) {
                         }
                     }
 
-                    if let Some(ref global_d) = global_dir {
-                        if global_d.is_dir() {
+                    if let Some(ref user_d) = user_dir {
+                        if user_d.is_dir() {
                             eprintln!(
-                                "Warning: Skill '{}' still exists at {} (global level, lowest priority).",
+                                "Warning: Skill '{}' still exists at {} (user level).",
                                 name,
-                                global_d.display()
+                                user_d.display()
                             );
                         }
+                    }
+
+                    if system_dir.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                            name,
+                            system_dir.display()
+                        );
                     }
                     return;
                 }
             }
 
-            // 3. Global level (lowest)
-            if let Some(ref global_d) = global_dir {
-                if global_d.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(global_d) {
-                        eprintln!("Failed to remove from global: {}", e);
+            // 3. User level
+            if let Some(ref user_d) = user_dir {
+                if user_d.is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(user_d) {
+                        eprintln!("Failed to remove from user directory: {}", e);
                         std::process::exit(1);
                     }
-                    println!("Removed skill '{}' from {} (global level, lowest priority).", name, global_d.display());
+                    println!(
+                        "Removed skill '{}' from {} (user level).",
+                        name,
+                        user_d.display()
+                    );
+
+                    // Warn if system level still exists
+                    if system_dir.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                            name,
+                            system_dir.display()
+                        );
+                    }
                     return;
                 }
+            }
+
+            // 4. System level (built-in skills only - requires root privileges to remove)
+            if system_dir.is_dir() {
+                eprintln!(
+                    "Skill '{}' is a built-in skill at {} (system level).",
+                    name,
+                    system_dir.display()
+                );
+                eprintln!("Built-in skills require root privileges to remove.");
+                eprintln!("To remove: sudo rm -rf {}", system_dir.display());
+                std::process::exit(1);
             }
 
             // Skill not found anywhere
             eprintln!("Skill '{}' not found in any skills directory.", name);
             eprintln!("Checked directories:");
-            eprintln!("  - {} (project level)", project_dir.display());
+            eprintln!("  - {} (project level, highest priority)", project_dir.display());
             for config_dir in &config_dirs {
                 eprintln!("  - {} (config directory)", config_dir.display());
             }
-            if let Some(ref global_d) = global_dir {
-                eprintln!("  - {} (global level)", global_d.display());
+            if let Some(ref user_d) = user_dir {
+                eprintln!("  - {} (user level)", user_d.display());
             }
+            eprintln!("  - {} (system level, built-in skills)", system_dir.display());
             std::process::exit(1);
         }
     }
@@ -707,6 +796,22 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             },
             workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             max_turns: Some(config.max_turns),
+            subagent_roles: config
+                .subagent
+                .iter()
+                .map(|(role_id, cfg)| {
+                    (
+                        role_id.clone(),
+                        SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: cfg.description.clone(),
+                            prompt: cfg.prompt.clone(),
+                            max_turns: cfg.max_turns,
+                            tools: cfg.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
         },
         trace: config.trace.clone(),
         provider: config.provider.clone(),
@@ -723,8 +828,23 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         llm_provider: Some(llm_provider),
         hooker: config.hooker.clone(),
         lsp_registry: None,
-        operation_backend: config.operation_backend.clone(),
+        operation_backend: None,
         skills_config: config.skills_config.clone(),
+        subagent_roles: config
+            .subagent
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    xiaoo_app::gateway::SubagentRoleConfigEntry {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
+            })
+            .collect(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

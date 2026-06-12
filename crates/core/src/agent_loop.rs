@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Duration;
 
 use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
@@ -21,6 +22,7 @@ use crate::loop_state::LoopState;
 use crate::runtime::AgentRuntime;
 use crate::snapshot::RuntimeSnapshot;
 use crate::suspend::{LoopRunResult, SuspendedToolCall};
+use crate::token_estimator::TokenEstimator;
 
 use crate::spawn_evict;
 
@@ -77,6 +79,7 @@ pub async fn run_agent_loop(
     mut input: AgentLoopInput,
 ) -> Result<LoopRunResult, AgentError> {
     let snapshot = runtime.snapshot();
+    let estimator = TokenEstimator::new();
 
     // Detect `/skill-name` prefix and expand skill prompt inline.
     if input.append_user_message {
@@ -141,7 +144,23 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
-        if let Err(error) = llm_call_with_context_limit_recovery(&mut ctx).await {
+        if let Err(error) = pre_check_token_budget(&mut ctx, &estimator).await {
+            end_turn_span(
+                &mut ctx,
+                TraceOutcome::Error,
+                json!({"stop_reason": "pre_check_error"}),
+            )
+            .await;
+            finalize_trace_for_ctx(
+                &ctx,
+                TraceOutcome::Error,
+                Some(error.to_string()),
+                "pre_check_error",
+            )
+            .await;
+            return Err(error);
+        }
+        if let Err(error) = llm_call_with_recovery(&mut ctx).await {
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Error,
@@ -430,6 +449,7 @@ async fn end_turn_span(
 enum CompressionTrigger {
     Automatic,
     ContextLimitRetry,
+    PreCheckExceeded,
 }
 
 impl CompressionTrigger {
@@ -437,12 +457,92 @@ impl CompressionTrigger {
         match self {
             Self::Automatic => "automatic",
             Self::ContextLimitRetry => "context_limit_retry",
+            Self::PreCheckExceeded => "pre_check_exceeded",
         }
     }
 
     fn is_forced(self) -> bool {
-        matches!(self, Self::ContextLimitRetry)
+        matches!(self, Self::ContextLimitRetry | Self::PreCheckExceeded)
     }
+}
+
+async fn pre_check_token_budget(
+    ctx: &mut LoopContext<'_>,
+    estimator: &TokenEstimator,
+) -> Result<(), AgentError> {
+    let messages = ctx.state.messages.read().clone();
+    let estimated_input = estimator.estimate_input_tokens(
+        &ctx.snapshot.system_prompt,
+        ctx.snapshot.tool_registry.list_specs().len(),
+        &messages,
+    );
+
+    let context_window = ctx.snapshot.token_budget_config.total_budget;
+    let max_tokens = ctx.snapshot.token_budget_config.reserved_for_output;
+    let reserved_for_system = ctx.snapshot.token_budget_config.reserved_for_system;
+    let available_for_input = context_window
+        .saturating_sub(max_tokens)
+        .saturating_sub(reserved_for_system);
+
+    if estimated_input <= available_for_input {
+        tracing::debug!(
+            estimated_input_tokens = estimated_input,
+            available_tokens = available_for_input,
+            context_window,
+            "Pre-check passed: input tokens within budget"
+        );
+        return Ok(());
+    }
+
+    tracing::warn!(
+        estimated_input_tokens = estimated_input,
+        available_tokens = available_for_input,
+        context_window,
+        max_tokens,
+        trigger = "pre_check_exceeded",
+        "Pre-check failed: input tokens exceed available budget, triggering compression"
+    );
+
+    compress(ctx, CompressionTrigger::PreCheckExceeded).await?;
+    build_messages(ctx).await?;
+
+    let new_messages = ctx.state.messages.read().clone();
+    let new_estimated = estimator.estimate_input_tokens(
+        &ctx.snapshot.system_prompt,
+        ctx.snapshot.tool_registry.list_specs().len(),
+        &new_messages,
+    );
+
+    if new_estimated <= available_for_input {
+        tracing::info!(
+            new_estimated_tokens = new_estimated,
+            available_tokens = available_for_input,
+            "Pre-check passed after compression"
+        );
+        return Ok(());
+    }
+
+    if available_for_input == 0 || max_tokens + reserved_for_system >= context_window {
+        tracing::warn!(
+            estimated_tokens = new_estimated,
+            available_tokens = available_for_input,
+            context_window,
+            max_tokens,
+            reserved_for_system,
+            "Pre-check detected invalid configuration: no available input space. \
+             System will attempt API call to trigger auto-detection of actual context window."
+        );
+        return Ok(()); // Allow API call to proceed for auto-detection
+    }
+
+    tracing::warn!(
+        estimated_tokens = new_estimated,
+        available_tokens = available_for_input,
+        context_window,
+        "Pre-check shows input exceeds budget, but allowing API call for potential auto-adjustment"
+    );
+
+    Ok(())
 }
 
 async fn compress(
@@ -729,7 +829,10 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
-        ctx.snapshot.llm_provider.complete(&build_result.request).await?
+        ctx.snapshot
+            .llm_provider
+            .complete(&build_result.request)
+            .await?
     } else {
         let first_token_at = std::sync::Arc::clone(&first_token_at);
         ctx.snapshot
@@ -741,8 +844,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                let default_agent_id =
-                    agent_types::common::ids::AgentId(String::from("anonymous"));
+                let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
                 let agent_id = ctx
                     .input
                     .agent_id
@@ -889,8 +991,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             let _ = std::fs::create_dir_all(dir);
             let filename = format!(
                 "kvcache_debug_{}_{}.json",
-                ctx.state.session_id,
-                cumulative_turn
+                ctx.state.session_id, cumulative_turn
             );
             let path = dir.join(&filename);
             if let Ok(json) = serde_json::to_string_pretty(&debug_entry) {
@@ -903,22 +1004,64 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     Ok(())
 }
 
-async fn llm_call_with_context_limit_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
-    match llm_call(ctx).await {
-        Ok(()) => Ok(()),
-        Err(LlmError::ContextLengthExceeded { message }) => {
-            tracing::warn!(
-                turn = ctx.turn.turn_number,
-                "LLM request exceeded provider context limit; forcing compression retry: {message}"
-            );
+const MAX_TRANSIENT_RETRIES: u32 = 4;
+const TRANSIENT_BASE_DELAY_MS: u64 = 4_000;
+const TRANSIENT_MAX_DELAY_MS: u64 = 60_000;
 
-            compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
-            build_messages(ctx).await?;
-            llm_call(ctx)
-                .await
-                .map_err(|error| AgentError::LlmProvider(error.to_string()))
+fn is_transient(error: &LlmError) -> bool {
+    matches!(
+        error,
+        LlmError::RateLimited { .. } | LlmError::HttpError(_) | LlmError::Timeout
+    )
+}
+
+fn transient_backoff(attempt: u32, retry_after_ms: u64) -> Duration {
+    let millis = if retry_after_ms > 0 {
+        retry_after_ms
+    } else {
+        TRANSIENT_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(63))
+    };
+    Duration::from_millis(millis.min(TRANSIENT_MAX_DELAY_MS))
+}
+
+async fn llm_call_with_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
+    let mut retry_attempts: u32 = 0;
+    loop {
+        match llm_call(ctx).await {
+            Ok(()) => return Ok(()),
+            Err(LlmError::ContextLengthExceeded { message }) => {
+                tracing::warn!(
+                    turn = ctx.turn.turn_number,
+                    "LLM request exceeded provider context limit; forcing compression retry: {message}"
+                );
+
+                compress(ctx, CompressionTrigger::ContextLimitRetry).await?;
+                build_messages(ctx).await?;
+                return llm_call(ctx)
+                    .await
+                    .map_err(|error| AgentError::LlmProvider(error.to_string()));
+            }
+            Err(error) if retry_attempts < MAX_TRANSIENT_RETRIES && is_transient(&error) => {
+                let retry_after_ms = match &error {
+                    LlmError::RateLimited { retry_after_ms, .. } => *retry_after_ms,
+                    _ => 0,
+                };
+                let backoff = transient_backoff(retry_attempts, retry_after_ms);
+                retry_attempts += 1;
+                tracing::warn!(
+                    turn = ctx.turn.turn_number,
+                    attempt = retry_attempts,
+                    max_attempts = MAX_TRANSIENT_RETRIES,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "transient LLM error; backing off before retrying agent turn: {error}"
+                );
+                tokio::select! {
+                    _ = ctx.state.cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+            }
+            Err(error) => return Err(AgentError::LlmProvider(error.to_string())),
         }
-        Err(error) => Err(AgentError::LlmProvider(error.to_string())),
     }
 }
 
@@ -978,6 +1121,11 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         return Ok(None);
     }
 
+    // Repair empty call_ids before the validity partition below.
+    if let Some(msg) = ctx.turn.assistant_message.as_mut() {
+        synthesize_missing_call_ids(msg, ctx.state.turn_count);
+    }
+
     let tool_calls: Vec<ToolUseBlock> = ctx
         .turn
         .assistant_message
@@ -1015,7 +1163,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
                 build_messages(ctx).await.map_err(|e| {
                     AgentError::PromptBuild(format!("retry after invalid tool call: {e}"))
                 })?;
-                llm_call_with_context_limit_recovery(ctx).await
+                llm_call_with_recovery(ctx).await
             }
             .await;
             ctx.state.messages.write().pop();
@@ -1152,6 +1300,17 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
     }
 
     Ok(None)
+}
+
+/// Fill empty `call_id`s with a stable, turn-scoped id (`call_<turn>_<idx>`) so a
+/// provider that omits `tool_call.id` does not get the call rejected as invalid; a
+/// non-empty id is left untouched.
+fn synthesize_missing_call_ids(msg: &mut AssistantMessage, turn: u32) {
+    for (idx, tc) in msg.tool_calls.iter_mut().enumerate() {
+        if tc.call_id.trim().is_empty() {
+            tc.call_id = format!("call_{turn}_{idx}");
+        }
+    }
 }
 
 fn is_valid_tool_call(tc: &ToolUseBlock) -> bool {
@@ -1333,6 +1492,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         timestamp_ms: now_ms(),
         api_usage_tokens: Some(msg.usage.total_tokens),
         reasoning_content: msg.reasoning_content.clone(),
+        estimated_tokens: None,
     });
 }
 
@@ -1399,6 +1559,7 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
         timestamp_ms: now_ms(),
         api_usage_tokens: None,
         reasoning_content: None,
+        estimated_tokens: None,
     }
 }
 
@@ -1548,6 +1709,184 @@ mod tests {
 
     use crate::runtime_support::{EmptySkillRegistry, NoopRuntimeView};
 
+    #[test]
+    fn transient_backoff_grows_exponentially_without_retry_after() {
+        assert_eq!(transient_backoff(0, 0), Duration::from_millis(4_000));
+        assert_eq!(transient_backoff(1, 0), Duration::from_millis(8_000));
+        assert_eq!(transient_backoff(2, 0), Duration::from_millis(16_000));
+        assert_eq!(transient_backoff(3, 0), Duration::from_millis(32_000));
+    }
+
+    #[test]
+    fn transient_backoff_is_clamped_to_the_ceiling() {
+        assert_eq!(transient_backoff(10, 0), Duration::from_millis(60_000));
+        assert_eq!(
+            transient_backoff(u32::MAX, 0),
+            Duration::from_millis(60_000)
+        );
+    }
+
+    #[test]
+    fn transient_backoff_honors_retry_after_within_the_ceiling() {
+        assert_eq!(transient_backoff(3, 5_000), Duration::from_millis(5_000));
+        assert_eq!(transient_backoff(0, 120_000), Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn is_transient_retries_network_and_throttle_errors_only() {
+        assert!(is_transient(&LlmError::HttpError(
+            "error sending request for url".into()
+        )));
+        assert!(is_transient(&LlmError::Timeout));
+        assert!(is_transient(&LlmError::RateLimited {
+            retry_after_ms: 0,
+            message: String::new(),
+        }));
+
+        assert!(!is_transient(&LlmError::AuthError {
+            message: String::new(),
+        }));
+        assert!(!is_transient(&LlmError::ApiError("HTTP 400".into())));
+        assert!(!is_transient(&LlmError::ContextLengthExceeded {
+            message: String::new(),
+        }));
+    }
+
+    fn assistant_with_tool_calls(calls: &[(&str, &str)]) -> AssistantMessage {
+        AssistantMessage {
+            text: None,
+            reasoning_content: None,
+            tool_calls: calls
+                .iter()
+                .map(|(call_id, tool_name)| ToolUseBlock {
+                    call_id: call_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    input: serde_json::json!({}),
+                })
+                .collect(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+        }
+    }
+
+    #[test]
+    fn synthesize_missing_call_ids_fills_only_empty_ids_uniquely() {
+        let mut msg = assistant_with_tool_calls(&[
+            ("", "grep"),          // missing id → synthesized
+            ("   ", "bash"),       // whitespace-only id → treated as missing
+            ("call_real", "edit"), // provider-supplied id → preserved
+        ]);
+
+        synthesize_missing_call_ids(&mut msg, 3);
+
+        assert_eq!(msg.tool_calls[0].call_id, "call_3_0");
+        assert_eq!(msg.tool_calls[1].call_id, "call_3_1");
+        assert_eq!(msg.tool_calls[2].call_id, "call_real");
+        assert!(msg.tool_calls.iter().all(is_valid_tool_call));
+        assert_ne!(msg.tool_calls[0].call_id, msg.tool_calls[1].call_id);
+
+        let mut next = assistant_with_tool_calls(&[("", "grep")]);
+        synthesize_missing_call_ids(&mut next, 4);
+        assert_eq!(next.tool_calls[0].call_id, "call_4_0");
+        assert_ne!(next.tool_calls[0].call_id, msg.tool_calls[0].call_id);
+    }
+
+    #[test]
+    fn synthesize_missing_call_ids_does_not_rescue_empty_tool_name() {
+        let mut msg = assistant_with_tool_calls(&[("", "")]);
+        synthesize_missing_call_ids(&mut msg, 0);
+        assert_eq!(msg.tool_calls[0].call_id, "call_0_0");
+        assert!(!is_valid_tool_call(&msg.tool_calls[0]));
+    }
+
+    #[test]
+    fn compression_trigger_as_str() {
+        assert_eq!(CompressionTrigger::Automatic.as_str(), "automatic");
+        assert_eq!(CompressionTrigger::ContextLimitRetry.as_str(), "context_limit_retry");
+        assert_eq!(CompressionTrigger::PreCheckExceeded.as_str(), "pre_check_exceeded");
+    }
+
+    #[test]
+    fn compression_trigger_is_forced() {
+        assert!(!CompressionTrigger::Automatic.is_forced());
+        assert!(CompressionTrigger::ContextLimitRetry.is_forced());
+        assert!(CompressionTrigger::PreCheckExceeded.is_forced());
+    }
+
+    mod token_budget_tests {
+        use super::*;
+        use crate::token_estimator::TokenEstimator;
+        use agent_types::MessageRole;
+
+        #[test]
+        fn test_estimator_basic_calculation() {
+            let estimator = TokenEstimator::new();
+            let messages = vec![
+                ChatMessage::text(MessageRole::User, "Hello world", 0),
+                ChatMessage::text(MessageRole::Assistant, "Hi there", 0),
+            ];
+
+            let estimated = estimator.estimate_input_tokens(
+                "You are a helpful assistant",
+                0,
+                &messages,
+            );
+
+            assert!(estimated > 0);
+        }
+
+        #[test]
+        fn test_budget_calculation_logic() {
+            let config = TokenBudgetConfig {
+                total_budget: 10000,
+                reserved_for_output: 1000,
+                reserved_for_system: 500,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 8500);
+        }
+
+        #[test]
+        fn test_budget_edge_case_zero_available() {
+            let config = TokenBudgetConfig {
+                total_budget: 1000,
+                reserved_for_output: 1000,
+                reserved_for_system: 500,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 0);
+        }
+
+        #[test]
+        fn test_budget_edge_case_over_allocation() {
+            let config = TokenBudgetConfig {
+                total_budget: 1000,
+                reserved_for_output: 800,
+                reserved_for_system: 400,
+                hard_limit_ratio: 0.8,
+            };
+
+            let available_for_input = config.total_budget
+                .saturating_sub(config.reserved_for_output)
+                .saturating_sub(config.reserved_for_system);
+
+            assert_eq!(available_for_input, 0);
+
+            let is_invalid = config.reserved_for_output + config.reserved_for_system >= config.total_budget;
+            assert!(is_invalid);
+        }
+    }
+
     struct StreamingTestProvider {
         capabilities: ProviderCapabilities,
     }
@@ -1692,78 +2031,6 @@ mod tests {
         }
     }
 
-    struct ContextLimitThenSuccessProvider {
-        capabilities: ProviderCapabilities,
-        call_count: Arc<StdMutex<usize>>,
-    }
-
-    impl ContextLimitThenSuccessProvider {
-        fn new(call_count: Arc<StdMutex<usize>>) -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: false,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "context-limit-test".to_string(),
-                },
-                call_count,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ContextLimitThenSuccessProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            _request: &LlmRequest,
-            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            let call_number = {
-                let mut count = self
-                    .call_count
-                    .lock()
-                    .expect("provider call count mutex should not be poisoned");
-                *count += 1;
-                *count
-            };
-
-            if call_number == 1 {
-                return Err(LlmError::ContextLengthExceeded {
-                    message: "provider context limit exceeded".to_string(),
-                });
-            }
-
-            on_chunk(StreamChunk {
-                delta_text: Some("Recovered".to_string()),
-                delta_reasoning: None,
-                delta_tool_call: None,
-            });
-
-            Ok(LlmResponse {
-                message: AssistantMessage {
-                    text: Some("Recovered".to_string()),
-                    reasoning_content: None,
-                    tool_calls: Vec::new(),
-                    usage: Usage {
-                        prompt_tokens: 5,
-                        completion_tokens: 1,
-                        total_tokens: 6,
-                    },
-                    stop_reason: StopReason::EndTurn,
-                },
-                kv_cache_chunk_hashes: vec![],
-            })
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
 
     struct FixedPromptBuilder;
 
@@ -1922,68 +2189,6 @@ mod tests {
             .expect("test runtime should build")
     }
 
-    struct ForceRetryCompressionPipeline {
-        forced_count: Arc<StdMutex<usize>>,
-    }
-
-    impl ForceRetryCompressionPipeline {
-        fn new(forced_count: Arc<StdMutex<usize>>) -> Self {
-            Self { forced_count }
-        }
-    }
-
-    #[async_trait]
-    impl CompressionPipeline for ForceRetryCompressionPipeline {
-        fn analyze(
-            &self,
-            messages: &[ChatMessage],
-            budget: &dyn TokenBudgetPolicy,
-        ) -> agent_types::compression::ContextAnalysis {
-            agent_types::compression::ContextAnalysis {
-                severity: agent_types::compression::ContextSeverity::Normal,
-                estimated_tokens: messages.len(),
-                should_compact: false,
-                total_tokens: messages.len(),
-                available_tokens: budget.available_budget().unwrap_or(0),
-                usage_ratio: 0.0,
-            }
-        }
-
-        async fn compress(
-            &self,
-            messages: &[ChatMessage],
-            _budget: &dyn TokenBudgetPolicy,
-            meta: &agent_types::compression::CompressionMeta,
-        ) -> Result<CompressedView, agent_contracts::CompressionError> {
-            let mut count = self
-                .forced_count
-                .lock()
-                .expect("compression counter mutex should not be poisoned");
-            *count += 1;
-
-            Ok(CompressedView {
-                messages: messages.to_vec(),
-                removed_count: 0,
-                summary: Some("forced retry compression".to_string()),
-                updated_meta: meta.clone(),
-                estimated_tokens: messages.len(),
-            })
-        }
-
-        fn microcompact(
-            &self,
-            messages: &[ChatMessage],
-            _now_ms: u64,
-        ) -> agent_types::compression::MicroCompactResult {
-            agent_types::compression::MicroCompactResult {
-                applied: false,
-                removed_count: 0,
-                removed_call_ids: Vec::new(),
-                messages: messages.to_vec(),
-                token_delta: 0,
-            }
-        }
-    }
 
     #[derive(Default)]
     struct RecordingLoopEventSink {
@@ -2161,8 +2366,11 @@ mod tests {
         }
     }
 
+    /// Streams an empty-`call_id` tool call on the first turn, then a plain
+    /// completion so the loop terminates after the call is executed.
     struct EmptyCallIdToolCallProvider {
         capabilities: ProviderCapabilities,
+        calls: Arc<StdMutex<usize>>,
     }
 
     impl EmptyCallIdToolCallProvider {
@@ -2175,6 +2383,7 @@ mod tests {
                     max_context_window: 4096,
                     model_name: "empty-call-id-test".to_string(),
                 },
+                calls: Arc::new(StdMutex::new(0)),
             }
         }
     }
@@ -2190,11 +2399,34 @@ mod tests {
             _request: &LlmRequest,
             on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
         ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut calls = self.calls.lock().expect("call counter mutex poisoned");
+                *calls += 1;
+                *calls
+            };
+
             on_chunk(StreamChunk {
                 delta_text: Some("trying to use a tool".to_string()),
                 delta_reasoning: None,
                 delta_tool_call: None,
             });
+
+            if call_number >= 2 {
+                return Ok(LlmResponse {
+                    message: AssistantMessage {
+                        text: Some("done".to_string()),
+                        reasoning_content: None,
+                        tool_calls: Vec::new(),
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 2,
+                            total_tokens: 12,
+                        },
+                        stop_reason: StopReason::EndTurn,
+                    },
+                    kv_cache_chunk_hashes: vec![],
+                });
+            }
 
             Ok(LlmResponse {
                 message: AssistantMessage {
@@ -2222,7 +2454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_agent_loop_drops_invalid_tool_calls_with_empty_call_id() {
+    async fn run_agent_loop_synthesizes_missing_call_id_and_executes_tool() {
         let provider = Arc::new(LlmProviderWrapper::new(
             Arc::new(EmptyCallIdToolCallProvider::new()),
             None,
@@ -2237,191 +2469,43 @@ mod tests {
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await
-            .expect("loop should degrade invalid tool call into assistant text");
+            .expect("loop should execute the call after synthesizing its id");
 
         assert!(matches!(
             outcome,
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
-        assert_eq!(loop_state.turn_count, 1);
-        assert_eq!(loop_state.messages.read().len(), 2);
-        assert_eq!(
-            loop_state.messages.read()[1].text_content(),
-            Some("trying to use a tool")
-        );
-        assert!(!loop_state.messages.read()[1]
-            .blocks
-            .iter()
-            .any(|block| matches!(block, ContentBlock::ToolUse { .. })));
-        assert!(!loop_state
-            .messages
-            .read()
-            .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool)));
-    }
+        assert_eq!(loop_state.turn_count, 2);
 
-    /// LLM provider that returns a single empty-name tool call on every invocation.
-    /// Used to exercise the "retry still returns empty name → graceful degrade" path.
-    struct EmptyNameToolCallProvider {
-        capabilities: ProviderCapabilities,
-    }
-
-    impl EmptyNameToolCallProvider {
-        fn new() -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: true,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "empty-name-test".to_string(),
-                },
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for EmptyNameToolCallProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            _request: &LlmRequest,
-            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            // Emit a text delta so the assistant message is non-empty.
-            on_chunk(StreamChunk {
-                delta_text: Some("trying to use a tool".to_string()),
-                delta_reasoning: None,
-                delta_tool_call: None,
-            });
-
-            Ok(LlmResponse {
-                message: AssistantMessage {
-                    text: Some("trying to use a tool".to_string()),
-                    reasoning_content: None,
-                    tool_calls: vec![ToolUseBlock {
-                        call_id: "call_empty_1".to_string(),
-                        tool_name: String::new(), // ← empty name: the trigger
-                        input: serde_json::json!({}),
-                    }],
-                    usage: Usage {
-                        prompt_tokens: 10,
-                        completion_tokens: 5,
-                        total_tokens: 15,
-                    },
-                    stop_reason: StopReason::EndTurn,
-                },
-                kv_cache_chunk_hashes: vec![],
+        let messages = loop_state.messages.read();
+        let tool_use = messages.iter().find_map(|m| {
+            m.blocks.iter().find_map(|b| match b {
+                ContentBlock::ToolUse {
+                    call_id, tool_name, ..
+                } => Some((call_id.clone(), tool_name.clone())),
+                _ => None,
             })
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
-
-    struct ToolThenDoneProvider {
-        capabilities: ProviderCapabilities,
-        requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>,
-    }
-
-    impl ToolThenDoneProvider {
-        fn new(requests: Arc<StdMutex<Vec<Vec<ChatMessage>>>>) -> Self {
-            Self {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: true,
-                    supports_json_mode: false,
-                    max_context_window: 4096,
-                    model_name: "tool-then-done-test".to_string(),
-                },
-                requests,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ToolThenDoneProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            panic!("streaming path should use complete_stream instead of complete");
-        }
-
-        async fn complete_stream(
-            &self,
-            request: &LlmRequest,
-            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            let call_number = {
-                let mut requests = self
-                    .requests
-                    .lock()
-                    .expect("request recorder mutex should not be poisoned");
-                requests.push(request.messages.clone());
-                requests.len()
-            };
-
-            if call_number == 1 {
-                Ok(LlmResponse {
-                    kv_cache_chunk_hashes: vec![],
-                    message: AssistantMessage {
-                        text: Some("checking".to_string()),
-                        reasoning_content: None,
-                        tool_calls: vec![ToolUseBlock {
-                            call_id: "call_1".to_string(),
-                            tool_name: "bash".to_string(),
-                            input: serde_json::json!({"command": "date"}),
-                        }],
-                        usage: Usage {
-                            prompt_tokens: 10,
-                            completion_tokens: 3,
-                            total_tokens: 13,
-                        },
-                        stop_reason: StopReason::ToolUse,
-                    },
+        });
+        assert_eq!(
+            tool_use,
+            Some(("call_0_0".to_string(), "bash".to_string())),
+            "empty call_id should be synthesized to a stable turn-scoped id and preserved"
+        );
+        let paired = messages.iter().any(|m| {
+            matches!(m.role, MessageRole::Tool)
+                && m.blocks.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolResult { call_id, .. } if call_id == "call_0_0"
+                    )
                 })
-            } else {
-                Ok(LlmResponse {
-                    kv_cache_chunk_hashes: vec![],
-                    message: AssistantMessage {
-                        text: Some("done".to_string()),
-                        reasoning_content: None,
-                        tool_calls: Vec::new(),
-                        usage: Usage {
-                            prompt_tokens: 20,
-                            completion_tokens: 2,
-                            total_tokens: 22,
-                        },
-                        stop_reason: StopReason::EndTurn,
-                    },
-                })
-            }
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
+        });
+        assert!(
+            paired,
+            "synthesized tool_use must pair with a tool_result on the same id"
+        );
     }
 
-    struct SecondTurnPendingSource {
-        drain_count: StdMutex<usize>,
-    }
 
-    #[async_trait]
-    impl crate::input::PendingUserMessageSource for SecondTurnPendingSource {
-        async fn drain_pending_user_messages(&self) -> Vec<String> {
-            let mut count = self
-                .drain_count
-                .lock()
-                .expect("pending source mutex should not be poisoned");
-            *count += 1;
-            if *count == 2 {
-                vec!["please use the fresh requirement".to_string()]
-            } else {
-                Vec::new()
-            }
-        }
-    }
+
 }

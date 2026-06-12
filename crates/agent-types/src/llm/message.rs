@@ -43,4 +43,6 @@ pub struct ChatMessage {
     pub api_usage_tokens: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens: Option<usize>,
 }

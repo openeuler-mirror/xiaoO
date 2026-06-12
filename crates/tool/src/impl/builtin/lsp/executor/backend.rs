@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use agent_contracts::backend::capability::filesystem::ReadBytesRequest;
 use agent_contracts::backend::capability::path::{ResolveBase, ResolvePathRequest};
-use agent_contracts::backend::OperationBackendKind;
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
@@ -67,10 +66,10 @@ impl ToolExecutor for LspExecutor {
             ));
         };
 
-        if backend.backend_kind() != OperationBackendKind::Local {
+        if !backend.capabilities().supports_lsp {
             return Ok(error_output(&format!(
-                "lsp tool only supports local backend; {} backend is not supported",
-                backend.backend_kind().as_str(),
+                "lsp tool is not supported by backend '{}'",
+                backend.backend_id(),
             )));
         }
 
@@ -97,8 +96,8 @@ impl ToolExecutor for LspExecutor {
         // ── Explicit content sync ──────────────────────────────────────────────
         // For local backend, LspService also reads content from the host FS
         // inside prepare_file(). This explicit sync ensures the LSP server sees
-        // the current on-disk state and establishes the interface that future
-        // remote backends (conch) will use as their primary content delivery path.
+        // the current on-disk state and establishes the interface that non-local
+        // LSP-capable backends can use as their primary content delivery path.
         let file_content = backend
             .files()
             .read_bytes(ReadBytesRequest {

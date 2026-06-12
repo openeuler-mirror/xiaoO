@@ -11,6 +11,9 @@ pub enum OperationBackendBuildError {
     #[error("unsupported backend kind: {kind}")]
     UnsupportedBackend { kind: String },
 
+    #[error("unsupported backend option: {message}")]
+    Unsupported { message: String },
+
     #[error("backend build failed: {message}")]
     BuildFailed { message: String },
 }

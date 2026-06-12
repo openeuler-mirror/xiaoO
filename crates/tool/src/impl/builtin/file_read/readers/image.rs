@@ -27,6 +27,7 @@ fn estimate_tokens_for_base64(base64_len: usize) -> usize {
     (base64_len as f64 / IMAGE_BYTES_PER_TOKEN_ESTIMATE).ceil() as usize
 }
 
+#[allow(dead_code)]
 pub fn read_image_file<P: AsRef<Path>>(
     file_path: P,
     max_tokens: Option<usize>,
@@ -82,7 +83,6 @@ pub fn read_image_file<P: AsRef<Path>>(
     })
 }
 
-#[allow(dead_code)]
 pub fn read_image_from_bytes(
     extension: &str,
     bytes: &[u8],

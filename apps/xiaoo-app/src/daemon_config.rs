@@ -1,4 +1,3 @@
-use agent_contracts::backend::OperationBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
@@ -15,9 +14,10 @@ use xiaoo_app::channels::{
     build_feishu_runtime, build_telegram_runtime, ChannelRuntime, FeishuConfig,
     FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
+use xiaoo_app::gateway::backend::GatewayBackendConfig;
 use xiaoo_app::httpserver::rate_limit::RateLimitConfig;
 
-const DEFAULT_OUTPUT_TOKENS: usize = 128000;
+const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub http: HttpConfig,
     #[serde(default)]
     pub agent: BTreeMap<String, AgentRoleConfig>,
+    #[serde(default)]
+    pub subagent: BTreeMap<String, SubagentRoleConfig>,
     #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
@@ -44,7 +46,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub lsp: Option<LspConfig>,
     #[serde(default)]
-    pub operation_backend: Option<OperationBackendConfig>,
+    pub operation_backend: Option<GatewayBackendConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,8 +59,6 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default)]
     pub max_tokens: Option<usize>,
-    #[serde(default)]
-    pub context_window: Option<usize>,
     #[serde(default)]
     pub kvcache_enabled: Option<bool>,
     #[serde(default)]
@@ -156,6 +156,19 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AgentRoleConfig {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SubagentRoleConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub description: String,
@@ -472,10 +485,13 @@ impl DaemonConfig {
             }
         }
 
-        // Priority 3: Global level (lowest)
+        // Priority 3: User level
         if let Some(home) = dirs::home_dir() {
             skills_dirs.push(home.join(".xiaoo").join("skills"));
         }
+
+        // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+        skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
 
         SkillsConfig {
             skills_dirs,

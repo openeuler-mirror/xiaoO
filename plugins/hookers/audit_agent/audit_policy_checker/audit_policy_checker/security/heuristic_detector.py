@@ -20,17 +20,41 @@ DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
 # ==================== 关键命令正则模式 ====================
 # 包含：递归删除根目录、全权限设置、提权执行、访问敏感文件等
 CRITICAL_COMMAND_PATTERNS: list[dict] = [
+    # rm 命令分级检测（规则从严格到宽松，先匹配的优先）
+    # 1. rm -rf 根目录 — critical（最高危）
     {
-        "pattern": r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(-[a-zA-Z]*r[a-zA-Z]*\s+)?/",
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\s",
         "risk_level": "critical",
         "risk_type": "script_execution",
-        "reason": "检测到递归强制删除关键路径 (rm -rf /...)",
+        "reason": "检测到递归强制删除根目录 (rm -rf /)",
     },
+    # 2. rm 同时带 -r 和 -f 且目标是绝对路径 — critical
     {
-        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*[a-zA-Z]*f[a-zA-Z]*\s+",
+        "pattern": r"\brm\s+-(?=[^\s]*r)(?=[^\s]*f)[a-zA-Z]*\s+/",
+        "risk_level": "critical",
+        "risk_type": "script_execution",
+        "reason": "检测到递归强制删除绝对路径 (rm -rf /...)",
+    },
+    # 3. rm 带 -r 或 -f 且目标是关键系统目录 — critical
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+/(etc|var|home|usr|boot|root|opt|srv|sys|proc)\b",
+        "risk_level": "critical",
+        "risk_type": "script_execution",
+        "reason": "检测到删除关键系统目录",
+    },
+    # 4. rm -r 后跟绝对路径（无 -f）— high
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/",
         "risk_level": "high",
         "risk_type": "script_execution",
-        "reason": "检测到递归强制删除命令 (rm -rf)",
+        "reason": "检测到递归删除操作 (rm -r /...)",
+    },
+    # 5. rm -f 后跟绝对路径（无 -r）— medium
+    {
+        "pattern": r"\brm\s+-[a-zA-Z]*f[a-zA-Z]*\s+/",
+        "risk_level": "medium",
+        "risk_type": "script_execution",
+        "reason": "检测到强制删除文件 (rm -f /...)",
     },
     {
         "pattern": r"chmod\s+[0-7]*777[0-7]*",
@@ -76,18 +100,32 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "reason": "检测到尝试访问或修改 xiaoO 配置文件",
     },
     # xiaoO 安全 Skill 目录保护：检测删除/修改操作（允许读取/执行）
+    # 系统级路径（/usr/lib/.xiaoo/skills/xiaoo-guardian/）
     # 只拦截写入类命令，放行 cat/read/ls/grep 等读取操作
+    {
+        "pattern": r"/usr/lib/\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 系统级安全防护 Skill 目录",
+    },
+    {
+        "pattern": r"\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b.* /usr/lib/\.xiaoo/skills/xiaoo-guardian/",
+        "risk_level": "critical",
+        "risk_type": "config_tampering",
+        "reason": "检测到尝试修改或删除 xiaoO 系统级安全防护 Skill 目录",
+    },
+    # 用户级路径（~/.xiaoo/skills/xiaoo-guardian/）
     {
         "pattern": r"\.xiaoo/skills/xiaoo-guardian/.*\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b",
         "risk_level": "critical",
         "risk_type": "config_tampering",
-        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
+        "reason": "检测到尝试修改或删除 xiaoO 用户级安全防护 Skill 目录",
     },
     {
         "pattern": r"\b(rm|del|delete|remove|修改|删除|chmod|chown|write|save|保存|modify|更新|覆盖|replace|truncate|追加|append)\b.*\.xiaoo/skills/xiaoo-guardian/",
         "risk_level": "critical",
         "risk_type": "config_tampering",
-        "reason": "检测到尝试修改或删除 xiaoO 安全防护 Skill 目录",
+        "reason": "检测到尝试修改或删除 xiaoO 用户级安全防护 Skill 目录",
     },
 ]
 
@@ -145,8 +183,52 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "data_exfiltration",
         "reason": "检测到通过 curl POST 外传可能包含敏感信息的请求",
     },
+    # Shell 配置文件追加写入检测 — 追加比覆盖更隐蔽（混入现有内容），是持久化的典型手法
+    {
+        "pattern": r">>\s*(~|/home/[^/]+)/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile)",
+        "risk_level": "high",
+        "risk_type": "persistence",
+        "reason": "检测到修改 Shell 配置文件（~/.bashrc 等），可能用于持久化后门",
+    },
     # 注意：/dev/null 已从检测列表移除，因为它通常只用于 shell 重定向（如 2>/dev/null），
     # 不是真正的安全风险。真正的攻击不会通过读取 /dev/null 来实现。
+    # ---- 非交互式密码修改 — 可能被 LLM 自动执行，需用户授权 ----
+    {
+        "pattern": r"\|\s*passwd\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到管道方式调用 passwd（非交互式密码修改）",
+    },
+    {
+        "pattern": r"\bpasswd\s+--stdin\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 passwd --stdin 非交互式密码输入",
+    },
+    {
+        "pattern": r"\bchpasswd\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 chpasswd 批量密码修改命令",
+    },
+    {
+        "pattern": r"\bnewusers\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 newusers 批量用户添加命令",
+    },
+    {
+        "pattern": r"\bpasswd\s+-[a-zA-Z]*d\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除用户密码操作 (passwd -d)",
+    },
+    {
+        "pattern": r"\bpasswd\s+-[a-zA-Z]*l\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到锁定用户账户操作 (passwd -l)",
+    },
 ]
 
 # ==================== Prompt 注入检测关键词 ====================
@@ -219,12 +301,48 @@ SAFE_ACTION_TYPES = frozenset({
 })
 
 # ==================== 安全 Bash 子命令模式 ====================
-# 这些是只读、低风险的 bash 命令，可以快速放行
-SAFE_BASH_PATTERNS = [
-    # 文件/目录查看
+
+# 完全安全的 bash 子命令：跳过 Layer 2 + Layer 3
+# 这些命令不涉及文件内容读取，无敏感路径泄露风险
+FULLY_SAFE_BASH_PATTERNS = [
+    # 目录查看
     r"^ls(?:\s|$)",
-    r"^ls\s+",
     r"^dir(?:\s|$)",
+    # 路径查看
+    r"^pwd(?:\s|$)",
+    r"^which\s+",
+    r"^whereis\s+",
+    r"^realpath\s+",
+    # 文件信息（不读内容）
+    r"^file\s+",
+    r"^stat\s+",
+    r"^du(?:\s|$)",
+    # 打印（不涉及文件）
+    r"^echo\s+",
+    r"^printf\s+",
+    # 类型检查
+    r"^type\s+",
+    r"^command\s+",
+    r"^basename\s+",
+    r"^dirname\s+",
+    # 系统信息查询（只读，不涉及文件/网络/权限）
+    r"^whoami(?:\s|$)",
+    r"^id(?:\s|$)",
+    r"^hostname(?:\s|$)",
+    r"^uname(?:\s|$)",
+    r"^date(?:\s|$)",
+    r"^env(?:\s|$)",
+    r"^printenv(?:\s|$)",
+    r"^tty(?:\s|$)",
+    r"^arch(?:\s|$)",
+    r"^uptime(?:\s|$)",
+    r"^groups(?:\s|$)",
+    r"^logname(?:\s|$)",
+]
+
+# 安全但可能访问敏感路径的 bash 子命令：跳过 Layer 3，保留 Layer 2
+# 这些命令可以读取文件内容，可能泄露 /etc/shadow 等敏感信息
+READONLY_SENSITIVE_BASH_PATTERNS = [
     # 文件内容查看
     r"^cat\s+\S",
     r"^head(?:\s|$)",
@@ -234,30 +352,24 @@ SAFE_BASH_PATTERNS = [
     r"^wc(?:\s|$)",
     # 搜索
     r"^grep(?:\s|$)",
-    r"^grep\s+",
     r"^find\s+",
     r"^ag(?:\s|$)",
     r"^rg(?:\s|$)",
-    # 路径查看
-    r"^pwd(?:\s|$)",
-    r"^which\s+",
-    r"^whereis\s+",
-    r"^realpath\s+",
-    # 文件信息
-    r"^file\s+",
-    r"^stat\s+",
-    r"^du(?:\s|$)",
-    # 打印
-    r"^echo\s+",
-    r"^printf\s+",
-    # 类型检查
-    r"^type\s+",
-    r"^basename\s+",
-    r"^dirname\s+",
+    # 内容提取
+    r"^awk\s+",
+    r"^sed\s+",
+    r"^cut\s+",
+    r"^sort(?:\s|$)",
+    r"^uniq(?:\s|$)",
 ]
 
-# 编译安全 bash 命令正则
-SAFE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in SAFE_BASH_PATTERNS]
+# 向后兼容：合并为完整安全列表（原 SAFE_BASH_PATTERNS）
+SAFE_BASH_PATTERNS = FULLY_SAFE_BASH_PATTERNS + READONLY_SENSITIVE_BASH_PATTERNS
+
+# 编译正则
+FULLY_SAFE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in FULLY_SAFE_BASH_PATTERNS]
+READONLY_SENSITIVE_BASH_COMPILED = [re.compile(p, re.IGNORECASE) for p in READONLY_SENSITIVE_BASH_PATTERNS]
+SAFE_BASH_COMPILED = FULLY_SAFE_BASH_COMPILED + READONLY_SENSITIVE_BASH_COMPILED
 
 # ==================== 风险等级优先级映射 ====================
 _RISK_PRIORITY = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -341,6 +453,19 @@ class CommandPatternScanner:
         )
 
 
+# 内联脚本命令检测 — 供 audit_agent.py 判断是否需要跳过 Layer 1 立即拦截
+_INLINE_SCRIPT_RE = re.compile(
+    r"(?:^|\s)(?:python|python3|python3\.\d+|perl|perl5|ruby|jruby|mruby|node|php|lua)\s+"
+    r"(?:-[a-zA-Z]*[ce][a-zA-Z]*\s+)",
+    re.IGNORECASE,
+)
+
+
+def is_inline_script_command(action_detail: str) -> bool:
+    """判断命令是否为内联脚本解释器命令（python -c, perl -e 等）"""
+    return bool(_INLINE_SCRIPT_RE.search(action_detail))
+
+
 class InjectionKeywordChecker:
     """子检测器：Prompt 注入关键词检测"""
 
@@ -362,9 +487,31 @@ class InjectionKeywordChecker:
         )
 
 
+def _extract_first_command(command: str) -> str:
+    """提取管道和链式命令的第一段"""
+    main_cmd = command.split("|")[0].strip()
+    for sep in ["&&", "||"]:
+        if sep in main_cmd:
+            main_cmd = main_cmd.split(sep)[0].strip()
+            break
+    return main_cmd
+
+
+def is_fully_safe_bash_command(command: str) -> bool:
+    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）"""
+    main_cmd = _extract_first_command(command)
+    return any(p.match(main_cmd) for p in FULLY_SAFE_BASH_COMPILED)
+
+
+def is_readonly_sensitive_bash_command(command: str) -> bool:
+    """检查是否为安全但可能访问敏感路径的 bash 命令（跳过 L3，保留 L2）"""
+    main_cmd = _extract_first_command(command)
+    return any(p.match(main_cmd) for p in READONLY_SENSITIVE_BASH_COMPILED)
+
+
 def is_safe_bash_command(command: str) -> bool:
     """
-    检查 bash 命令是否是安全的只读操作。
+    检查 bash 命令是否是安全的只读操作（向后兼容）。
 
     Args:
         command: bash 命令字符串
@@ -372,15 +519,7 @@ def is_safe_bash_command(command: str) -> bool:
     Returns:
         bool: 如果是安全的只读命令返回 True
     """
-    # 去掉前后的管道和重定向，获取主要命令
-    # 处理管道命令：只检查第一个命令
-    main_cmd = command.split("|")[0].strip()
-
-    # 处理 && 和 || 组合命令：只检查第一个命令
-    for sep in ["&&", "||"]:
-        if sep in main_cmd:
-            main_cmd = main_cmd.split(sep)[0].strip()
-            break
+    main_cmd = _extract_first_command(command)
 
     # 检查是否匹配安全模式
     for pattern in SAFE_BASH_COMPILED:

@@ -86,9 +86,10 @@ impl GatewayRuntime {
                     self.stream_rx = None;
                 }
                 SessionTurnUpdate::Err(error) => {
+                    let display_error = crate::error_log::record_tui_error("turn_stream", &error);
                     self.stream_reveal_buffer.clear();
                     self.pending_stream_done = None;
-                    self.set_stream_message_content(state, format!("Error: {}", error), false);
+                    self.set_stream_message_content(state, display_error, false);
                     state.chat_state.is_loading = false;
                     self.stream_rx = None;
                     self.stream_message_index = None;
@@ -312,9 +313,15 @@ impl GatewayRuntime {
                 );
             }
             ToolExecutionStatus::Completed => {
+                let fallback_file_change = update.file_change.clone().or_else(|| {
+                    crate::app_state::file_change_delta_from_tool_args(
+                        &update.tool,
+                        &update.args_preview,
+                    )
+                });
                 state.reconcile_tool_file_change_from_baseline(
                     &update.call_id,
-                    update.file_change.clone(),
+                    fallback_file_change,
                 );
             }
             ToolExecutionStatus::Failed => {
@@ -724,6 +731,47 @@ mod tests {
             .get("src/main.rs")
             .expect("file stats should be tracked");
         assert_eq!(stats.additions, 2);
+        assert_eq!(stats.deletions, 1);
+    }
+
+    #[test]
+    fn completed_file_edit_without_running_update_tracks_args_delta() {
+        let mut runtime = GatewayRuntime::new();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
+            .expect("test app state should initialize");
+        state.chat_state.messages.clear();
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "call-args-only".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: serde_json::json!({
+                    "file_path": "README.md",
+                    "old_string": "[@shen](https://github.com/shen)",
+                    "new_string": "[@hypo](https://github.com/hypo)"
+                })
+                .to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            },
+        );
+
+        let stats = state
+            .session_file_changes
+            .get("README.md")
+            .expect("file stats should be tracked from args");
+        assert_eq!(stats.additions, 1);
         assert_eq!(stats.deletions, 1);
     }
 

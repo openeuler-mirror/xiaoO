@@ -1,13 +1,15 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use agent_contracts::backend::capability::path::{ResolveBase, ResolvePathRequest};
 use agent_contracts::backend::capability::search::GlobRequest;
-use agent_contracts::backend::{BackendPath, PathKind};
+use agent_contracts::backend::BackendPath;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
+use super::super::validation::backend as validation;
 use super::constants::GLOB_LIMIT;
 use super::input::GlobInput;
 use super::output::GlobOutput;
@@ -22,10 +24,6 @@ impl GlobToolExecutor {
         Self { spec }
     }
 
-    fn is_unc_path(path: &str) -> bool {
-        path.starts_with("\\\\") || path.starts_with("//")
-    }
-
     async fn resolve_and_validate_base_dir(
         path: Option<&str>,
         backend: &dyn agent_contracts::backend::OperationBackend,
@@ -36,18 +34,20 @@ impl GlobToolExecutor {
 
         let path_str = path.trim();
 
-        if Self::is_unc_path(path_str) {
-            return Err("UNC paths are not allowed for backend glob execution".to_string());
+        let validation_result = validation::validate_path_shape(path_str);
+        if !validation_result.result {
+            let _error_code = validation_result.error_code;
+            return Err(validation_result
+                .message
+                .unwrap_or_else(|| "Validation failed".to_string()));
         }
 
         let resolved = backend
             .paths()
-            .resolve_path(
-                agent_contracts::backend::capability::path::ResolvePathRequest {
-                    raw_path: path_str.to_string(),
-                    base: agent_contracts::backend::capability::path::ResolveBase::WorkspaceRoot,
-                },
-            )
+            .resolve_path(ResolvePathRequest {
+                raw_path: path_str.to_string(),
+                base: ResolveBase::WorkspaceRoot,
+            })
             .await
             .map_err(|e| format!("Failed to resolve path: {}", e))?;
 
@@ -57,12 +57,12 @@ impl GlobToolExecutor {
             .await
             .map_err(|e| format!("Failed to stat path: {}", e))?;
 
-        if !stat.exists {
-            return Err(format!("Directory does not exist: {}", path));
-        }
-
-        if stat.kind != Some(PathKind::Directory) {
-            return Err(format!("Path is not a directory: {}", path));
+        let validation_result = validation::validate_base_dir(path, &stat);
+        if !validation_result.result {
+            let _error_code = validation_result.error_code;
+            return Err(validation_result
+                .message
+                .unwrap_or_else(|| "Validation failed".to_string()));
         }
 
         Ok(Some(resolved))

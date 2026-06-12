@@ -4,11 +4,11 @@ use ratatui::{layout::Rect, text::Line};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
+use crate::gateway::backend::GatewayBackendConfig;
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
@@ -22,6 +22,7 @@ use crate::theme::Theme;
 pub enum InputMode {
     Editing,
     ProviderSelection,
+    SandboxSelection,
     SessionSnapshotSelection,
     InteractionPrompt,
     TurnDelete,
@@ -41,6 +42,60 @@ pub struct ApiKeyDialogState {
     pub input: Input,
     pub error: Option<String>,
     pub show_plaintext: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxOption {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxDialog {
+    pub options: Vec<SandboxOption>,
+    pub selected: usize,
+}
+
+impl SandboxDialog {
+    pub fn new(current_id: &str) -> Self {
+        let mut options = vec![SandboxOption {
+            id: "local",
+            name: "Local",
+            description: "本地执行，不启用 Seatbelt policy。",
+        }];
+        if cfg!(target_os = "macos") {
+            options.push(SandboxOption {
+                id: "seatbelt",
+                name: "Seatbelt",
+                description: "macOS sandbox-exec + local file policy。",
+            });
+        }
+        if cfg!(target_os = "linux") {
+            options.push(SandboxOption {
+                id: "bubblewrap",
+                name: "Bubblewrap",
+                description: "Linux bubblewrap + local file policy。",
+            });
+        }
+        let selected = options
+            .iter()
+            .position(|option| option.id == current_id)
+            .unwrap_or(0);
+        Self { options, selected }
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        self.selected = (self.selected + 1).min(self.options.len().saturating_sub(1));
+    }
+
+    pub fn selected(&self) -> Option<&SandboxOption> {
+        self.options.get(self.selected)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +149,9 @@ pub struct RenderState {
     /// entry (the "▎ Role  HH:MM:SS" header).  These lines are excluded from
     /// copied text even when visually highlighted.
     pub line_is_header: Vec<bool>,
+    /// Index of the first visible agent tab in the header.
+    /// Used for horizontal scrolling when there are many agent tabs.
+    pub first_visible_agent_tab: usize,
 }
 
 #[derive(Default)]
@@ -128,6 +186,7 @@ pub struct AppState {
     pub input_mode: InputMode,
     pub should_quit: bool,
     pub provider_dialog: Option<ProviderDialog>,
+    pub sandbox_dialog: Option<SandboxDialog>,
     pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
@@ -140,7 +199,7 @@ pub struct AppState {
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
-    pub current_snapshot_name: Option<String>,
+    pub current_snapshot_context: Option<crate::session_snapshot_service::SnapshotContext>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
@@ -152,6 +211,7 @@ pub struct AppState {
     pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
     pub tool_file_changes: HashMap<String, crate::chat::FileChangeDelta>,
     tool_file_baselines: HashMap<String, ToolFileBaseline>,
+    session_file_content_baselines: HashMap<String, Option<String>>,
 }
 
 impl AppState {
@@ -164,6 +224,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            sandbox_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -176,7 +237,7 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            current_snapshot_name: None,
+            current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -186,6 +247,7 @@ impl AppState {
             session_file_changes: BTreeMap::new(),
             tool_file_changes: HashMap::new(),
             tool_file_baselines: HashMap::new(),
+            session_file_content_baselines: HashMap::new(),
         })
     }
 
@@ -201,6 +263,7 @@ impl AppState {
             input_mode: InputMode::Editing,
             should_quit: false,
             provider_dialog: None,
+            sandbox_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
             api_key_dialog: None,
@@ -213,7 +276,7 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
-            current_snapshot_name: None,
+            current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
@@ -223,6 +286,7 @@ impl AppState {
             session_file_changes: BTreeMap::new(),
             tool_file_changes: HashMap::new(),
             tool_file_baselines: HashMap::new(),
+            session_file_content_baselines: HashMap::new(),
         })
     }
 
@@ -232,6 +296,7 @@ impl AppState {
         self.status_panel.set_workspace(&self.workspace);
         self.input_mode = InputMode::Editing;
         self.provider_dialog = None;
+        self.sandbox_dialog = None;
         self.session_snapshot_dialog = None;
         self.delete_dialog = None;
         self.api_key_dialog = None;
@@ -239,9 +304,9 @@ impl AppState {
         self.session_messages.clear();
         self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
-        self.current_snapshot_name = None;
+        self.current_snapshot_context = None;
         self.slash = SlashState::default();
-        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
+        self.reasoning_effort = ReasoningEffort::default();
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;
@@ -250,6 +315,7 @@ impl AppState {
         self.session_file_changes.clear();
         self.tool_file_changes.clear();
         self.tool_file_baselines.clear();
+        self.session_file_content_baselines.clear();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -304,6 +370,10 @@ impl AppState {
             return;
         };
         let absolute_path = resolve_workspace_file_path(&self.workspace, &file_path);
+        let current_content = read_file_if_exists(&absolute_path);
+        self.session_file_content_baselines
+            .entry(file_path.clone())
+            .or_insert_with(|| current_content.clone());
         self.tool_file_baselines.insert(
             call_id.to_string(),
             ToolFileBaseline {
@@ -325,11 +395,21 @@ impl AppState {
             return;
         };
 
-        let computed = current_git_diff_delta_for_file(
-            &self.workspace,
-            &baseline.file_path,
-            &baseline.absolute_path,
-        );
+        let current_content = read_file_if_exists(&baseline.absolute_path);
+        let computed = self
+            .session_file_content_baselines
+            .get(&baseline.file_path)
+            .and_then(|initial_content| {
+                if initial_content.is_none() && current_content.is_none() {
+                    None
+                } else {
+                    Some(file_content_delta(
+                        &baseline.file_path,
+                        initial_content.as_deref(),
+                        current_content.as_deref(),
+                    ))
+                }
+            });
         if let Some(delta) = computed.or(fallback) {
             self.session_file_changes.insert(
                 delta.file_path.clone(),
@@ -550,9 +630,10 @@ impl AppState {
     }
 
     pub fn agent_tab_labels(&self) -> Vec<String> {
-        let mut tabs = vec!["Core".to_string()];
-        tabs.extend(self.agent_config.agent_role_ids());
-        tabs
+        self.agent_tabs()
+            .into_iter()
+            .map(|tab| tab.unwrap_or_else(|| "Core".to_string()))
+            .collect()
     }
 
     pub fn active_agent_tab_label(&self) -> &str {
@@ -566,30 +647,79 @@ impl AppState {
     }
 
     pub fn cycle_agent_role(&mut self, reverse: bool) -> bool {
-        let role_ids = self.agent_config.agent_role_ids();
-        if role_ids.is_empty() {
+        let tabs = self.agent_tabs();
+        if tabs.len() <= 1 {
             return false;
         }
 
-        let total_tabs = role_ids.len() + 1;
-        let current_index = self
-            .active_agent_role
-            .as_ref()
-            .and_then(|current| role_ids.iter().position(|role_id| role_id == current))
-            .map(|index| index + 1)
+        let current_index = tabs
+            .iter()
+            .position(|tab| tab.as_ref() == self.active_agent_role.as_ref())
             .unwrap_or(0);
         let next_index = if reverse {
-            (current_index + total_tabs - 1) % total_tabs
+            (current_index + tabs.len() - 1) % tabs.len()
         } else {
-            (current_index + 1) % total_tabs
+            (current_index + 1) % tabs.len()
         };
 
-        self.active_agent_role = if next_index == 0 {
-            None
-        } else {
-            role_ids.get(next_index - 1).cloned()
-        };
+        self.active_agent_role = tabs.get(next_index).cloned().flatten();
         true
+    }
+
+    fn agent_tabs(&self) -> Vec<Option<String>> {
+        let order_mentions_core = self
+            .agent_config
+            .tui
+            .agent_order
+            .iter()
+            .any(|tab| tab.trim().eq_ignore_ascii_case("core"));
+        let mut tabs = Vec::new();
+        let mut seen_core = false;
+        let mut seen_roles = std::collections::BTreeSet::new();
+
+        if !order_mentions_core {
+            tabs.push(None);
+            seen_core = true;
+        }
+
+        for configured_tab in &self.agent_config.tui.agent_order {
+            let configured_tab = configured_tab.trim();
+            if configured_tab.is_empty() {
+                continue;
+            }
+
+            if configured_tab.eq_ignore_ascii_case("core") {
+                if !seen_core {
+                    tabs.push(None);
+                    seen_core = true;
+                }
+                continue;
+            }
+
+            if let Some(role_id) = self
+                .agent_config
+                .agent
+                .keys()
+                .find(|role_id| role_id.eq_ignore_ascii_case(configured_tab))
+                .cloned()
+            {
+                if seen_roles.insert(role_id.clone()) {
+                    tabs.push(Some(role_id));
+                }
+            }
+        }
+
+        for role_id in self.agent_config.agent_role_ids() {
+            if seen_roles.insert(role_id.clone()) {
+                tabs.push(Some(role_id));
+            }
+        }
+
+        if !seen_core {
+            tabs.push(None);
+        }
+
+        tabs
     }
 
     pub fn cycle_reasoning_effort(&mut self) {
@@ -617,6 +747,36 @@ fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String>
     }
 }
 
+pub(crate) fn file_change_delta_from_tool_args(
+    tool: &str,
+    args_preview: &str,
+) -> Option<crate::chat::FileChangeDelta> {
+    let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
+    let file_path = value.get("file_path")?.as_str()?.to_string();
+    let (additions, deletions) = match tool {
+        "file_edit" => {
+            let old_string = value.get("old_string")?.as_str()?;
+            let new_string = value.get("new_string")?.as_str()?;
+            line_change_counts(old_string, new_string)
+        }
+        "file_write" => {
+            let content = value.get("content")?.as_str()?;
+            (text_line_count(content), 0)
+        }
+        _ => return None,
+    };
+
+    if additions == 0 && deletions == 0 {
+        return None;
+    }
+
+    Some(crate::chat::FileChangeDelta {
+        file_path,
+        additions,
+        deletions,
+    })
+}
+
 fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
     if path.is_absolute() {
@@ -634,105 +794,97 @@ fn read_file_if_exists(path: &Path) -> Option<String> {
     }
 }
 
-fn current_git_diff_delta_for_file(
-    workspace: &Path,
+fn file_content_delta(
     file_path: &str,
-    absolute_path: &Path,
-) -> Option<crate::chat::FileChangeDelta> {
-    let repo_root = git_repo_root(workspace)?;
-    let normalized_path = absolute_path
-        .canonicalize()
-        .unwrap_or_else(|_| absolute_path.to_path_buf());
-    let relative_path = normalized_path.strip_prefix(&repo_root).ok()?.to_path_buf();
-
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["diff", "--numstat", "--"])
-        .arg(&relative_path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    if let Some((_, stats)) = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(parse_git_numstat_line)
-    {
-        return Some(crate::chat::FileChangeDelta {
-            file_path: file_path.to_string(),
-            additions: stats.additions,
-            deletions: stats.deletions,
-        });
-    }
-
-    let untracked = Command::new("git")
-        .arg("-C")
-        .arg(&repo_root)
-        .args(["ls-files", "--others", "--exclude-standard", "--"])
-        .arg(&relative_path)
-        .output()
-        .ok()?;
-    if !untracked.status.success() {
-        return None;
-    }
-
-    let is_untracked = String::from_utf8_lossy(&untracked.stdout)
-        .lines()
-        .any(|line| !line.trim().is_empty());
-    let additions = if is_untracked {
-        read_file_if_exists(absolute_path)
-            .map(|content| content.lines().count() as u32)
-            .unwrap_or(0)
-    } else {
-        0
+    before: Option<&str>,
+    after: Option<&str>,
+) -> crate::chat::FileChangeDelta {
+    let (additions, deletions) = match (before, after) {
+        (Some(before), Some(after)) => line_change_counts(before, after),
+        (None, Some(after)) => (text_line_count(after), 0),
+        (Some(before), None) => (0, text_line_count(before)),
+        (None, None) => (0, 0),
     };
 
-    Some(crate::chat::FileChangeDelta {
+    crate::chat::FileChangeDelta {
         file_path: file_path.to_string(),
         additions,
-        deletions: 0,
-    })
+        deletions,
+    }
 }
 
-fn git_repo_root(workspace: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn line_change_counts(before: &str, after: &str) -> (u32, u32) {
+    if before == after {
+        return (0, 0);
     }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if root.is_empty() {
-        None
+
+    let before_lines = text_lines(before);
+    let after_lines = text_lines(after);
+    if before_lines.is_empty() {
+        return (after_lines.len() as u32, 0);
+    }
+    if after_lines.is_empty() {
+        return (0, before_lines.len() as u32);
+    }
+
+    let cell_count = before_lines.len().saturating_mul(after_lines.len());
+    let common = if cell_count > 20_000 {
+        coarse_common_line_count(&before_lines, &after_lines)
     } else {
-        let root_path = PathBuf::from(root);
-        Some(root_path.canonicalize().unwrap_or(root_path))
+        lcs_line_count(&before_lines, &after_lines)
+    };
+
+    (
+        after_lines.len().saturating_sub(common) as u32,
+        before_lines.len().saturating_sub(common) as u32,
+    )
+}
+
+fn lcs_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
+    let mut previous = vec![0usize; after_lines.len() + 1];
+    let mut current = vec![0usize; after_lines.len() + 1];
+    for before_line in before_lines {
+        for (after_index, after_line) in after_lines.iter().enumerate() {
+            current[after_index + 1] = if before_line == after_line {
+                previous[after_index] + 1
+            } else {
+                current[after_index].max(previous[after_index + 1])
+            };
+        }
+        std::mem::swap(&mut previous, &mut current);
+        current.fill(0);
     }
+    previous[after_lines.len()]
 }
 
-fn parse_git_numstat_line(line: &str) -> Option<(String, SessionFileChangeStats)> {
-    let mut parts = line.split('\t');
-    let additions = parse_numstat_count(parts.next()?)?;
-    let deletions = parse_numstat_count(parts.next()?)?;
-    let path = parts.next()?.to_string();
-    Some((
-        path,
-        SessionFileChangeStats {
-            additions,
-            deletions,
-        },
-    ))
+fn coarse_common_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
+    let mut prefix = 0usize;
+    while prefix < before_lines.len().min(after_lines.len())
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < before_lines.len().saturating_sub(prefix)
+        && suffix < after_lines.len().saturating_sub(prefix)
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    prefix + suffix
 }
 
-fn parse_numstat_count(value: &str) -> Option<u32> {
-    match value {
-        "-" => Some(0),
-        other => other.parse().ok(),
+fn text_line_count(text: &str) -> u32 {
+    text_lines(text).len() as u32
+}
+
+fn text_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
     }
 }
 
@@ -761,15 +913,103 @@ fn build_status_panel(config: &Config) -> StatusPanel {
     if !config.llm.provider.trim().is_empty() && !config.llm.model.trim().is_empty() {
         status_panel.set_provider(&config.llm.provider, &config.llm.model);
     }
+    status_panel.set_backend(sandbox_display_name(&config.operation_backend));
     status_panel
+}
+
+pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
+    let Some(backend) = config.operation_backend.as_ref() else {
+        return "local";
+    };
+    if backend.kind != "local" {
+        return "local";
+    }
+    let Some(isolation) = backend.options.get("isolation") else {
+        return "local";
+    };
+    match isolation.get("kind").and_then(|value| value.as_str()) {
+        Some("macos_seatbelt") => "seatbelt",
+        Some("linux_bubblewrap") => "bubblewrap",
+        _ => "local",
+    }
+}
+
+pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'static str {
+    let Some(backend) = backend.as_ref() else {
+        return "Local";
+    };
+    if backend.kind != "local" {
+        return "Local";
+    }
+    match backend
+        .options
+        .get("isolation")
+        .and_then(|value| value.get("kind"))
+        .and_then(|value| value.as_str())
+    {
+        Some("macos_seatbelt") => "Seatbelt",
+        Some("linux_bubblewrap") => "Bubblewrap",
+        _ => "Local",
+    }
+}
+
+pub(crate) fn sandbox_backend_config(
+    id: &str,
+    current: &Option<GatewayBackendConfig>,
+) -> Option<GatewayBackendConfig> {
+    let mut options = current
+        .as_ref()
+        .filter(|backend| backend.kind == "local")
+        .map(|backend| backend.options.clone())
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    if !options.is_object() {
+        options = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let object = options.as_object_mut()?;
+
+    match id {
+        "seatbelt" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "macos_seatbelt"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        "bubblewrap" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "linux_bubblewrap"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        _ => {
+            object.remove("isolation");
+            if object.is_empty() {
+                None
+            } else {
+                Some(GatewayBackendConfig::new("local", options))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{current_git_diff_delta_for_file, ApiKeyDialogState, AppState, RuntimeStatusLight};
+    use super::{
+        current_sandbox_id, sandbox_backend_config,
+        sandbox_display_name, ApiKeyDialogState, AppState, RuntimeStatusLight,
+    };
+    use crate::config::{AgentRoleConfig, Config};
+    use crate::gateway::backend::GatewayBackendConfig;
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
     use agent_types::ReasoningEffort;
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
 
@@ -778,6 +1018,96 @@ mod tests {
         let state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
             .expect("app state should initialize");
         assert_eq!(state.runtime_status_light(), RuntimeStatusLight::Idle);
+    }
+
+    #[test]
+    fn agent_tab_labels_allow_core_in_configured_order() {
+        let mut config = Config::default();
+        for role_id in ["baize", "xuanyuan", "plan"] {
+            config
+                .agent
+                .insert(role_id.to_string(), AgentRoleConfig::default());
+        }
+        config.tui.agent_order = vec![
+            "xuanyuan".to_string(),
+            "Core".to_string(),
+            "baize".to_string(),
+        ];
+        let mut state = AppState::new_with_config(
+            &config,
+            PathBuf::from("config.toml"),
+            PathBuf::from("."),
+        )
+        .expect("app state should initialize");
+
+        assert_eq!(
+            state.agent_tab_labels(),
+            vec!["xuanyuan", "Core", "baize", "plan"]
+        );
+
+        assert!(state.cycle_agent_role(false));
+        assert_eq!(state.active_agent_tab_label(), "xuanyuan");
+        assert!(state.cycle_agent_role(false));
+        assert_eq!(state.active_agent_tab_label(), "Core");
+    }
+
+    #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_seatbelt() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/zsh"}),
+        ));
+
+        let updated = sandbox_backend_config("seatbelt", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/zsh");
+        assert_eq!(updated.options["isolation"]["kind"], "macos_seatbelt");
+    }
+
+    #[test]
+    fn sandbox_backend_config_removes_only_isolation_when_switching_local() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({
+                "default_shell": "/bin/zsh",
+                "isolation": {"kind": "macos_seatbelt"}
+            }),
+        ));
+
+        let updated = sandbox_backend_config("local", &current).expect("backend");
+
+        assert_eq!(updated.options["default_shell"], "/bin/zsh");
+        assert!(updated.options.get("isolation").is_none());
+    }
+
+    #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_bubblewrap() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/bash"}),
+        ));
+
+        let updated = sandbox_backend_config("bubblewrap", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/bash");
+        assert_eq!(updated.options["isolation"]["kind"], "linux_bubblewrap");
+    }
+
+    #[test]
+    fn sandbox_helpers_recognize_bubblewrap() {
+        let mut config = Config::default();
+        config.operation_backend = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"isolation": {"kind": "linux_bubblewrap"}}),
+        ));
+
+        assert_eq!(current_sandbox_id(&config), "bubblewrap");
+        assert_eq!(
+            sandbox_display_name(&config.operation_backend),
+            "Bubblewrap"
+        );
     }
 
     #[test]
@@ -887,57 +1217,27 @@ mod tests {
     }
 
     #[test]
-    fn current_git_diff_delta_for_file_reads_real_numstat() {
+    fn session_file_change_uses_content_baseline_for_existing_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
-        fs::create_dir_all(workspace.join("src")).expect("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
 
-        let init = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["init"])
-            .output()
-            .expect("git init");
-        assert!(init.status.success());
+        let file = workspace.join("README.md");
+        fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").expect("baseline");
 
-        let file = workspace.join("src/main.rs");
-        fs::write(&file, "fn main() {\n    println!(\"before\");\n}\n").expect("baseline");
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
+            .expect("app state should initialize");
+        state.capture_tool_file_baseline("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
 
-        let add = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["add", "src/main.rs"])
-            .output()
-            .expect("git add");
-        assert!(add.status.success());
+        fs::write(&file, "one\ntwo\nTHREE\nfour\nfive\n").expect("modified");
+        state.reconcile_tool_file_change_from_baseline("call-1", None);
 
-        let commit = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args([
-                "-c",
-                "user.name=Codex",
-                "-c",
-                "user.email=codex@example.com",
-                "commit",
-                "-m",
-                "baseline",
-            ])
-            .output()
-            .expect("git commit");
-        assert!(commit.status.success());
-
-        fs::write(
-            &file,
-            "fn main() {\n    println!(\"after\");\n    println!(\"more\");\n}\n",
-        )
-        .expect("modified");
-
-        let delta = current_git_diff_delta_for_file(&workspace, "src/main.rs", &file)
-            .expect("current git diff");
-        assert_eq!(delta.file_path, "src/main.rs");
-        assert_eq!(delta.additions, 2);
-        assert_eq!(delta.deletions, 1);
+        let stats = state
+            .session_file_changes
+            .get("README.md")
+            .expect("session stats should be tracked");
+        assert_eq!(stats.additions, 1);
+        assert_eq!(stats.deletions, 1);
     }
 
     fn sample_prompt_request() -> PromptRequest {

@@ -143,7 +143,95 @@ fn exec_command(args: Vec<String>, policy: &Policy) -> Result<(), CliError> {
 
     print!("{}", render_result(&result));
 
+    emit_audit(
+        "file_access_audit",
+        "CERBERUS_FILE_ACCESS_AUDIT_PATH",
+        &cmd_str,
+        &result.file_accesses,
+    )?;
+    emit_audit(
+        "network_audit",
+        "CERBERUS_NETWORK_AUDIT_PATH",
+        &cmd_str,
+        &result.network_accesses,
+    )?;
+
     std::process::exit(result.exit_code);
+}
+
+/// Surface one eBPF audit stream (file access or network) collected for an
+/// invocation.
+///
+/// Channel selection (the reason this is gated on an env var):
+/// a wrapping agent (e.g. xiaoO) captures the sandboxed command's stderr and
+/// feeds it back to its model. Dumping the full audit to stderr poisons the
+/// agent's context for broad commands (e.g. `find /` touching thousands of
+/// files), which can blow the context window and crash the run. So:
+/// - sidecar configured (`sidecar_env`): that file is the *sole* audit channel
+///   (one JSONL record per invocation); stderr gets only a one-line summary.
+/// - no sidecar: keep the human-facing stderr dump for interactive use.
+fn emit_audit<T: serde::Serialize>(
+    label: &str,
+    sidecar_env: &str,
+    cmd_str: &str,
+    records: &[T],
+) -> Result<(), CliError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let Some(audit_path) = std::env::var_os(sidecar_env) else {
+        let json = serde_json::to_string_pretty(records).map_err(|error| {
+            CliError::ConfigError(format!("Failed to serialize {}: {}", label, error))
+        })?;
+        eprintln!("\n--- {} ---\n{}\n", label, json);
+        return Ok(());
+    };
+
+    let record = serde_json::json!({
+        "command": cmd_str,
+        "events": records,
+    });
+    match append_audit_record(&audit_path, &record) {
+        Ok(()) => eprintln!(
+            "[cerberus] {}: {} event(s) -> {}",
+            label,
+            records.len(),
+            std::path::Path::new(&audit_path).display()
+        ),
+        // Never fail the command because audit persistence failed; the
+        // sandboxed result is authoritative.
+        Err(error) => {
+            eprintln!("Warning: failed to write {} file: {}", label, error)
+        }
+    }
+    Ok(())
+}
+
+/// Append a single JSONL record (one cerberus invocation) to the audit file.
+fn append_audit_record(
+    audit_path: &std::ffi::OsStr,
+    record: &serde_json::Value,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let path = std::path::Path::new(audit_path);
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let line = serde_json::to_string(record)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
 
 fn show_history(limit: usize, since: Option<&str>) -> Result<(), CliError> {
@@ -239,6 +327,8 @@ fn handle_profile(command: &ProfileCommands) -> Result<(), CliError> {
                 "  mount_isolation_fallback:  {}",
                 policy.mount_isolation_fallback
             );
+            println!("  file_access_audit:         {}", policy.file_access_audit);
+            println!("  network_audit:             {}", policy.network_audit);
 
             println!();
             println!("Namespaces:");
@@ -384,6 +474,40 @@ mod tests {
         let injected =
             inject_workspace_access(policy.clone(), &source).expect("workspace injection");
         assert_eq!(injected.custom_paths.len(), policy.custom_paths.len());
+    }
+
+    #[test]
+    fn append_audit_record_creates_missing_parent_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Nested path whose parent does not exist yet.
+        let path = dir.path().join("nested/sub/audit.jsonl");
+
+        append_audit_record(path.as_os_str(), &serde_json::json!({"command": "ls"}))
+            .expect("append should create parents and write");
+
+        assert!(path.exists(), "audit file should have been created");
+    }
+
+    #[test]
+    fn append_audit_record_writes_one_json_line_per_invocation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+
+        append_audit_record(path.as_os_str(), &serde_json::json!({"command": "a", "events": []}))
+            .expect("first append");
+        append_audit_record(path.as_os_str(), &serde_json::json!({"command": "b", "events": []}))
+            .expect("second append");
+
+        let contents = std::fs::read_to_string(&path).expect("read audit file");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "each invocation appends exactly one line");
+
+        // Every line must be independently parseable JSON (true JSONL), and the
+        // records must preserve the per-invocation command in order.
+        let first: serde_json::Value = serde_json::from_str(lines[0]).expect("line 0 is json");
+        let second: serde_json::Value = serde_json::from_str(lines[1]).expect("line 1 is json");
+        assert_eq!(first["command"], "a");
+        assert_eq!(second["command"], "b");
     }
 }
 

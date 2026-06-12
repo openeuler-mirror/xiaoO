@@ -15,7 +15,11 @@ import logging
 from pathlib import Path
 
 from ..config import Config, is_llm_layer3_enabled
-from .heuristic_detector import HeuristicDetector, SAFE_ACTION_TYPES, is_safe_bash_command
+from .heuristic_detector import (
+    HeuristicDetector,
+    is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
+    is_inline_script_command,
+)
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
 from .skill_engine import SkillEngine
@@ -23,11 +27,25 @@ from .types import HeuristicResult, SecurityJudgment
 
 logger = logging.getLogger(__name__)
 
-# 白名单只读工具：这些工具在启发式检测未命中 high/critical 时可快速放行
-READONLY_SAFE_TOOLS = frozenset({
-    "ask_user_question", "glob", "grep", "list_dir", "count_text_length",
-    "read", "file_read", "head", "tail", "ls",
+# 完全安全工具：跳过 Layer 2 + Layer 3（不具备读取文件内容的能力）
+FULLY_SAFE_TOOLS = frozenset({
+    "ask_user_question", "glob", "list_dir", "ls", "count_text_length",
+    "filemgr-globfiles",
 })
+
+# 内置安全 Skill 白名单：这些是 xiaoO 系统自带的安全 Skill，加载时直接放行
+TRUSTED_SKILLS = frozenset({
+    "xiaoo-guardian",
+})
+
+# 安全但可能访问敏感路径：跳过 Layer 3，保留 Layer 2 敏感路径检测
+READONLY_SENSITIVE_TOOLS = frozenset({
+    "read", "file_read", "read_file", "head", "tail", "grep",
+    "filemgr-readfile", "filemgr-grepfiles",
+})
+
+# 向后兼容
+READONLY_SAFE_TOOLS = FULLY_SAFE_TOOLS | READONLY_SENSITIVE_TOOLS
 
 
 class xiaoOSecBot:
@@ -78,6 +96,14 @@ class xiaoOSecBot:
 
         violated_layers: list[str] = []
 
+        # ========== 内联脚本命令检查（假阳性防护） ==========
+        # 对内联脚本命令（python -c, perl -e 等），Layer 1/2 的 file_access 模式
+        # （如 /etc/shadow）不立即 Deny。因为敏感路径可能出现在字符串字面量中，
+        # 而纯正则无法可靠区分字符串和执行路径。交给 Layer 3 LLM 做语义判断。
+        action_detail = a_next.get("action_detail", "").lower()
+        is_inline_script_cmd = is_inline_script_command(action_detail)
+        skip_inline_file_access = False
+
         # ========== 层1: 启发式静态检测 ==========
         if security_cfg.heuristic_enabled:
             heuristic_result = self._heuristic_detector.detect(a_next, reason)
@@ -88,8 +114,13 @@ class xiaoOSecBot:
                 heuristic_result.reason,
             )
             if heuristic_result.hit:
-                violated_layers.append("1.1")
-                if heuristic_result.risk_level in ("high", "critical"):
+                # 对内联脚本命令，file_access 风险不立即 Deny
+                skip_inline_file_access = (
+                    is_inline_script_cmd
+                    and heuristic_result.risk_type == "file_access"
+                )
+                if heuristic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
+                    violated_layers.append("1.1")
                     logger.info(
                         "启发式检测拦截: risk_level=%s, reason=%s",
                         heuristic_result.risk_level,
@@ -108,43 +139,77 @@ class xiaoOSecBot:
         else:
             heuristic_result = HeuristicResult(hit=False)
 
-        # ========== 白名单只读工具快速放行 ==========
+        # ========== 白名单快速放行（两级） ==========
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
-        is_readonly_safe = action_type in READONLY_SAFE_TOOLS or action_type in SAFE_ACTION_TYPES
+        heuristic_risk = heuristic_result.risk_level or "low"
+        no_high_risk = heuristic_risk not in ("high", "critical")
 
-        # 扩展：检查安全的 bash 子命令
-        is_safe_bash = (
+        # --- 完全放行：跳过 L2 + L3 ---
+        is_fully_safe_tool = action_type in FULLY_SAFE_TOOLS
+        # 内置安全 Skill 直接放行（如 xiaoo-guardian）
+        is_trusted_skill = (
+            action_type == "skill"
+            and action_detail in TRUSTED_SKILLS
+        )
+        is_fully_safe_bash = (
             action_type == "bash"
-            and is_safe_bash_command(action_detail)
-            and heuristic_result.risk_level not in ("high", "critical")
+            and is_fully_safe_bash_command(action_detail)
+            and no_high_risk
         )
 
-        if is_readonly_safe and heuristic_result.risk_level not in ("high", "critical"):
+        # 安全兜底：is_fully_safe_bash_command 只检查管道前的第一段命令，
+        # 对于 "echo ... | passwd" 等管道命令，第一段 (echo) 是安全的，
+        # 但完整命令包含危险模式。此处用 CommandPatternScanner 扫描完整命令，
+        # 如果命中 high/critical 模式则不允许白名单放行。
+        if is_fully_safe_bash:
+            from .heuristic_detector import CommandPatternScanner
+            _full_cmd_scanner = CommandPatternScanner()
+            _full_scan = _full_cmd_scanner.scan(action_detail)
+            if _full_scan.hit and _full_scan.risk_level in ("high", "critical"):
+                is_fully_safe_bash = False
+                logger.info(
+                    "白名单放行覆盖: 完整命令命中高危模式 [%s]: %s",
+                    _full_scan.risk_level, _full_scan.reason,
+                )
+
+        if (is_fully_safe_tool or is_trusted_skill) and no_high_risk:
             logger.info(
-                "白名单只读工具快速放行: action_type=%s, heuristic_risk=%s",
-                action_type,
-                heuristic_result.risk_level or "none",
+                "完全安全工具快速放行: action_type=%s, heuristic_risk=%s",
+                action_type, heuristic_risk,
             )
             return SecurityJudgment(
                 allowed=True,
-                reason=f"白名单只读工具且未检测到敏感路径访问: {action_type}",
-                risk_level=heuristic_result.risk_level or "low",
+                reason=f"完全安全工具，跳过深度分析: {action_type}",
+                risk_level=heuristic_risk,
                 source="whitelist_bypass",
                 action_desc=action_detail,
             )
 
-        if is_safe_bash:
-            logger.info(
-                "安全 bash 子命令快速放行: command=%s",
-                action_detail[:50],
-            )
+        if is_fully_safe_bash:
+            logger.info("完全安全 bash 命令快速放行: command=%s", action_detail[:50])
             return SecurityJudgment(
                 allowed=True,
                 reason=f"安全的只读 bash 命令: {action_detail[:100]}",
                 risk_level="low",
                 source="whitelist_bypass",
                 action_desc=action_detail,
+            )
+
+        # --- 轻量放行：跳过 L3，保留 L2 ---
+        skip_llm = False
+        if action_type in READONLY_SENSITIVE_TOOLS and no_high_risk:
+            skip_llm = True
+        elif (
+            action_type == "bash"
+            and is_readonly_sensitive_bash_command(action_detail)
+            and no_high_risk
+        ):
+            skip_llm = True
+
+        if skip_llm:
+            logger.info(
+                "只读敏感工具，跳过 LLM 分析: action_type=%s", action_type,
             )
 
         # ========== 层2: 逻辑规则检测 ==========
@@ -159,8 +224,9 @@ class xiaoOSecBot:
                 logic_result.reason,
             )
             if logic_result.hit:
-                violated_layers.append("1.2")
-                if logic_result.risk_level in ("high", "critical"):
+                # 内联脚本的 file_access 不立即 Deny，转 Layer 3 语义判断
+                if logic_result.risk_level in ("high", "critical") and not skip_inline_file_access:
+                    violated_layers.append("1.2")
                     logger.info(
                         "逻辑规则检测拦截: violated_rule=%s, reason=%s",
                         logic_result.violated_rule,
@@ -182,7 +248,8 @@ class xiaoOSecBot:
 
         # ========== 层3: LLM + Skill 深度分析 ==========
         # 配置控制：环境变量 > audit_settings.json > 默认值
-        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled()
+        # skip_llm 由白名单快速放行逻辑设置，只读敏感工具跳过 LLM 分析
+        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and not skip_llm
 
         if llm_analysis_enabled:
             try:

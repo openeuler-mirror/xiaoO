@@ -1,13 +1,14 @@
 use crate::backends::local::{
     exec::LocalExec, export::LocalExport, filesystem::LocalFileSystem, path::LocalPathResolver,
-    search::LocalSearch,
+    policy::LocalBackendPolicy, search::LocalSearch,
 };
 use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationBackendKind,
-    OperationError, PathKind, PathStat,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
+    OperationPermissionControl, PathKind, PathStat, SandboxPermissionGrantId,
+    SandboxPermissionGrantRequest,
 };
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
@@ -22,11 +23,13 @@ pub(crate) struct LocalBackendState {
     pub(crate) home_dir_host: Option<PathBuf>,
     pub(crate) temp_root_host: PathBuf,
     pub(crate) default_shell: Option<String>,
+    pub(crate) policy: LocalBackendPolicy,
 }
 
 pub struct LocalOperationBackend {
     backend_id: String,
     capabilities: OperationBackendCapabilities,
+    state: Arc<LocalBackendState>,
     paths: LocalPathResolver,
     files: LocalFileSystem,
     search: LocalSearch,
@@ -68,6 +71,7 @@ impl LocalOperationBackend {
             home_dir_host,
             temp_root_host: std::env::temp_dir(),
             default_shell: None,
+            policy: LocalBackendPolicy::unrestricted(),
         }))
     }
 
@@ -78,7 +82,9 @@ impl LocalOperationBackend {
                 supports_atomic_write: true,
                 supports_grep: true,
                 supports_export_file: true,
+                supports_lsp: true,
             },
+            state: Arc::clone(&state),
             paths: LocalPathResolver::new(Arc::clone(&state)),
             files: LocalFileSystem::new(Arc::clone(&state)),
             search: LocalSearch::new(Arc::clone(&state)),
@@ -111,6 +117,17 @@ impl LocalBackendState {
         raw_path: &str,
         base: &Path,
     ) -> Result<PathBuf, OperationError> {
+        if raw_path == "~" || raw_path.starts_with("~/") {
+            let home_dir =
+                self.home_dir_host
+                    .as_ref()
+                    .ok_or_else(|| OperationError::Unsupported {
+                        message: "home_dir is not configured".to_string(),
+                    })?;
+            let suffix = raw_path.strip_prefix("~/").unwrap_or_default();
+            return normalize_absolute_host_path(home_dir.join(suffix).as_path());
+        }
+
         let candidate = Path::new(raw_path);
         let joined = if candidate.is_absolute() {
             candidate.to_path_buf()
@@ -247,10 +264,6 @@ impl OperationBackend for LocalOperationBackend {
         self.backend_id.as_str()
     }
 
-    fn backend_kind(&self) -> OperationBackendKind {
-        OperationBackendKind::Local
-    }
-
     fn capabilities(&self) -> OperationBackendCapabilities {
         self.capabilities
     }
@@ -275,7 +288,81 @@ impl OperationBackend for LocalOperationBackend {
         &self.export as &dyn OperationExport
     }
 
+    fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
+        Some(self)
+    }
+
     async fn shutdown(&self) -> Result<(), OperationError> {
         Ok(())
+    }
+}
+
+impl OperationPermissionControl for LocalOperationBackend {
+    fn sandbox_denial_for_path(
+        &self,
+        path: &BackendPath,
+        capability: agent_contracts::backend::SandboxPermissionCapability,
+        operation: &str,
+    ) -> Result<Option<agent_contracts::backend::SandboxPolicyDenial>, OperationError> {
+        let host_path = self.state.backend_path_to_host(path)?;
+        self.state
+            .policy
+            .sandbox_denial_for_path(host_path.as_path(), capability, operation)
+    }
+
+    fn grant(
+        &self,
+        request: SandboxPermissionGrantRequest,
+    ) -> Result<SandboxPermissionGrantId, OperationError> {
+        self.state.policy.grant(request)
+    }
+
+    fn revoke(&self, id: SandboxPermissionGrantId) -> Result<(), OperationError> {
+        self.state.policy.revoke(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state(home_dir_host: Option<PathBuf>) -> LocalBackendState {
+        let workspace_root_host = std::env::current_dir().expect("current dir");
+        let workspace_root = BackendPath(workspace_root_host.to_string_lossy().into_owned());
+        let home_dir = home_dir_host
+            .as_ref()
+            .map(|path| BackendPath(path.to_string_lossy().into_owned()));
+
+        LocalBackendState {
+            backend_id: "test".to_string(),
+            workspace_root,
+            workspace_root_host,
+            home_dir,
+            home_dir_host,
+            temp_root_host: std::env::temp_dir(),
+            default_shell: None,
+            policy: LocalBackendPolicy::unrestricted(),
+        }
+    }
+
+    #[test]
+    fn resolves_tilde_paths_against_home_dir() {
+        let home = std::env::current_dir().expect("current dir").join("home");
+        let state = test_state(Some(home.clone()));
+        let resolved = state
+            .resolve_host_path("~/.xiaoo/tools/md_to_html.mjs", Path::new("/workspace"))
+            .expect("resolve");
+
+        assert_eq!(resolved, home.join(".xiaoo/tools/md_to_html.mjs"));
+    }
+
+    #[test]
+    fn tilde_requires_configured_home_dir() {
+        let state = test_state(None);
+        let error = state
+            .resolve_host_path("~/missing", Path::new("/workspace"))
+            .expect_err("tilde should require home");
+
+        assert!(matches!(error, OperationError::Unsupported { .. }));
     }
 }

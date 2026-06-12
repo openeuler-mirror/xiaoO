@@ -49,25 +49,91 @@ impl App {
         )]));
         frame.render_widget(title, inner_chunks[0]);
 
-        let mut tabs = Vec::new();
-        for (index, label) in self.state.agent_tab_labels().iter().enumerate() {
-            if index > 0 {
-                tabs.push(Span::raw(" "));
+        let all_labels = self.state.agent_tab_labels();
+        let active_label = self.state.active_agent_tab_label().to_string();
+        let active_index = all_labels
+            .iter()
+            .position(|label| label == &active_label)
+            .unwrap_or(0);
+
+        let available_width = inner_chunks[1].width as usize;
+
+        let tab_widths: Vec<usize> = all_labels
+            .iter()
+            .map(|label| label.chars().count() + 2)
+            .collect();
+
+        let mut visible_start = self.state.render_state.first_visible_agent_tab;
+
+        if active_index < visible_start {
+            visible_start = active_index;
+        } else {
+            let mut test_start = visible_start;
+
+            while test_start <= active_index {
+                let mut total_width = 0;
+                let mut last_visible_index = test_start;
+
+                for (i, width) in tab_widths[test_start..].iter().enumerate() {
+                    let w = if total_width > 0 { width + 1 } else { *width };
+                    if total_width + w > available_width {
+                        break;
+                    }
+                    total_width += w;
+                    last_visible_index = test_start + i;
+                }
+
+                if last_visible_index >= active_index {
+                    break;
+                }
+
+                test_start += 1;
             }
+
+            visible_start = test_start;
+        }
+
+        self.state.render_state.first_visible_agent_tab = visible_start;
+
+        let mut tabs = Vec::new();
+        let mut current_width = 0;
+
+        for (index, label) in all_labels.iter().enumerate() {
+            if index < visible_start {
+                continue;
+            }
+
+            let tab_width = label.chars().count() + 2;
+            let needs_space = current_width > 0;
+            let additional_width = if needs_space { tab_width + 1 } else { tab_width };
+
+            if current_width + additional_width > available_width {
+                break;
+            }
+
+            if needs_space {
+                tabs.push(Span::raw(" "));
+                current_width += 1;
+            }
+
             tabs.push(Span::styled(
                 format!(" {label} "),
-                self.state
-                    .theme
-                    .tab_style(label == self.state.active_agent_tab_label()),
+                self.state.theme.tab_style(label == &active_label),
             ));
+            current_width += tab_width;
         }
+
         if let Some(role) = self.state.active_agent_role_config() {
             if !role.description.trim().is_empty() {
-                tabs.push(Span::raw("  "));
-                tabs.push(Span::styled(
-                    role.description.as_str(),
-                    Style::default().fg(self.state.theme.muted),
-                ));
+                let desc = role.description.as_str();
+                let desc_width = desc.chars().count() + 2;
+                if current_width + desc_width <= available_width {
+                    tabs.push(Span::raw("  "));
+                    tabs.push(Span::styled(
+                        desc,
+                        Style::default().fg(self.state.theme.muted),
+                    ));
+                }
             }
         }
         frame.render_widget(Paragraph::new(Line::from(tabs)), inner_chunks[1]);
@@ -87,25 +153,33 @@ impl App {
             height: 1,
         });
 
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
-        let (status_light_color, status_label, status_label_style) =
+        let now = chrono::Local::now();
+        let now_text = now.format("%H:%M:%S").to_string();
+        let (status_light_symbol, status_light_style, status_label, status_label_style) =
             match self.state.runtime_status_light() {
-                RuntimeStatusLight::Running => (
-                    self.state.theme.success,
-                    "RUN",
-                    Style::default()
-                        .fg(self.state.theme.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                RuntimeStatusLight::Running => {
+                    let (symbol, light_style) =
+                        running_status_light(now.timestamp_millis(), self.state.theme.success);
+                    (
+                        symbol,
+                        light_style,
+                        "RUN",
+                        Style::default()
+                            .fg(self.state.theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                }
                 RuntimeStatusLight::AwaitingInteraction => (
-                    self.state.theme.gradient_yellow,
+                    "●",
+                    Style::default().fg(self.state.theme.gradient_yellow),
                     "ASK",
                     Style::default()
                         .fg(self.state.theme.gradient_yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
                 RuntimeStatusLight::Idle => (
-                    self.state.theme.foreground,
+                    "●",
+                    Style::default().fg(self.state.theme.foreground),
                     "IDLE",
                     Style::default()
                         .fg(self.state.theme.foreground)
@@ -114,11 +188,11 @@ impl App {
             };
         let status = Paragraph::new(Line::from(vec![
             Span::styled(
-                sanitize_terminal_text("● "),
-                Style::default().fg(status_light_color),
+                sanitize_terminal_text(&format!("{status_light_symbol} ")),
+                status_light_style,
             ),
             Span::styled(format!("{status_label} "), status_label_style),
-            Span::styled(now, Style::default().fg(self.state.theme.muted)),
+            Span::styled(now_text, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);
         frame.render_widget(status, inner_chunks[3]);
@@ -208,7 +282,10 @@ impl App {
                     .fg(self.state.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  Think ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                "  Think(Ctrl+T) ",
+                Style::default().fg(self.state.theme.muted),
+            ),
             Span::styled(
                 self.state.reasoning_effort.to_string(),
                 Style::default()
@@ -226,5 +303,34 @@ fn reasoning_effort_color(effort: ReasoningEffort) -> Color {
         ReasoningEffort::Off => Color::Gray,
         ReasoningEffort::High => Color::Yellow,
         ReasoningEffort::Max => Color::Red,
+    }
+}
+
+fn running_status_light(now_millis: i64, color: Color) -> (&'static str, Style) {
+    let bright = now_millis.rem_euclid(1_200) < 650;
+    let symbol = if bright { "●" } else { "○" };
+    let modifier = if bright {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+    (symbol, Style::default().fg(color).add_modifier(modifier))
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::{Color, Modifier};
+
+    use super::running_status_light;
+
+    #[test]
+    fn running_status_light_blinks_at_human_scale() {
+        let (bright_symbol, bright_style) = running_status_light(0, Color::Green);
+        let (dim_symbol, dim_style) = running_status_light(700, Color::Green);
+
+        assert_eq!(bright_symbol, "●");
+        assert!(bright_style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(dim_symbol, "○");
+        assert!(!dim_style.add_modifier.contains(Modifier::BOLD));
     }
 }

@@ -1,5 +1,5 @@
+use crate::daemon_config::SubagentRoleConfig as ConfigSubagentRole;
 use crate::daemon_config::{AgentRoleConfig, DaemonConfig, ResolvedAgentConfig};
-use agent_contracts::backend::OperationBackendConfig;
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -19,15 +19,20 @@ use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
+use std::path::PathBuf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::{fs, path::Path};
-use tool::ToolRuntimeServices;
-use tool::{load_tool_sources_with_services, ToolRegistryBuilderImpl};
+use tool::{
+    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
+    ToolRuntimeServices,
+};
+use xiaoo_app::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
+use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 use xiaoo_app::gateway::{
-    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
-    SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
-    SessionRuntimeResolver,
+    backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
+    SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
+    SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
@@ -37,6 +42,7 @@ const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
 pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
     agent_roles: BTreeMap<String, AgentRoleConfig>,
+    subagent_roles: BTreeMap<String, ConfigSubagentRole>,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
     feature_flags: FeatureFlags,
@@ -44,8 +50,9 @@ pub struct ConfiguredRuntimeResolver {
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
+    skills_dirs: Vec<PathBuf>,
     lsp_registry: Option<Arc<LspServiceRegistry>>,
-    operation_backend: Option<OperationBackendConfig>,
+    operation_backend: Option<GatewayBackendConfig>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -71,40 +78,48 @@ impl ConfiguredRuntimeResolver {
             .context("failed to create llm provider")?,
         );
         let effective_context_window = resolve_effective_context_window(
-            config.app.llm.context_window,
             &resolved_provider,
             &agent.model,
             llm_provider.capabilities().max_context_window,
         )
         .await;
         let token_budget = build_token_budget(
-            Some(effective_context_window),
+            effective_context_window,
             config.max_output_tokens(),
-            llm_provider.capabilities().max_context_window,
+        );
+
+        validate_token_budget_config(
+            &token_budget,
+            config.max_output_tokens(),
+            &agent.model,
+            config.config_path(),
         );
 
         let trace = config.resolve_trace_config();
         let compression_pipeline = build_compression_pipeline(config, &llm_provider)?;
+        let skills_config = config.resolve_skills_config();
         let skill_registry: Arc<dyn SkillRegistry> =
-            Arc::new(FileSkillRegistry::new(&config.resolve_skills_config()));
+            Arc::new(FileSkillRegistry::new(&skills_config));
 
         let lsp_registry = config.build_lsp_registry();
 
         Ok(Self {
             agent,
             agent_roles: config.app.agent.clone(),
+            subagent_roles: config.app.subagent.clone(),
             llm_provider,
             token_budget,
             feature_flags: {
-            let mut flags = FeatureFlags::default();
-            flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
-            flags.kvcache_debug_enabled = config.app.llm.kvcache_debug_enabled.unwrap_or(false);
-            flags
-        },
+                let mut flags = FeatureFlags::default();
+                flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
+                flags.kvcache_debug_enabled = config.app.llm.kvcache_debug_enabled.unwrap_or(false);
+                flags
+            },
             trace,
             compression_pipeline: Some(compression_pipeline),
             hooker: config.app.hooker.clone(),
             skill_registry,
+            skills_dirs: skills_config.skills_dirs.clone(),
             operation_backend: config.app.operation_backend.clone(),
             lsp_registry,
         })
@@ -114,8 +129,25 @@ impl ConfiguredRuntimeResolver {
         &self,
         agent_role: Option<&AgentRoleConfig>,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
+        let subagent_roles: BTreeMap<String, SubagentRoleConfig> = self
+            .subagent_roles
+            .iter()
+            .map(|(role_id, config)| {
+                (
+                    role_id.clone(),
+                    SubagentRoleConfig {
+                        description: config.description.clone(),
+                        prompt: config.prompt.clone(),
+                        max_turns: config.max_turns,
+                        tools: config.tools.clone(),
+                    },
+                )
+            })
+            .collect();
         let services = ToolRuntimeServices {
             lsp_registry: self.lsp_registry.clone(),
+            workspace_root: Some(self.agent.workspace_root.clone()),
+            subagent_roles,
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
@@ -145,18 +177,21 @@ impl ConfiguredRuntimeResolver {
 }
 
 async fn resolve_effective_context_window(
-    configured_context_window: Option<usize>,
     resolved_provider: &llm_client::ResolvedConfig,
     model: &str,
     static_fallback: usize,
 ) -> usize {
-    if let Some(configured) = configured_context_window.filter(|value| *value > 0) {
-        return configured;
-    }
-
     match resolve_model_context_length(resolved_provider, model).await {
         Ok(Some(context_window)) => match usize::try_from(context_window) {
-            Ok(value) if value > 0 => return value,
+            Ok(value) if value > 0 => {
+                tracing::info!(
+                    context_window = value,
+                    source = "model_catalog",
+                    model = %model,
+                    "Using context_window from model catalog API"
+                );
+                return value;
+            }
             Ok(_) => {}
             Err(_) => {
                 tracing::warn!(
@@ -176,7 +211,14 @@ async fn resolve_effective_context_window(
         }
     }
 
-    static_fallback.max(1)
+    let fallback = static_fallback.max(1);
+    tracing::info!(
+        context_window = fallback,
+        source = "provider_default",
+        model = %model,
+        "Using context_window from provider default"
+    );
+    fallback
 }
 
 #[async_trait]
@@ -192,6 +234,29 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .filter(|prompt| !prompt.trim().is_empty())
             .unwrap_or(self.agent.system_prompt.as_str());
 
+        let subagent_roles: BTreeMap<String, SubagentRoleRecord> = self
+            .subagent_roles
+            .iter()
+            .map(|(role_id, config)| {
+                (
+                    role_id.clone(),
+                    SubagentRoleRecord {
+                        role_id: role_id.clone(),
+                        description: config.description.clone(),
+                        prompt: config.prompt.clone(),
+                        max_turns: config.max_turns,
+                        tools: config.tools.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let is_subagent = request
+            .agent_id_override
+            .as_ref()
+            .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
+            .unwrap_or(false);
+
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: AgentId(self.agent.id.clone()),
@@ -200,12 +265,16 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                     system_prompt,
                     &self.agent.workspace_root,
                     request,
+                    &subagent_roles,
+                    is_subagent,
+                    &self.skills_dirs,
                 ),
                 feature_flags: self.feature_flags.clone(),
 
                 token_budget: self.token_budget.clone(),
                 workspace_root: self.agent.workspace_root.clone(),
                 max_turns: agent_role.and_then(|role| role.max_turns),
+                subagent_roles,
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: Arc::clone(&self.llm_provider),
@@ -275,13 +344,10 @@ fn resolve_allowed_tool_names(
 }
 
 fn build_token_budget(
-    configured_context_window: Option<usize>,
+    total_budget: usize,
     configured_output_tokens: usize,
-    provider_context_window: usize,
 ) -> TokenBudgetConfig {
-    let total_budget = configured_context_window
-        .unwrap_or(provider_context_window)
-        .max(1);
+    let total_budget = total_budget.max(1);
     let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
     let reserved_for_prompt = DEFAULT_MIN_PROMPT_TOKEN_RESERVE.min(
         total_budget
@@ -302,13 +368,68 @@ fn build_token_budget(
     }
 }
 
+fn validate_token_budget_config(
+    budget: &TokenBudgetConfig,
+    configured_max_tokens: usize,
+    model: &str,
+    config_path: &Path,
+) {
+    let max_reasonable_output_ratio = 0.5;
+    let max_reasonable_output_tokens = (budget.total_budget as f64 * max_reasonable_output_ratio) as usize;
+
+    if configured_max_tokens > max_reasonable_output_tokens {
+        let warning_msg = format!(
+            "Warning: max_tokens {} exceeds 50% of context_window ({} * 0.5 = {}) for model {}. \
+            This may limit input space.",
+            configured_max_tokens, budget.total_budget, max_reasonable_output_tokens, model
+        );
+        tracing::warn!("{}", warning_msg);
+    }
+
+    if configured_max_tokens >= budget.total_budget {
+        let error_msg = format!(
+            "Config Error: max_tokens {} >= context_window {} (from provider/model). \
+            This would leave NO space for input.",
+            configured_max_tokens, budget.total_budget
+        );
+
+        eprintln!("{}", error_msg);
+        eprintln!();
+        eprintln!("Configuration file: {}", config_path.display());
+        eprintln!("Suggestions:");
+        eprintln!("  - Reduce max_tokens (currently {}) in [app.llm] section", configured_max_tokens);
+        std::process::abort();
+    }
+}
+
 fn build_system_prompt(
     base_prompt: &str,
     workspace_root: &Path,
     request: &SessionRuntimeBuildInput,
+    subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
+    is_subagent: bool,
+    skills_dirs: &[PathBuf],
 ) -> String {
-    let base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
-    let base_prompt = base_prompt.trim();
+    let mut base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
+    base_prompt = base_prompt.trim().to_string();
+
+    base_prompt = base_prompt.replace(
+        "{{skills_dirs_table}}",
+        &generate_skills_dirs_table(skills_dirs),
+    );
+
+    if !is_subagent {
+        if let Some(rules) = compose_subagent_delegation_rules(&subagent_roles) {
+            // Insert Subagent Delegation after identity introduction
+            // Find the first double newline after the identity line
+            if let Some(pos) = base_prompt.find("\n\n") {
+                base_prompt.insert_str(pos, &rules);
+            } else {
+                base_prompt.push_str(&rules);
+            }
+        }
+    }
+
     let channel_prompt = request.channel.as_deref().map(|channel| {
         let mut prompt = compose_channel_system_prompt(ChannelPromptSections {
             memory_prompt: "",
@@ -324,7 +445,7 @@ fn build_system_prompt(
     match (base_prompt.is_empty(), channel_prompt) {
         (true, Some(channel_prompt)) => channel_prompt,
         (false, Some(channel_prompt)) => format!("{base_prompt}\n\n{channel_prompt}"),
-        (false, None) => base_prompt.to_string(),
+        (false, None) => base_prompt,
         (true, None) => String::new(),
     }
 }
@@ -406,15 +527,15 @@ mod tests {
 
     #[test]
     fn token_budget_caps_output_to_preserve_prompt_budget() {
-        let budget = build_token_budget(None, 150_000, 128_000);
+        let budget = build_token_budget(128_000, 150_000);
         assert_eq!(budget.total_budget, 128_000);
         assert_eq!(budget.reserved_for_output, 123_904);
         assert_eq!(budget.reserved_for_system, 2_048);
     }
 
     #[test]
-    fn token_budget_prefers_configured_context_window() {
-        let budget = build_token_budget(Some(65536), 8192, 128000);
+    fn token_budget_with_explicit_window() {
+        let budget = build_token_budget(65536, 8192);
         assert_eq!(budget.total_budget, 65536);
         assert_eq!(budget.reserved_for_output, 8192);
         assert_eq!(budget.reserved_for_system, 2048);
@@ -433,9 +554,11 @@ mod tests {
             channel_identity_prompt: None,
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
+            max_turns_override: None,
         };
 
-        let prompt = build_system_prompt("base rules", temp.path(), &request);
+        let prompt =
+            build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false, &Vec::new());
 
         assert!(prompt.contains("base rules"));
         assert!(prompt.contains("repo rules"));
@@ -490,6 +613,7 @@ mod tests {
                 ..GatewayEntryContext::channel(None)
             },
             agent_id_override: None,
+            max_turns_override: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)

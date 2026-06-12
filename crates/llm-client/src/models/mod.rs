@@ -3,6 +3,8 @@ mod gemini;
 mod ollama;
 mod openai_family;
 
+use std::sync::OnceLock;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +93,10 @@ pub async fn resolve_model_context_length(
         return Ok(dynamic_from_catalog);
     }
 
+    if let Some(known) = get_known_model_context_length(model) {
+        return Ok(Some(known));
+    }
+
     match config.protocol {
         ProtocolFamily::Ollama => {
             OllamaModelCatalog::new(config.base_url.clone())
@@ -99,6 +105,33 @@ pub async fn resolve_model_context_length(
         }
         _ => Ok(None),
     }
+}
+
+pub fn get_known_model_context_length(model: &str) -> Option<u64> {
+    static KNOWN_MODELS: OnceLock<Vec<(String, u64)>> = OnceLock::new();
+
+    let models = KNOWN_MODELS.get_or_init(|| {
+        let content = include_str!("known_models.toml");
+        let parsed: toml::Value = toml::from_str(content).expect("Invalid known_models.toml");
+        parsed
+            .get("models")
+            .and_then(|v| v.as_table())
+            .expect("known_models.toml must have a [models] section")
+            .iter()
+            .map(|(pattern, value)| {
+                let context = value.as_integer().expect("model context must be an integer") as u64;
+                (normalize_model_id(pattern), context)
+            })
+            .collect()
+    });
+
+    let normalized = normalize_model_id(model);
+    for (pattern, context) in models {
+        if normalized.contains(pattern) {
+            return Some(*context);
+        }
+    }
+    None
 }
 
 pub fn create_model_catalog(config: &ResolvedConfig) -> Result<Box<dyn ModelCatalog>, LlmError> {

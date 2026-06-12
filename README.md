@@ -26,7 +26,7 @@ The runtime also includes a layered memory and adaptive context-compression syst
 - Full tool suite: file operations, shell execution, Git, web search/browse, patch application, sub-agents, and extensible tool manifests.
 - Adaptive context management: token-budget tracking, configured compaction, forced recovery after context-limit errors, and prefix-cache telemetry.
 - Streaming reasoning: provider reasoning/thinking deltas can be surfaced while the model works.
-- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Shift+Tab`.
+- Reasoning-effort tiers: switch among `off`, `high`, and `max`; the TUI cycles them with `Ctrl+T`.
 - Session management: save and resume long-running work.
 - LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
 - Skills system: installable instruction packs loaded from local directories or Git sources.
@@ -46,13 +46,33 @@ The runtime also includes a layered memory and adaptive context-compression syst
 ```bash
 git clone https://gitcode.com/openeuler/xiaoO.git
 cd xiaoO
-cargo build --release
 cargo install --path apps/xiaoo-app
 ```
 
-This installs the application binaries into `~/.cargo/bin`. Make sure `~/.cargo/bin` is in your `PATH`.
+This installs the application binaries into `~/.cargo/bin` and attempts to install builtin skills. Make sure `~/.cargo/bin` is in your `PATH`.
 
-If you want the interactive security-plugin prompt during build, use:
+> **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
+>
+> **Installation Behavior**:
+> - First attempts to install builtin skills to system-level directory: `/usr/lib/.xiaoo/skills/` (requires root privileges)
+> - If system-level installation fails (e.g., permission denied), automatically falls back to user-level directory: `~/.xiaoo/skills/`
+> - Builtin skills include `xiaoo-guardian` (security policy enforcement) and other built-in capabilities
+> - Without these skills, security features may be unavailable.
+>
+> **For system-wide installation** (recommended for multi-user environments):
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+
+### Uninstallation
+
+```bash
+# Uninstall binaries
+cargo uninstall xiaoo-app
+
+# Remove the guardian skill (system level requires root)
+sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
+```
+
+### Skill Directory Priority (Four Levels - Runtime Search Only)
 
 ```bash
 ./build.sh --release
@@ -73,6 +93,19 @@ max_tokens = 128000                  # Optional, max output tokens per response
 context_window = 128000              # Optional, explicit total context budget override
 reasoning_effort = "off"             # Optional: off, high, or max
 
+# Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
+# Note: tools configuration supports two formats - see docs/config_file_guide.md
+[subagent.code_reviewer]
+description = "Code review specialist"
+prompt = "You are a code review specialist focusing on quality and best practices."
+max_turns = 5
+
+[subagent.code_reviewer.tools]
+bash = true
+read = true
+glob = true
+grep = true
+
 [trace]
 storage_backend = "moirai-sqlite"    # noop, stdout, or moirai-sqlite
 db_path = "~/.xiaoo/traces.db"       # Used when storage_backend is moirai-sqlite
@@ -82,6 +115,16 @@ Set your provider credential:
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Setup custom api url for local LLM: (e.g. entry point is http://localhost:8080/v1/chat/completions)
+
+```toml
+[llm]
+provider = "local"
+model = "deepseek-v4-flash"
+api_base = "http://localhost:8080"
+api_key_env = "LLM_API_KEY"
 ```
 
 Run xiaoO:
@@ -99,6 +142,12 @@ Example CLI output:
 ```text
 "hello world" has 11 characters.
 ```
+
+> **Configuration Documentation**:
+> - [General Configuration Guide](docs/config_file_guide.md) - Shared configuration for all modes (llm, subagent, skills, etc.)
+> - [CLI Configuration](docs/cli_config.md) - CLI basic usage and supported configuration
+> - [TUI Configuration](docs/tui_config.md) - TUI-specific configuration (remote, LSP, agent roles)
+> - [Daemon Configuration](docs/daemon_config.md) - Daemon-specific configuration (channels, HTTP API)
 
 ## Context Window
 
@@ -123,7 +172,7 @@ More details are available in [Memory & Context Compression](./docs/memory_conte
 | `high` | Use a stronger reasoning/thinking setting | Yellow |
 | `max` | Use the strongest reasoning/thinking setting | Red |
 
-The TUI status bar shows the current value as `Think off/high/max`. Press `Shift+Tab` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
+The TUI status bar shows the current value as `Think off/high/max`. Press `Ctrl+T` to cycle `off -> high -> max -> off` for the next turn. In CLI mode, use:
 
 ```bash
 xiaoo run --reasoning-effort high -p "Explain this repository"

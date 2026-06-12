@@ -1,4 +1,5 @@
 use crate::gateway::GatewayEntryContext;
+use agent_contracts::backend::BackendInstance;
 use agent_types::common::ids::AgentId;
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use memory::MemorySnapshot;
@@ -18,6 +19,15 @@ pub enum SessionLifecycleStatus {
     Closed,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentRoleRecord {
+    pub role_id: String,
+    pub description: String,
+    pub prompt: Option<String>,
+    pub max_turns: Option<u32>,
+    pub tools: BTreeMap<String, bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRuntimeSnapshot {
     pub agent_id: AgentId,
@@ -30,6 +40,8 @@ pub struct SessionRuntimeSnapshot {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
+    #[serde(default)]
+    pub subagent_roles: BTreeMap<String, SubagentRoleRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +57,8 @@ pub struct SessionRecord {
     pub channel_instance_id: Option<String>,
     pub status: SessionLifecycleStatus,
     pub runtime: SessionRuntimeSnapshot,
+    #[serde(default)]
+    pub backend_instance: Option<BackendInstance>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     #[serde(default)]

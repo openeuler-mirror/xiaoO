@@ -14,8 +14,9 @@ pub fn load_tool_sources() -> Vec<Box<dyn ToolSource>> {
 }
 
 pub fn load_tool_sources_with_services(services: ToolRuntimeServices) -> Vec<Box<dyn ToolSource>> {
+    let workspace_root = services.workspace_root.clone();
     vec![
         Box::new(BuiltinToolSource::new(services)),
-        Box::new(PluginToolSource::new()),
+        Box::new(PluginToolSource::new(workspace_root)),
     ]
 }

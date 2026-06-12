@@ -49,8 +49,8 @@
       "description": "删除定时任务（可能用于清除审计痕迹）"
     },
     {
-      "pattern": "crontab * | crontab",
-      "description": "管道方式修改定时任务（可能用于持久化后门）"
+      "pattern": "* | crontab",
+      "description": "管道方式安装/修改定时任务（可能用于持久化后门）"
     },
     {
       "pattern": "iptables -",

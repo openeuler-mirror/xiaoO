@@ -14,8 +14,10 @@ __pycache__/
 *.pyc
 .clawtrace
 .env
+.xiaoo
 
 **/tests/
+!plugins/tests/
 
 .claude/
 .vscode/
