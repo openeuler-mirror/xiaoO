@@ -66,6 +66,16 @@ READ_KEYWORDS = [
     "grep", "search", "搜索", "find", "查找",
 ]
 
+# ==================== 非交互式密码修改命令模式 ====================
+PASSWORD_MODIFY_PATTERNS: list[str] = [
+    r"\|\s*passwd\b",              # echo pass | passwd
+    r"\bpasswd\s+--stdin\b",       # passwd --stdin
+    r"\bchpasswd\b",               # 批量改密码
+    r"\bnewusers\b",               # 批量添加用户
+    r"\bpasswd\s+-[a-zA-Z]*d\b",   # 删除密码 (passwd -d)
+    r"\bpasswd\s+-[a-zA-Z]*l\b",   # 锁定账户 (passwd -l)
+]
+
 # ==================== 意图偏离关键词对 ====================
 # prompt 意图关键词 → a_next 中不应出现的危险关键词
 INTENT_DEVIATION_PATTERNS: list[dict] = [
@@ -123,6 +133,11 @@ class LogicRulesChecker:
         dangerous_result = self._check_dangerous_patterns(a_next)
         if dangerous_result.hit:
             return dangerous_result
+
+        # 5. 密码修改授权检测
+        consent_result = self._check_password_consent(action_history, a_next)
+        if consent_result.hit:
+            return consent_result
 
         return LogicRuleResult(hit=False)
 
@@ -341,6 +356,47 @@ class LogicRulesChecker:
                 )
 
         return LogicRuleResult(hit=False)
+
+    def _check_password_consent(
+        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+    ) -> LogicRuleResult:
+        """
+        密码修改授权检测：
+        非交互式密码修改命令必须在 action_history 中有 ask_user_question 且用户返回了密码。
+        交互式 passwd（无参数）不在此列，因为 LLM 无法完成交互式输入。
+        """
+        action_detail = a_next.get("action_detail", "").lower()
+        action_type = a_next.get("action_type", "").lower()
+
+        # 只检测 bash 工具中的密码修改命令
+        if action_type != "bash":
+            return LogicRuleResult(hit=False)
+
+        is_password_modify = any(
+            re.search(p, action_detail, re.IGNORECASE) for p in PASSWORD_MODIFY_PATTERNS
+        )
+        if not is_password_modify:
+            return LogicRuleResult(hit=False)
+
+        # 检查 action_history 中是否有 ask_user_question 且用户返回了答案
+        for action in action_history:
+            if not isinstance(action, dict):
+                continue
+            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
+            output = str(action.get("output", ""))
+            if hist_type == "ask_user_question" and output.strip():
+                return LogicRuleResult(hit=False)  # 用户已授权，放行
+
+        return LogicRuleResult(
+            hit=True,
+            violated_rule="password_modify_requires_consent",
+            risk_level="high",
+            reason=(
+                "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 "
+                "ask_user_question 操作，可能存在未授权的密码修改风险"
+            ),
+            risk_type="consent_missing",
+        )
 
     @staticmethod
     def _extract_file_paths(text: str) -> list[str]:
