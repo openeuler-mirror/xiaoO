@@ -1,4 +1,5 @@
-use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig};
+use crate::backend::SandboxForkResult;
+use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig, SessionRecord};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +56,24 @@ pub struct SessionCloseRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCancelRequest {
     pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionForkRequest {
+    pub parent_session_id: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    #[serde(default)]
+    pub snapshot_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionForkResult {
+    pub parent: SessionRecord,
+    pub child: SessionRecord,
+    pub backend_fork: SandboxForkResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -30,6 +30,18 @@ pub(crate) struct E2bCreatedBackend {
     pub(crate) backend: Arc<dyn OperationBackend>,
 }
 
+pub(crate) struct E2bSnapshotInput {
+    pub(crate) provider_options: Value,
+    pub(crate) sandbox_id: String,
+    pub(crate) name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct E2bSnapshotResult {
+    pub(crate) snapshot_id: String,
+    pub(crate) names: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct E2bProviderOptions {
@@ -81,6 +93,14 @@ struct CreateSandboxResponse {
     envd_access_token: Option<String>,
     #[serde(rename = "trafficAccessToken")]
     traffic_access_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSnapshotResponse {
+    #[serde(rename = "snapshotID")]
+    snapshot_id: String,
+    #[serde(default)]
+    names: Vec<String>,
 }
 
 pub(crate) async fn create_backend(
@@ -151,7 +171,7 @@ pub(crate) async fn create_backend(
             supports_export_file: true,
             supports_lsp: false,
             supports_pause: false,
-            supports_snapshot: false,
+            supports_snapshot: true,
             supports_delete: true,
         },
         resources: BackendResourceAllocation {
@@ -200,6 +220,64 @@ pub(crate) async fn create_backend(
     }
 
     Ok(E2bCreatedBackend { instance, backend })
+}
+
+pub(crate) async fn create_snapshot(
+    input: E2bSnapshotInput,
+) -> Result<E2bSnapshotResult, SandboxError> {
+    let options = parse_options(&input.provider_options)?;
+    let api_key = resolve_api_key(&options)?;
+    let api_base = options
+        .api_base
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(DEFAULT_API_BASE)
+        .to_string();
+    let http = reqwest::Client::new();
+
+    let mut body = Map::new();
+    if let Some(name) = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        body.insert("name".to_string(), Value::String(name.to_string()));
+    }
+
+    let response = http
+        .post(join_url(
+            api_base.as_str(),
+            format!("/sandboxes/{}/snapshots", input.sandbox_id).as_str(),
+        ))
+        .header("X-API-Key", api_key)
+        .json(&Value::Object(body))
+        .send()
+        .await
+        .map_err(|error| SandboxError::BuildFailed {
+            message: format!("failed to create e2b snapshot: {error}"),
+        })?;
+
+    if response.status() != reqwest::StatusCode::CREATED {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
+        return Err(SandboxError::BuildFailed {
+            message: format!("e2b create snapshot failed with HTTP {status}: {message}"),
+        });
+    }
+
+    let parsed = response
+        .json::<CreateSnapshotResponse>()
+        .await
+        .map_err(|error| SandboxError::BuildFailed {
+            message: format!("failed to decode e2b create snapshot response: {error}"),
+        })?;
+
+    Ok(E2bSnapshotResult {
+        snapshot_id: parsed.snapshot_id,
+        names: parsed.names,
+    })
 }
 
 fn parse_options(value: &Value) -> Result<E2bProviderOptions, SandboxError> {
