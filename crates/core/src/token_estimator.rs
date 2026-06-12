@@ -29,15 +29,13 @@ impl TokenEstimator {
     }
 
     pub fn estimate_system_prompt(&self, prompt: &str) -> usize {
-        *self.system_prompt_tokens.get_or_init(|| {
-            self.estimate_text_precise(prompt)
-        })
+        *self
+            .system_prompt_tokens
+            .get_or_init(|| self.estimate_text_precise(prompt))
     }
 
     pub fn estimate_tools(&self, count: usize) -> usize {
-        *self.tools_tokens.get_or_init(|| {
-            count * 150 + 200
-        })
+        *self.tools_tokens.get_or_init(|| count * 150 + 200)
     }
 
     pub fn estimate_history_messages(&self, messages: &[ChatMessage]) -> usize {
@@ -67,16 +65,10 @@ impl TokenEstimator {
             ContentBlock::ToolUse { input, .. } => {
                 let json_str = serde_json::to_string(input).unwrap_or_default();
                 self.estimate_text_quick(&json_str) + 20
-            },
-            ContentBlock::ToolResult { output, .. } => {
-                self.estimate_text_quick(output) + 15
-            },
-            ContentBlock::Image { description } => {
-                self.estimate_text_quick(description) + 100
-            },
-            ContentBlock::Document { description } => {
-                self.estimate_text_quick(description) + 150
-            },
+            }
+            ContentBlock::ToolResult { output, .. } => self.estimate_text_quick(output) + 15,
+            ContentBlock::Image { description } => self.estimate_text_quick(description) + 100,
+            ContentBlock::Document { description } => self.estimate_text_quick(description) + 150,
         }
     }
 
@@ -150,11 +142,7 @@ mod tests {
     #[test]
     fn estimate_message_with_cached_tokens() {
         let estimator = TokenEstimator::new();
-        let msg = ChatMessage::text(
-            MessageRole::User,
-            "Test message",
-            0,
-        );
+        let msg = ChatMessage::text(MessageRole::User, "Test message", 0);
 
         assert_eq!(msg.estimated_tokens, None);
 
@@ -170,11 +158,7 @@ mod tests {
             ChatMessage::text(MessageRole::Assistant, "Hi there", 0),
         ];
 
-        let total = estimator.estimate_input_tokens(
-            "System prompt",
-            5,
-            &messages,
-        );
+        let total = estimator.estimate_input_tokens("System prompt", 5, &messages);
 
         assert!(total > 0);
     }

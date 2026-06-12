@@ -30,6 +30,10 @@ pub struct LoopStateSnapshot {
 
 impl LoopState {
     pub fn new(session_id: uuid::Uuid) -> Self {
+        Self::new_with_cancel(session_id, CancellationToken::new())
+    }
+
+    pub fn new_with_cancel(session_id: uuid::Uuid, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             messages: Arc::new(RwLock::new(Vec::new())),
@@ -37,7 +41,7 @@ impl LoopState {
             token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
             kv_cache_map: KvCacheMap::default(),
-            cancel: CancellationToken::new(),
+            cancel,
         }
     }
 

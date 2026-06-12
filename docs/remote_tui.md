@@ -2,8 +2,8 @@
 
 Remote TUI lets one machine run the XiaoO gateway daemon while another machine runs the terminal UI.
 
-- **Machine A** runs `xiaoo-app daemon` and owns the runtime, LLM provider, tools, hooks, workspace, and operation backend.
-- **Machine B** runs `xiaoo-tui` and connects to Machine A with `/remote`.
+- **Machine A** runs `xiaoo-daemon` and owns the runtime, LLM provider, tools, hooks, workspace, and operation backend.
+- **Machine B** runs `xiaoo` and connects to Machine A with `/remote`.
 - Both machines use the same codebase and binaries; only the startup mode is different.
 
 ---
@@ -12,7 +12,7 @@ Remote TUI lets one machine run the XiaoO gateway daemon while another machine r
 
 ```
 Machine B                         Machine A
-xiaoo-tui                         xiaoo-app daemon
+xiaoo                         xiaoo-daemon
 ---------                         ----------------
 TUI input/rendering   HTTP/SSE    Gateway session APIs
 /remote commands   ----------->   Agent loop
@@ -33,7 +33,7 @@ In remote mode, all tool execution happens on Machine A. The workspace shown in 
 Start the daemon on Machine A:
 
 ```bash
-xiaoo-app daemon \
+xiaoo-daemon \
   --host 0.0.0.0 \
   --port 18080 \
   --config ~/.config/xiaoo/config.toml
@@ -50,7 +50,7 @@ Then export the token before starting the daemon:
 
 ```bash
 export XIAOO_HTTP_BEARER_TOKEN="change-me"
-xiaoo-app daemon --host 0.0.0.0 --port 18080
+xiaoo-daemon --host 0.0.0.0 --port 18080
 ```
 
 Health check:
@@ -72,7 +72,7 @@ If bearer auth is configured, protected session/chat routes require:
 Start the TUI normally:
 
 ```bash
-xiaoo-tui
+xiaoo
 ```
 
 Connect to Machine A:
@@ -94,7 +94,7 @@ Then export the same token value on Machine B:
 
 ```bash
 export XIAOO_REMOTE_TOKEN="change-me"
-xiaoo-tui
+xiaoo
 ```
 
 When `auto_connect = true`, TUI enters remote backend mode on startup using the configured URL. When `auto_connect = false`, the config only supplies the bearer token env var and default remote settings; use `/remote <url>` manually.
@@ -116,15 +116,15 @@ After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. Th
 
 ## 5. Remote Session API
 
-Remote TUI uses the daemon's session APIs, not the older channel-style `/api/v1/chat` endpoint.
+Remote TUI uses the daemon's session APIs.
 
 | Endpoint | Description |
 |----------|-------------|
 | `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
-| `POST /api/v1/sessions/{session_id}/turn/stream` | Run one turn and stream SSE events |
-| `POST /api/v1/sessions/{session_id}/interaction` | Send a user interaction response back to the daemon |
-| `POST /api/v1/sessions/{session_id}/cancel` | Request cancellation of the current turn |
-| `POST /api/v1/sessions/{session_id}/close` | Close the session and fire lifecycle hooks |
+| `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/sessions/interaction` | Send a user interaction response back to the daemon |
+| `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
+| `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
 
 SSE event types:
 
@@ -154,16 +154,16 @@ SSE event types:
 
 - `/cancel` is wired through the HTTP/TUI path, but hard cancellation depends on the gateway/core exposing the active loop cancellation token through the session supervisor.
 - Remote mode does not sync files from Machine A to Machine B. Tool results and file-change summaries are streamed, but filesystem operations happen only on Machine A.
-- Remote TUI is not a separate lightweight client package; it is the same `xiaoo-tui` binary running with a remote backend.
+- Remote TUI is not a separate lightweight client package; it is the same `xiaoo` binary running with a remote backend.
 
 ---
 
 ## 8. Quick Checklist
 
 1. Machine A has daemon config and provider credentials.
-2. Machine A starts `xiaoo-app daemon --host 0.0.0.0 --port 18080`.
+2. Machine A starts `xiaoo-daemon --host 0.0.0.0 --port 18080`.
 3. Machine B can reach `http://A:18080/api/v1/health`.
 4. If auth is enabled, Machine B exports `XIAOO_REMOTE_TOKEN`.
-5. Machine B starts `xiaoo-tui`.
+5. Machine B starts `xiaoo`.
 6. In TUI, run `/remote http://A:18080`.
 7. Send a message and confirm the status bar shows `Remote: http://A:18080`.

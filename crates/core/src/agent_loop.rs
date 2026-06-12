@@ -1802,8 +1802,14 @@ mod tests {
     #[test]
     fn compression_trigger_as_str() {
         assert_eq!(CompressionTrigger::Automatic.as_str(), "automatic");
-        assert_eq!(CompressionTrigger::ContextLimitRetry.as_str(), "context_limit_retry");
-        assert_eq!(CompressionTrigger::PreCheckExceeded.as_str(), "pre_check_exceeded");
+        assert_eq!(
+            CompressionTrigger::ContextLimitRetry.as_str(),
+            "context_limit_retry"
+        );
+        assert_eq!(
+            CompressionTrigger::PreCheckExceeded.as_str(),
+            "pre_check_exceeded"
+        );
     }
 
     #[test]
@@ -1826,11 +1832,8 @@ mod tests {
                 ChatMessage::text(MessageRole::Assistant, "Hi there", 0),
             ];
 
-            let estimated = estimator.estimate_input_tokens(
-                "You are a helpful assistant",
-                0,
-                &messages,
-            );
+            let estimated =
+                estimator.estimate_input_tokens("You are a helpful assistant", 0, &messages);
 
             assert!(estimated > 0);
         }
@@ -1844,7 +1847,8 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
@@ -1860,7 +1864,8 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
@@ -1876,13 +1881,15 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
             assert_eq!(available_for_input, 0);
 
-            let is_invalid = config.reserved_for_output + config.reserved_for_system >= config.total_budget;
+            let is_invalid =
+                config.reserved_for_output + config.reserved_for_system >= config.total_budget;
             assert!(is_invalid);
         }
     }
@@ -2030,7 +2037,6 @@ mod tests {
             &self.capabilities
         }
     }
-
 
     struct FixedPromptBuilder;
 
@@ -2188,7 +2194,6 @@ mod tests {
             .build()
             .expect("test runtime should build")
     }
-
 
     #[derive(Default)]
     struct RecordingLoopEventSink {
@@ -2505,7 +2510,4 @@ mod tests {
             "synthesized tool_use must pair with a tool_result on the same id"
         );
     }
-
-
-
 }

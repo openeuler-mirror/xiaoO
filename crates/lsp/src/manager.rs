@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,8 +21,15 @@ pub struct LspServerManager {
 
 impl LspServerManager {
     pub fn new(extra_configs: Vec<ServerConfig>, env: Arc<dyn LspEnv>) -> Self {
-        let mut configs = extra_configs;
-        configs.extend(builtin_servers());
+        Self::new_with_disabled(extra_configs, Vec::new(), env)
+    }
+
+    pub fn new_with_disabled(
+        extra_configs: Vec<ServerConfig>,
+        disabled_servers: Vec<String>,
+        env: Arc<dyn LspEnv>,
+    ) -> Self {
+        let configs = server_configs_with_disabled(extra_configs, &disabled_servers);
         Self {
             configs,
             instances: HashMap::new(),
@@ -326,8 +333,49 @@ impl LspServerManager {
     }
 }
 
+fn server_configs_with_disabled(
+    extra_configs: Vec<ServerConfig>,
+    disabled_servers: &[String],
+) -> Vec<ServerConfig> {
+    let disabled_servers: HashSet<&str> = disabled_servers.iter().map(String::as_str).collect();
+    let mut configs = extra_configs;
+    configs.extend(builtin_servers());
+    configs.retain(|config| !disabled_servers.contains(config.id));
+    configs
+}
+
 fn deduplicate_locations(mut locs: Vec<LspLocation>) -> Vec<LspLocation> {
     locs.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     locs.dedup_by(|a, b| a.file == b.file && a.line == b.line && a.col == b.col);
     locs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_configs_with_disabled;
+    use crate::servers::{AutoInstall, ServerConfig};
+
+    #[test]
+    fn server_configs_filter_disabled_builtin_and_extra_servers() {
+        let extra = ServerConfig {
+            id: "custom-python",
+            extensions: &["py"],
+            command: "custom-python-lsp",
+            args: &[],
+            root_markers: &["pyproject.toml"],
+            language_id: "python",
+            initialization_options: None,
+            auto_install: AutoInstall::None,
+        };
+
+        let configs = server_configs_with_disabled(
+            vec![extra],
+            &["pyright".to_string(), "custom-python".to_string()],
+        );
+        let ids = configs.iter().map(|config| config.id).collect::<Vec<_>>();
+
+        assert!(!ids.contains(&"pyright"));
+        assert!(!ids.contains(&"custom-python"));
+        assert!(ids.contains(&"rust-analyzer"));
+    }
 }

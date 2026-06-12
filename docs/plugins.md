@@ -35,7 +35,7 @@ You can also develop your own hookers and place them in `<your_xiaoO>/plugins/ho
 
 ### Built-in Skills
 
-When you run `cargo install --path apps/xiaoo-app`, builtin skills are automatically installed. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
+When you run `cargo install --path apps/endside`, builtin skills are automatically installed. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
 
 **Installation locations** (automatic fallback):
 - **System level** (preferred): `/usr/lib/.xiaoo/skills/` - requires root privileges
@@ -53,7 +53,7 @@ When you run `cargo install --path apps/xiaoo-app`, builtin skills are automatic
 > - Without these skills, security features and other capabilities may be unavailable.
 >
 > **For system-wide installation** (recommended for multi-user environments):
-> - Run `cargo install` with root privileges: `sudo cargo install --path apps/xiaoo-app`
+> - Run `cargo install` with root privileges: `sudo cargo install --path apps/endside`
 
 ### Skill Directory Priority (Four Levels)
 
@@ -64,14 +64,14 @@ When you run `cargo install --path apps/xiaoo-app`, builtin skills are automatic
 
 ### Custom Skills
 
-Custom skills can be installed to user-level directory using the `xiaoo skill install` command:
+Custom skills can be installed to user-level directory using the `xiaoo --cli skill install` command:
 
 ```bash
 # Install from local directory (installs to ~/.xiaoo/skills by default)
-xiaoo skill install ./my-skill/
+xiaoo --cli skill install ./my-skill/
 
 # Install from Git repository
-xiaoo skill install https://github.com/user/my-skill.git
+xiaoo --cli skill install https://github.com/user/my-skill.git
 ```
 
 > **Note**: User-installed skills go to `~/.xiaoo/skills/` (user level), NOT `/usr/lib/.xiaoo/skills/` (system level is reserved for built-in skills).
@@ -82,7 +82,7 @@ See [skill_usage.md](./skill_usage.md) for detailed skill documentation.
 
 ```bash
 # Remove a user-installed skill
-xiaoo skill remove <skill-name>
+xiaoo --cli skill remove <skill-name>
 
 # Or manually remove from user level
 rm -rf ~/.xiaoo/skills/<skill-name>
@@ -95,7 +95,7 @@ To completely uninstall xiaoO and all associated skills:
 
 ```bash
 # Uninstall the application
-cargo uninstall xiaoo-app
+cargo uninstall xiaoo-endside
 
 # Remove system-level skills (requires root)
 sudo rm -rf /usr/lib/.xiaoo/skills

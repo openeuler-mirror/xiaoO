@@ -1,6 +1,6 @@
 # CLI Configuration Guide
 
-> **Note**: This document focuses on CLI (`xiaoo run`) configuration options and usage.
+> **Note**: This document focuses on CLI (`xiaoo --cli run`) configuration options and usage.
 >
 > For **common configuration items** (llm, subagent, skills, compact, trace, hooker, etc.), please refer to [Configuration File Guide](./config_file_guide.md).
 
@@ -78,16 +78,16 @@ default = "audit_agent"
 
 ```bash
 # Single execution
-xiaoo run -p "Count the characters in hello world"
+xiaoo --cli run -p "Count the characters in hello world"
 
 # Use specific configuration file
-xiaoo run --config /path/to/config.toml -p "Your prompt"
+xiaoo --cli run --config /path/to/config.toml -p "Your prompt"
 
 # Show debug information
-xiaoo run --debug -p "Your prompt"
+xiaoo --cli run --debug -p "Your prompt"
 
 # Disable tool execution
-xiaoo run --no-tools -p "Just answer this question"
+xiaoo --cli run --no-tools -p "Just answer this question"
 ```
 
 ### Parameter Description
@@ -133,10 +133,10 @@ grep = true
 
 ```bash
 # Code review task (main agent will automatically delegate to code_reviewer subagent)
-xiaoo run -p "Review my authentication module for security issues"
+xiaoo --cli run -p "Review my authentication module for security issues"
 
 # Test writing task (main agent will automatically delegate to test_writer subagent)
-xiaoo run -p "Write comprehensive tests for user registration API"
+xiaoo --cli run -p "Write comprehensive tests for user registration API"
 ```
 
 ### How It Works
@@ -172,7 +172,7 @@ When CLI has subagent configured:
 **A**: ❌ No. `[agent]` configuration only takes effect in TUI and Daemon. CLI does not support multi-role switching.
 
 For multi-role functionality, use:
-- **TUI**: `xiaoo-tui` + Tab key switching
+- **TUI**: `xiaoo` + Tab key switching
 - **Daemon**: HTTP API + agent role configuration
 
 ### Q: Will CLI-configured subagents take effect?
@@ -183,7 +183,7 @@ For multi-role functionality, use:
 
 **A**: Use the `--debug` parameter:
 ```bash
-xiaoo run --debug -p "test"
+xiaoo --cli run --debug -p "test"
 ```
 Output will show:
 - Configuration file path
@@ -248,16 +248,16 @@ grep = true
 
 ```bash
 # Quick code review
-xiaoo run -p "Review src/auth.rs for security issues"
+xiaoo --cli run -p "Review src/auth.rs for security issues"
 
 # Quick test generation
-xiaoo run -p "Generate unit tests for user.rs"
+xiaoo --cli run -p "Generate unit tests for user.rs"
 
 # Simple Q&A (disable tools)
-xiaoo run --no-tools -p "Explain the difference between TCP and UDP"
+xiaoo --cli run --no-tools -p "Explain the difference between TCP and UDP"
 
 # Debug mode to view execution process
-xiaoo run --debug -p "List all Python files in the project"
+xiaoo --cli run --debug -p "List all Python files in the project"
 ```
 
 ---

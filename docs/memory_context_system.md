@@ -170,8 +170,8 @@ Important boundary:
 
 If you only need the built-in context-management path, configure `[compact]` and optionally `[llm].context_window`. This is already wired into:
 
-- `apps/xiaoo-app/src/daemon_runtime.rs`
-- `apps/xiaoo-app/src/cli/mod.rs`
+- `apps/serverside/src/daemon_runtime.rs`
+- `apps/endside/src/cli/mod.rs`
 - `crates/core/src/agent_loop.rs`
 
 Once configured, compression runs automatically before each turn.

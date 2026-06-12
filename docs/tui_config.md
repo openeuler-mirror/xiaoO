@@ -1,6 +1,6 @@
 # TUI Configuration Guide
 
-> **Note**: This document focuses on TUI (`xiaoo-tui`) specific configuration items.
+> **Note**: This document focuses on TUI (`xiaoo`) specific configuration items.
 >
 > For **common configuration items** (llm, subagent, skills, compact, trace, hooker, etc.), please refer to [Configuration File Guide](./config_file_guide.md).
 
@@ -293,13 +293,13 @@ write = true
 
 ```bash
 # Local mode
-xiaoo-tui
+xiaoo
 
 # Use specific configuration file
-xiaoo-tui --config /path/to/config.toml
+xiaoo --config /path/to/config.toml
 
 # Debug mode
-xiaoo-tui --debug
+xiaoo --debug
 ```
 
 ---
