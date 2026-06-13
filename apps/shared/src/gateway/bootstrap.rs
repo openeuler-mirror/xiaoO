@@ -1,6 +1,7 @@
 use crate::backend::BackendManager;
 use crate::gateway::{
-    CoreBackedSessionService, SessionControlPlane, SessionRuntimeResolver, SessionService,
+    CoreBackedSessionService, ResolvedSessionRuntime, SessionControlPlane,
+    SessionRuntimeBuildInput, SessionRuntimeResolveError, SessionRuntimeResolver, SessionService,
     SessionStore,
 };
 use agent_types::hook::HookerRegistryConfig;
@@ -34,11 +35,10 @@ struct NoopSessionRuntimeResolver;
 impl SessionRuntimeResolver for NoopSessionRuntimeResolver {
     async fn resolve(
         &self,
-        _request: &crate::gateway::SessionRuntimeBuildInput,
+        _request: &SessionRuntimeBuildInput,
         _existing: Option<&crate::gateway::SessionRecord>,
-    ) -> Result<crate::gateway::ResolvedSessionRuntime, crate::gateway::SessionRuntimeResolveError>
-    {
-        Err(crate::gateway::SessionRuntimeResolveError::ResolveFailed {
+    ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+        Err(SessionRuntimeResolveError::ResolveFailed {
             message: "lifecycle-only control plane cannot resolve runtimes".to_string(),
         })
     }

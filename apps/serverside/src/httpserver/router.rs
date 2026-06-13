@@ -239,8 +239,16 @@ fn create_router_from_state(
                 post(handle_session_interaction),
             )
             .route("/api/v1/sessions/cancel", post(handle_session_cancel))
-            .route("/api/v1/sessions/fork", post(handle_session_fork))
-            .route("/api/v1/sessions/close", post(handle_session_close)),
+            .route("/api/v1/sessions/close", post(handle_session_close))
+            .route(
+                "/api/v1/runtimes/checkpoint",
+                post(handle_runtime_checkpoint),
+            )
+            .route(
+                "/api/v1/runtimes/checkpoint/delete-snapshot",
+                post(handle_runtime_checkpoint_snapshot_delete),
+            )
+            .route("/api/v1/runtimes/checkout", post(handle_runtime_checkout)),
         bearer_auth.clone(),
     );
 
@@ -492,9 +500,9 @@ async fn handle_session_close(
     }
 }
 
-async fn handle_session_fork(
+async fn handle_runtime_checkpoint(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::SessionForkRequest>,
+    Json(payload): Json<xiaoo_shared::RuntimeCheckpointRequest>,
 ) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -506,7 +514,47 @@ async fn handle_session_fork(
             .into_response();
     };
 
-    match control_plane.fork_session(payload).await {
+    match control_plane.checkpoint_runtime(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_checkout(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeCheckoutRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.checkout_runtime(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_checkpoint_snapshot_delete(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeCheckpointSnapshotDeleteRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.delete_checkpoint_snapshot(payload).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
     }
@@ -744,6 +792,78 @@ mod tests {
             .expect("router should respond");
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bearer_auth_applies_to_runtime_checkpoint_route() {
+        let router = create_router_with_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
+        );
+
+        let missing_auth = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_id":"runtime-1"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+
+        let valid_auth = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_id":"runtime-1"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(valid_auth.status(), StatusCode::NOT_IMPLEMENTED);
+
+        let missing_auth_delete_snapshot = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint/delete-snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"checkpoint_id":"rtcp_demo"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(
+            missing_auth_delete_snapshot.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let valid_auth_delete_snapshot = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint/delete-snapshot")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"checkpoint_id":"rtcp_demo"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(
+            valid_auth_delete_snapshot.status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

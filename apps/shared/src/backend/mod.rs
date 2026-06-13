@@ -1,7 +1,8 @@
 use agent_contracts::backend::{
-    BackendControlError, BackendCreateRequest, BackendDeleteRequest, BackendId, BackendInstance,
-    BackendLifecycle, BackendLifecycleReason, BackendPath, BackendProvider, BackendResourceLimits,
-    OperationBackend, OperationBackendBuildError, OperationError,
+    BackendControlError, BackendCreateRequest as ProviderBackendCreateRequest,
+    BackendDeleteRequest, BackendId, BackendInstance, BackendLifecycle, BackendLifecycleReason,
+    BackendPath, BackendProvider, BackendResourceLimits, OperationBackend,
+    OperationBackendBuildError, OperationError,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -11,15 +12,19 @@ use std::sync::Arc;
 
 mod backend_manager;
 mod base;
+mod dirty_write;
 mod e2b;
 
 pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
 pub use base::{
-    BackendEnsureSessionRequest, BackendLease, GatewayBackendConfig, SandboxConnectRequest,
-    SandboxCreateRequest, SandboxError, SandboxForkRequest, SandboxForkResult, SandboxInfo,
-    SandboxLineageInfo, SandboxListFilter, SandboxTreeNode,
+    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
+    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
+    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
+    BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
+    BackendLease, BackendLineageInfo, BackendListFilter, BackendTreeNode, GatewayBackendConfig,
 };
+use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
 
 struct BackendInstanceEntry {
     backend: Arc<dyn OperationBackend>,
@@ -29,11 +34,12 @@ struct BackendInstanceEntry {
     config_hash: u64,
     session_ids: BTreeMap<String, ()>,
     expires_at_ms: Option<u64>,
-    lineage: SandboxLineageEntry,
+    lineage: BackendLineageEntry,
+    dirty_tracker: Arc<BackendDirtyTracker>,
 }
 
 #[derive(Debug, Clone, Default)]
-struct SandboxLineageEntry {
+struct BackendLineageEntry {
     parent_backend_id: Option<BackendId>,
     children_backend_ids: BTreeMap<String, ()>,
     forked_from_snapshot_id: Option<String>,
@@ -102,10 +108,10 @@ fn default_local_provider_options() -> Value {
     Value::Object(options)
 }
 
-fn resolve_sandbox_backend_config(
+fn resolve_backend_config(
     provider: Option<String>,
     options: Option<Value>,
-) -> Result<GatewayBackendConfig, SandboxError> {
+) -> Result<GatewayBackendConfig, BackendError> {
     let kind = provider.unwrap_or_else(|| "local".to_string());
     let options = options.unwrap_or_else(|| {
         if kind == "local" {
@@ -115,12 +121,12 @@ fn resolve_sandbox_backend_config(
         }
     });
     resolve_session_backend_config(Some(GatewayBackendConfig::new(kind, options)))
-        .map_err(SandboxError::from_build_error)
+        .map_err(BackendError::from_build_error)
 }
 
-fn requested_backend_id(backend_id: Option<String>) -> Result<BackendId, SandboxError> {
+fn requested_backend_id(backend_id: Option<String>) -> Result<BackendId, BackendError> {
     match backend_id {
-        Some(backend_id) if backend_id.trim().is_empty() => Err(SandboxError::InvalidRequest {
+        Some(backend_id) if backend_id.trim().is_empty() => Err(BackendError::InvalidRequest {
             message: "backend_id cannot be empty".to_string(),
         }),
         Some(backend_id) => Ok(BackendId(backend_id)),
@@ -129,7 +135,7 @@ fn requested_backend_id(backend_id: Option<String>) -> Result<BackendId, Sandbox
 }
 
 fn new_backend_id() -> BackendId {
-    BackendId(format!("sbx_{}", uuid::Uuid::new_v4().simple()))
+    BackendId(format!("bkd_{}", uuid::Uuid::new_v4().simple()))
 }
 
 fn expires_at_ms_from_timeout(timeout_secs: u64) -> u64 {
@@ -158,52 +164,6 @@ fn metadata_matches_filter(metadata: &Value, filter: &BTreeMap<String, String>) 
     })
 }
 
-fn resolve_parent_backend_id(
-    state: &BackendManagerState,
-    request: &SandboxForkRequest,
-) -> Result<BackendId, SandboxError> {
-    let by_backend = request
-        .parent_backend_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| BackendId(value.to_string()));
-    let by_session = request
-        .parent_session_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|session_id| {
-            state
-                .session_index
-                .get(session_id)
-                .cloned()
-                .ok_or_else(|| SandboxError::NotFound {
-                    backend_id: format!("session:{session_id}"),
-                })
-        })
-        .transpose()?;
-
-    match (by_backend, by_session) {
-        (Some(backend_id), Some(session_backend_id)) if backend_id != session_backend_id => {
-            Err(SandboxError::Conflict {
-                message: format!(
-                    "parent_backend_id {backend_id} does not match parent_session_id backend {session_backend_id}"
-                ),
-            })
-        }
-        (Some(backend_id), _) | (_, Some(backend_id)) => Ok(backend_id),
-        (None, None) => Err(SandboxError::InvalidRequest {
-            message: "fork requires parent_backend_id or parent_session_id".to_string(),
-        }),
-    }
-}
-
-struct ParentForkSource {
-    backend_id: BackendId,
-    config: GatewayBackendConfig,
-    workspace_root: String,
-    instance_id: String,
-}
-
 fn forked_provider_options(
     parent_options: &Value,
     override_options: Option<&Value>,
@@ -222,70 +182,6 @@ fn forked_provider_options(
     Value::Object(options)
 }
 
-fn fork_metadata(
-    metadata: Value,
-    parent: &ParentForkSource,
-    child_backend_id: &str,
-    snapshot_id: &str,
-) -> Value {
-    let mut object = match metadata {
-        Value::Object(object) => object,
-        Value::Null => Map::new(),
-        other => {
-            let mut object = Map::new();
-            object.insert("user_metadata".to_string(), other);
-            object
-        }
-    };
-    object.insert(
-        "xiaoo_fork_parent_backend_id".to_string(),
-        Value::String(parent.backend_id.0.clone()),
-    );
-    object.insert(
-        "xiaoo_fork_parent_sandbox_id".to_string(),
-        Value::String(parent.instance_id.clone()),
-    );
-    object.insert(
-        "xiaoo_fork_snapshot_id".to_string(),
-        Value::String(snapshot_id.to_string()),
-    );
-    object.insert(
-        "xiaoo_fork_child_backend_id".to_string(),
-        Value::String(child_backend_id.to_string()),
-    );
-    Value::Object(object)
-}
-
-fn insert_forked_child(
-    state: &mut BackendManagerState,
-    parent_backend_id: &BackendId,
-    child_backend_id: &BackendId,
-    child_session_id: Option<String>,
-    child_entry: BackendInstanceEntry,
-) -> Result<SandboxInfo, SandboxError> {
-    let parent_entry =
-        state
-            .sandboxes
-            .get_mut(parent_backend_id)
-            .ok_or_else(|| SandboxError::NotFound {
-                backend_id: parent_backend_id.0.clone(),
-            })?;
-    parent_entry
-        .lineage
-        .children_backend_ids
-        .insert(child_backend_id.0.clone(), ());
-    let parent_info = parent_entry.info();
-    if let Some(session_id) = child_session_id {
-        state
-            .session_index
-            .insert(session_id, child_backend_id.clone());
-    }
-    state
-        .sandboxes
-        .insert(child_backend_id.clone(), child_entry);
-    Ok(parent_info)
-}
-
 fn detach_from_parent(
     state: &mut BackendManagerState,
     backend_id: &BackendId,
@@ -294,23 +190,23 @@ fn detach_from_parent(
     let Some(parent_backend_id) = entry.lineage.parent_backend_id.as_ref() else {
         return;
     };
-    if let Some(parent) = state.sandboxes.get_mut(parent_backend_id) {
+    if let Some(parent) = state.backends.get_mut(parent_backend_id) {
         parent.lineage.children_backend_ids.remove(&backend_id.0);
     }
 }
 
-fn sandbox_tree_node(
+fn backend_tree_node(
     state: &BackendManagerState,
     backend_id: &BackendId,
-) -> Option<SandboxTreeNode> {
-    let entry = state.sandboxes.get(backend_id)?;
+) -> Option<BackendTreeNode> {
+    let entry = state.backends.get(backend_id)?;
     let mut child_ids = entry
         .lineage
         .children_backend_ids
         .keys()
         .filter_map(|id| {
             state
-                .sandboxes
+                .backends
                 .contains_key(&BackendId(id.clone()))
                 .then(|| id.clone())
         })
@@ -318,15 +214,15 @@ fn sandbox_tree_node(
     child_ids.sort();
     let children = child_ids
         .into_iter()
-        .filter_map(|id| sandbox_tree_node(state, &BackendId(id)))
+        .filter_map(|id| backend_tree_node(state, &BackendId(id)))
         .collect();
-    Some(SandboxTreeNode {
-        sandbox: entry.info(),
+    Some(BackendTreeNode {
+        backend: entry.info(),
         children,
     })
 }
 
-struct BuildSandboxInput {
+struct BuildBackendInput {
     backend_id: BackendId,
     config: GatewayBackendConfig,
     workspace_root_text: String,
@@ -336,12 +232,11 @@ struct BuildSandboxInput {
     resource_limits: BackendResourceLimits,
     metadata: Value,
     expires_at_ms: Option<u64>,
-    lineage: SandboxLineageEntry,
+    lineage: BackendLineageEntry,
+    backend_checkpoint: Option<BackendCheckpointRef>,
 }
 
-async fn build_managed_backend(
-    input: BuildSandboxInput,
-) -> Result<BackendInstanceEntry, SandboxError> {
+async fn build_backend(input: BuildBackendInput) -> Result<BackendInstanceEntry, BackendError> {
     if input.config.kind == "e2b" {
         let created = e2b::create_backend(e2b::E2bCreateBackendInput {
             backend_id: input.backend_id,
@@ -352,8 +247,15 @@ async fn build_managed_backend(
             metadata: input.metadata,
         })
         .await?;
+        let dirty_tracker = Arc::new(BackendDirtyTracker::default());
+        if let Some(checkpoint) = input.backend_checkpoint {
+            dirty_tracker.set_checkpoint(checkpoint);
+        }
         return Ok(BackendInstanceEntry {
-            backend: created.backend,
+            backend: DirtyTrackedOperationBackend::wrap(
+                created.backend,
+                Arc::clone(&dirty_tracker),
+            ),
             instance: created.instance,
             config: input.config,
             workspace_root: input.workspace_root_text,
@@ -364,13 +266,14 @@ async fn build_managed_backend(
                 .unwrap_or_default(),
             expires_at_ms: input.expires_at_ms,
             lineage: input.lineage,
+            dirty_tracker,
         });
     }
 
     let provider = local_provider_for_kind(&input.config.kind)?;
     let lifecycle = provider.lifecycle();
     let instance = lifecycle
-        .create_sandbox(BackendCreateRequest {
+        .create_sandbox(ProviderBackendCreateRequest {
             requested_backend_id: Some(input.backend_id),
             session_id: input.session_id_for_instance,
             conversation_id: None,
@@ -380,13 +283,17 @@ async fn build_managed_backend(
             metadata: input.metadata,
         })
         .await
-        .map_err(SandboxError::from_control_error)?;
+        .map_err(BackendError::from_control_error)?;
     let backend = provider
         .attach(instance.clone())
         .await
-        .map_err(SandboxError::from_control_error)?;
+        .map_err(BackendError::from_control_error)?;
+    let dirty_tracker = Arc::new(BackendDirtyTracker::default());
+    if let Some(checkpoint) = input.backend_checkpoint {
+        dirty_tracker.set_checkpoint(checkpoint);
+    }
     Ok(BackendInstanceEntry {
-        backend,
+        backend: DirtyTrackedOperationBackend::wrap(backend, Arc::clone(&dirty_tracker)),
         instance,
         config: input.config,
         workspace_root: input.workspace_root_text,
@@ -397,15 +304,16 @@ async fn build_managed_backend(
             .unwrap_or_default(),
         expires_at_ms: input.expires_at_ms,
         lineage: input.lineage,
+        dirty_tracker,
     })
 }
 
 fn local_provider_for_kind(
     kind: &str,
-) -> Result<operation_backend::LocalBackendProvider, SandboxError> {
+) -> Result<operation_backend::LocalBackendProvider, BackendError> {
     match kind {
         "local" => Ok(operation_backend::local_backend_provider()),
-        other => Err(SandboxError::UnsupportedBackend {
+        other => Err(BackendError::UnsupportedBackend {
             kind: other.to_string(),
         }),
     }
@@ -421,7 +329,7 @@ async fn delete_backend_instance(
     }
 
     let provider = local_provider_for_kind(&instance.config.kind)
-        .map_err(SandboxError::into_operation_error)?;
+        .map_err(BackendError::into_operation_error)?;
     provider
         .delete(BackendDeleteRequest {
             backend_id: instance.instance.backend_id,
@@ -446,9 +354,9 @@ fn control_error_to_operation_error(error: BackendControlError) -> OperationErro
 }
 
 impl BackendInstanceEntry {
-    fn info(&self) -> SandboxInfo {
+    fn info(&self) -> BackendInfo {
         let session_ids = self.session_ids.keys().cloned().collect::<Vec<_>>();
-        SandboxInfo {
+        BackendInfo {
             backend_id: self.instance.backend_id.0.clone(),
             provider: self.instance.provider.0.clone(),
             instance_id: self.instance.instance_id.0.clone(),
@@ -464,7 +372,7 @@ impl BackendInstanceEntry {
             },
             session_ids,
             expires_at_ms: self.expires_at_ms,
-            lineage: SandboxLineageInfo {
+            lineage: BackendLineageInfo {
                 parent_backend_id: self
                     .lineage
                     .parent_backend_id
@@ -483,7 +391,12 @@ impl BackendInstanceEntry {
 mod tests {
     use super::*;
     use agent_contracts::backend::{
-        BackendLifecycle, BackendLifecycleState, BackendPauseMode, BackendPauseRequest,
+        capability::{
+            exec::ExecRequest,
+            filesystem::{WriteBytesRequest, WriteMode},
+        },
+        BackendLifecycle, BackendLifecycleState, BackendPath, BackendPauseMode,
+        BackendPauseRequest,
     };
     use serde_json::json;
     use tempfile::TempDir;
@@ -551,7 +464,7 @@ mod tests {
         let first_backend = first.backend();
         let second_backend = second.backend();
         assert_eq!(first.instance(), second.instance());
-        assert!(first.instance().backend_id.0.starts_with("sbx_"));
+        assert!(first.instance().backend_id.0.starts_with("bkd_"));
         assert_ne!(first.instance().backend_id.0, "s1");
         assert!(Arc::ptr_eq(&first_backend, &second_backend));
     }
@@ -593,11 +506,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_sandbox_create_generates_backend_id_and_supports_get_list_delete() {
+    async fn independent_backend_create_generates_backend_id_and_supports_get_list_delete() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let created = manager
-            .create_sandbox(SandboxCreateRequest {
+            .create_backend(BackendCreateRequest {
                 workspace_root: workspace.path().to_path_buf(),
                 backend_id: None,
                 provider: None,
@@ -608,20 +521,20 @@ mod tests {
                 options: Some(temp_options(&workspace)),
             })
             .await
-            .expect("create sandbox");
+            .expect("create managed backend");
 
-        assert!(created.backend_id.starts_with("sbx_"));
+        assert!(created.backend_id.starts_with("bkd_"));
         assert_eq!(created.session_id, None);
         assert!(created.expires_at_ms.is_some());
 
         let fetched = manager
-            .get_sandbox(&created.backend_id)
+            .get_backend(&created.backend_id)
             .await
-            .expect("get sandbox");
+            .expect("get managed backend");
         assert_eq!(fetched.backend_id, created.backend_id);
 
         let listed = manager
-            .list_sandboxes(SandboxListFilter {
+            .list_backends(BackendListFilter {
                 metadata: BTreeMap::from([("user".to_string(), "abc".to_string())]),
             })
             .await;
@@ -629,21 +542,21 @@ mod tests {
         assert_eq!(listed[0].backend_id, created.backend_id);
 
         manager
-            .delete_sandbox(&created.backend_id)
+            .delete_backend(&created.backend_id)
             .await
-            .expect("delete sandbox");
+            .expect("delete managed backend");
         assert!(matches!(
-            manager.get_sandbox(&created.backend_id).await,
-            Err(SandboxError::NotFound { .. })
+            manager.get_backend(&created.backend_id).await,
+            Err(BackendError::NotFound { .. })
         ));
     }
 
     #[tokio::test]
-    async fn sandbox_create_allows_session_id_and_independent_backend_id() {
+    async fn backend_create_allows_session_id_and_independent_backend_id() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let created = manager
-            .create_sandbox(SandboxCreateRequest {
+            .create_backend(BackendCreateRequest {
                 workspace_root: workspace.path().to_path_buf(),
                 backend_id: Some("backend-a".to_string()),
                 provider: None,
@@ -654,7 +567,7 @@ mod tests {
                 options: Some(temp_options(&workspace)),
             })
             .await
-            .expect("create sandbox");
+            .expect("create managed backend");
 
         assert_eq!(created.backend_id, "backend-a");
         assert_eq!(created.session_id.as_deref(), Some("session-a"));
@@ -672,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_sandbox_explicitly_attaches_session_to_existing_backend() {
+    async fn connect_backend_explicitly_attaches_session_to_existing_backend() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let root = workspace.path().to_path_buf();
@@ -683,15 +596,15 @@ mod tests {
         let backend_id = first.instance().backend_id.0;
 
         let connected = manager
-            .connect_sandbox(
+            .connect_backend(
                 &backend_id,
-                SandboxConnectRequest {
+                BackendConnectRequest {
                     timeout: None,
                     session_id: Some("s2".to_string()),
                 },
             )
             .await
-            .expect("connect sandbox");
+            .expect("connect managed backend");
         assert_eq!(
             connected.session_ids,
             vec!["s1".to_string(), "s2".to_string()]
@@ -706,7 +619,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_sandbox_rejects_non_e2b_parent() {
+    async fn fork_backend_rejects_non_e2b_parent() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let parent = manager
@@ -719,7 +632,7 @@ mod tests {
             .expect("local backend");
 
         let forked = manager
-            .fork_sandbox(SandboxForkRequest {
+            .fork_backend(BackendForkRequest {
                 parent_backend_id: Some(parent.instance().backend_id.0),
                 parent_session_id: Some("s1".to_string()),
                 backend_id: Some("child".to_string()),
@@ -730,12 +643,179 @@ mod tests {
 
         assert!(matches!(
             forked,
-            Err(SandboxError::UnsupportedBackend { kind }) if kind == "local:fork"
+            Err(BackendError::UnsupportedBackend { kind }) if kind == "local:checkout"
         ));
     }
 
     #[tokio::test]
-    async fn list_sandbox_trees_uses_recorded_lineage() {
+    async fn clean_backend_checkpoint_reuses_previous_ref() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new();
+        let lease = manager
+            .ensure_session_backend(local_request(
+                "s-checkpoint",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("local backend");
+
+        let first = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(lease.instance().backend_id.0.clone()),
+                session_id: Some("s-checkpoint".to_string()),
+                name: Some("first".to_string()),
+                metadata: json!({"step": 1}),
+            })
+            .await
+            .expect("first checkpoint");
+        let second = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(lease.instance().backend_id.0),
+                session_id: Some("s-checkpoint".to_string()),
+                name: Some("second".to_string()),
+                metadata: json!({"step": 2}),
+            })
+            .await
+            .expect("second checkpoint");
+
+        assert!(!first.reused);
+        assert!(second.reused);
+        assert_eq!(
+            second.checkpoint.checkpoint_id,
+            first.checkpoint.checkpoint_id
+        );
+        assert_eq!(second.checkpoint.provider, "local");
+        assert_eq!(second.checkpoint.provider_snapshot_id, None);
+    }
+
+    #[tokio::test]
+    async fn write_and_exec_mark_backend_dirty_for_next_checkpoint() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new();
+        let lease = manager
+            .ensure_session_backend(local_request(
+                "s-dirty",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("local backend");
+        let backend_id = lease.instance().backend_id.0.clone();
+        let baseline = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(backend_id.clone()),
+                session_id: Some("s-dirty".to_string()),
+                name: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("baseline checkpoint");
+
+        lease
+            .backend()
+            .files()
+            .write_bytes(WriteBytesRequest {
+                path: BackendPath(
+                    workspace
+                        .path()
+                        .join("dirty.txt")
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+                content: b"changed".to_vec(),
+                mode: WriteMode::Overwrite,
+            })
+            .await
+            .expect("write file");
+        let after_write = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(backend_id.clone()),
+                session_id: Some("s-dirty".to_string()),
+                name: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("checkpoint after write");
+
+        assert!(!after_write.reused);
+        assert_ne!(
+            after_write.checkpoint.checkpoint_id,
+            baseline.checkpoint.checkpoint_id
+        );
+
+        lease
+            .backend()
+            .exec()
+            .exec(ExecRequest {
+                command: "printf ok".to_string(),
+                args: Vec::new(),
+                shell: Some("/bin/sh".to_string()),
+                cwd: Some(BackendPath(workspace.path().to_string_lossy().to_string())),
+                timeout_ms: Some(5_000),
+                env: None,
+            })
+            .await
+            .expect("exec command");
+        let after_exec = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(backend_id),
+                session_id: Some("s-dirty".to_string()),
+                name: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("checkpoint after exec");
+
+        assert!(!after_exec.reused);
+        assert_ne!(
+            after_exec.checkpoint.checkpoint_id,
+            after_write.checkpoint.checkpoint_id
+        );
+    }
+
+    #[tokio::test]
+    async fn non_snapshot_provider_checkout_is_unsupported() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new();
+        manager
+            .ensure_session_backend(local_request(
+                "s-local-checkout",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("local backend");
+        let checkpoint = manager
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: None,
+                session_id: Some("s-local-checkout".to_string()),
+                name: None,
+                metadata: Value::Null,
+            })
+            .await
+            .expect("checkpoint");
+
+        let checkout = manager
+            .checkout_backend(BackendCheckoutRequest {
+                checkpoint: checkpoint.checkpoint,
+                backend_id: None,
+                session_id: Some("child".to_string()),
+                timeout: None,
+                metadata: Value::Null,
+                resource_limits: BackendResourceLimits::default(),
+                options: None,
+            })
+            .await;
+
+        assert!(matches!(
+            checkout,
+            Err(BackendError::UnsupportedBackend { kind }) if kind == "local:checkout"
+        ));
+    }
+
+    #[tokio::test]
+    async fn list_backend_trees_uses_recorded_lineage() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let root = workspace.path().to_path_buf();
@@ -759,25 +839,25 @@ mod tests {
         {
             let mut state = manager.state.lock().await;
             state
-                .sandboxes
+                .backends
                 .get_mut(&parent)
                 .expect("parent entry")
                 .lineage
                 .children_backend_ids
                 .insert(child.0.clone(), ());
-            let child_entry = state.sandboxes.get_mut(&child).expect("child entry");
+            let child_entry = state.backends.get_mut(&child).expect("child entry");
             child_entry.lineage.parent_backend_id = Some(parent.clone());
             child_entry.lineage.forked_from_snapshot_id = Some("snap:default".to_string());
         }
 
-        let forest = manager.list_sandbox_trees().await;
+        let forest = manager.list_backend_trees().await;
         assert_eq!(forest.len(), 1);
-        assert_eq!(forest[0].sandbox.backend_id, parent.0);
+        assert_eq!(forest[0].backend.backend_id, parent.0);
         assert_eq!(forest[0].children.len(), 1);
-        assert_eq!(forest[0].children[0].sandbox.backend_id, child.0);
+        assert_eq!(forest[0].children[0].backend.backend_id, child.0);
         assert_eq!(
             forest[0].children[0]
-                .sandbox
+                .backend
                 .lineage
                 .forked_from_snapshot_id
                 .as_deref(),
