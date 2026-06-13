@@ -163,8 +163,10 @@ impl App {
         } else {
             available_width
         };
-        let available_height = area.height.saturating_sub(4).max(1);
-        let desired_height = interaction_prompt_outer_height(&prompt.request).max(6);
+        let inner_width = width.saturating_sub(2);
+        let max_height = (area.height as f32 * 0.8).ceil() as u16;
+        let available_height = area.height.saturating_sub(4).max(1).min(max_height);
+        let desired_height = interaction_prompt_outer_height(&prompt.request, inner_width).max(6);
         let height = desired_height.min(available_height);
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;

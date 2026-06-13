@@ -10,7 +10,7 @@ use crate::input::Input;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, List, ListItem, Padding, Paragraph, Wrap},
     Frame,
 };
@@ -183,8 +183,14 @@ impl InteractionPromptState {
 }
 
 /// Calculate prompt block height (including border), for use in `Constraint::Length`.
-pub fn interaction_prompt_outer_height(req: &PromptRequest) -> u16 {
+/// `inner_width` is the inner width of the dialog (excluding borders), used to wrap title.
+pub fn interaction_prompt_outer_height(req: &PromptRequest, inner_width: u16) -> u16 {
     let border = 2u16;
+    let title_h = if inner_width > 0 {
+        wrap_text_to_lines(&req.title, inner_width as usize).len() as u16
+    } else {
+        1
+    };
     let body_h = if req.body.as_ref().map_or(false, |s| !s.is_empty()) {
         1
     } else {
@@ -193,9 +199,43 @@ pub fn interaction_prompt_outer_height(req: &PromptRequest) -> u16 {
     let list_cap = if req.allow_custom_input { 4 } else { 6 };
     let list_h = req.choices.len().min(list_cap) as u16;
     let sup_h = if req.allow_custom_input { 3 } else { 0 };
-    let total = border + body_h + list_h + sup_h;
-    let max_outer = 11u16;
-    total.min(max_outer).max(border + 1)
+    let total = border + title_h + body_h + list_h + sup_h;
+    total.max(border + 1)
+}
+
+/// Wrap text into multiple lines based on character display width.
+/// Returns a Vec of strings, each fitting within max_width columns.
+fn wrap_text_to_lines(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0usize;
+
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+
+        if current_width + cw > max_width {
+            lines.push(current_line);
+            current_line = String::new();
+            current_width = 0;
+        }
+
+        current_line.push(ch);
+        current_width += cw;
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
 }
 
 pub fn render_interaction_prompt(
@@ -209,22 +249,33 @@ pub fn render_interaction_prompt(
     *list_hit_area = None;
     *supplement_hit_area = None;
 
-    let title = format!(" {} ", state.request.title);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.border_active))
-        .title(title)
         .style(Style::default().bg(theme.background));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // Calculate title lines based on inner width
+    let title_lines_vec = if inner.width > 0 {
+        wrap_text_to_lines(&state.request.title, inner.width as usize)
+    } else {
+        vec![state.request.title.clone()]
+    };
+    let title_lines = title_lines_vec.len() as u16;
+
+    let vmax = state.list_visible_max();
+    let list_h = state.request.choices.len().min(vmax) as u16;
+
     let mut constraints: Vec<Constraint> = Vec::new();
+    // Title area
+    constraints.push(Constraint::Length(title_lines));
     if state.request.body.as_ref().map_or(false, |s| !s.is_empty()) {
         constraints.push(Constraint::Length(1));
     }
-    constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(list_h));
     if state.request.allow_custom_input {
         constraints.push(Constraint::Length(3));
     }
@@ -234,7 +285,25 @@ pub fn render_interaction_prompt(
         .constraints(constraints)
         .split(inner);
 
+    // Render title as first element
     let mut idx = 0usize;
+    let title_text = Text::from(
+        title_lines_vec
+            .iter()
+            .map(|line| {
+                Line::styled(
+                    line.clone(),
+                    Style::default()
+                        .fg(theme.foreground)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<Line>>(),
+    );
+    let title = Paragraph::new(title_text);
+    f.render_widget(title, chunks[idx]);
+    idx += 1;
+
     if state.request.body.as_ref().map_or(false, |s| !s.is_empty()) {
         let body = state.request.body.as_deref().unwrap_or_default();
         let line = if body.chars().count() > 256 {
@@ -251,7 +320,6 @@ pub fn render_interaction_prompt(
     }
 
     let list_chunk = chunks[idx];
-    let vmax = state.list_visible_max();
     let start = state
         .list_scroll
         .min(state.request.choices.len().saturating_sub(1));
