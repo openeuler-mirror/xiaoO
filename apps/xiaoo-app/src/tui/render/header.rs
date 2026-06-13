@@ -105,7 +105,11 @@ impl App {
 
             let tab_width = label.chars().count() + 2;
             let needs_space = current_width > 0;
-            let additional_width = if needs_space { tab_width + 1 } else { tab_width };
+            let additional_width = if needs_space {
+                tab_width + 1
+            } else {
+                tab_width
+            };
 
             if current_width + additional_width > available_width {
                 break;

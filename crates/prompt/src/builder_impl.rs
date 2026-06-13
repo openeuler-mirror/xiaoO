@@ -350,21 +350,33 @@ mod tests {
 
         assert_eq!(result.request.messages.len(), 3);
 
-        assert_eq!(result.request.messages[0].role, agent_types::MessageRole::System);
+        assert_eq!(
+            result.request.messages[0].role,
+            agent_types::MessageRole::System
+        );
         let system_text = result.request.messages[0].text_content().unwrap();
         assert!(system_text.contains("New system prompt"));
         assert!(system_text.contains("Environment"));
 
-        assert_eq!(result.request.messages[1].role, agent_types::MessageRole::User);
+        assert_eq!(
+            result.request.messages[1].role,
+            agent_types::MessageRole::User
+        );
         assert_eq!(result.request.messages[1].text_content(), Some("hello"));
 
-        assert_eq!(result.request.messages[2].role, agent_types::MessageRole::Assistant);
+        assert_eq!(
+            result.request.messages[2].role,
+            agent_types::MessageRole::Assistant
+        );
         assert_eq!(result.request.messages[2].text_content(), Some("response"));
 
         for message in &result.request.messages {
             if message.role == agent_types::MessageRole::System {
                 let text = message.text_content().unwrap();
-                assert!(!text.contains("Old system prompt"), "Old system messages should be filtered out");
+                assert!(
+                    !text.contains("Old system prompt"),
+                    "Old system messages should be filtered out"
+                );
             }
         }
     }

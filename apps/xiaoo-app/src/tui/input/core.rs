@@ -179,6 +179,80 @@ impl Input {
         self.cursor = cursor;
     }
 
+    fn move_cursor_up(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        if self.cursor == 0 {
+            return;
+        }
+
+        let current_line_start = self.current_line_start(&chars);
+        if current_line_start == 0 {
+            self.cursor = 0;
+            return;
+        }
+
+        let current_col = self.cursor - current_line_start;
+        let prev_line_end = current_line_start.saturating_sub(1);
+        let prev_line_start = self.line_start_before(&chars, prev_line_end);
+        let prev_line_len = prev_line_end.saturating_sub(prev_line_start);
+
+        self.cursor = prev_line_start + current_col.min(prev_line_len);
+    }
+
+    fn move_cursor_down(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let total = chars.len();
+        if self.cursor >= total {
+            return;
+        }
+
+        let current_line_start = self.current_line_start(&chars);
+        let current_line_end = self.current_line_end(&chars, total);
+
+        if current_line_end >= total {
+            self.cursor = total;
+            return;
+        }
+
+        let current_col = self.cursor - current_line_start;
+        let next_line_start = current_line_end + 1;
+        let next_line_end = self.current_line_end(&chars, total);
+        let next_line_len = next_line_end.saturating_sub(next_line_start);
+
+        self.cursor = next_line_start + current_col.min(next_line_len);
+    }
+
+    fn current_line_start(&self, chars: &[char]) -> usize {
+        chars
+            .iter()
+            .take(self.cursor)
+            .enumerate()
+            .rev()
+            .find(|(_, &c)| c == '\n')
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0)
+    }
+
+    fn current_line_end(&self, chars: &[char], total: usize) -> usize {
+        chars
+            .iter()
+            .skip(self.cursor)
+            .position(|&c| c == '\n')
+            .map(|p| self.cursor + p)
+            .unwrap_or(total)
+    }
+
+    fn line_start_before(&self, chars: &[char], position: usize) -> usize {
+        chars
+            .iter()
+            .take(position)
+            .enumerate()
+            .rev()
+            .find(|(_, &c)| c == '\n')
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0)
+    }
+
     fn is_backspace_compat(key: &crossterm::event::KeyEvent) -> bool {
         match key.code {
             KeyCode::Backspace => true,
@@ -284,6 +358,14 @@ impl EventHandler for Input {
                 } else {
                     self.cursor = (self.cursor + 1).min(self.value.chars().count());
                 }
+                self.selection_anchor = None;
+            }
+            KeyCode::Up => {
+                self.move_cursor_up();
+                self.selection_anchor = None;
+            }
+            KeyCode::Down => {
+                self.move_cursor_down();
                 self.selection_anchor = None;
             }
             KeyCode::Home => {

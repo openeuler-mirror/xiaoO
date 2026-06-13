@@ -1229,8 +1229,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
 
             let messages = ctx.state.messages.read().clone();
             let secrets = extract_secrets_from_messages(&messages);
-            let args_preview = serde_json::to_string_pretty(&inv.input)
-                .unwrap_or_else(|_| inv.input.to_string());
+            let args_preview =
+                serde_json::to_string_pretty(&inv.input).unwrap_or_else(|_| inv.input.to_string());
             let filtered_args_preview = if inv.tool_name == "bash" {
                 filter_bash_args_preview(&args_preview, &secrets)
             } else {
@@ -1497,7 +1497,9 @@ fn extract_secrets_from_messages(messages: &[ChatMessage]) -> Vec<String> {
         .filter(|m| m.role == MessageRole::Tool)
         .flat_map(|m| m.blocks.iter())
         .filter_map(|block| match block {
-            ContentBlock::ToolResult { tool_name, output, .. } => {
+            ContentBlock::ToolResult {
+                tool_name, output, ..
+            } => {
                 if tool_name == "ask_user_question" {
                     Some(output)
                 } else {
@@ -1513,7 +1515,8 @@ fn extract_secrets_from_messages(messages: &[ChatMessage]) -> Vec<String> {
             let is_text = answer.get("kind").and_then(|k| k.as_str()) == Some("text");
             let value = answer.get("value").and_then(|v| v.as_str());
             // Only extract as secret if has display_value field (is_secret=true was used)
-            let has_display_value = answer.get("display_value")
+            let has_display_value = answer
+                .get("display_value")
                 .map(|v| !v.is_null())
                 .unwrap_or(false);
 
@@ -1947,8 +1950,14 @@ mod tests {
     #[test]
     fn compression_trigger_as_str() {
         assert_eq!(CompressionTrigger::Automatic.as_str(), "automatic");
-        assert_eq!(CompressionTrigger::ContextLimitRetry.as_str(), "context_limit_retry");
-        assert_eq!(CompressionTrigger::PreCheckExceeded.as_str(), "pre_check_exceeded");
+        assert_eq!(
+            CompressionTrigger::ContextLimitRetry.as_str(),
+            "context_limit_retry"
+        );
+        assert_eq!(
+            CompressionTrigger::PreCheckExceeded.as_str(),
+            "pre_check_exceeded"
+        );
     }
 
     #[test]
@@ -1971,11 +1980,8 @@ mod tests {
                 ChatMessage::text(MessageRole::Assistant, "Hi there", 0),
             ];
 
-            let estimated = estimator.estimate_input_tokens(
-                "You are a helpful assistant",
-                0,
-                &messages,
-            );
+            let estimated =
+                estimator.estimate_input_tokens("You are a helpful assistant", 0, &messages);
 
             assert!(estimated > 0);
         }
@@ -1989,7 +1995,8 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
@@ -2005,7 +2012,8 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
@@ -2021,13 +2029,15 @@ mod tests {
                 hard_limit_ratio: 0.8,
             };
 
-            let available_for_input = config.total_budget
+            let available_for_input = config
+                .total_budget
                 .saturating_sub(config.reserved_for_output)
                 .saturating_sub(config.reserved_for_system);
 
             assert_eq!(available_for_input, 0);
 
-            let is_invalid = config.reserved_for_output + config.reserved_for_system >= config.total_budget;
+            let is_invalid =
+                config.reserved_for_output + config.reserved_for_system >= config.total_budget;
             assert!(is_invalid);
         }
     }
@@ -2175,7 +2185,6 @@ mod tests {
             &self.capabilities
         }
     }
-
 
     struct FixedPromptBuilder;
 
@@ -2333,7 +2342,6 @@ mod tests {
             .build()
             .expect("test runtime should build")
     }
-
 
     #[derive(Default)]
     struct RecordingLoopEventSink {
@@ -2645,7 +2653,7 @@ mod tests {
                     )
                 })
         });
-assert!(
+        assert!(
             paired,
             "synthesized tool_use must pair with a tool_result on the same id"
         );
@@ -2661,7 +2669,8 @@ assert!(
                 "value": "real_password_123",
                 "display_value": "<SECRET>"
             }]
-        }).to_string();
+        })
+        .to_string();
 
         let filtered = filter_ask_user_question_output(&input_with_display);
 
@@ -2677,7 +2686,8 @@ assert!(
                 "prompt": "Enter name",
                 "value": "John"
             }]
-        }).to_string();
+        })
+        .to_string();
 
         let filtered2 = filter_ask_user_question_output(&input_without_display);
         let filtered2_json: serde_json::Value = serde_json::from_str(&filtered2).unwrap();
@@ -2690,7 +2700,8 @@ assert!(
                 "prompt": "Select option",
                 "value": "option1"
             }]
-        }).to_string();
+        })
+        .to_string();
 
         let filtered3 = filter_ask_user_question_output(&input_choice);
         let filtered3_json: serde_json::Value = serde_json::from_str(&filtered3).unwrap();
@@ -2719,7 +2730,8 @@ assert!(
                         "value": "secret123",
                         "display_value": "<SECRET>"
                     }]
-                }).to_string(),
+                })
+                .to_string(),
                 is_error: false,
             }],
             message_id: None,
@@ -2740,7 +2752,8 @@ assert!(
                         "prompt": "Username",
                         "value": "john"
                     }]
-                }).to_string(),
+                })
+                .to_string(),
                 is_error: false,
             }],
             message_id: None,
@@ -2778,7 +2791,8 @@ assert!(
                             "display_value": "<SECRET>"
                         }
                     ]
-                }).to_string(),
+                })
+                .to_string(),
                 is_error: false,
             }],
             message_id: None,

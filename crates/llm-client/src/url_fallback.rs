@@ -77,10 +77,7 @@ fn has_version_path(base: &str) -> bool {
 fn normalize_url_duplicates(url: &str) -> String {
     let url = url.trim_end_matches('/');
 
-    let patterns = [
-        "/v1/v1",
-        "/v4/v4",
-    ];
+    let patterns = ["/v1/v1", "/v4/v4"];
 
     for pattern in &patterns {
         if url.contains(pattern) {
@@ -142,7 +139,7 @@ pub fn is_configuration_error(error: &LlmError) -> bool {
                 || msg.contains("endpoint not found")
                 || msg.contains("route not found")
             {
-                return false;  // Endpoint path error, NOT configuration error
+                return false; // Endpoint path error, NOT configuration error
             }
 
             // Only after excluding endpoint path errors, check for configuration errors
@@ -208,10 +205,7 @@ pub fn write_url_fallback_error_log(
         }
     }
 
-    let mut error_message = format!(
-        "All {} endpoint URL candidates failed:\n",
-        attempts.len()
-    );
+    let mut error_message = format!("All {} endpoint URL candidates failed:\n", attempts.len());
 
     match OpenOptions::new().create(true).append(true).open(&log_path) {
         Ok(mut file) => {
@@ -250,11 +244,7 @@ pub fn write_url_fallback_error_log(
             writeln!(file).ok();
 
             writeln!(file, "Suggestions:").ok();
-            writeln!(
-                file,
-                "  • Check if API base URL is correct and accessible"
-            )
-            .ok();
+            writeln!(file, "  • Check if API base URL is correct and accessible").ok();
             let test_url = {
                 let base = base_candidates.get(1).unwrap_or(&base_candidates[0]);
                 if base.ends_with("/v1") || base.contains("/v1/") {
@@ -263,22 +253,9 @@ pub fn write_url_fallback_error_log(
                     format!("{}{}", base.trim_end_matches('/'), "/v1/models")
                 }
             };
-            writeln!(
-                file,
-                "  • Test endpoint manually: curl -v {}",
-                test_url
-            )
-            .ok();
-            writeln!(
-                file,
-                "  • Verify API key environment variable is set"
-            )
-            .ok();
-            writeln!(
-                file,
-                "  • Check ~/.xiaoo/log/error.log for detailed error"
-            )
-            .ok();
+            writeln!(file, "  • Test endpoint manually: curl -v {}", test_url).ok();
+            writeln!(file, "  • Verify API key environment variable is set").ok();
+            writeln!(file, "  • Check ~/.xiaoo/log/error.log for detailed error").ok();
             writeln!(file).ok();
         }
         Err(e) => {
@@ -325,10 +302,22 @@ mod tests {
         let final_urls = build_final_candidates(&bases);
 
         assert_eq!(final_urls.len(), 4);
-        assert_eq!(final_urls[0], "http://api.test.com", "#1 原始base（不拼接endpoint）");
-        assert_eq!(final_urls[1], "http://api.test.com/v1", "#2 补/v1 base（不拼接endpoint）");
-        assert_eq!(final_urls[2], "http://api.test.com/chat/completions", "#3 原始base + endpoint");
-        assert_eq!(final_urls[3], "http://api.test.com/v1/chat/completions", "#4 补/v1 base + endpoint");
+        assert_eq!(
+            final_urls[0], "http://api.test.com",
+            "#1 原始base（不拼接endpoint）"
+        );
+        assert_eq!(
+            final_urls[1], "http://api.test.com/v1",
+            "#2 补/v1 base（不拼接endpoint）"
+        );
+        assert_eq!(
+            final_urls[2], "http://api.test.com/chat/completions",
+            "#3 原始base + endpoint"
+        );
+        assert_eq!(
+            final_urls[3], "http://api.test.com/v1/chat/completions",
+            "#4 补/v1 base + endpoint"
+        );
     }
 
     #[test]
@@ -491,12 +480,8 @@ mod tests {
         ];
         let final_error = LlmError::ApiError("All candidates failed".to_string());
 
-        let error_msg = write_url_fallback_error_log(
-            original_base,
-            &base_candidates,
-            &attempts,
-            &final_error,
-        );
+        let error_msg =
+            write_url_fallback_error_log(original_base, &base_candidates, &attempts, &final_error);
 
         assert!(error_msg.contains("All 2 endpoint URL candidates failed"));
         assert!(error_msg.contains("http://wrong.endpoint.com"));

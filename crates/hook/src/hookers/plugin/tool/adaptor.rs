@@ -478,7 +478,7 @@ impl PluginToolHookerAdaptor {
                 InteractionRequest::TextInput {
                     prompt,
                     source,
-                    is_secret: false,  // Default to false for plugin requests
+                    is_secret: false, // Default to false for plugin requests
                 }
             }
             PluginAskUserRequest::Choice {
@@ -965,7 +965,7 @@ else:
                         hooker_name,
                         hook_point,
                     }),
-                is_secret: _,  // Ignore is_secret in test
+                is_secret: _, // Ignore is_secret in test
             } => {
                 assert_eq!(prompt, "who approved this?");
                 assert_eq!(hooker_name, "plugin_pre_ask");

@@ -1432,15 +1432,24 @@ mod tests {
     }
 }
 
-fn filter_messages_for_display(messages: &[llm_client::ChatMessage]) -> Vec<llm_client::ChatMessage> {
+fn filter_messages_for_display(
+    messages: &[llm_client::ChatMessage],
+) -> Vec<llm_client::ChatMessage> {
     messages.iter().map(filter_message_for_display).collect()
 }
 
 fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::ChatMessage {
     use agent_types::llm::ContentBlock;
-    let filtered_blocks: Vec<ContentBlock> = message.blocks.iter().map(|block| {
-        match block {
-            ContentBlock::ToolResult { call_id, tool_name, output, is_error } => {
+    let filtered_blocks: Vec<ContentBlock> = message
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                is_error,
+            } => {
                 if tool_name == "ask_user_question" {
                     let filtered_output = filter_ask_user_question_output(output);
                     ContentBlock::ToolResult {
@@ -1454,8 +1463,8 @@ fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::
                 }
             }
             _ => block.clone(),
-        }
-    }).collect();
+        })
+        .collect();
 
     llm_client::ChatMessage {
         role: message.role.clone(),
@@ -1476,7 +1485,11 @@ fn filter_ask_user_question_output(output: &str) -> String {
                     if let Some(kind) = answer.get("kind") {
                         if kind.as_str() == Some("text") {
                             let display_value = answer.get("display_value").and_then(|v| {
-                                if v.is_null() { None } else { Some(v.clone()) }
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.clone())
+                                }
                             });
                             if let Some(display_val) = display_value {
                                 if let Some(obj) = answer.as_object_mut() {

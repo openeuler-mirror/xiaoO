@@ -538,7 +538,7 @@ fn parse_sse_frame(frame: &str) -> Result<Option<RemoteSseEvent>, String> {
 
 fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
     match request {
-InteractionRequest::Confirm { prompt, .. } => PromptRequest {
+        InteractionRequest::Confirm { prompt, .. } => PromptRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             title: prompt.clone(),
             body: None,
@@ -559,7 +559,9 @@ InteractionRequest::Confirm { prompt, .. } => PromptRequest {
             default_index: Some(0),
             is_secret: false,
         },
-        InteractionRequest::TextInput { prompt, is_secret, .. } => PromptRequest {
+        InteractionRequest::TextInput {
+            prompt, is_secret, ..
+        } => PromptRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             title: prompt.clone(),
             body: None,
@@ -593,7 +595,7 @@ InteractionRequest::Confirm { prompt, .. } => PromptRequest {
             allow_custom_input: *allow_custom_input,
             multi_select: false,
             default_index: Some(0),
-            is_secret: false,  // Choice type does not need password hiding
+            is_secret: false, // Choice type does not need password hiding
         },
     }
 }
@@ -608,7 +610,10 @@ fn map_response(
                 allowed: choice_id == "yes",
             })
         }
-        (InteractionRequest::TextInput { is_secret, .. }, PromptResolution::Single { supplement, .. }) => {
+        (
+            InteractionRequest::TextInput { is_secret, .. },
+            PromptResolution::Single { supplement, .. },
+        ) => {
             // For secret inputs, use display_value to hide the password in messages
             let display_value = if *is_secret {
                 Some("<SECRET>".to_string())

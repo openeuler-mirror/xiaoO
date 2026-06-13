@@ -592,8 +592,7 @@ mod tests {
 
     /// `-e` must immediately precede the pattern so it is never reparsed as a flag.
     fn pattern_is_e_guarded(args: &[String], pattern: &str) -> bool {
-        args.windows(2)
-            .any(|w| w[0] == "-e" && w[1] == pattern)
+        args.windows(2).any(|w| w[0] == "-e" && w[1] == pattern)
     }
 
     fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
@@ -606,16 +605,26 @@ mod tests {
 
         assert!(args.contains(&"-P".to_string()), "PCRE engine selected");
         assert!(args.contains(&"-r".to_string()), "recursive on directory");
-        assert!(args.contains(&"-l".to_string()), "files-with-matches default");
+        assert!(
+            args.contains(&"-l".to_string()),
+            "files-with-matches default"
+        );
         assert!(pattern_is_e_guarded(&args, "TODO"));
-        assert_eq!(args.last().map(String::as_str), Some("."), "target is last arg");
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("."),
+            "target is last arg"
+        );
         for dir in VCS_DIRECTORIES_TO_EXCLUDE {
             assert!(
                 args.contains(&format!("--exclude-dir={}", dir)),
                 "VCS dir {dir} excluded"
             );
         }
-        assert!(!args.contains(&"-n".to_string()), "no line numbers outside content mode");
+        assert!(
+            !args.contains(&"-n".to_string()),
+            "no line numbers outside content mode"
+        );
     }
 
     /// A single-file target must NOT recurse: the `-r`, `--exclude-dir`, and
@@ -627,7 +636,10 @@ mod tests {
         grep_input.glob = Some("*.py".to_string());
         let args = GrepExecutor::build_grep_args(&grep_input, "foo.py");
 
-        assert!(!args.contains(&"-r".to_string()), "no recursion on a single file");
+        assert!(
+            !args.contains(&"-r".to_string()),
+            "no recursion on a single file"
+        );
         assert!(
             !args.iter().any(|a| a.starts_with("--exclude-dir=")),
             "no VCS exclusions on a single file"
@@ -646,8 +658,14 @@ mod tests {
         grep_input.context = Some(3);
         let args = GrepExecutor::build_grep_args(&grep_input, ".");
 
-        assert!(args.contains(&"-n".to_string()), "line numbers on by default");
-        assert!(has_pair(&args, "-C", "3"), "symmetric context passed through");
+        assert!(
+            args.contains(&"-n".to_string()),
+            "line numbers on by default"
+        );
+        assert!(
+            has_pair(&args, "-C", "3"),
+            "symmetric context passed through"
+        );
         assert!(pattern_is_e_guarded(&args, "needle"));
     }
 

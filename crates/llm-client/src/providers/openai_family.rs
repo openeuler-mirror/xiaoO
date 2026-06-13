@@ -1,5 +1,5 @@
-use std::time::Duration;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -12,8 +12,9 @@ use crate::error::{
     map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
 use crate::url_fallback::{
-    build_base_url_candidates, build_final_candidates, should_try_next_candidate,
-    is_configuration_error, is_retryable_network_error, write_url_fallback_error_log, UrlAttemptRecord,
+    build_base_url_candidates, build_final_candidates, is_configuration_error,
+    is_retryable_network_error, should_try_next_candidate, write_url_fallback_error_log,
+    UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -280,10 +281,7 @@ impl OpenAiFamilyProvider {
             })
             .collect();
 
-        if full_text.is_empty()
-            && full_reasoning.is_empty()
-            && tool_use_blocks.is_empty()
-        {
+        if full_text.is_empty() && full_reasoning.is_empty() && tool_use_blocks.is_empty() {
             return Err(LlmError::ApiError(
                 "empty stream response: stream completed but received no content. \
                  The endpoint may not support SSE streaming or returned an unexpected response."
@@ -325,7 +323,11 @@ fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
 #[async_trait]
 impl LlmProvider for OpenAiFamilyProvider {
     async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let cached_url = self.cached_endpoint_url.read().ok().and_then(|guard| guard.clone());
+        let cached_url = self
+            .cached_endpoint_url
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
 
         if let Some(url) = cached_url {
             tracing::debug!(
@@ -338,7 +340,7 @@ impl LlmProvider for OpenAiFamilyProvider {
                     tracing::debug!(url, "Cached URL succeeded");
                     return Ok(response);
                 }
-Err(error) => {
+                Err(error) => {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
@@ -358,20 +360,11 @@ Err(error) => {
                         for attempt in 1..=3 {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-                            tracing::info!(
-                                url,
-                                attempt,
-                                total_attempts = 3,
-                                "Retrying cached URL"
-                            );
+                            tracing::info!(url, attempt, total_attempts = 3, "Retrying cached URL");
 
                             match self.try_single_endpoint(&url, request).await {
                                 Ok(response) => {
-                                    tracing::info!(
-                                        url,
-                                        attempt,
-                                        "✓ Cached URL retry succeeded"
-                                    );
+                                    tracing::info!(url, attempt, "✓ Cached URL retry succeeded");
                                     return Ok(response);
                                 }
                                 Err(retry_error) => {
@@ -519,12 +512,8 @@ Err(error) => {
             }
         }
 
-        let error_msg = write_url_fallback_error_log(
-            &self.api_base,
-            &base_candidates,
-            &attempts,
-            &final_error,
-        );
+        let error_msg =
+            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
 
         Err(LlmError::ApiError(error_msg))
     }
@@ -534,20 +523,21 @@ Err(error) => {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
-        let cached_url = self.cached_endpoint_url.read().ok().and_then(|guard| guard.clone());
+        let cached_url = self
+            .cached_endpoint_url
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
 
         if let Some(url) = cached_url {
-            tracing::debug!(
-                url,
-                "Using cached endpoint URL for streaming request"
-            );
+            tracing::debug!(url, "Using cached endpoint URL for streaming request");
 
             match self.try_stream_endpoint(&url, request, on_chunk).await {
                 Ok(response) => {
                     tracing::debug!(url, "Cached URL succeeded for streaming");
                     return Ok(response);
                 }
-Err(error) => {
+                Err(error) => {
                     if is_configuration_error(&error) {
                         tracing::error!(
                             error = error.to_string(),
@@ -728,16 +718,11 @@ Err(error) => {
             }
         }
 
-        let error_msg = write_url_fallback_error_log(
-            &self.api_base,
-            &base_candidates,
-            &attempts,
-            &final_error,
-        );
+        let error_msg =
+            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
 
         Err(LlmError::ApiError(error_msg))
     }
-
 
     fn capabilities(&self) -> &ProviderCapabilities {
         &self.capabilities

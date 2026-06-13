@@ -1001,8 +1001,8 @@ pub(crate) fn sandbox_backend_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        current_sandbox_id, sandbox_backend_config,
-        sandbox_display_name, ApiKeyDialogState, AppState, RuntimeStatusLight,
+        current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState,
+        AppState, RuntimeStatusLight,
     };
     use crate::config::{AgentRoleConfig, Config};
     use crate::gateway::backend::GatewayBackendConfig;
@@ -1033,12 +1033,9 @@ mod tests {
             "Core".to_string(),
             "baize".to_string(),
         ];
-        let mut state = AppState::new_with_config(
-            &config,
-            PathBuf::from("config.toml"),
-            PathBuf::from("."),
-        )
-        .expect("app state should initialize");
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
 
         assert_eq!(
             state.agent_tab_labels(),
