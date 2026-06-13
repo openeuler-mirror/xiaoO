@@ -21,11 +21,11 @@ pub(crate) fn compose_system_messages(base_system: &str, context: &PromptContext
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let mut messages = Vec::new();
 
-    // Put Context section first (only Environment)
-    if let Some(environment_section) = compose_environment_section(context) {
-        messages.push(format!("# Context\n{}", environment_section));
-    }
-
+    // Stable prefix first: the base system prompt, workspace rules, and skill
+    // catalog rarely change, so they form a cache-friendly span. The volatile
+    // `# Context` block (date, remaining horizon, live plan) used to sit at the
+    // front, where its changing first bytes shifted the whole prefix and defeated
+    // provider prefix caching; it is now appended last.
     let base_system = base_system.trim();
     if !base_system.is_empty() {
         messages.push(base_system.to_string());
@@ -35,16 +35,113 @@ pub(crate) fn compose_system_messages(base_system: &str, context: &PromptContext
         messages.push(workspace_prompt);
     }
 
-    // Add Available Skills at the end
     if let Some(skill_section) = compose_skill_section(context) {
         messages.push(skill_section);
+    }
+
+    // Volatile tail last — environment, remaining-horizon notice, active plan,
+    // and recalled memory change turn-to-turn and must stay out of the cached prefix.
+    if let Some(context_section) = compose_context_section(context) {
+        messages.push(context_section);
     }
 
     messages
 }
 
+/// The per-turn dynamic block: environment, remaining-budget horizon, the live
+/// plan from the `todo_write` store, and recalled memory. Kept whole and last so
+/// the stable prefix above stays cache-aligned.
+fn compose_context_section(context: &PromptContext) -> Option<String> {
+    let mut blocks = Vec::new();
+    if let Some(section) = compose_environment_section(context) {
+        blocks.push(section);
+    }
+    if let Some(section) = compose_progress_section(context) {
+        blocks.push(section);
+    }
+    if let Some(section) = compose_plan_section(context) {
+        blocks.push(section);
+    }
+    if let Some(section) = compose_instructions_section(context) {
+        blocks.push(section);
+    }
+    if let Some(section) = compose_memory_section(context) {
+        blocks.push(section);
+    }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(format!("# Context\n\n{}", blocks.join("\n\n")))
+    }
+}
+
+/// Remaining-horizon notice: turns and tokens consumed so far, with a wrap-up
+/// nudge as the turn cap approaches so the model commits its best partial result.
+/// Rendered from the `horizon` snippet the agent loop injects each turn.
+fn compose_progress_section(context: &PromptContext) -> Option<String> {
+    let snippet = context
+        .memory_snippets
+        .iter()
+        .find(|snippet| snippet.source == "horizon")?;
+    let content = snippet.content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    Some(format!("## Progress\n{}", content))
+}
+
+/// Live plan: the open `todo_write` items, re-injected every turn so plan state
+/// is load-bearing context rather than a write-only decoration.
+fn compose_plan_section(context: &PromptContext) -> Option<String> {
+    let items: Vec<&str> = context
+        .memory_snippets
+        .iter()
+        .filter(|snippet| snippet.source == "plan")
+        .map(|snippet| snippet.content.trim())
+        .filter(|content| !content.is_empty())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let mut section = String::from(
+        "## Active plan\nOpen items from your todo list — keep working until each is done or you update the plan with todo_write:",
+    );
+    for item in items {
+        section.push_str("\n- ");
+        section.push_str(item);
+    }
+    Some(section)
+}
+
 pub fn compose_system_text(base_system: &str, context: &PromptContext) -> String {
     compose_system_messages(base_system, context).join("\n\n")
+}
+
+/// Split the system prompt into a cache-stable prefix (base prompt, workspace
+/// rules, skills catalog) and the per-turn-volatile `# Context` tail (environment,
+/// horizon, plan, memory). Emitting them as two distinct system blocks lets a
+/// provider with an explicit cache breakpoint (Anthropic) cache the stable prefix
+/// without the volatile tail invalidating it every turn — the same goal the
+/// stable-prefix ordering already serves for providers that auto-cache the
+/// longest matching prefix. Returns `(stable, volatile?)`.
+pub(crate) fn compose_system_parts(
+    base_system: &str,
+    context: &PromptContext,
+) -> (String, Option<String>) {
+    let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
+    let mut stable = Vec::new();
+    let base_system = base_system.trim();
+    if !base_system.is_empty() {
+        stable.push(base_system.to_string());
+    }
+    if let Some(workspace_prompt) = workspace_prompt {
+        stable.push(workspace_prompt);
+    }
+    if let Some(skill_section) = compose_skill_section(context) {
+        stable.push(skill_section);
+    }
+    let volatile = compose_context_section(context);
+    (stable.join("\n\n"), volatile)
 }
 
 pub fn compose_channel_system_prompt(sections: ChannelPromptSections<'_>) -> String {
@@ -137,6 +234,47 @@ fn compose_environment_section(context: &PromptContext) -> Option<String> {
     } else {
         Some(format!("## Environment\n{}", lines.join("\n")))
     }
+}
+
+/// Recalled memory: facts the agent loop pins into context, re-surfaced every
+/// turn. Excludes the `horizon`/`plan` snippets, which render in their own sections.
+fn compose_memory_section(context: &PromptContext) -> Option<String> {
+    let lines: Vec<String> = context
+        .memory_snippets
+        .iter()
+        .filter(|snippet| snippet.source != "horizon" && snippet.source != "plan")
+        .filter(|snippet| !snippet.content.trim().is_empty())
+        .map(|snippet| {
+            let label = snippet.source.trim().replace(':', "/");
+            if label.is_empty() {
+                snippet.content.trim().to_string()
+            } else {
+                format!("[{}] {}", label, snippet.content.trim())
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!("## Memory\n{}", lines.join("\n")))
+}
+
+fn compose_instructions_section(context: &PromptContext) -> Option<String> {
+    if context.instructions.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = context
+        .instructions
+        .iter()
+        .map(|instruction| {
+            format!(
+                "- {}: {}",
+                instruction.source.trim(),
+                instruction.content.trim()
+            )
+        })
+        .collect();
+    Some(format!("## Instructions\n{}", lines.join("\n")))
 }
 
 fn compose_skill_section(context: &PromptContext) -> Option<String> {

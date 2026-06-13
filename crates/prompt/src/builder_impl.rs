@@ -7,7 +7,7 @@ use agent_types::{
 };
 use async_trait::async_trait;
 
-use crate::compose::compose_system_text;
+use crate::compose::compose_system_parts;
 use crate::context::collect_prompt_context;
 use crate::decision::decide_prompt;
 
@@ -31,16 +31,22 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let system_text = compose_system_text(&input.system_prompt, &context);
+        let (stable_system, volatile_system) =
+            compose_system_parts(&input.system_prompt, &context);
 
-        if system_text.trim().is_empty() {
+        if stable_system.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
                 message: "missing required context: system_prompt".to_string(),
             });
         }
 
-        let mut messages = Vec::with_capacity(input.messages.len() + 1);
-        messages.push(ChatMessage::system(system_text));
+        let mut messages = Vec::with_capacity(input.messages.len() + 2);
+        messages.push(ChatMessage::system(stable_system));
+        if let Some(volatile) = volatile_system {
+            if !volatile.trim().is_empty() {
+                messages.push(ChatMessage::system(volatile));
+            }
+        }
 
         messages.extend(
             input
@@ -348,27 +354,33 @@ mod tests {
 
         let result = futures::executor::block_on(builder.build(input)).unwrap();
 
-        assert_eq!(result.request.messages.len(), 3);
+        assert_eq!(result.request.messages.len(), 4);
 
         assert_eq!(
             result.request.messages[0].role,
             agent_types::MessageRole::System
         );
-        let system_text = result.request.messages[0].text_content().unwrap();
-        assert!(system_text.contains("New system prompt"));
-        assert!(system_text.contains("Environment"));
+        let stable_text = result.request.messages[0].text_content().unwrap();
+        assert!(stable_text.contains("New system prompt"));
 
         assert_eq!(
             result.request.messages[1].role,
-            agent_types::MessageRole::User
+            agent_types::MessageRole::System
         );
-        assert_eq!(result.request.messages[1].text_content(), Some("hello"));
+        let volatile_text = result.request.messages[1].text_content().unwrap();
+        assert!(volatile_text.contains("Environment"));
 
         assert_eq!(
             result.request.messages[2].role,
+            agent_types::MessageRole::User
+        );
+        assert_eq!(result.request.messages[2].text_content(), Some("hello"));
+
+        assert_eq!(
+            result.request.messages[3].role,
             agent_types::MessageRole::Assistant
         );
-        assert_eq!(result.request.messages[2].text_content(), Some("response"));
+        assert_eq!(result.request.messages[3].text_content(), Some("response"));
 
         for message in &result.request.messages {
             if message.role == agent_types::MessageRole::System {
