@@ -331,6 +331,206 @@ curl -N -X POST http://localhost:18080/api/v1/sessions/input \
   }'
 ```
 
+**Runtime checkpoint / checkout example with timing:**
+
+The runtime checkpoint APIs require the source runtime to be idle. In the
+current v1 implementation, the `runtime_id` is the same value as the session id
+returned by `/api/v1/sessions/open`. The following flow creates a session, runs
+one turn to make the backend dirty, captures a checkpoint, checks out a child
+runtime, runs both branches, and closes both sessions.
+
+The example requires Bash, `curl`, and `jq`. It only adds the `Authorization`
+header when `XIAOO_HTTP_BEARER_TOKEN` is present. It uses
+`curl -w '%{time_total}'` to capture end-to-end HTTP request latency for the
+checkpoint and checkout control-plane calls.
+
+```bash
+BASE_URL="http://localhost:18080"
+SESSION="checkpoint-demo-$(date +%Y%m%d%H%M%S)"
+CONV="conv-${SESSION}"
+SENDER="checkpoint-demo-user"
+
+AUTH_HEADER=()
+if [ -n "${XIAOO_HTTP_BEARER_TOKEN:-}" ]; then
+  AUTH_HEADER=(-H "Authorization: Bearer ${XIAOO_HTTP_BEARER_TOKEN}")
+fi
+
+jq -n --arg session "$SESSION" --arg conv "$CONV" --arg sender "$SENDER" \
+  '{
+    session_id: $session,
+    conversation_id: $conv,
+    sender_id: $sender,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" }
+  }' > /tmp/xiaoo_open.json
+
+curl -sS -X POST "$BASE_URL/api/v1/sessions/open" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_open.json \
+  > /tmp/xiaoo_open.out
+```
+
+```bash
+INIT_TEXT="请在当前 agent runtime 的工作区创建文件 /home/user/workspace/checkpoint_demo.txt，内容为两行：第一行 checkpoint base，第二行 runtime parent initialized。完成后读取该文件并回复其完整内容。"
+
+jq -n \
+  --arg session "$SESSION" \
+  --arg conv "$CONV" \
+  --arg sender "$SENDER" \
+  --arg text "$INIT_TEXT" \
+  '{
+    session_id: $session,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" },
+    channel: null,
+    message_id: null,
+    conversation_id: $conv,
+    sender_id: $sender,
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_initial_turn.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_initial_turn.json \
+  > /tmp/xiaoo_initial_turn.sse
+```
+
+```bash
+jq -n --arg runtime "$SESSION" \
+  '{
+    runtime_id: $runtime,
+    name: "fork-test-base",
+    metadata: {
+      purpose: "checkpoint checkout smoke test",
+      requested_line: "测试fork"
+    }
+  }' > /tmp/xiaoo_checkpoint.json
+
+curl -sS \
+  -o /tmp/xiaoo_checkpoint.out \
+  -w "%{time_total}\n" \
+  -X POST "$BASE_URL/api/v1/runtimes/checkpoint" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_checkpoint.json \
+  > /tmp/xiaoo_checkpoint.time
+
+CHECKPOINT_ID="$(jq -r '.checkpoint_id' /tmp/xiaoo_checkpoint.out)"
+printf "checkpoint_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkpoint.time)"
+```
+
+```bash
+jq -n \
+  --arg checkpoint "$CHECKPOINT_ID" \
+  --arg child_conv "conv-${SESSION}-child" \
+  '{
+    checkpoint_id: $checkpoint,
+    conversation_id: $child_conv,
+    sender_id: "checkpoint-demo-child",
+    metadata: {
+      branch: "child",
+      requested_line: "测试fork"
+    }
+  }' > /tmp/xiaoo_checkout.json
+
+curl -sS \
+  -o /tmp/xiaoo_checkout.out \
+  -w "%{time_total}\n" \
+  -X POST "$BASE_URL/api/v1/runtimes/checkout" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_checkout.json \
+  > /tmp/xiaoo_checkout.time
+
+CHILD_SESSION="$(jq -r '.runtime.runtime_id' /tmp/xiaoo_checkout.out)"
+printf "checkout_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkout.time)"
+```
+
+```bash
+PARENT_TEXT="你是父 runtime。请不要写入“测试fork”。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：parent runtime complete。完成后读取该文件并回复完整内容。"
+CHILD_TEXT="你是 checkpoint checkout 出来的子 runtime。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：测试fork。完成后读取该文件并回复完整内容。"
+
+jq -n --arg session "$SESSION" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
+  '{
+    session_id: $session,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" },
+    channel: null,
+    message_id: null,
+    conversation_id: $conv,
+    sender_id: "checkpoint-demo-user",
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_parent_final.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_parent_final.json \
+  > /tmp/xiaoo_parent_final.sse
+
+jq -n --arg session "$CHILD_SESSION" --arg text "$CHILD_TEXT" \
+  '{
+    session_id: $session,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo-child" },
+    channel: null,
+    message_id: null,
+    conversation_id: "conv-checkpoint-demo-child",
+    sender_id: "checkpoint-demo-child",
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_child_final.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_child_final.json \
+  > /tmp/xiaoo_child_final.sse
+```
+
+```bash
+for id in "$SESSION" "$CHILD_SESSION"; do
+  jq -n --arg session "$id" '{ session_id: $session }' \
+    > "/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
+  curl -sS -X POST "$BASE_URL/api/v1/sessions/close" \
+    "${AUTH_HEADER[@]}" \
+    -H "Content-Type: application/json" \
+    --data @"/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
+done
+```
+
+With E2B as `[server.operation_backend]`, a local smoke run on 2026-06-13
+measured:
+
+| Operation | Measured `curl` `time_total` | E2B work included |
+|-----------|-------------------------------|-------------------|
+| Runtime checkpoint | `1.516061s` | Create an E2B provider snapshot for the dirty parent sandbox |
+| Runtime checkout | `2.335461s` | Start a new E2B sandbox from the provider snapshot and bind it to the child runtime |
+
+These values are examples, not guarantees. They vary with E2B provider latency,
+network path, snapshot size, template cold/warm state, and daemon host load. The
+numbers above do not include the LLM turns before or after the checkpoint, and
+they do not include closing the sessions. Closing an E2B-backed session calls
+backend release, which deletes the corresponding E2B sandbox.
+
 **SSE Event Types:**
 
 | Event | Fields | Description |

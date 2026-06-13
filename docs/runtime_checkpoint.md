@@ -90,6 +90,32 @@ create a new E2B-backed backend for the child runtime.
 Providers without snapshot checkout support return `UnsupportedBackend` for
 checkout. The current v1 implementation does not implement local restore.
 
+## E2B Sandbox Timing
+
+E2B runtime checkpoint and checkout include provider-side sandbox work:
+
+| Operation | Provider work | Notes |
+| --- | --- | --- |
+| `POST /api/v1/runtimes/checkpoint` | Calls the E2B snapshot API for the source sandbox when the backend is dirty or has no reusable checkpoint | Clean backends with an existing checkpoint can reuse the prior `BackendCheckpointRef` and avoid a new provider snapshot |
+| `POST /api/v1/runtimes/checkout` | Starts a new E2B sandbox from the provider snapshot and binds it to the child runtime id | The child runtime receives a generated id; callers cannot provide it in v1 |
+| `POST /api/v1/sessions/close` | Releases the session backend and deletes the E2B sandbox when no sessions remain bound to that backend | Close time is separate from checkpoint/checkout timing |
+
+Use `curl -w '%{time_total}'` around the checkpoint and checkout requests when
+measuring from a client. That value is end-to-end HTTP latency as observed by the
+caller; it includes daemon bookkeeping and E2B provider calls, but not the LLM
+turns needed to prepare or validate the runtime state.
+
+One local smoke run against an E2B backend on 2026-06-13 measured:
+
+| Operation | Measured `time_total` |
+| --- | ---: |
+| Runtime checkpoint | `1.516061s` |
+| Runtime checkout | `2.335461s` |
+
+These numbers are operational examples rather than SLA values. They can vary
+with E2B service latency, network path, snapshot size, template cold/warm state,
+and daemon host load.
+
 ## Dirty Tracking
 
 Backend dirty tracking lives in `apps/shared/src/backend/dirty_write.rs`. It is
