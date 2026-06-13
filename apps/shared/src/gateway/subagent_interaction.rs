@@ -56,6 +56,7 @@ fn default_timeout_response(request: &InteractionRequest) -> InteractionResponse
         InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
         InteractionRequest::TextInput { .. } => InteractionResponse::Text {
             value: Some(sentinel.to_string()),
+            display_value: None,
         },
         InteractionRequest::Choice { .. } => InteractionResponse::Choice {
             value: Some(sentinel.to_string()),

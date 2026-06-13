@@ -572,21 +572,24 @@ fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
             body: None,
             choices: vec![
                 PromptChoice {
-                    id: "approve".to_string(),
-                    label: "Approve".to_string(),
+                    id: "yes".to_string(),
+                    label: "Yes".to_string(),
                     description: None,
                 },
                 PromptChoice {
-                    id: "reject".to_string(),
-                    label: "Reject".to_string(),
+                    id: "no".to_string(),
+                    label: "No".to_string(),
                     description: None,
                 },
             ],
             allow_custom_input: false,
             multi_select: false,
             default_index: Some(0),
+            is_secret: false,
         },
-        InteractionRequest::TextInput { prompt, .. } => PromptRequest {
+        InteractionRequest::TextInput {
+            prompt, is_secret, ..
+        } => PromptRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             title: prompt.clone(),
             body: None,
@@ -598,6 +601,7 @@ fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
             allow_custom_input: true,
             multi_select: false,
             default_index: Some(0),
+            is_secret: *is_secret,
         },
         InteractionRequest::Choice {
             prompt,
@@ -619,6 +623,7 @@ fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
             allow_custom_input: *allow_custom_input,
             multi_select: false,
             default_index: Some(0),
+            is_secret: false, // Choice type does not need password hiding
         },
     }
 }
@@ -630,11 +635,23 @@ fn map_response(
     match (request, response.resolution) {
         (InteractionRequest::Confirm { .. }, PromptResolution::Single { choice_id, .. }) => {
             Some(InteractionResponse::Confirmed {
-                allowed: choice_id == "approve",
+                allowed: choice_id == "yes",
             })
         }
-        (InteractionRequest::TextInput { .. }, PromptResolution::Single { supplement, .. }) => {
-            Some(InteractionResponse::Text { value: supplement })
+        (
+            InteractionRequest::TextInput { is_secret, .. },
+            PromptResolution::Single { supplement, .. },
+        ) => {
+            // For secret inputs, use display_value to hide the password in messages
+            let display_value = if *is_secret {
+                Some("<SECRET>".to_string())
+            } else {
+                None
+            };
+            Some(InteractionResponse::Text {
+                value: supplement,
+                display_value,
+            })
         }
         (
             InteractionRequest::Choice { .. },
@@ -653,7 +670,10 @@ fn map_response(
 fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
     match request {
         InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+            value: None,
+            display_value: None,
+        },
         InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
     }
 }

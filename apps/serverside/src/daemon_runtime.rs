@@ -95,6 +95,38 @@ impl ConfiguredRuntimeResolver {
         let agent = config.resolve_agent()?;
         ensure_workspace_exists(&agent.workspace_root)?;
 
+        let resolved_provider = resolve_config(ResolveInput {
+            provider: Some(config.app.llm.provider.clone()),
+            protocol: None,
+            api_key: None,
+            api_key_env: config.app.llm.api_key_env.clone(),
+            base_url: config.app.llm.api_base.clone(),
+        })
+        .context("failed to resolve llm provider config")?;
+        let llm_provider = Arc::new(
+            create_llm_provider_from_resolved(
+                &resolved_provider,
+                agent.model.clone(),
+                Some(agent.id.clone()),
+                None,
+            )
+            .context("failed to create llm provider")?,
+        );
+        let effective_context_window = resolve_effective_context_window(
+            &resolved_provider,
+            &agent.model,
+            llm_provider.capabilities().max_context_window,
+        )
+        .await;
+        let token_budget = build_token_budget(effective_context_window, config.max_output_tokens());
+
+        validate_token_budget_config(
+            &token_budget,
+            config.max_output_tokens(),
+            &agent.model,
+            config.config_path(),
+        );
+
         let trace = config.resolve_trace_config();
         let skills_config = config.resolve_skills_config();
         let skill_registry: Arc<dyn SkillRegistry> =

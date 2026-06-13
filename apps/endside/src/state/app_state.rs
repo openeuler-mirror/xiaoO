@@ -1254,6 +1254,7 @@ mod tests {
             }],
             allow_custom_input: true,
             multi_select: false,
+            is_secret: false,
             default_index: Some(0),
         }
     }

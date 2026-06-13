@@ -38,7 +38,7 @@ impl ToolExecutor for AskUserQuestionExecutor {
                 message: format!("Failed to parse input: {}", e),
             })?;
 
-        // 校验输入
+        // Validate input
         let validation_result = validation::validate_input(&input);
         if !validation_result.result {
             let message = validation_result
@@ -67,10 +67,11 @@ impl ToolExecutor for AskUserQuestionExecutor {
                     },
                     prompt.clone(),
                 ),
-                QuestionItem::TextInput { prompt } => (
+                QuestionItem::TextInput { prompt, is_secret } => (
                     InteractionRequest::TextInput {
                         prompt: prompt.clone(),
                         source: source.clone(),
+                        is_secret: *is_secret,
                     },
                     prompt.clone(),
                 ),
@@ -95,7 +96,14 @@ impl ToolExecutor for AskUserQuestionExecutor {
                 InteractionResponse::Confirmed { allowed } => {
                     AnswerItem::Confirmed { prompt, allowed }
                 }
-                InteractionResponse::Text { value } => AnswerItem::Text { prompt, value },
+                InteractionResponse::Text {
+                    value,
+                    display_value,
+                } => AnswerItem::Text {
+                    prompt,
+                    value,
+                    display_value,
+                },
                 InteractionResponse::Choice { value } => AnswerItem::Choice { prompt, value },
             };
             answers.push(answer);
