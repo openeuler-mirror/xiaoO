@@ -192,8 +192,15 @@ impl FileReadExecutor {
 
         let estimated_tokens = super::tokenizer::estimate_tokens(file_path, &text_output.content);
         if estimated_tokens > max_tokens {
+            if input.limit.is_none() {
+                return Ok(FileReadOutput::Text(window_text_output(
+                    text_output,
+                    max_tokens,
+                    estimated_tokens,
+                )));
+            }
             return Err(format!(
-                "File content token count ({}) exceeds maximum ({})",
+                "File content token count ({}) exceeds maximum ({}). Re-read a smaller slice with a lower `limit` (and `offset` to page).",
                 estimated_tokens, max_tokens
             ));
         }
@@ -220,26 +227,51 @@ impl FileReadExecutor {
     ) -> Option<FileReadOutput> {
         let dedup_store = self.get_dedup_store().await;
 
-        if let Some(state) = dedup_store.get_read_state(file_path) {
-            if state.offset.is_some() {
-                let is_unchanged = dedup_store.is_file_unchanged(
-                    file_path,
-                    mtime,
-                    input.offset,
-                    input.limit,
-                    input.offset.is_some() || input.limit.is_some(),
-                );
+        let is_partial_view = input.offset.is_some() || input.limit.is_some();
+        if !is_partial_view {
+            return None;
+        }
 
-                if is_unchanged {
-                    return Some(FileReadOutput::FileUnchanged(
-                        super::output::FileUnchangedOutput {
-                            file_path: input.file_path.clone(),
-                        },
-                    ));
-                }
-            }
+        let is_unchanged =
+            dedup_store.is_file_unchanged(file_path, mtime, input.offset, input.limit, true);
+
+        if is_unchanged {
+            return Some(FileReadOutput::FileUnchanged(
+                super::output::FileUnchangedOutput {
+                    file_path: input.file_path.clone(),
+                    note: "File is unchanged since your previous identical paged read \
+                           this session; its content is already in your context above. \
+                           Pass a different `offset`/`limit` to view other lines, or \
+                           re-read after the file changes."
+                        .to_string(),
+                },
+            ));
         }
         None
+    }
+}
+
+fn window_text_output(
+    output: super::output::TextOutput,
+    max_tokens: usize,
+    estimated_tokens: usize,
+) -> super::output::TextOutput {
+    let lines: Vec<&str> = output.content.lines().collect();
+    let total_shown = lines.len();
+    let fraction = (max_tokens as f64 / estimated_tokens.max(1) as f64).min(1.0) * 0.9;
+    let keep = ((total_shown as f64 * fraction) as usize).clamp(1, total_shown.max(1));
+    let last_line = output.start_line + keep.saturating_sub(1) as u64;
+    let next_offset = output.start_line + keep as u64;
+    let head = lines[..keep.min(lines.len())].join("\n");
+    let marker = format!(
+        "\n\n…[file_read truncated to fit the {max_tokens}-token budget: showing lines {}–{} of {} total. \
+         Re-read with offset={} (optionally a `limit`) to continue, or use grep to jump to a pattern.]…",
+        output.start_line, last_line, output.total_lines, next_offset,
+    );
+    super::output::TextOutput {
+        content: format!("{head}{marker}"),
+        num_lines: keep as u64,
+        ..output
     }
 }
 

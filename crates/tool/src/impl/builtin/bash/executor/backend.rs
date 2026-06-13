@@ -58,29 +58,90 @@ impl BashExecutor {
 
     fn format_output(
         result: &agent_contracts::backend::capability::exec::ExecResult,
+        spill_dir: Option<&std::path::Path>,
     ) -> BashOutput {
-        let stdout_truncated = result.stdout.len() > MAX_OUTPUT_BYTES_PER_STREAM;
-        let stderr_truncated = result.stderr.len() > MAX_OUTPUT_BYTES_PER_STREAM;
-        let stdout_bytes = if stdout_truncated {
-            &result.stdout[..MAX_OUTPUT_BYTES_PER_STREAM]
-        } else {
-            result.stdout.as_slice()
-        };
-        let stderr_bytes = if stderr_truncated {
-            &result.stderr[..MAX_OUTPUT_BYTES_PER_STREAM]
-        } else {
-            result.stderr.as_slice()
-        };
+        let (stdout, stdout_truncated) = window_stream(&result.stdout, spill_dir);
+        let (stderr, stderr_truncated) = window_stream(&result.stderr, spill_dir);
 
         BashOutput {
-            stdout: String::from_utf8_lossy(stdout_bytes).replace("\r\n", "\n"),
+            stdout,
             stdout_truncated,
-            stderr: String::from_utf8_lossy(stderr_bytes).replace("\r\n", "\n"),
+            stderr,
             stderr_truncated,
             exit_code: result.exit_code,
             interrupted: result.timed_out,
         }
     }
+}
+
+fn window_stream(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> (String, bool) {
+    let normalize = |slice: &[u8]| String::from_utf8_lossy(slice).replace("\r\n", "\n");
+    if bytes.len() <= MAX_OUTPUT_BYTES_PER_STREAM {
+        return (normalize(bytes), false);
+    }
+    let head_bytes = MAX_OUTPUT_BYTES_PER_STREAM / 2;
+    let tail_bytes = MAX_OUTPUT_BYTES_PER_STREAM - head_bytes;
+    let elided = bytes.len() - head_bytes - tail_bytes;
+    let head = normalize(&bytes[..head_bytes]);
+    let tail = normalize(&bytes[bytes.len() - tail_bytes..]);
+    let retrieval = match spill_full_output(bytes, spill_dir) {
+        Some(path) => format!(
+            "the FULL output is saved at {path} — `grep`/`sed -n` it or read it to retrieve any region"
+        ),
+        None => format!(
+            "re-run piping through `tail -c {tail_bytes}`, `sed -n 'A,Bp'`, or `grep <pattern>` to retrieve a specific region"
+        ),
+    };
+    let marker = format!(
+        "\n\n…[bash output truncated: {elided} bytes elided from the middle ({total} total). \
+         Head and tail are shown; {retrieval}.]…\n\n",
+        total = bytes.len(),
+    );
+    (format!("{head}{marker}{tail}"), true)
+}
+
+fn spill_full_output(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let dir = spill_dir?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(format!("{:016x}.txt", hasher.finish()));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+fn sanitize_session(session: &str) -> String {
+    let cleaned: String = session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.trim_matches('_').is_empty() {
+        "session".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn bash_spill_dir(runtime: &dyn RuntimeView) -> std::path::PathBuf {
+    let metadata = runtime.agent_context().metadata();
+    let session = metadata
+        .session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| metadata.agent_id.clone());
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join(".xiaoo")
+        .join("bash-output")
+        .join(sanitize_session(&session))
 }
 
 impl Default for BashExecutor {
@@ -194,7 +255,8 @@ impl ToolExecutor for BashExecutor {
             }
         })?;
 
-        let output = Self::format_output(&result);
+        let spill_dir = bash_spill_dir(runtime);
+        let output = Self::format_output(&result, Some(spill_dir.as_path()));
 
         let serialized =
             serde_json::to_string(&output).map_err(|e| ToolExecutionError::ExecutionFailed {
