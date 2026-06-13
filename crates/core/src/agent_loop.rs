@@ -128,6 +128,7 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
+        prune_stale_tool_output(&mut ctx);
         if let Err(error) = build_messages(&mut ctx).await {
             end_turn_span(
                 &mut ctx,
@@ -177,8 +178,8 @@ pub async fn run_agent_loop(
             return Err(error);
         }
         update_turn_span_after_llm(&mut ctx).await;
-        let suspended_call = match tool_exec(&mut ctx).await {
-            Ok(suspended_call) => suspended_call,
+        let suspended_calls = match tool_exec(&mut ctx).await {
+            Ok(suspended_calls) => suspended_calls,
             Err(error) => {
                 end_turn_span(
                     &mut ctx,
@@ -196,7 +197,7 @@ pub async fn run_agent_loop(
                 return Err(error);
             }
         };
-        if let Some(suspended_call) = suspended_call {
+        if !suspended_calls.is_empty() {
             end_turn_span(
                 &mut ctx,
                 TraceOutcome::Ok,
@@ -211,7 +212,7 @@ pub async fn run_agent_loop(
                 "suspended",
             )
             .await;
-            return Ok(LoopRunResult::Suspended(suspended_call));
+            return Ok(LoopRunResult::Suspended(suspended_calls));
         }
         decide(&mut ctx);
 
@@ -705,6 +706,94 @@ fn microcompact(ctx: &mut LoopContext<'_>) {
     }
 }
 
+fn prune_stale_tool_output(ctx: &mut LoopContext<'_>) {
+    const KEEP_RECENT_TOOL_BYTES: usize = 40_000;
+    const MIN_PRUNABLE_BYTES: usize = 1_000;
+    const PRUNED_MARKER: &str =
+        "[older tool output pruned to save context — re-run the tool or read the file if you still need it]";
+    let mut messages = ctx.state.messages.write();
+    let mut kept = 0usize;
+    let mut pruned = 0usize;
+    for message in messages.iter_mut().rev() {
+        for block in message.blocks.iter_mut() {
+            if let ContentBlock::ToolResult { output, .. } = block {
+                if output.as_str() == PRUNED_MARKER {
+                    continue;
+                }
+                if kept < KEEP_RECENT_TOOL_BYTES {
+                    kept += output.len();
+                } else if output.len() > MIN_PRUNABLE_BYTES {
+                    *output = PRUNED_MARKER.to_string();
+                    pruned += 1;
+                }
+            }
+        }
+    }
+    drop(messages);
+    if pruned > 0 {
+        tracing::debug!(pruned, "pruned stale tool output beyond recent window");
+    }
+}
+
+/// Per-turn dynamic context re-injected into the system prompt: the remaining
+/// horizon and the live `todo_write` plan. Rendered into the volatile tail of
+/// the system message (see `prompt::compose`), after the cache-stable prefix.
+fn live_context_snippets(
+    ctx: &LoopContext<'_>,
+) -> Vec<agent_types::context::prompt::MemorySnippet> {
+    use agent_types::context::prompt::MemorySnippet;
+    let mut snippets = Vec::new();
+
+    let turn = ctx.turn.turn_number;
+    let max_turns = ctx.snapshot.max_turns;
+    let tokens_used = ctx.state.token_usage.total_tokens;
+    let remaining = max_turns.saturating_sub(turn);
+    if max_turns > 0 && remaining <= 5 {
+        let horizon = format!(
+            "- turn: {turn}/{max_turns} ({remaining} remaining)\n- tokens used so far: ~{tokens_used}\n- NEARING THE TURN LIMIT — stop investigating and converge now: apply your best fix, save the files, and finish this turn. A committed partial fix beats an unfinished exploration that gets cut off."
+        );
+        snippets.push(MemorySnippet {
+            source: "horizon".to_string(),
+            content: horizon,
+            relevance_score: 1.0,
+        });
+    }
+
+    let window = ctx.snapshot.token_budget_config.total_budget;
+    let context_input = ctx.state.token_usage.prompt_tokens;
+    if window > 0 {
+        let pct = context_input.saturating_mul(100) / window;
+        if pct >= 25 {
+            let mut line =
+                format!("- context window: ~{pct}% used ({context_input}/{window} input tokens)");
+            if pct >= 75 {
+                line.push_str(
+                    " — running full; converge and finish before the earliest context is compacted away.",
+                );
+            }
+            snippets.push(MemorySnippet {
+                source: "budget".to_string(),
+                content: line,
+                relevance_score: 0.95,
+            });
+        }
+    }
+
+    // Active plan: open `todo_write` items for this session, re-injected every
+    // turn so plan state is load-bearing rather than write-only.
+    if let Some(runtime_view) = ctx.input.runtime_view.as_ref() {
+        for line in tool::open_todo_lines(runtime_view.as_ref()) {
+            snippets.push(MemorySnippet {
+                source: "plan".to_string(),
+                content: line,
+                relevance_score: 0.9,
+            });
+        }
+    }
+
+    snippets
+}
+
 async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
     let skill_summaries = ctx.snapshot.skill_registry.list_skills();
 
@@ -733,12 +822,20 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         None
     };
 
+    let is_final_turn =
+        ctx.snapshot.max_turns > 0 && ctx.turn.turn_number >= ctx.snapshot.max_turns;
+    let visible_tools = if is_final_turn {
+        Vec::new()
+    } else {
+        ctx.input.visible_tools.clone()
+    };
+
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
         messages: ctx.state.messages.read().clone(),
-        visible_tools: ctx.input.visible_tools.clone(),
+        visible_tools,
         skill_summaries,
-        memory_snippets: Vec::new(),
+        memory_snippets: live_context_snippets(ctx),
         environment: agent_types::context::prompt::EnvironmentInfo {
             model: String::new(),
             cwd: String::new(),
@@ -1018,7 +1115,11 @@ const TRANSIENT_MAX_DELAY_MS: u64 = 60_000;
 fn is_transient(error: &LlmError) -> bool {
     matches!(
         error,
-        LlmError::RateLimited { .. } | LlmError::HttpError(_) | LlmError::Timeout
+        LlmError::RateLimited { .. }
+            | LlmError::HttpError(_)
+            | LlmError::Timeout
+            | LlmError::StreamError { .. }
+            | LlmError::IoError(_)
     )
 }
 
@@ -1110,7 +1211,7 @@ fn stream_assistant_chunk(
     }
 }
 
-async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall>, AgentError> {
+async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, AgentError> {
     let has_tool_calls = ctx
         .turn
         .assistant_message
@@ -1118,22 +1219,23 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         .map_or(false, |m| m.has_tool_calls());
 
     if ctx.turn.assistant_message.is_none() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     if !has_tool_calls || !ctx.snapshot.feature_flags.tool_execution {
         append_assistant_to_history(ctx);
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     if ctx.input.runtime_view.is_none() {
         append_assistant_to_history(ctx);
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     // Repair empty call_ids before the validity partition below.
     if let Some(msg) = ctx.turn.assistant_message.as_mut() {
         synthesize_missing_call_ids(msg, ctx.state.turn_count);
+        repair_tool_names(msg, &ctx.input.visible_tools);
     }
 
     let tool_calls: Vec<ToolUseBlock> = ctx
@@ -1145,7 +1247,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         .clone();
 
     if ctx.input.agent_id.is_none() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     // Partition tool calls into valid (non-empty call_id + tool_name) and invalid.
@@ -1209,6 +1311,9 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         (valid_calls, invalid_calls)
     };
 
+    let mut valid_calls = valid_calls;
+    valid_calls.sort_by_key(|tc| tc.tool_name == "join_subagent");
+
     if let Some(msg) = ctx.turn.assistant_message.as_mut() {
         msg.tool_calls = valid_calls.clone();
     }
@@ -1250,9 +1355,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         }
     }
 
-    // Execute valid tool calls (original logic).
-    let runtime_view = ctx.input.runtime_view.as_ref().unwrap();
-
+    // Pass 1 — build every call (borrows ctx for the per-call tool filter).
+    let mut built = Vec::with_capacity(valid_calls.len());
     for tc in &valid_calls {
         let raw_tool_call = RawToolCall {
             call_id: tc.call_id.clone(),
@@ -1270,47 +1374,102 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
             ctx.snapshot.tool_registry.as_ref(),
         );
 
-        let tool_call = match ToolCallBuilderImpl::new()
+        match ToolCallBuilderImpl::new()
             .with_raw_llm_tool_call(raw_tool_call)
             .with_tool_filter(per_call_filter)
             .build()
         {
-            Ok(tool_call) => tool_call,
-            Err(error) => {
-                let result = build_framework_failed_tool_result(
-                    fallback_final_call,
-                    format!("tool call build failed: {error}"),
-                );
-                emit_tool_result_event(ctx, &result);
-                let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.write().push(tool_result_message);
-                ctx.turn.tool_results.push(result);
-                continue;
-            }
-        };
+            Ok(tool_call) => built.push(Ok(tool_call)),
+            Err(error) => built.push(Err(build_framework_failed_tool_result(
+                fallback_final_call,
+                format!("tool call build failed: {error}"),
+            ))),
+        }
+    }
 
-        let result = match tool_call.execute(&**runtime_view).await {
-            Ok(result) => result,
-            Err(error) => {
-                let result =
-                    build_framework_failed_tool_result(fallback_final_call, error.to_string());
-                emit_tool_result_event(ctx, &result);
-                let tool_result_message = build_tool_result_message(&result);
-                ctx.state.messages.write().push(tool_result_message);
-                ctx.turn.tool_results.push(result);
-                continue;
+    let serialize_batch = {
+        let mut path_touches: std::collections::HashMap<&str, (u32, bool)> =
+            std::collections::HashMap::new();
+        for call in built.iter().filter_map(|b| b.as_ref().ok()) {
+            let final_call = call.final_call();
+            let is_write = matches!(final_call.tool_name.as_str(), "file_write" | "file_edit");
+            let is_read = final_call.tool_name.as_str() == "file_read";
+            if is_write || is_read {
+                if let Some(path) = final_call.input.get("file_path").and_then(|v| v.as_str()) {
+                    let entry = path_touches.entry(path).or_insert((0, false));
+                    entry.0 += 1;
+                    entry.1 |= is_write;
+                }
             }
-        };
+        }
+        path_touches
+            .values()
+            .any(|(count, has_write)| *count >= 2 && *has_write)
+    };
+
+    // Pass 2 — execute the successfully built calls. Clone the Arc runtime handle
+    // so the futures borrow it, not `ctx` (post-processing needs `&mut ctx`).
+    // Both paths preserve input order, so Pass 3/4 are unaffected.
+    let runtime_view = ctx.input.runtime_view.clone().unwrap();
+    let exec_outcomes: Vec<_> = if serialize_batch {
+        let mut outcomes = Vec::new();
+        for call in built.iter().filter_map(|b| b.as_ref().ok()) {
+            outcomes.push(call.execute(&*runtime_view).await);
+        }
+        outcomes
+    } else {
+        futures_util::future::join_all(
+            built
+                .iter()
+                .filter_map(|b| b.as_ref().ok().map(|call| call.execute(&*runtime_view))),
+        )
+        .await
+    };
+
+    // Pass 3 — stitch outcomes back into call order, pairing each executed call
+    // with its result (build failures already carry their own result).
+    let mut exec_outcomes = exec_outcomes.into_iter();
+    let mut results: Vec<ToolExecutionResult> = Vec::with_capacity(built.len());
+    for entry in built {
+        match entry {
+            Err(failed_result) => results.push(failed_result),
+            Ok(tool_call) => {
+                let result = match exec_outcomes.next().expect("one outcome per executed call") {
+                    Ok(result) => result,
+                    Err(error) => build_framework_failed_tool_result(
+                        tool_call.final_call().clone(),
+                        error.to_string(),
+                    ),
+                };
+                results.push(result);
+            }
+        }
+    }
+
+    // Pass 4 — record results in call order. Suspending calls (`join_subagent`)
+    // are sorted last (above), so by the time the first one is seen every
+    // side-effecting sibling already has its tool_result recorded.
+    let mut streak_note: Option<String> = None;
+    let mut suspended_calls: Vec<SuspendedToolCall> = Vec::new();
+    for result in results {
         let should_stop_after_result = should_stop_after_tool_result(ctx, &result);
         emit_tool_result_event(ctx, &result);
 
         if let Some(suspended_call) = SuspendedToolCall::from_tool_result(&result) {
+            // Defer: no tool_result message now (the resumer appends it once the
+            // child finishes). Recording the raw result keeps tool_results complete.
             ctx.turn.tool_results.push(result);
-            return Ok(Some(suspended_call));
+            suspended_calls.push(suspended_call);
+            continue;
         }
 
         let tool_result_message = build_tool_result_message(&result);
         ctx.state.messages.write().push(tool_result_message);
+        // Track repeated identical failing calls; any note is pushed after all
+        // tool results so the assistant/tool-result protocol stays intact.
+        if let Some(note) = update_tool_failure_streak(ctx, &result) {
+            streak_note = Some(note);
+        }
         ctx.turn.tool_results.push(result);
 
         if should_stop_after_result {
@@ -1319,7 +1478,89 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Option<SuspendedToolCall
         }
     }
 
-    Ok(None)
+    // A pending suspend must not be followed by an injected user message: the
+    // resumer still has to slot tool_result(s) right after the assistant turn, so
+    // hold the streak nudge until everything is resolved (drop it this turn).
+    if suspended_calls.is_empty() {
+        if let Some(note) = streak_note {
+            ctx.state.messages.write().push(ChatMessage::user(note));
+        }
+    }
+
+    Ok(suspended_calls)
+}
+
+const REPEATED_FAILURE_THRESHOLD: u32 = 3;
+const REPEATED_SUCCESS_THRESHOLD: u32 = 3;
+
+fn update_tool_failure_streak(
+    ctx: &mut LoopContext<'_>,
+    result: &ToolExecutionResult,
+) -> Option<String> {
+    let sig = tool_call_signature(result);
+    if is_failure_result(result) {
+        ctx.state.last_success_sig = None;
+        ctx.state.repeated_success_count = 0;
+        if ctx.state.last_failure_sig == Some(sig) {
+            ctx.state.repeated_failure_count += 1;
+        } else {
+            ctx.state.last_failure_sig = Some(sig);
+            ctx.state.repeated_failure_count = 1;
+        }
+        if ctx.state.repeated_failure_count >= REPEATED_FAILURE_THRESHOLD {
+            let count = ctx.state.repeated_failure_count;
+            let tool = result.tool_name().to_string();
+            ctx.state.repeated_failure_count = 0;
+            ctx.state.last_failure_sig = None;
+            return Some(format!(
+                "The `{tool}` call has now failed {count} times in a row with identical arguments. \
+                 Stop retrying it unchanged — change approach: fix the arguments, read the relevant \
+                 file or state to understand why it fails, or use a different tool to reach the goal."
+            ));
+        }
+        return None;
+    }
+    ctx.state.last_failure_sig = None;
+    ctx.state.repeated_failure_count = 0;
+    if ctx.state.last_success_sig == Some(sig) {
+        ctx.state.repeated_success_count += 1;
+    } else {
+        ctx.state.last_success_sig = Some(sig);
+        ctx.state.repeated_success_count = 1;
+    }
+    if ctx.state.repeated_success_count >= REPEATED_SUCCESS_THRESHOLD {
+        let count = ctx.state.repeated_success_count;
+        let tool = result.tool_name().to_string();
+        ctx.state.repeated_success_count = 0;
+        ctx.state.last_success_sig = None;
+        return Some(format!(
+            "The `{tool}` call has now run {count} times in a row with identical arguments and the \
+             same result — that output is already in your context above. Stop repeating it: use \
+             what you have, or take a different action toward the goal."
+        ));
+    }
+    None
+}
+
+fn is_failure_result(result: &ToolExecutionResult) -> bool {
+    matches!(
+        result,
+        ToolExecutionResult::Completed {
+            raw_outcome: RawToolOutcome::Error { .. },
+            ..
+        } | ToolExecutionResult::Failed { .. }
+            | ToolExecutionResult::Denied { .. }
+    )
+}
+
+fn tool_call_signature(result: &ToolExecutionResult) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    result.tool_name().hash(&mut hasher);
+    serde_json::to_string(&result.final_call().input)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Fill empty `call_id`s with a stable, turn-scoped id (`call_<turn>_<idx>`) so a
@@ -1329,6 +1570,39 @@ fn synthesize_missing_call_ids(msg: &mut AssistantMessage, turn: u32) {
     for (idx, tc) in msg.tool_calls.iter_mut().enumerate() {
         if tc.call_id.trim().is_empty() {
             tc.call_id = format!("call_{turn}_{idx}");
+        }
+    }
+}
+
+fn repair_tool_names(
+    msg: &mut AssistantMessage,
+    visible: &[std::sync::Arc<dyn agent_contracts::tool::ToolSpecView>],
+) {
+    if visible.is_empty() {
+        return;
+    }
+    let normalize = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let mut canonical = std::collections::HashSet::new();
+    let mut normalized = std::collections::HashMap::new();
+    for tool in visible {
+        let name = tool.name().0.clone();
+        normalized.entry(normalize(&name)).or_insert_with(|| name.clone());
+        canonical.insert(name);
+    }
+    for tc in msg.tool_calls.iter_mut() {
+        if canonical.contains(&tc.tool_name) {
+            continue;
+        }
+        if let Some(fixed) = normalized.get(&normalize(&tc.tool_name)) {
+            if *fixed != tc.tool_name {
+                tracing::debug!(from = %tc.tool_name, to = %fixed, "repaired tool name");
+                tc.tool_name = fixed.clone();
+            }
         }
     }
 }
@@ -1586,6 +1860,52 @@ fn decide(ctx: &mut LoopContext<'_>) {
             ctx.turn.decision = Some(LoopDecision::Continue);
             return;
         }
+    }
+
+    // Don't accept a stop while the model still has open plan items. The first
+    // such stop triggers one reminder (bounded by `plan_nudged`, so never an
+    // infinite loop — if the model stops again it completes). Only fires when the
+    // model actually used `todo_write` and left items open.
+    if !ctx.state.plan_nudged && ctx.turn.turn_number < ctx.snapshot.max_turns {
+        let open = ctx
+            .input
+            .runtime_view
+            .as_ref()
+            .map(|runtime_view| tool::open_todo_lines(runtime_view.as_ref()))
+            .unwrap_or_default();
+        if !open.is_empty() {
+            ctx.state.plan_nudged = true;
+            let reminder = format!(
+                "You are about to stop, but your plan still has {} open item(s):\n{}\n\
+                 Finish them now, or call todo_write to mark them completed/cancelled if they no longer apply — then stop.",
+                open.len(),
+                open.join("\n")
+            );
+            ctx.state.messages.write().push(ChatMessage::user(reminder));
+            ctx.turn.decision = Some(LoopDecision::Continue);
+            return;
+        }
+    }
+
+    // Only nudge agentic runs: the checklist is about verifying a code change, so
+    // it is noise for a tool-less, conversational turn (and would force every such
+    // reply through a wasted extra round-trip). Gate on tools being available.
+    if !ctx.state.completion_nudged
+        && ctx.turn.turn_number < ctx.snapshot.max_turns
+        && !ctx.input.visible_tools.is_empty()
+    {
+        ctx.state.completion_nudged = true;
+        let checklist = "You are about to finish. Before you stop, re-read the ORIGINAL task and verify, do not assume:\n\
+            1. Every requirement it states is met — including any exact error message, return value, output, or edge case it names; if it specifies a behavior, you have a check that exercises THAT behavior, not a different one that merely passes.\n\
+            2. Your change is robust to changed inputs — different numbers, empty/None/zero, other files or config — not only the one case you tried, and it does not mutate shared state or leave unintended side effects.\n\
+            3. Review the change once from three angles: as the test engineer who will grade it, as a QA reviewer hunting regressions, and as the user who filed the task.\n\
+            If any check fails, fix it now. If all hold, stop again and you are done.";
+        ctx.state
+            .messages
+            .write()
+            .push(ChatMessage::user(checklist.to_string()));
+        ctx.turn.decision = Some(LoopDecision::Continue);
+        return;
     }
 
     ctx.turn.decision = Some(LoopDecision::ReturnComplete);
@@ -2628,7 +2948,10 @@ mod tests {
             outcome,
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
-        assert_eq!(loop_state.turn_count, 2);
+        // turn 1: synthesize + run the tool; turn 2: model stops and the
+        // completion nudge (tools are visible here) adds one verification turn;
+        // turn 3: model stops again and the loop completes.
+        assert_eq!(loop_state.turn_count, 3);
 
         let messages = loop_state.messages.read();
         let tool_use = messages.iter().find_map(|m| {
