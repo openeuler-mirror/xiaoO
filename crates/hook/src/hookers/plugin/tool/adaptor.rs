@@ -936,6 +936,7 @@ else:
         );
         let runtime = TestRuntimeView::new(InteractionResponse::Text {
             value: Some("alice".to_string()),
+            display_value: None,
         });
         let input = PreToolHookInput {
             call: FinalToolCall {

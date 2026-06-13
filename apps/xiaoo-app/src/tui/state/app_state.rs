@@ -1043,9 +1043,9 @@ mod tests {
         );
 
         assert!(state.cycle_agent_role(false));
-        assert_eq!(state.active_agent_tab_label(), "xuanyuan");
+        assert_eq!(state.active_agent_tab_label(), "baize");
         assert!(state.cycle_agent_role(false));
-        assert_eq!(state.active_agent_tab_label(), "Core");
+        assert_eq!(state.active_agent_tab_label(), "plan");
     }
 
     #[test]
@@ -1250,6 +1250,7 @@ mod tests {
             allow_custom_input: true,
             multi_select: false,
             default_index: Some(0),
+            is_secret: false,
         }
     }
 }

@@ -95,7 +95,7 @@ mod tests {
         assert!(result.is_some());
 
         let rules = result.unwrap();
-        assert!(rules.contains("## Subagent Delegation Rules"));
+        assert!(rules.contains("## Subagent Delegation"));
         assert!(rules.contains("- \"code_reviewer\": Reviews code quality"));
         assert!(rules.contains("spawn_subagent"));
         assert!(rules.contains("join_subagent"));
