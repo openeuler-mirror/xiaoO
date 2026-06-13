@@ -1,4 +1,4 @@
-use crate::backend::SandboxForkResult;
+use crate::backend::BackendForkResult;
 use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig, SessionRecord};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ pub struct SessionForkRequest {
 pub struct SessionForkResult {
     pub parent: SessionRecord,
     pub child: SessionRecord,
-    pub backend_fork: SandboxForkResult,
+    pub backend_fork: BackendForkResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

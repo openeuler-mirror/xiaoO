@@ -4,3 +4,9 @@ pub mod channels;
 pub mod gateway;
 pub mod llm_secrets;
 pub mod lsp_support;
+pub mod runtime_checkpoint;
+
+pub use runtime_checkpoint::{
+    RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
+    RuntimeCheckpointResult, RuntimeRecord,
+};

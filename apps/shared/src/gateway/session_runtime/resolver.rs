@@ -2,7 +2,7 @@ use crate::backend::GatewayBackendConfig;
 use crate::gateway::session_record::SubagentRoleRecord;
 use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig, SessionOpenRequest,
-    SessionRecord, SessionRuntimeBindings,
+    SessionRecord,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry};
 use agent_types::common::ids::AgentId;
@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use subagent::SubagentControl;
 use thiserror::Error;
+
+use super::SessionRuntimeBindings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRuntimeDescriptor {

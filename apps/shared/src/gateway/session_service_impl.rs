@@ -4,6 +4,10 @@ use crate::gateway::{
     SessionRuntimeBuildInput, SessionRuntimeResolveError, SessionRuntimeResolver, SessionService,
     SessionServiceError, SessionStore, SessionStoreError,
 };
+use crate::{
+    RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
+    RuntimeCheckpointResult, RuntimeRecord,
+};
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
 use agent_types::session::{SessionClosedHookInput, SessionCreatedHookInput};
@@ -20,7 +24,11 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::backend::{BackendManager, SandboxForkRequest};
+use crate::backend::{
+    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRequest,
+    BackendCheckpointResult, BackendForkResult, BackendManager,
+};
+use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
@@ -28,6 +36,19 @@ pub struct CoreBackedSessionService {
     sessions_handler: Mutex<HashMap<String, SessionHandle>>,
     hooker_registry: Arc<dyn HookerRegistry>,
     backend_manager: Arc<BackendManager>,
+    runtime_checkpoints: InMemoryRuntimeCheckpointStore,
+}
+
+struct RuntimeCheckpointInternal {
+    result: RuntimeCheckpointResult,
+    session: SessionRecord,
+    backend_checkpoint: Option<BackendCheckpointResult>,
+}
+
+struct RuntimeCheckoutInternal {
+    result: RuntimeCheckoutResult,
+    session: SessionRecord,
+    backend_checkout: Option<BackendCheckoutResult>,
 }
 
 impl CoreBackedSessionService {
@@ -43,6 +64,7 @@ impl CoreBackedSessionService {
             sessions_handler: Mutex::new(HashMap::new()),
             hooker_registry,
             backend_manager,
+            runtime_checkpoints: InMemoryRuntimeCheckpointStore::default(),
         }
     }
 
@@ -103,6 +125,199 @@ impl CoreBackedSessionService {
 
         let session = self.session_store.load(session_id).await?;
         Some(self.get_or_create_session_handle(session).await)
+    }
+
+    async fn idle_session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        if let Some(handle) = self.sessions_handler.lock().await.get(session_id).cloned() {
+            let status = handle.status();
+            if status.phase != super::session_handle::SessionPhase::Idle || status.queue_depth > 0 {
+                return Err(SessionServiceError::SessionBusy {
+                    session_id: session_id.to_string(),
+                    message: "runtime must be idle before checkpoint or checkout".to_string(),
+                });
+            }
+            return handle.snapshot().await;
+        }
+
+        let Some(session) = self.session_store.load(session_id).await else {
+            return Err(SessionServiceError::SessionNotFound {
+                session_id: session_id.to_string(),
+            });
+        };
+        if session.status == SessionLifecycleStatus::Running {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: session_id.to_string(),
+                message: "runtime must be idle before checkpoint or checkout".to_string(),
+            });
+        }
+        Ok(session)
+    }
+
+    async fn checkpoint_runtime_internal(
+        &self,
+        request: RuntimeCheckpointRequest,
+    ) -> Result<RuntimeCheckpointInternal, SessionServiceError> {
+        let session = self.idle_session_snapshot(&request.runtime_id).await?;
+        let backend_checkpoint = if let Some(parent_backend) = session.backend_instance.as_ref() {
+            Some(
+                self.backend_manager
+                    .checkpoint_backend(BackendCheckpointRequest {
+                        backend_id: Some(parent_backend.backend_id.0.clone()),
+                        session_id: Some(request.runtime_id.clone()),
+                        name: request.name.clone(),
+                        metadata: request.metadata.clone(),
+                    })
+                    .await
+                    .map_err(|error| SessionServiceError::RuntimeBuild {
+                        message: format!("failed to checkpoint runtime backend: {error}"),
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let parent_checkpoint_id = self
+            .runtime_checkpoints
+            .latest_for_runtime(&request.runtime_id)
+            .await;
+        let checkpoint_id = format!("rtcp_{}", uuid::Uuid::new_v4().simple());
+        let created_at_ms = current_time_ms();
+        let checkpoint = RuntimeCheckpoint {
+            checkpoint_id: checkpoint_id.clone(),
+            runtime_id: request.runtime_id.clone(),
+            parent_checkpoint_id: parent_checkpoint_id.clone(),
+            session: session.clone(),
+            backend_checkpoint: backend_checkpoint
+                .as_ref()
+                .map(|result| result.checkpoint.clone()),
+            created_at_ms,
+            metadata: request.metadata.clone(),
+            name: request.name.clone(),
+        };
+        self.runtime_checkpoints.save(checkpoint).await;
+
+        Ok(RuntimeCheckpointInternal {
+            result: RuntimeCheckpointResult {
+                checkpoint_id,
+                runtime: RuntimeRecord::from_session(&session),
+                parent_checkpoint_id,
+                created_at_ms,
+                metadata: request.metadata,
+                name: request.name,
+            },
+            session,
+            backend_checkpoint,
+        })
+    }
+
+    async fn checkout_runtime_internal(
+        &self,
+        request: RuntimeCheckoutRequest,
+    ) -> Result<RuntimeCheckoutInternal, SessionServiceError> {
+        let checkpoint = self
+            .runtime_checkpoints
+            .load(&request.checkpoint_id)
+            .await
+            .ok_or_else(|| SessionServiceError::SessionNotFound {
+                session_id: format!("checkpoint:{}", request.checkpoint_id),
+            })?;
+        let _ = self.idle_session_snapshot(&checkpoint.runtime_id).await?;
+
+        let child_runtime_id = format!(
+            "{}:checkout:{}",
+            checkpoint.runtime_id,
+            uuid::Uuid::new_v4().simple()
+        );
+        if self.session_store.load(&child_runtime_id).await.is_some() {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: child_runtime_id,
+                message: "generated runtime already exists".to_string(),
+            });
+        }
+
+        let backend_checkout =
+            if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone() {
+                Some(
+                    self.backend_manager
+                        .checkout_backend(BackendCheckoutRequest {
+                            checkpoint: backend_checkpoint,
+                            backend_id: None,
+                            session_id: Some(child_runtime_id.clone()),
+                            timeout: None,
+                            metadata: request.metadata.clone(),
+                            resource_limits: Default::default(),
+                            options: None,
+                        })
+                        .await
+                        .map_err(|error| SessionServiceError::RuntimeBuild {
+                            message: format!("failed to checkout runtime backend: {error}"),
+                        })?,
+                )
+            } else {
+                None
+            };
+        let backend_lease = if backend_checkout.is_some() {
+            Some(
+                self.backend_manager
+                    .lease_bound_session(&child_runtime_id)
+                    .await
+                    .map_err(|error| SessionServiceError::RuntimeBuild {
+                        message: format!("failed to lease checked out backend: {error}"),
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let now_ms = current_time_ms();
+        let mut child = checkpoint.session.clone();
+        child.session_id = child_runtime_id.clone();
+        if let Some(conversation_id) = request.conversation_id {
+            child.conversation_id = conversation_id;
+        }
+        if let Some(sender_id) = request.sender_id {
+            child.sender_id = sender_id;
+        }
+        child.status = SessionLifecycleStatus::Idle;
+        child.backend_instance = backend_lease.map(|lease| lease.instance());
+        child.last_error = None;
+        child.created_at_ms = now_ms;
+        child.updated_at_ms = now_ms;
+
+        self.session_store.save(child.clone()).await;
+        self.runtime_checkpoints
+            .register_runtime_head(child.session_id.clone(), checkpoint.checkpoint_id.clone())
+            .await;
+
+        let hook_point = HookPointId(format!(
+            "{}.Session.lifecycle.created",
+            child.runtime.agent_id.0
+        ));
+        self.fire_session_hooks(
+            HookInvokeInput::SessionCreated {
+                input: SessionCreatedHookInput {
+                    session_id: child.session_id.clone(),
+                    sender_id: child.sender_id.clone(),
+                },
+                metadata: HookInvokeMetadata::default(),
+            },
+            hook_point,
+        )
+        .await;
+        self.get_or_create_session_handle(child.clone()).await;
+
+        Ok(RuntimeCheckoutInternal {
+            result: RuntimeCheckoutResult {
+                checkpoint_id: checkpoint.checkpoint_id,
+                source_runtime_id: checkpoint.runtime_id,
+                runtime: RuntimeRecord::from_session(&child),
+            },
+            session: child,
+            backend_checkout,
+        })
     }
 
     fn build_session_for_turn(
@@ -369,123 +584,24 @@ impl SessionControlPlane for CoreBackedSessionService {
         Ok(closed)
     }
 
-    async fn fork_session(
+    async fn checkpoint_runtime(
         &self,
-        request: SessionForkRequest,
-    ) -> Result<SessionForkResult, SessionServiceError> {
-        let parent = if let Some(handle) = self.handle_for_session(&request.parent_session_id).await
-        {
-            let status = handle.status();
-            if status.phase != super::session_handle::SessionPhase::Idle || status.queue_depth > 0 {
-                return Err(SessionServiceError::SessionBusy {
-                    session_id: request.parent_session_id.clone(),
-                    message: "session must be idle before it can be forked".to_string(),
-                });
-            }
-            handle.snapshot().await?
-        } else {
-            let Some(parent) = self.session_store.load(&request.parent_session_id).await else {
-                return Err(SessionServiceError::SessionNotFound {
-                    session_id: request.parent_session_id.clone(),
-                });
-            };
-            if parent.status == SessionLifecycleStatus::Running {
-                return Err(SessionServiceError::SessionBusy {
-                    session_id: request.parent_session_id.clone(),
-                    message: "session must be idle before it can be forked".to_string(),
-                });
-            }
-            parent
-        };
-
-        let Some(parent_backend) = parent.backend_instance.as_ref() else {
-            return Err(SessionServiceError::UnsupportedCapability {
-                capability: "fork_session.backend_missing".to_string(),
-            });
-        };
-
-        let child_session_id = format!(
-            "{}:fork:{}",
-            request.parent_session_id,
-            uuid::Uuid::new_v4().simple()
-        );
-        if self.session_store.load(&child_session_id).await.is_some() {
-            return Err(SessionServiceError::SessionBusy {
-                session_id: child_session_id,
-                message: "child session already exists".to_string(),
-            });
-        }
-
-        let backend_fork = self
-            .backend_manager
-            .fork_sandbox(SandboxForkRequest {
-                parent_backend_id: Some(parent_backend.backend_id.0.clone()),
-                parent_session_id: Some(request.parent_session_id.clone()),
-                backend_id: None,
-                session_id: Some(child_session_id.clone()),
-                timeout: None,
-                metadata: serde_json::json!({
-                    "xiaoo_fork_parent_session_id": request.parent_session_id.clone(),
-                    "xiaoo_fork_child_session_id": child_session_id.clone(),
-                }),
-                resource_limits: Default::default(),
-                options: None,
-                snapshot_name: request.snapshot_name,
-            })
+        request: RuntimeCheckpointRequest,
+    ) -> Result<RuntimeCheckpointResult, SessionServiceError> {
+        self.checkpoint_runtime_internal(request)
             .await
-            .map_err(|error| SessionServiceError::RuntimeBuild {
-                message: format!("failed to fork session backend: {error}"),
-            })?;
-
-        let backend_lease = self
-            .backend_manager
-            .lease_bound_session(&child_session_id)
-            .await
-            .map_err(|error| SessionServiceError::RuntimeBuild {
-                message: format!("failed to lease forked backend: {error}"),
-            })?;
-
-        let now_ms = current_time_ms();
-        let mut child = parent.clone();
-        child.session_id = child_session_id;
-        if let Some(conversation_id) = request.conversation_id {
-            child.conversation_id = conversation_id;
-        }
-        if let Some(sender_id) = request.sender_id {
-            child.sender_id = sender_id;
-        }
-        child.status = SessionLifecycleStatus::Idle;
-        child.backend_instance = Some(backend_lease.instance());
-        child.last_error = None;
-        child.created_at_ms = now_ms;
-        child.updated_at_ms = now_ms;
-
-        self.session_store.save(child.clone()).await;
-
-        let hook_point = HookPointId(format!(
-            "{}.Session.lifecycle.created",
-            child.runtime.agent_id.0
-        ));
-        self.fire_session_hooks(
-            HookInvokeInput::SessionCreated {
-                input: SessionCreatedHookInput {
-                    session_id: child.session_id.clone(),
-                    sender_id: child.sender_id.clone(),
-                },
-                metadata: HookInvokeMetadata::default(),
-            },
-            hook_point,
-        )
-        .await;
-        self.get_or_create_session_handle(child.clone()).await;
-
-        Ok(SessionForkResult {
-            parent,
-            child,
-            backend_fork,
-        })
+            .map(|internal| internal.result)
     }
 
+    async fn checkout_runtime(
+        &self,
+        request: RuntimeCheckoutRequest,
+    ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
+        self.checkout_runtime_internal(request)
+            .await
+            .map(|internal| internal.result)
+    }
+    
     async fn submit_input(
         &self,
         session_id: &str,
@@ -672,6 +788,37 @@ mod tests {
         ))
     }
 
+    fn test_open_request(session_id: &str) -> SessionOpenRequest {
+        SessionOpenRequest {
+            session_id: session_id.to_string(),
+            conversation_id: format!("{session_id}-conversation"),
+            sender_id: "user-1".to_string(),
+            entry: GatewayEntryContext::tui(None),
+            channel: None,
+            channel_instance_id: None,
+            llm: None,
+        }
+    }
+
+    async fn save_session_without_backend(
+        store: &Arc<InMemorySessionStore>,
+        resolver: &Arc<StubRuntimeResolver>,
+        session_id: &str,
+        status: SessionLifecycleStatus,
+    ) -> SessionRecord {
+        let request = test_open_request(session_id);
+        let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
+        let resolved = resolver
+            .resolve(&runtime_input, None)
+            .await
+            .expect("resolve runtime");
+        let mut session = CoreBackedSessionService::build_session_for_open(&request, &resolved);
+        session.status = status;
+        session.backend_instance = None;
+        store.save(session.clone()).await;
+        session
+    }
+
     #[tokio::test]
     async fn open_session_persists_active_backend_instance() {
         let workspace = TempDir::new().expect("workspace");
@@ -705,7 +852,7 @@ mod tests {
         let instance = record.backend_instance.expect("backend instance");
         assert_eq!(instance.state, BackendLifecycleState::Active);
         assert_eq!(instance.session_id, "s1");
-        assert!(instance.backend_id.0.starts_with("sbx_"));
+        assert!(instance.backend_id.0.starts_with("bkd_"));
         assert_ne!(instance.backend_id.0, "s1");
 
         let saved = store.load("s1").await.expect("saved session");
@@ -799,5 +946,198 @@ mod tests {
             .await
             .expect("resume closed session");
         assert!(resumed.is_none());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_runtime_idle_session_without_backend_succeeds() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
+            .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let result = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: "runtime-1".to_string(),
+                metadata: json!({"kind": "test"}),
+                name: Some("checkpoint-a".to_string()),
+            })
+            .await
+            .expect("checkpoint runtime");
+
+        assert!(result.checkpoint_id.starts_with("rtcp_"));
+        assert_eq!(result.runtime.runtime_id, "runtime-1");
+        assert_eq!(result.parent_checkpoint_id, None);
+        assert_eq!(result.metadata, json!({"kind": "test"}));
+        assert_eq!(result.name.as_deref(), Some("checkpoint-a"));
+    }
+
+    #[tokio::test]
+    async fn checkout_runtime_creates_new_runtime_from_checkpoint() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let parent = save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-parent",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+        let checkpoint = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: parent.session_id.clone(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await
+            .expect("checkpoint runtime");
+
+        let checkout = dependencies
+            .session_control_plane
+            .checkout_runtime(RuntimeCheckoutRequest {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                conversation_id: Some("child-conversation".to_string()),
+                sender_id: Some("child-user".to_string()),
+                metadata: json!({"branch": "a"}),
+            })
+            .await
+            .expect("checkout runtime");
+
+        assert_eq!(checkout.checkpoint_id, checkpoint.checkpoint_id);
+        assert_eq!(checkout.source_runtime_id, parent.session_id);
+        assert_ne!(checkout.runtime.runtime_id, parent.session_id);
+        assert!(checkout
+            .runtime
+            .runtime_id
+            .starts_with("runtime-parent:checkout:"));
+        assert_eq!(checkout.runtime.conversation_id, "child-conversation");
+        assert_eq!(checkout.runtime.sender_id, "child-user");
+
+        let saved = store
+            .load(&checkout.runtime.runtime_id)
+            .await
+            .expect("checked out runtime saved");
+        assert_eq!(saved.conversation_id, "child-conversation");
+        assert_eq!(saved.sender_id, "child-user");
+        assert_eq!(saved.status, SessionLifecycleStatus::Idle);
+        assert!(saved.backend_instance.is_none());
+        assert_eq!(saved.runtime.agent_id, parent.runtime.agent_id);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_runtime_rejects_running_session() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-running",
+            SessionLifecycleStatus::Running,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let result = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: "runtime-running".to_string(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SessionServiceError::SessionBusy { session_id, .. })
+                if session_id == "runtime-running"
+        ));
+    }
+
+    #[tokio::test]
+    async fn checkout_runtime_rejects_running_source_runtime() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let mut parent = save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-source",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+        let checkpoint = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: "runtime-source".to_string(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await
+            .expect("checkpoint runtime");
+        parent.status = SessionLifecycleStatus::Running;
+        store.save(parent).await;
+
+        let result = dependencies
+            .session_control_plane
+            .checkout_runtime(RuntimeCheckoutRequest {
+                checkpoint_id: checkpoint.checkpoint_id,
+                conversation_id: None,
+                sender_id: None,
+                metadata: Value::Null,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SessionServiceError::SessionBusy { session_id, .. })
+                if session_id == "runtime-source"
+        ));
     }
 }

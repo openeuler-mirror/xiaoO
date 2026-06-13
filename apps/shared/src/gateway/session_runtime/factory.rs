@@ -28,10 +28,12 @@ use xiaoo_core::{
     NoopInteractionHandle, NoopToolEventSink,
 };
 
-use crate::gateway::permission_backend::PermissionAwareOperationBackend;
-use crate::gateway::{GatewayEntryKind, ResolvedSessionRuntime, SessionRecord};
 use llm_client::LlmProviderWrapper;
 use parking_lot::RwLock;
+
+use super::ResolvedSessionRuntime;
+use crate::gateway::permission_backend::PermissionAwareOperationBackend;
+use crate::gateway::{GatewayEntryKind, SessionRecord};
 
 pub struct AppRuntimeAssembly {
     pub runtime: AgentRuntime,

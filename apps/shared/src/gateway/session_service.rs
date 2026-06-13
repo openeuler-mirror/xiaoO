@@ -1,6 +1,10 @@
 use crate::gateway::{
     AppTurnRequest, AppTurnResult, SessionOpenRequest, SessionRecord, SessionSubmitReceipt,
 };
+use crate::{
+    RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
+    RuntimeCheckpointResult,
+};
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -83,12 +87,21 @@ pub trait SessionControlPlane: Send + Sync {
         })
     }
 
-    async fn fork_session(
+    async fn checkpoint_runtime(
         &self,
-        _request: crate::gateway::SessionForkRequest,
-    ) -> Result<crate::gateway::SessionForkResult, SessionServiceError> {
+        _request: RuntimeCheckpointRequest,
+    ) -> Result<RuntimeCheckpointResult, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
-            capability: "fork_session".to_string(),
+            capability: "checkpoint_runtime".to_string(),
+        })
+    }
+
+    async fn checkout_runtime(
+        &self,
+        _request: RuntimeCheckoutRequest,
+    ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "checkout_runtime".to_string(),
         })
     }
 

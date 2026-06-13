@@ -14,7 +14,7 @@ use super::backend::{
     DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS, DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
 };
 use super::exec::E2bExec;
-use crate::backend::SandboxError;
+use crate::backend::BackendError;
 
 pub(crate) struct E2bCreateBackendInput {
     pub(crate) backend_id: BackendId,
@@ -105,7 +105,7 @@ struct CreateSnapshotResponse {
 
 pub(crate) async fn create_backend(
     input: E2bCreateBackendInput,
-) -> Result<E2bCreatedBackend, SandboxError> {
+) -> Result<E2bCreatedBackend, BackendError> {
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
     let http = reqwest::Client::new();
@@ -214,7 +214,7 @@ pub(crate) async fn create_backend(
 
     if let Err(error) = ensure_remote_roots(&state).await {
         let _ = state.delete_sandbox().await;
-        return Err(SandboxError::BuildFailed {
+        return Err(BackendError::BuildFailed {
             message: format!("e2b sandbox created but workspace initialization failed: {error}"),
         });
     }
@@ -224,7 +224,7 @@ pub(crate) async fn create_backend(
 
 pub(crate) async fn create_snapshot(
     input: E2bSnapshotInput,
-) -> Result<E2bSnapshotResult, SandboxError> {
+) -> Result<E2bSnapshotResult, BackendError> {
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
     let api_base = options
@@ -254,7 +254,7 @@ pub(crate) async fn create_snapshot(
         .json(&Value::Object(body))
         .send()
         .await
-        .map_err(|error| SandboxError::BuildFailed {
+        .map_err(|error| BackendError::BuildFailed {
             message: format!("failed to create e2b snapshot: {error}"),
         })?;
 
@@ -262,7 +262,7 @@ pub(crate) async fn create_snapshot(
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
-        return Err(SandboxError::BuildFailed {
+        return Err(BackendError::BuildFailed {
             message: format!("e2b create snapshot failed with HTTP {status}: {message}"),
         });
     }
@@ -270,7 +270,7 @@ pub(crate) async fn create_snapshot(
     let parsed = response
         .json::<CreateSnapshotResponse>()
         .await
-        .map_err(|error| SandboxError::BuildFailed {
+        .map_err(|error| BackendError::BuildFailed {
             message: format!("failed to decode e2b create snapshot response: {error}"),
         })?;
 
@@ -280,18 +280,18 @@ pub(crate) async fn create_snapshot(
     })
 }
 
-fn parse_options(value: &Value) -> Result<E2bProviderOptions, SandboxError> {
+fn parse_options(value: &Value) -> Result<E2bProviderOptions, BackendError> {
     let value = if value.is_null() {
         Value::Object(Map::new())
     } else {
         value.clone()
     };
-    serde_json::from_value(value).map_err(|error| SandboxError::InvalidRequest {
+    serde_json::from_value(value).map_err(|error| BackendError::InvalidRequest {
         message: format!("invalid e2b backend options: {error}"),
     })
 }
 
-fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, SandboxError> {
+fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, BackendError> {
     if let Some(api_key) = options
         .api_key
         .as_deref()
@@ -308,14 +308,14 @@ fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, SandboxError>
     std::env::var(env_name)
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| SandboxError::InvalidRequest {
+        .ok_or_else(|| BackendError::InvalidRequest {
             message: format!("e2b backend requires api_key or non-empty env var {env_name}"),
         })
 }
 
-fn backend_path(value: &str) -> Result<BackendPath, SandboxError> {
+fn backend_path(value: &str) -> Result<BackendPath, BackendError> {
     normalize_backend_path(std::path::Path::new(value)).map_err(|error| {
-        SandboxError::InvalidRequest {
+        BackendError::InvalidRequest {
             message: error.to_string(),
         }
     })
@@ -328,7 +328,7 @@ async fn create_e2b_sandbox(
     template_id: &str,
     options: &E2bProviderOptions,
     input: &E2bCreateBackendInput,
-) -> Result<CreateSandboxResponse, SandboxError> {
+) -> Result<CreateSandboxResponse, BackendError> {
     let timeout_secs = options
         .timeout_secs
         .or_else(|| input.resource_limits.timeout_ms.map(|ms| ms / 1000))
@@ -383,7 +383,7 @@ async fn create_e2b_sandbox(
         .json(&Value::Object(body))
         .send()
         .await
-        .map_err(|error| SandboxError::BuildFailed {
+        .map_err(|error| BackendError::BuildFailed {
             message: format!("failed to create e2b sandbox: {error}"),
         })?;
 
@@ -391,7 +391,7 @@ async fn create_e2b_sandbox(
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
-        return Err(SandboxError::BuildFailed {
+        return Err(BackendError::BuildFailed {
             message: format!("e2b create sandbox failed with HTTP {status}: {message}"),
         });
     }
@@ -399,7 +399,7 @@ async fn create_e2b_sandbox(
     response
         .json::<CreateSandboxResponse>()
         .await
-        .map_err(|error| SandboxError::BuildFailed {
+        .map_err(|error| BackendError::BuildFailed {
             message: format!("failed to decode e2b create sandbox response: {error}"),
         })
 }

@@ -32,7 +32,7 @@ pub struct BackendEnsureSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxCreateRequest {
+pub struct BackendCreateRequest {
     pub workspace_root: PathBuf,
     #[serde(default)]
     pub backend_id: Option<String>,
@@ -51,7 +51,7 @@ pub struct SandboxCreateRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SandboxConnectRequest {
+pub struct BackendConnectRequest {
     #[serde(default)]
     pub timeout: Option<u64>,
     #[serde(default)]
@@ -59,12 +59,12 @@ pub struct SandboxConnectRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct SandboxListFilter {
+pub struct BackendListFilter {
     pub metadata: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SandboxLineageInfo {
+pub struct BackendLineageInfo {
     #[serde(default)]
     pub parent_backend_id: Option<String>,
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct SandboxLineageInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxInfo {
+pub struct BackendInfo {
     pub backend_id: String,
     pub provider: String,
     pub instance_id: String,
@@ -92,11 +92,11 @@ pub struct SandboxInfo {
     pub session_ids: Vec<String>,
     pub expires_at_ms: Option<u64>,
     #[serde(default)]
-    pub lineage: SandboxLineageInfo,
+    pub lineage: BackendLineageInfo,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SandboxForkRequest {
+pub struct BackendForkRequest {
     #[serde(default)]
     pub parent_backend_id: Option<String>,
     #[serde(default)]
@@ -118,38 +118,100 @@ pub struct SandboxForkRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxForkResult {
-    pub parent: SandboxInfo,
-    pub child: SandboxInfo,
+pub struct BackendCheckpointRef {
+    pub checkpoint_id: String,
+    pub provider: String,
+    #[serde(default)]
+    pub source_backend_id: Option<String>,
+    #[serde(default)]
+    pub provider_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub provider_snapshot_names: Vec<String>,
+    pub workspace_root: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+    pub created_at_ms: u64,
+    #[serde(default, skip_serializing)]
+    pub provider_options: Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BackendCheckpointRequest {
+    #[serde(default)]
+    pub backend_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCheckpointResult {
+    pub backend: BackendInfo,
+    pub checkpoint: BackendCheckpointRef,
+    pub reused: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCheckoutRequest {
+    pub checkpoint: BackendCheckpointRef,
+    #[serde(default)]
+    pub backend_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub resource_limits: BackendResourceLimits,
+    #[serde(default)]
+    pub options: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCheckoutResult {
+    pub backend: BackendInfo,
+    pub checkpoint: BackendCheckpointRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendForkResult {
+    pub parent: BackendInfo,
+    pub child: BackendInfo,
     pub snapshot_id: String,
     #[serde(default)]
     pub snapshot_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxTreeNode {
-    pub sandbox: SandboxInfo,
+pub struct BackendTreeNode {
+    pub backend: BackendInfo,
     #[serde(default)]
-    pub children: Vec<SandboxTreeNode>,
+    pub children: Vec<BackendTreeNode>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SandboxError {
-    #[error("invalid sandbox request: {message}")]
+pub enum BackendError {
+    #[error("invalid managed backend request: {message}")]
     InvalidRequest { message: String },
-    #[error("sandbox conflict: {message}")]
+    #[error("managed backend conflict: {message}")]
     Conflict { message: String },
-    #[error("sandbox not found: {backend_id}")]
+    #[error("managed backend not found: {backend_id}")]
     NotFound { backend_id: String },
     #[error("unsupported backend kind: {kind}")]
     UnsupportedBackend { kind: String },
-    #[error("sandbox backend build failed: {message}")]
+    #[error("managed backend build failed: {message}")]
     BuildFailed { message: String },
-    #[error("sandbox backend operation failed: {message}")]
+    #[error("managed backend operation failed: {message}")]
     Operation { message: String },
 }
 
-impl SandboxError {
+impl BackendError {
     pub(super) fn from_build_error(error: OperationBackendBuildError) -> Self {
         match error {
             OperationBackendBuildError::InvalidConfig { message } => {
@@ -200,7 +262,7 @@ impl SandboxError {
                 OperationBackendBuildError::UnsupportedBackend { kind }
             }
             Self::NotFound { backend_id } => OperationBackendBuildError::BuildFailed {
-                message: format!("sandbox not found: {backend_id}"),
+                message: format!("managed backend not found: {backend_id}"),
             },
             Self::BuildFailed { message } | Self::Operation { message } => {
                 OperationBackendBuildError::BuildFailed { message }

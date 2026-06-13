@@ -253,9 +253,10 @@ Health check endpoint for liveness probes and load balancing.
 
 ---
 
-#### Session Control Plane
+#### Session And Runtime Control Plane
 
-The daemon exposes session APIs for remote TUI and other first-class clients.
+The daemon exposes session APIs for remote TUI and other first-class clients,
+plus runtime checkpoint APIs for callers that need branching execution state.
 These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
 LLM provider settings are resolved per session/turn: request payloads may pass an
 optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
@@ -268,6 +269,14 @@ config. The daemon does not require the LLM API key at process startup.
 | `POST /api/v1/sessions/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint using `RuntimeCheckpointRequest` |
+| `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint using `RuntimeCheckoutRequest` |
+
+Runtime APIs use `runtime_id` and `checkpoint_id` as the public vocabulary. In
+the current v1 implementation, `runtime_id` is backed by the same value as the
+internal `session_id`; backend ids remain internal and are not returned in
+`RuntimeRecord`. See [Runtime Checkpoint Control](./runtime_checkpoint_control.md)
+for the current layering and checkpoint semantics.
 
 **Open session example:**
 

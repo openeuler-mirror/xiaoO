@@ -114,9 +114,11 @@ After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. Th
 
 ---
 
-## 5. Remote Session API
+## 5. Remote Session And Runtime API
 
-Remote TUI uses the daemon's session APIs.
+Remote TUI uses the daemon's session APIs. The same protected route group also
+contains runtime checkpoint APIs for programmatic clients that need branching
+runtime state.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -125,6 +127,12 @@ Remote TUI uses the daemon's session APIs.
 | `POST /api/v1/sessions/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint |
+| `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint |
+
+For the checkpoint API, callers use `runtime_id` and `checkpoint_id`. Current
+v1 runtime ids are backed by internal session ids, while backend ids and
+provider-native instance ids stay internal to the daemon.
 
 SSE event types:
 
