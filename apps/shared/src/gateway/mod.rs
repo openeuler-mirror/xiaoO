@@ -1,6 +1,5 @@
 pub mod bootstrap;
 pub mod channel_interaction;
-pub mod session_service_impl;
 pub mod decrypted_api_keys;
 pub mod hosted_runtime_resolver;
 pub mod pending_interaction;
@@ -13,6 +12,7 @@ mod session_handle;
 pub mod session_record;
 pub mod session_runtime;
 pub mod session_service;
+pub mod session_service_impl;
 pub mod session_store;
 pub mod session_supervisor;
 pub mod session_worker;
@@ -23,7 +23,6 @@ pub mod workspace_prompt;
 pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
-pub use session_service_impl::CoreBackedSessionService;
 pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
@@ -40,6 +39,7 @@ pub use session_runtime::{
     SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
+pub use session_service_impl::CoreBackedSessionService;
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turns::{
     AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig,

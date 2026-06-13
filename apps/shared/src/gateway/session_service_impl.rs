@@ -1,8 +1,8 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionForkRequest,
-    SessionForkResult, SessionInput, SessionLifecycleStatus, SessionOpenRequest, SessionRecord,
-    SessionRuntimeBuildInput, SessionRuntimeResolveError, SessionRuntimeResolver, SessionService,
-    SessionServiceError, SessionStore, SessionStoreError,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionInput,
+    SessionLifecycleStatus, SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput,
+    SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
+    SessionStore, SessionStoreError,
 };
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
@@ -24,10 +24,7 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::backend::{
-    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendForkResult, BackendManager,
-};
+use crate::backend::{BackendCheckoutRequest, BackendCheckpointRequest, BackendManager};
 use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
 
 pub struct CoreBackedSessionService {
@@ -41,14 +38,14 @@ pub struct CoreBackedSessionService {
 
 struct RuntimeCheckpointInternal {
     result: RuntimeCheckpointResult,
-    session: SessionRecord,
-    backend_checkpoint: Option<BackendCheckpointResult>,
+    // session: SessionRecord,
+    // backend_checkpoint: Option<BackendCheckpointResult>,
 }
 
 struct RuntimeCheckoutInternal {
     result: RuntimeCheckoutResult,
-    session: SessionRecord,
-    backend_checkout: Option<BackendCheckoutResult>,
+    // session: SessionRecord,
+    // backend_checkout: Option<BackendCheckoutResult>,
 }
 
 impl CoreBackedSessionService {
@@ -208,8 +205,8 @@ impl CoreBackedSessionService {
                 metadata: request.metadata,
                 name: request.name,
             },
-            session,
-            backend_checkpoint,
+            // session,
+            // backend_checkpoint,
         })
     }
 
@@ -315,8 +312,8 @@ impl CoreBackedSessionService {
                 source_runtime_id: checkpoint.runtime_id,
                 runtime: RuntimeRecord::from_session(&child),
             },
-            session: child,
-            backend_checkout,
+            // session: child,
+            // backend_checkout,
         })
     }
 
@@ -601,7 +598,7 @@ impl SessionControlPlane for CoreBackedSessionService {
             .await
             .map(|internal| internal.result)
     }
-    
+
     async fn submit_input(
         &self,
         session_id: &str,
