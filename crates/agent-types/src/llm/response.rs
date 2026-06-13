@@ -12,6 +12,8 @@ pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    #[serde(default)]
+    pub cached_tokens: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

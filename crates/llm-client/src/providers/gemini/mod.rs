@@ -154,6 +154,7 @@ impl LlmProvider for GeminiProvider {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    cached_tokens: 0,
                 },
                 stop_reason,
             },
@@ -270,6 +271,7 @@ impl LlmProvider for GeminiProvider {
                     completion_tokens: u.candidates_token_count.unwrap_or(0),
                     total_tokens: u.prompt_token_count.unwrap_or(0)
                         + u.candidates_token_count.unwrap_or(0),
+                    prompt_tokens_details: None,
                 });
                 if let Some(ref u) = usage {
                     final_usage = Some(wire_usage_to_usage(u));

@@ -110,6 +110,7 @@ pub(super) fn response_trace_fields(response: &LlmResponse) -> Value {
         "prompt_tokens": response.message.usage.prompt_tokens,
         "completion_tokens": response.message.usage.completion_tokens,
         "total_tokens": response.message.usage.total_tokens,
+        "cached_tokens": response.message.usage.cached_tokens,
         "response_has_text": response.message.text.is_some(),
         "response_text_len": response.message.text.as_ref().map(|text| text.len()),
         "tool_call_count": response.message.tool_calls.len(),
