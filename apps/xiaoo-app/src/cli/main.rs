@@ -686,14 +686,20 @@ fn handle_skill_command(command: SkillCommands) {
             // Skill not found anywhere
             eprintln!("Skill '{}' not found in any skills directory.", name);
             eprintln!("Checked directories:");
-            eprintln!("  - {} (project level, highest priority)", project_dir.display());
+            eprintln!(
+                "  - {} (project level, highest priority)",
+                project_dir.display()
+            );
             for config_dir in &config_dirs {
                 eprintln!("  - {} (config directory)", config_dir.display());
             }
             if let Some(ref user_d) = user_dir {
                 eprintln!("  - {} (user level)", user_d.display());
             }
-            eprintln!("  - {} (system level, built-in skills)", system_dir.display());
+            eprintln!(
+                "  - {} (system level, built-in skills)",
+                system_dir.display()
+            );
             std::process::exit(1);
         }
     }

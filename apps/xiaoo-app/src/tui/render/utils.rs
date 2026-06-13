@@ -20,29 +20,6 @@ pub fn paste_into_input(input: &mut Input, text: &str) {
     }
 }
 
-pub(crate) fn cursor_row_col(value: &str, cursor: usize) -> (usize, usize) {
-    let chars: Vec<char> = value.chars().collect();
-    let length = chars.len();
-    let cursor = cursor.min(length);
-    let mut row = 0usize;
-    let mut line_start = 0usize;
-    for idx in 0..cursor {
-        if chars[idx] == '\n' {
-            row += 1;
-            line_start = idx + 1;
-        }
-    }
-    let col = cursor - line_start;
-    (row, col)
-}
-
-pub(crate) fn line_prefix_width(line: &str, col_chars: usize) -> usize {
-    line.chars()
-        .take(col_chars)
-        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum()
-}
-
 fn use_ascii_terminal_symbols() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {

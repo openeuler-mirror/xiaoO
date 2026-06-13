@@ -5,15 +5,15 @@ use crate::gateway::{
 };
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
-use agent_types::ReasoningEffort;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_core::{
-    AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule, run_agent_loop,
+    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
 };
 
 pub struct SessionWorkerInput {

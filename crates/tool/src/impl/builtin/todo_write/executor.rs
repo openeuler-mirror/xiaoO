@@ -35,11 +35,9 @@ impl ToolExecutor for TodoWriteToolExecutor {
         call: &FinalToolCall,
         runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
-        let input: TodoWriteInput =
-            crate::r#impl::tool_input::parse_tool_input(&call.input).map_err(|error| {
-                ToolExecutionError::ExecutionFailed {
-                    message: format!("failed to parse todo_write input: {error}"),
-                }
+        let input: TodoWriteInput = crate::r#impl::tool_input::parse_tool_input(&call.input)
+            .map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!("failed to parse todo_write input: {error}"),
             })?;
         validate_todos(&input.todos)?;
 

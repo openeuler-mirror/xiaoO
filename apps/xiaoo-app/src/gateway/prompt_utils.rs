@@ -29,7 +29,8 @@ pub fn generate_skills_dirs_table(skills_dirs: &[PathBuf]) -> String {
         return "| Priority | Directory | Purpose |\n|----------|-----------|---------|\n| (none configured) | - | - |".to_string();
     }
 
-    let mut table = "| Priority | Directory | Purpose |\n|----------|-----------|---------|\n".to_string();
+    let mut table =
+        "| Priority | Directory | Purpose |\n|----------|-----------|---------|\n".to_string();
 
     let mut config_counter = 0;
 
@@ -49,13 +50,15 @@ fn classify_skill_dir(dir: &str, config_counter: &mut usize) -> (String, String)
     } else if dir == "/usr/lib/.xiaoo/skills" {
         ("System".to_string(), "Built-in skills".to_string())
     } else if dir.ends_with("/.xiaoo/skills")
-        && (dir.starts_with('~')
-            || dir.starts_with("/home/")
-            || dir.starts_with("/root/")) {
+        && (dir.starts_with('~') || dir.starts_with("/home/") || dir.starts_with("/root/"))
+    {
         ("User".to_string(), "Personal skills".to_string())
     } else {
         *config_counter += 1;
-        ("Config".to_string(), format!("Configured skill dir {}", config_counter))
+        (
+            "Config".to_string(),
+            format!("Configured skill dir {}", config_counter),
+        )
     }
 }
 

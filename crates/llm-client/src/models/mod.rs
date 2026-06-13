@@ -119,7 +119,10 @@ pub fn get_known_model_context_length(model: &str) -> Option<u64> {
             .expect("known_models.toml must have a [models] section")
             .iter()
             .map(|(pattern, value)| {
-                let context = value.as_integer().expect("model context must be an integer") as u64;
+                let context = value
+                    .as_integer()
+                    .expect("model context must be an integer")
+                    as u64;
                 (normalize_model_id(pattern), context)
             })
             .collect()

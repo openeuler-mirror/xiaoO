@@ -7,11 +7,11 @@ use crate::gateway::{
 };
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
-use agent_types::ReasoningEffort;
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::outcome::AgentOutcome;
 use agent_types::tool::{RawToolOutcome, ToolExecutionResult};
+use agent_types::ReasoningEffort;
 use memory::MemorySnapshot;
 use serde_json::json;
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use subagent::{
     HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
 };
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tool::ToolSpecSnapshot;
 use xiaoo_core::agent_loop::build_tool_result_message;
 use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};

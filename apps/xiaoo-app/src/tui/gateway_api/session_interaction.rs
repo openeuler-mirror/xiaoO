@@ -40,7 +40,9 @@ impl ChannelInteractionHandle {
                 default_index: Some(0),
                 is_secret: false,
             },
-            InteractionRequest::TextInput { prompt, is_secret, .. } => PromptRequest {
+            InteractionRequest::TextInput {
+                prompt, is_secret, ..
+            } => PromptRequest {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 title: prompt.clone(),
                 body: None,
@@ -74,7 +76,7 @@ impl ChannelInteractionHandle {
                 allow_custom_input: *allow_custom_input,
                 multi_select: false,
                 default_index: Some(0),
-                is_secret: false,  // Choice type does not need password hiding
+                is_secret: false, // Choice type does not need password hiding
             },
         }
     }
@@ -89,7 +91,10 @@ impl ChannelInteractionHandle {
                     allowed: choice_id == "yes",
                 })
             }
-            (InteractionRequest::TextInput { is_secret, .. }, PromptResolution::Single { supplement, .. }) => {
+            (
+                InteractionRequest::TextInput { is_secret, .. },
+                PromptResolution::Single { supplement, .. },
+            ) => {
                 // For secret inputs, use display_value to hide the password in messages
                 let display_value = if *is_secret {
                     Some("<SECRET>".to_string())

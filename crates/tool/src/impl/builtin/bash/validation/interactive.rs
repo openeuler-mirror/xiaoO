@@ -7,9 +7,9 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use super::backend::ValidationResult;
-use super::backend::error_code::INTERACTIVE_COMMAND;
 use super::super::input::BashInput;
+use super::backend::error_code::INTERACTIVE_COMMAND;
+use super::backend::ValidationResult;
 
 /// Interactive command detection rule
 struct InteractiveCommandRule {
@@ -66,8 +66,7 @@ fn ssh_needs_password(command: &str) -> bool {
 
 /// Check if SSH command needs hostkey confirmation
 fn ssh_needs_hostkey(command: &str) -> bool {
-    !SSH_STRICT_HOSTKEY.is_match(command)
-        && !SSH_USER_HOSTS_FILE.is_match(command)
+    !SSH_STRICT_HOSTKEY.is_match(command) && !SSH_USER_HOSTS_FILE.is_match(command)
 }
 
 /// Check if sudo command needs password
@@ -157,11 +156,7 @@ fn detect_interactive_command(command: &str) -> Option<(String, bool, bool)> {
                 };
 
                 if needs_password || needs_hostkey {
-                    return Some((
-                        rule.command_type.to_string(),
-                        needs_password,
-                        needs_hostkey,
-                    ));
+                    return Some((rule.command_type.to_string(), needs_password, needs_hostkey));
                 }
             }
         }
@@ -201,9 +196,11 @@ fn build_interactive_error_message(
             if needs_password && needs_hostkey {
                 message_parts.push("  sshpass -p '<password>' ssh -o StrictHostKeyChecking=no <user>@<host> <command>".to_string());
             } else if needs_password {
-                message_parts.push("  sshpass -p '<password>' ssh <user>@<host> <command>".to_string());
+                message_parts
+                    .push("  sshpass -p '<password>' ssh <user>@<host> <command>".to_string());
             } else if needs_hostkey {
-                message_parts.push("  ssh -o StrictHostKeyChecking=no <user>@<host> <command>".to_string());
+                message_parts
+                    .push("  ssh -o StrictHostKeyChecking=no <user>@<host> <command>".to_string());
             }
         }
         "sudo" => {
@@ -219,7 +216,10 @@ fn build_interactive_error_message(
             message_parts.push("  mysql -u <user> -p'<password>'".to_string());
         }
         "gpg" => {
-            message_parts.push("  echo '<passphrase>' | gpg --batch --passphrase-fd 0 --decrypt <file>".to_string());
+            message_parts.push(
+                "  echo '<passphrase>' | gpg --batch --passphrase-fd 0 --decrypt <file>"
+                    .to_string(),
+            );
         }
         _ => {
             message_parts.push("  请根据命令类型构造非交互式命令".to_string());
@@ -245,13 +245,10 @@ pub fn validate_interactive_command(input: &BashInput) -> ValidationResult {
     let command = input.command.trim();
 
     // Detect if command needs interaction
-    if let Some((command_type, needs_password, needs_hostkey)) = detect_interactive_command(command) {
-        let error_message = build_interactive_error_message(
-            &command_type,
-            needs_password,
-            needs_hostkey,
-            command,
-        );
+    if let Some((command_type, needs_password, needs_hostkey)) = detect_interactive_command(command)
+    {
+        let error_message =
+            build_interactive_error_message(&command_type, needs_password, needs_hostkey, command);
 
         return ValidationResult::error(error_message, INTERACTIVE_COMMAND);
     }
@@ -307,7 +304,7 @@ mod tests {
         let needs_section = &message[needs_section_start..example_section_start];
         assert!(needs_section.contains("主机密钥确认"));
         assert!(!needs_section.contains("密码"));
-}
+    }
 
     #[test]
     fn test_ssh_strict_hostkey_allowed() {
@@ -328,7 +325,8 @@ mod tests {
     #[test]
     fn test_ssh_with_key_and_no_hostkey_allowed() {
         let input = BashInput {
-            command: "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no root@192.168.1.1 ls /root".to_string(),
+            command: "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no root@192.168.1.1 ls /root"
+                .to_string(),
             cwd: None,
             timeout: None,
         };
@@ -341,7 +339,8 @@ mod tests {
     #[test]
     fn test_ssh_with_batch_and_no_hostkey_allowed() {
         let input = BashInput {
-            command: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@192.168.1.1 ls /root".to_string(),
+            command: "ssh -o BatchMode=yes -o StrictHostKeyChecking=no root@192.168.1.1 ls /root"
+                .to_string(),
             cwd: None,
             timeout: None,
         };

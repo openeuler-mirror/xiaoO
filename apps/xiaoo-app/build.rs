@@ -76,7 +76,10 @@ fn install_builtin_skills() {
     println!("cargo:rerun-if-changed={}", skills_src_dir.display());
 
     if !skills_src_dir.exists() {
-        println!("cargo:warning=Builtin skills source directory not found: {}", skills_src_dir.display());
+        println!(
+            "cargo:warning=Builtin skills source directory not found: {}",
+            skills_src_dir.display()
+        );
         println!("cargo:warning=Builtin skills will NOT be installed.");
         println!("cargo:warning=This may cause security policy enforcement to be unavailable.");
         return;
@@ -93,7 +96,10 @@ fn install_builtin_skills() {
     };
 
     if skills.is_empty() {
-        println!("cargo:warning=No builtin skills found in {}", skills_src_dir.display());
+        println!(
+            "cargo:warning=No builtin skills found in {}",
+            skills_src_dir.display()
+        );
         return;
     }
 
@@ -103,7 +109,11 @@ fn install_builtin_skills() {
     let mut system_failed_skills: Vec<String> = Vec::new();
 
     if let Err(e) = fs::create_dir_all(system_install_base) {
-        println!("cargo:warning=Failed to create system-level skills directory {}: {}", system_install_base.display(), e);
+        println!(
+            "cargo:warning=Failed to create system-level skills directory {}: {}",
+            system_install_base.display(),
+            e
+        );
         println!("cargo:warning=Reason: likely permission denied (requires root privileges)");
     } else {
         for skill_name in &skills {
@@ -138,7 +148,10 @@ fn install_builtin_skills() {
 
     // Determine which skills need fallback to user-level
     let fallback_skills = if !system_failed_skills.is_empty() {
-        println!("cargo:warning=Failed to install {} skill(s) to system-level directory", system_failed_skills.len());
+        println!(
+            "cargo:warning=Failed to install {} skill(s) to system-level directory",
+            system_failed_skills.len()
+        );
         println!("cargo:warning=Reason: permission denied (requires root privileges)");
         println!("cargo:warning=Fallback: installing to user-level directory ~/.xiaoo/skills");
         system_failed_skills.clone()
@@ -155,7 +168,11 @@ fn install_builtin_skills() {
 
     let user_install_base = Path::new(&home).join(".xiaoo/skills");
     if let Err(e) = fs::create_dir_all(&user_install_base) {
-        println!("cargo:warning=Failed to create user skills directory {}: {}", user_install_base.display(), e);
+        println!(
+            "cargo:warning=Failed to create user skills directory {}: {}",
+            user_install_base.display(),
+            e
+        );
         println!("cargo:warning=Builtin skills will NOT be installed.");
         println!("cargo:warning=This may cause security policy enforcement to be unavailable.");
         return;

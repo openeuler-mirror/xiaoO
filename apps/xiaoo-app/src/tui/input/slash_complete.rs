@@ -237,14 +237,7 @@ mod tests {
         assert_eq!(
             candidates_for_prefix("/", NO_EXT),
             vec![
-                "/connect",
-                "/dir",
-                "/delete",
-                "/load",
-                "/new",
-                "/save",
-                "/remote",
-                "/sandbox",
+                "/connect", "/dir", "/delete", "/load", "/new", "/save", "/remote", "/sandbox",
                 "/skills"
             ]
         );

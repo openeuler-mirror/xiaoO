@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 use serde_json::Value;
-use textwrap::{Options, WordSplitter, WordSeparator, wrap};
+use textwrap::{wrap, Options, WordSeparator, WordSplitter};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;

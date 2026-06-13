@@ -33,11 +33,9 @@ impl ToolExecutor for AskUserQuestionExecutor {
         call: &FinalToolCall,
         runtime: &dyn RuntimeView,
     ) -> Result<ToolExecutorOutput, ToolExecutionError> {
-        let input: AskUserQuestionInput =
-            crate::r#impl::tool_input::parse_tool_input(&call.input).map_err(|e| {
-                ToolExecutionError::ExecutionFailed {
-                    message: format!("Failed to parse input: {}", e),
-                }
+        let input: AskUserQuestionInput = crate::r#impl::tool_input::parse_tool_input(&call.input)
+            .map_err(|e| ToolExecutionError::ExecutionFailed {
+                message: format!("Failed to parse input: {}", e),
             })?;
 
         // Validate input
@@ -98,12 +96,13 @@ impl ToolExecutor for AskUserQuestionExecutor {
                 InteractionResponse::Confirmed { allowed } => {
                     AnswerItem::Confirmed { prompt, allowed }
                 }
-                InteractionResponse::Text { value, display_value } => {
-                    AnswerItem::Text {
-                        prompt,
-                        value,
-                        display_value,
-                    }
+                InteractionResponse::Text {
+                    value,
+                    display_value,
+                } => AnswerItem::Text {
+                    prompt,
+                    value,
+                    display_value,
                 },
                 InteractionResponse::Choice { value } => AnswerItem::Choice { prompt, value },
             };

@@ -142,7 +142,8 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await.ok();
+            .await
+            .ok();
     }
 
     async fn end_span(
@@ -174,11 +175,13 @@ impl TraceBackend for MoiraiSqliteBackend {
                 ),
                 occurred_at_ms as i64,
             )
-            .await.ok();
+            .await
+            .ok();
 
         self.context
             .end_span_at(span.span_id(), occurred_at_ms as i64)
-            .await.ok();
+            .await
+            .ok();
     }
 
     async fn finalize_trace(
@@ -212,7 +215,8 @@ impl TraceBackend for MoiraiSqliteBackend {
 
         self.context
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
-            .await.ok();
+            .await
+            .ok();
 
         *finalized = true;
     }
