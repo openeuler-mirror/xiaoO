@@ -244,6 +244,10 @@ fn create_router_from_state(
                 "/api/v1/runtimes/checkpoint",
                 post(handle_runtime_checkpoint),
             )
+            .route(
+                "/api/v1/runtimes/checkpoint/delete-snapshot",
+                post(handle_runtime_checkpoint_snapshot_delete),
+            )
             .route("/api/v1/runtimes/checkout", post(handle_runtime_checkout)),
         bearer_auth.clone(),
     );
@@ -536,6 +540,26 @@ async fn handle_runtime_checkout(
     }
 }
 
+async fn handle_runtime_checkpoint_snapshot_delete(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeCheckpointSnapshotDeleteRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.delete_checkpoint_snapshot(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
 fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Response {
     let status = match &error {
         xiaoo_shared::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
@@ -793,6 +817,7 @@ mod tests {
         assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
 
         let valid_auth = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -805,6 +830,40 @@ mod tests {
             .await
             .expect("router should respond");
         assert_eq!(valid_auth.status(), StatusCode::NOT_IMPLEMENTED);
+
+        let missing_auth_delete_snapshot = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint/delete-snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"checkpoint_id":"rtcp_demo"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(
+            missing_auth_delete_snapshot.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let valid_auth_delete_snapshot = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/checkpoint/delete-snapshot")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"checkpoint_id":"rtcp_demo"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(
+            valid_auth_delete_snapshot.status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -20,5 +20,5 @@ Application-layer package for XiaoO.
 The public control plane should talk in runtime/checkpoint terms. In the current
 v1 implementation, `runtime_id` is backed by the internal `session_id`, while
 backend ids remain internal manager state. See
-[`docs/runtime_checkpoint_control.md`](../../docs/runtime_checkpoint_control.md)
+[`docs/runtime_checkpoint.md`](../../docs/runtime_checkpoint.md)
 for the current checkpoint layering.

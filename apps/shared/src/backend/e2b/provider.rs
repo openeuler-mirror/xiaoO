@@ -36,6 +36,11 @@ pub(crate) struct E2bSnapshotInput {
     pub(crate) name: Option<String>,
 }
 
+pub(crate) struct E2bDeleteSnapshotInput {
+    pub(crate) provider_options: Value,
+    pub(crate) snapshot_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct E2bSnapshotResult {
     pub(crate) snapshot_id: String,
@@ -280,6 +285,51 @@ pub(crate) async fn create_snapshot(
     })
 }
 
+pub(crate) async fn delete_snapshot(input: E2bDeleteSnapshotInput) -> Result<bool, BackendError> {
+    let snapshot_id = input.snapshot_id.trim();
+    if snapshot_id.is_empty() {
+        return Err(BackendError::InvalidRequest {
+            message: "e2b snapshot id cannot be empty".to_string(),
+        });
+    }
+
+    let options = parse_options(&input.provider_options)?;
+    let api_key = resolve_api_key(&options)?;
+    let api_base = options
+        .api_base
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(DEFAULT_API_BASE)
+        .to_string();
+    let http = reqwest::Client::new();
+
+    let response = http
+        .delete(join_url(
+            api_base.as_str(),
+            format!("/templates/{}", encode_path_segment(snapshot_id)).as_str(),
+        ))
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|error| BackendError::BuildFailed {
+            message: format!("failed to delete e2b snapshot template: {error}"),
+        })?;
+
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(true);
+    }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
+    Err(BackendError::BuildFailed {
+        message: format!("e2b delete snapshot template failed with HTTP {status}: {message}"),
+    })
+}
+
 fn parse_options(value: &Value) -> Result<E2bProviderOptions, BackendError> {
     let value = if value.is_null() {
         Value::Object(Map::new())
@@ -518,6 +568,19 @@ fn current_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(format!("%{byte:02X}").as_str()),
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +618,14 @@ mod tests {
                 .as_deref()
                 .unwrap_or(DEFAULT_TEMPLATE_ID),
             "base"
+        );
+    }
+
+    #[test]
+    fn encodes_template_id_as_single_path_segment() {
+        assert_eq!(
+            encode_path_segment("team/fork-test:default"),
+            "team%2Ffork-test%3Adefault"
         );
     }
 }

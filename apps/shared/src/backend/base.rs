@@ -157,6 +157,22 @@ pub struct BackendCheckpointResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCheckpointSnapshotDeleteRequest {
+    pub checkpoint: BackendCheckpointRef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCheckpointSnapshotDeleteResult {
+    pub checkpoint_id: String,
+    pub provider: String,
+    #[serde(default)]
+    pub provider_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub provider_snapshot_names: Vec<String>,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendCheckoutRequest {
     pub checkpoint: BackendCheckpointRef,
     #[serde(default)]

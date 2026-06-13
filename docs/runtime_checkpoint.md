@@ -44,6 +44,7 @@ Bearer authentication applies when `[http]` auth is configured.
 | Endpoint | Request | Response | Meaning |
 | --- | --- | --- | --- |
 | `POST /api/v1/runtimes/checkpoint` | `RuntimeCheckpointRequest` | `RuntimeCheckpointResult` | Capture the current idle runtime as a checkpoint |
+| `POST /api/v1/runtimes/checkpoint/delete-snapshot` | `RuntimeCheckpointSnapshotDeleteRequest` | `RuntimeCheckpointSnapshotDeleteResult` | Delete the provider snapshot/template referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | `RuntimeCheckoutRequest` | `RuntimeCheckoutResult` | Create a new runtime from an existing checkpoint |
 
 `RuntimeCheckpointRequest` contains `runtime_id`, optional `name`, and optional
@@ -55,6 +56,13 @@ exists.
 optional `sender_id`, and optional `metadata`. Checkout always creates a new
 runtime branch in v1. The caller cannot provide the child runtime id; the service
 generates it from the source runtime id plus a UUID suffix.
+
+`RuntimeCheckpointSnapshotDeleteRequest` contains `checkpoint_id`. The service
+looks up the checkpoint's internal `BackendCheckpointRef` and deletes only the
+provider snapshot recorded there; callers cannot provide an arbitrary provider
+template id. The checkpoint record remains in the process-local store, but its
+provider snapshot id is cleared after successful or already-deleted provider
+cleanup.
 
 ## Runtime Checkpoint Shape
 
@@ -98,6 +106,7 @@ E2B runtime checkpoint and checkout include provider-side sandbox work:
 | --- | --- | --- |
 | `POST /api/v1/runtimes/checkpoint` | Calls the E2B snapshot API for the source sandbox when the backend is dirty or has no reusable checkpoint | Clean backends with an existing checkpoint can reuse the prior `BackendCheckpointRef` and avoid a new provider snapshot |
 | `POST /api/v1/runtimes/checkout` | Starts a new E2B sandbox from the provider snapshot and binds it to the child runtime id | The child runtime receives a generated id; callers cannot provide it in v1 |
+| `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Deletes the E2B snapshot/template by calling the E2B delete-template API | This is explicit cleanup for snapshots the caller no longer needs for future checkout |
 | `POST /api/v1/sessions/close` | Releases the session backend and deletes the E2B sandbox when no sessions remain bound to that backend | Close time is separate from checkpoint/checkout timing |
 
 Use `curl -w '%{time_total}'` around the checkpoint and checkout requests when

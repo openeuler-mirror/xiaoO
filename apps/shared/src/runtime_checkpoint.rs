@@ -69,6 +69,25 @@ pub struct RuntimeCheckoutResult {
     pub runtime: RuntimeRecord,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointSnapshotDeleteRequest {
+    pub checkpoint_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointSnapshotDeleteResult {
+    pub checkpoint_id: String,
+    pub runtime_id: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub provider_snapshot_id: Option<String>,
+    #[serde(default)]
+    pub provider_snapshot_names: Vec<String>,
+    pub deleted_provider_snapshot: bool,
+    pub deleted_at_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub(crate) struct RuntimeCheckpoint {
@@ -129,5 +148,18 @@ impl InMemoryRuntimeCheckpointStore {
             .await
             .runtime_heads
             .insert(runtime_id, checkpoint_id);
+    }
+
+    pub(crate) async fn clear_backend_snapshot(
+        &self,
+        checkpoint_id: &str,
+    ) -> Option<RuntimeCheckpoint> {
+        let mut state = self.state.write().await;
+        let checkpoint = state.checkpoints.get_mut(checkpoint_id)?;
+        if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.as_mut() {
+            backend_checkpoint.provider_snapshot_id = None;
+            backend_checkpoint.provider_snapshot_names.clear();
+        }
+        Some(checkpoint.clone())
     }
 }

@@ -19,7 +19,8 @@ pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
 pub use base::{
     BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendConnectRequest, BackendCreateRequest,
+    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
+    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
     BackendLease, BackendLineageInfo, BackendListFilter, BackendTreeNode, GatewayBackendConfig,
 };

@@ -48,6 +48,19 @@ impl BackendDirtyTracker {
             state.dirty = false;
         }
     }
+
+    pub(super) fn clear_checkpoint_if_matches(&self, checkpoint_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if state
+                .checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+            {
+                state.checkpoint = None;
+                state.dirty = true;
+            }
+        }
+    }
 }
 
 pub(super) struct DirtyTrackedOperationBackend {

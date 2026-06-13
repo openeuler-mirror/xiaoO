@@ -6,7 +6,8 @@ use crate::gateway::{
 };
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
-    RuntimeCheckpointResult, RuntimeRecord,
+    RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimeRecord,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
@@ -24,7 +25,10 @@ use xiaoo_core::NoopRuntimeView;
 use super::session_backend::{lease_session_backend, sync_session_backend_instance};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
-use crate::backend::{BackendCheckoutRequest, BackendCheckpointRequest, BackendManager};
+use crate::backend::{
+    BackendCheckoutRequest, BackendCheckpointRequest, BackendCheckpointSnapshotDeleteRequest,
+    BackendError, BackendManager,
+};
 use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
 
 pub struct CoreBackedSessionService {
@@ -46,6 +50,10 @@ struct RuntimeCheckoutInternal {
     result: RuntimeCheckoutResult,
     // session: SessionRecord,
     // backend_checkout: Option<BackendCheckoutResult>,
+}
+
+struct RuntimeCheckpointSnapshotDeleteInternal {
+    result: RuntimeCheckpointSnapshotDeleteResult,
 }
 
 impl CoreBackedSessionService {
@@ -314,6 +322,69 @@ impl CoreBackedSessionService {
             },
             // session: child,
             // backend_checkout,
+        })
+    }
+
+    async fn delete_checkpoint_snapshot_internal(
+        &self,
+        request: RuntimeCheckpointSnapshotDeleteRequest,
+    ) -> Result<RuntimeCheckpointSnapshotDeleteInternal, SessionServiceError> {
+        let checkpoint = self
+            .runtime_checkpoints
+            .load(&request.checkpoint_id)
+            .await
+            .ok_or_else(|| SessionServiceError::SessionNotFound {
+                session_id: format!("checkpoint:{}", request.checkpoint_id),
+            })?;
+
+        let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone() else {
+            return Ok(RuntimeCheckpointSnapshotDeleteInternal {
+                result: RuntimeCheckpointSnapshotDeleteResult {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    runtime_id: checkpoint.runtime_id,
+                    provider: None,
+                    provider_snapshot_id: None,
+                    provider_snapshot_names: Vec::new(),
+                    deleted_provider_snapshot: false,
+                    deleted_at_ms: current_time_ms(),
+                },
+            });
+        };
+
+        let provider = backend_checkpoint.provider.clone();
+        let provider_snapshot_id = backend_checkpoint.provider_snapshot_id.clone();
+        let provider_snapshot_names = backend_checkpoint.provider_snapshot_names.clone();
+        let delete = self
+            .backend_manager
+            .delete_checkpoint_snapshot(BackendCheckpointSnapshotDeleteRequest {
+                checkpoint: backend_checkpoint,
+            })
+            .await
+            .map_err(|error| match error {
+                BackendError::UnsupportedBackend { kind } => {
+                    SessionServiceError::UnsupportedCapability {
+                        capability: format!("delete_checkpoint_snapshot:{kind}"),
+                    }
+                }
+                error => SessionServiceError::RuntimeBuild {
+                    message: format!("failed to delete checkpoint backend snapshot: {error}"),
+                },
+            })?;
+
+        self.runtime_checkpoints
+            .clear_backend_snapshot(&request.checkpoint_id)
+            .await;
+
+        Ok(RuntimeCheckpointSnapshotDeleteInternal {
+            result: RuntimeCheckpointSnapshotDeleteResult {
+                checkpoint_id: request.checkpoint_id,
+                runtime_id: checkpoint.runtime_id,
+                provider: Some(provider),
+                provider_snapshot_id,
+                provider_snapshot_names,
+                deleted_provider_snapshot: delete.deleted,
+                deleted_at_ms: current_time_ms(),
+            },
         })
     }
 
@@ -595,6 +666,15 @@ impl SessionControlPlane for CoreBackedSessionService {
         request: RuntimeCheckoutRequest,
     ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
         self.checkout_runtime_internal(request)
+            .await
+            .map(|internal| internal.result)
+    }
+
+    async fn delete_checkpoint_snapshot(
+        &self,
+        request: RuntimeCheckpointSnapshotDeleteRequest,
+    ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
+        self.delete_checkpoint_snapshot_internal(request)
             .await
             .map(|internal| internal.result)
     }
@@ -979,6 +1059,49 @@ mod tests {
         assert_eq!(result.parent_checkpoint_id, None);
         assert_eq!(result.metadata, json!({"kind": "test"}));
         assert_eq!(result.name.as_deref(), Some("checkpoint-a"));
+    }
+
+    #[tokio::test]
+    async fn delete_checkpoint_snapshot_without_backend_snapshot_is_noop() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
+            .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+        let checkpoint = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: "runtime-1".to_string(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await
+            .expect("checkpoint runtime");
+
+        let result = dependencies
+            .session_control_plane
+            .delete_checkpoint_snapshot(RuntimeCheckpointSnapshotDeleteRequest {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+            })
+            .await
+            .expect("delete checkpoint snapshot");
+
+        assert_eq!(result.checkpoint_id, checkpoint.checkpoint_id);
+        assert_eq!(result.runtime_id, "runtime-1");
+        assert_eq!(result.provider, None);
+        assert_eq!(result.provider_snapshot_id, None);
+        assert!(!result.deleted_provider_snapshot);
     }
 
     #[tokio::test]

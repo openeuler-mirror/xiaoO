@@ -270,12 +270,13 @@ config. The daemon does not require the LLM API key at process startup.
 | `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint using `RuntimeCheckpointRequest` |
+| `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot/template referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint using `RuntimeCheckoutRequest` |
 
 Runtime APIs use `runtime_id` and `checkpoint_id` as the public vocabulary. In
 the current v1 implementation, `runtime_id` is backed by the same value as the
 internal `session_id`; backend ids remain internal and are not returned in
-`RuntimeRecord`. See [Runtime Checkpoint Control](./runtime_checkpoint_control.md)
+`RuntimeRecord`. See [Runtime Checkpoint Control](./runtime_checkpoint.md)
 for the current layering and checkpoint semantics.
 
 **Open session example:**
@@ -451,6 +452,22 @@ curl -sS \
 
 CHILD_SESSION="$(jq -r '.runtime.runtime_id' /tmp/xiaoo_checkout.out)"
 printf "checkout_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkout.time)"
+```
+
+If a checkpoint's provider snapshot is no longer needed for future checkout,
+delete it explicitly. The checkpoint record remains in daemon memory for lineage
+metadata, but after this call it no longer has an E2B provider snapshot and
+cannot be used to create another checkout branch.
+
+```bash
+jq -n --arg checkpoint "$CHECKPOINT_ID" \
+  '{ checkpoint_id: $checkpoint }' \
+  > /tmp/xiaoo_delete_snapshot.json
+
+curl -sS -X POST "$BASE_URL/api/v1/runtimes/checkpoint/delete-snapshot" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_delete_snapshot.json
 ```
 
 ```bash

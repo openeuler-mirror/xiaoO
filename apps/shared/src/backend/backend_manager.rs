@@ -12,7 +12,8 @@ use super::{
     e2b, expires_at_ms_from_timeout, forked_provider_options, hash_config, metadata_matches_filter,
     new_backend_id, requested_backend_id, resolve_backend_config, resolve_session_backend_config,
     workspace_root_string, BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef,
-    BackendCheckpointRequest, BackendCheckpointResult, BackendConnectRequest, BackendCreateRequest,
+    BackendCheckpointRequest, BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
+    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
     BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter, BackendTreeNode,
     BuildBackendInput,
@@ -369,6 +370,55 @@ impl BackendManager {
             backend,
             checkpoint,
             reused: false,
+        })
+    }
+
+    pub async fn delete_checkpoint_snapshot(
+        &self,
+        request: BackendCheckpointSnapshotDeleteRequest,
+    ) -> Result<BackendCheckpointSnapshotDeleteResult, BackendError> {
+        let checkpoint = request.checkpoint;
+        let provider = checkpoint.provider.clone();
+        let provider_snapshot_id = checkpoint.provider_snapshot_id.clone();
+        let provider_snapshot_names = checkpoint.provider_snapshot_names.clone();
+
+        let Some(snapshot_id) = provider_snapshot_id.as_deref() else {
+            return Ok(BackendCheckpointSnapshotDeleteResult {
+                checkpoint_id: checkpoint.checkpoint_id,
+                provider,
+                provider_snapshot_id,
+                provider_snapshot_names,
+                deleted: false,
+            });
+        };
+
+        if provider != "e2b" {
+            return Err(BackendError::UnsupportedBackend {
+                kind: format!("{provider}:delete_snapshot"),
+            });
+        }
+
+        let deleted = e2b::delete_snapshot(e2b::E2bDeleteSnapshotInput {
+            provider_options: checkpoint.provider_options.clone(),
+            snapshot_id: snapshot_id.to_string(),
+        })
+        .await?;
+
+        if let Some(source_backend_id) = checkpoint.source_backend_id.as_ref() {
+            let state = self.state.lock().await;
+            if let Some(entry) = state.backends.get(&BackendId(source_backend_id.clone())) {
+                entry
+                    .dirty_tracker
+                    .clear_checkpoint_if_matches(&checkpoint.checkpoint_id);
+            }
+        }
+
+        Ok(BackendCheckpointSnapshotDeleteResult {
+            checkpoint_id: checkpoint.checkpoint_id,
+            provider,
+            provider_snapshot_id,
+            provider_snapshot_names,
+            deleted,
         })
     }
 
