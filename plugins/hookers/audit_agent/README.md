@@ -372,6 +372,8 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ## 端到端测试
 
+测试脚本通过读取审计日志（`AUDIT_LOG_PATH`）来判断 audit_agent 是否拒绝，比检查 xiaoo 输出更可靠。
+
 ### 源码安装环境
 
 ```bash
