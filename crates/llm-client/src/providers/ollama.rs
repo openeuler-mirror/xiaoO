@@ -141,8 +141,8 @@ impl LlmProvider for OllamaProvider {
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         if !status.is_success() {
-            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
             return Err(map_api_status_error(
                 status,
@@ -160,8 +160,17 @@ impl LlmProvider for OllamaProvider {
         let mut byte_stream = response.bytes_stream();
 
         while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmError::StreamError {
-                message: e.to_string(),
+            let bytes = chunk_result.map_err(|e| {
+                crate::error::write_stream_error_log(
+                    &url,
+                    Some(&headers),
+                    &buffer,
+                    &e.to_string(),
+                    Some(status.as_u16()),
+                );
+                LlmError::StreamError {
+                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
+                }
             })?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
