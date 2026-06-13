@@ -401,19 +401,26 @@ bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 
 ### RPM 安装环境
 
-需安装两个 RPM 包：
+audit_agent 通过 `xiaoO-hookers` RPM 包安装到 `/usr/lib/.xiaoo/hookers/audit_agent/`，测试用例需从 `src.rpm` 解压获取：
 
 ```bash
-sudo dnf install ./xiaoO-hookers-*.rpm       # audit_agent 主程序
-sudo dnf install ./xiaoO-hookers-tests-*.rpm  # 测试用例（安装到 /usr/lib/.xiaoo/tests/）
+# 安装 xiaoO-hookers（audit_agent 主程序）
+sudo dnf install ./xiaoO-hookers-*.rpm
+
+# 获取测试用例（从 src.rpm 解压）
+rpm -ivh ./xiaoO-*.src.rpm
+cd ~/rpmbuild/SOURCES/ && tar -zxvf xiaoO-*.tar.gz
+
+# 启用 audit_agent
+xiaoo-hookers-install --non-interactive audit-agent
 ```
 
-`--plugin-json` 参数是必需的，因为测试用例和 plugin.json 分属两个不同的 RPM 包，路径不连续：
+测试用例位于 `~/rpmbuild/SOURCES/xiaoO-*/plugins/tests/hookers/audit_agent/xiaoo/`，直接在该目录运行即可：
 
 ```bash
-cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
+cd ~/rpmbuild/SOURCES/xiaoO-*/plugins/tests/hookers/audit_agent/xiaoo
 
-# 运行全部用例（完整示例）
+# 运行全部用例
 python3 run_rules_tests.py \
   --api-key "your-api-key" \
   --bin /usr/bin/xiaoo \
@@ -438,14 +445,12 @@ python3 run_rules_tests.py \
   --bin /usr/bin/xiaoo \
   --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
   --dry-run
-
-# Shell 脚本测试
-export XIAOO_BIN=/usr/bin/xiaoo
-export XIAOO_CONFIG=~/.config/xiaoo/config.toml
-bash run-deny-01-passwd.sh
 ```
 
-> **提示**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM（含 `api_key_env`），可省略 `--api-key`，脚本会自动读取。
+> **说明**：
+> - `--plugin-json` 必须指定已安装的 plugin.json 路径
+> - `--bin` 指定已安装的 xiaoo 二进制路径
+> - 测试脚本中的 `PROJECT_ROOT` 变量用于推断开发环境的默认路径，RPM 环境下通过 `--bin` 和 `--plugin-json` 参数覆盖，因此不需要移动测试用例
 
 详细测试指南见 [TEST_GUIDE.md](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md)。
 
