@@ -1,7 +1,8 @@
 use crate::gateway::backend::GatewayBackendConfig;
 use crate::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use crate::gateway::{
-    compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
+    compose_repo_map, compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord,
+    SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
     SessionRuntimeResolver,
 };
@@ -31,6 +32,19 @@ pub struct SubagentRoleConfigEntry {
     pub prompt: Option<String>,
     pub max_turns: Option<u32>,
     pub tools: BTreeMap<String, bool>,
+}
+
+/// Slim system prompt for spawned exploration subagents, instead of the parent's
+/// full composed prompt (identity, output-economy rules, delegation guidance the
+/// child cannot act on, skills catalog), which would be re-sent every child turn.
+const SUBAGENT_SYSTEM_PROMPT: &str = include_str!("../prompts/subagent_system_prompt.txt");
+
+/// Tools a read-only exploration subagent receives: the minimal search/read set.
+/// Allowlist, not blocklist — every other tool (mutation, side effects, user
+/// interaction, further delegation, web access) is dead weight in the child's
+/// per-turn tool-spec overhead, or a way to waste its final turn and lose its reply.
+fn is_subagent_allowed_tool(name: &str) -> bool {
+    matches!(name, "file_read" | "glob" | "grep")
 }
 
 #[derive(Clone)]
@@ -129,10 +143,16 @@ impl HostedSessionRuntimeResolver {
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let Some(visible_tool_names) = self.config.visible_tool_names.as_ref() else {
             let tool_sources = load_tool_sources_with_services(services.clone());
+            // A spawned subagent is read-only exploration fan-out (see the
+            // spawn_subagent spec), so restrict it to the search/read allowlist
+            // rather than letting it inherit the parent's full toolset; the main
+            // agent keeps everything.
+            let is_subagent = *agent_id != self.config.descriptor.agent_id;
             let all_tool_names = tool_sources
                 .iter()
                 .flat_map(|source| source.discover())
                 .map(|tool| tool.spec.name().clone())
+                .filter(|name| !is_subagent || is_subagent_allowed_tool(&name.0))
                 .collect();
             let mut per_agent_allowed_tools = HashMap::new();
             per_agent_allowed_tools.insert(agent_id.clone(), all_tool_names);
@@ -155,11 +175,16 @@ impl HostedSessionRuntimeResolver {
             return Ok(None);
         }
 
+        let is_subagent = *agent_id != self.config.descriptor.agent_id;
+        let allowed: Vec<ToolName> = visible_tool_names
+            .iter()
+            .filter(|name| !is_subagent || is_subagent_allowed_tool(name.as_str()))
+            .cloned()
+            .map(ToolName)
+            .collect();
+
         let mut per_agent_allowed_tools = HashMap::new();
-        per_agent_allowed_tools.insert(
-            agent_id.clone(),
-            visible_tool_names.iter().cloned().map(ToolName).collect(),
-        );
+        per_agent_allowed_tools.insert(agent_id.clone(), allowed);
 
         let registry = ToolRegistryBuilderImpl::new()
             .with_sources(load_tool_sources_with_services(services))
@@ -241,19 +266,33 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
         services.workspace_root = Some(self.config.descriptor.workspace_root.clone());
         let mut descriptor = self.config.descriptor.clone();
         descriptor.agent_id = agent_id.clone();
-        descriptor.system_prompt =
-            compose_workspace_system_prompt(&descriptor.system_prompt, &descriptor.workspace_root);
 
-        descriptor.system_prompt = descriptor.system_prompt.replace(
-            "{{skills_dirs_table}}",
-            &generate_skills_dirs_table(&self.config.skills_config.skills_dirs),
-        );
+        let is_subagent = agent_id != self.config.descriptor.agent_id;
+
+        if is_subagent {
+            // The child gets the slim exploration prompt, not the parent's full
+            // composed one (re-billed every child turn). Its task arrives via the
+            // spawn_subagent template as the first user message, so the system
+            // slot only needs the exploration contract.
+            descriptor.system_prompt = SUBAGENT_SYSTEM_PROMPT.trim().to_string();
+        } else {
+            descriptor.system_prompt = compose_workspace_system_prompt(
+                &descriptor.system_prompt,
+                &descriptor.workspace_root,
+            );
+            descriptor.system_prompt = descriptor.system_prompt.replace(
+                "{{skills_dirs_table}}",
+                &generate_skills_dirs_table(&self.config.skills_config.skills_dirs),
+            );
+            if let Some(repo_map) = compose_repo_map(&descriptor.workspace_root) {
+                descriptor.system_prompt.push_str("\n\n");
+                descriptor.system_prompt.push_str(&repo_map);
+            }
+        }
 
         if request.max_turns_override.is_some() {
             descriptor.max_turns = request.max_turns_override;
         }
-
-        let is_subagent = agent_id != self.config.descriptor.agent_id;
 
         if !is_subagent {
             if let Some(rules) = compose_subagent_delegation_rules(&descriptor.subagent_roles) {
@@ -272,7 +311,13 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             entry_kind: request.entry.kind.clone(),
             llm_provider,
             tool_registry: self.build_tool_registry(&agent_id, services)?,
-            skill_registry: Some(Self::build_skill_registry(&self.config.skills_config)),
+            // Children don't get the skills catalog: more per-turn prompt surface,
+            // and the `skill` tool is outside their allowlist anyway.
+            skill_registry: if is_subagent {
+                None
+            } else {
+                Some(Self::build_skill_registry(&self.config.skills_config))
+            },
             bindings: self.bindings.clone(),
             trace: self.config.trace.clone(),
             compression_pipeline: self.config.compression_pipeline.clone(),

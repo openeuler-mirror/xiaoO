@@ -48,4 +48,4 @@ pub use session_service::{SessionControlPlane, SessionService, SessionServiceErr
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turn_request::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, TurnMention};
 pub use turn_result::AppTurnResult;
-pub use workspace_prompt::compose_workspace_system_prompt;
+pub use workspace_prompt::{compose_repo_map, compose_workspace_system_prompt};
