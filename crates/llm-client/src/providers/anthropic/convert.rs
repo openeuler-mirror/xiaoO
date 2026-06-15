@@ -40,14 +40,19 @@ pub(crate) fn extract_anthropic_tool_calls(content: &serde_json::Value) -> Vec<W
         .collect()
 }
 
-pub(crate) fn anthropic_system_message(messages: &[ChatMessage]) -> String {
+pub(crate) fn anthropic_system_blocks(messages: &[ChatMessage]) -> Vec<String> {
     messages
         .iter()
         .filter(|m| matches!(m.role, MessageRole::System))
-        .flat_map(|m| m.blocks.iter())
-        .filter_map(block_text_for_system)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .map(|m| {
+            m.blocks
+                .iter()
+                .filter_map(block_text_for_system)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        })
+        .filter(|text| !text.is_empty())
+        .collect()
 }
 
 pub(crate) fn anthropic_messages(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
@@ -274,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_system_message_joins_text_blocks() {
+    fn test_anthropic_system_blocks_one_entry_per_message() {
         let messages = vec![
             ChatMessage::system("base system"),
             ChatMessage::new(
@@ -288,7 +293,7 @@ mod tests {
             ),
         ];
 
-        let system = anthropic_system_message(&messages);
-        assert_eq!(system, "base system\n\nworkspace doc");
+        let blocks = anthropic_system_blocks(&messages);
+        assert_eq!(blocks, vec!["base system", "workspace doc"]);
     }
 }
