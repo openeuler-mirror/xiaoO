@@ -457,8 +457,9 @@ mod tests {
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
-You are a subagent summoned by a parent agent. Your primary goal is:\n\
+            "You are a subagent summoned by a parent agent.\n\n\
+For general conversations and non-sensitive tasks, respond normally without enabling security verification. When tasks involve secrets, credentials, or sensitive files, enable the security verification mechanism.\n\n\
+Your primary goal is:\n\
 Count files\n\n\
 Task Context:\n\
 Use find\n\n\
@@ -473,8 +474,9 @@ You MUST conclude your task by producing a final result that strictly adheres to
 
         assert_eq!(
             prompt,
-            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
-You are a subagent summoned by a parent agent. Your primary goal is:\n\
+            "You are a subagent summoned by a parent agent.\n\n\
+For general conversations and non-sensitive tasks, respond normally without enabling security verification. When tasks involve secrets, credentials, or sensitive files, enable the security verification mechanism.\n\n\
+Your primary goal is:\n\
 Summarize logs\n\n\
 Task Context:\n\
 Check /var/log\n\n\
