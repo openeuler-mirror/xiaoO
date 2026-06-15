@@ -119,11 +119,10 @@ pub fn compose_system_text(base_system: &str, context: &PromptContext) -> String
 
 /// Split the system prompt into a cache-stable prefix (base prompt, workspace
 /// rules, skills catalog) and the per-turn-volatile `# Context` tail (environment,
-/// horizon, plan, memory). Emitting them as two distinct system blocks lets a
-/// provider with an explicit cache breakpoint (Anthropic) cache the stable prefix
-/// without the volatile tail invalidating it every turn — the same goal the
-/// stable-prefix ordering already serves for providers that auto-cache the
-/// longest matching prefix. Returns `(stable, volatile?)`.
+/// horizon, plan, memory). The caller merges them into a single system message
+/// (stable first, volatile appended) so the stable prefix is a byte-identical
+/// leading span every turn, enabling auto-prefix caching on providers that
+/// cache the longest matching prefix. Returns `(stable, volatile?)`.
 pub(crate) fn compose_system_parts(
     base_system: &str,
     context: &PromptContext,

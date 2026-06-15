@@ -40,13 +40,12 @@ impl PromptBuilderImpl {
             });
         }
 
-        let mut messages = Vec::with_capacity(input.messages.len() + 2);
-        messages.push(ChatMessage::system(stable_system));
-        if let Some(volatile) = volatile_system {
-            if !volatile.trim().is_empty() {
-                messages.push(ChatMessage::system(volatile));
-            }
-        }
+        let system_text = match volatile_system {
+            Some(v) if !v.trim().is_empty() => format!("{stable_system}\n\n{v}"),
+            _ => stable_system,
+        };
+        let mut messages = Vec::with_capacity(input.messages.len() + 1);
+        messages.push(ChatMessage::system(system_text));
 
         messages.extend(
             input
@@ -354,42 +353,27 @@ mod tests {
 
         let result = futures::executor::block_on(builder.build(input)).unwrap();
 
-        assert_eq!(result.request.messages.len(), 4);
+        assert_eq!(result.request.messages.len(), 3);
 
         assert_eq!(
             result.request.messages[0].role,
             agent_types::MessageRole::System
         );
-        let stable_text = result.request.messages[0].text_content().unwrap();
-        assert!(stable_text.contains("New system prompt"));
+        let system_text = result.request.messages[0].text_content().unwrap();
+        assert!(system_text.contains("New system prompt"));
+        assert!(system_text.contains("Environment"));
+        assert!(!system_text.contains("Old system prompt"), "Old system messages should be filtered out");
 
         assert_eq!(
             result.request.messages[1].role,
-            agent_types::MessageRole::System
+            agent_types::MessageRole::User
         );
-        let volatile_text = result.request.messages[1].text_content().unwrap();
-        assert!(volatile_text.contains("Environment"));
+        assert_eq!(result.request.messages[1].text_content(), Some("hello"));
 
         assert_eq!(
             result.request.messages[2].role,
-            agent_types::MessageRole::User
-        );
-        assert_eq!(result.request.messages[2].text_content(), Some("hello"));
-
-        assert_eq!(
-            result.request.messages[3].role,
             agent_types::MessageRole::Assistant
         );
-        assert_eq!(result.request.messages[3].text_content(), Some("response"));
-
-        for message in &result.request.messages {
-            if message.role == agent_types::MessageRole::System {
-                let text = message.text_content().unwrap();
-                assert!(
-                    !text.contains("Old system prompt"),
-                    "Old system messages should be filtered out"
-                );
-            }
-        }
+        assert_eq!(result.request.messages[2].text_content(), Some("response"));
     }
 }
