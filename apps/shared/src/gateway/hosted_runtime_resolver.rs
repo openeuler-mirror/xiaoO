@@ -37,7 +37,8 @@ pub struct SubagentRoleConfigEntry {
 /// Slim system prompt for spawned exploration subagents, instead of the parent's
 /// full composed prompt (identity, output-economy rules, delegation guidance the
 /// child cannot act on, skills catalog), which would be re-sent every child turn.
-const SUBAGENT_SYSTEM_PROMPT: &str = include_str!("../prompts/subagent_system_prompt.txt");
+const SUBAGENT_SYSTEM_PROMPT: &str =
+    include_str!("../../../endside/src/prompts/subagent_system_prompt.txt");
 
 /// Tools a read-only exploration subagent receives: the minimal search/read set.
 /// Allowlist, not blocklist — every other tool (mutation, side effects, user

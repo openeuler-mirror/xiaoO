@@ -46,4 +46,4 @@ pub use turns::{
     AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig,
     RuntimeTurnRequest, TurnMention,
 };
-pub use workspace_prompt::compose_workspace_system_prompt;
+pub use workspace_prompt::{compose_repo_map, compose_workspace_system_prompt};
