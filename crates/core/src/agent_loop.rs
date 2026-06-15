@@ -404,15 +404,16 @@ async fn update_turn_span_after_llm(ctx: &mut LoopContext<'_>) {
     let Some(span) = ctx.turn.turn_span.as_ref() else {
         return;
     };
-    let (prompt_tokens, completion_tokens, total_tokens, has_tool_calls) =
+    let (prompt_tokens, completion_tokens, total_tokens, cached_tokens, has_tool_calls) =
         match ctx.turn.assistant_message.as_ref() {
             Some(msg) => (
                 msg.usage.prompt_tokens,
                 msg.usage.completion_tokens,
                 msg.usage.total_tokens,
+                msg.usage.cached_tokens,
                 msg.has_tool_calls(),
             ),
-            None => (0, 0, 0, false),
+            None => (0, 0, 0, 0, false),
         };
     runtime_view
         .trace_recorder()
@@ -422,6 +423,7 @@ async fn update_turn_span_after_llm(ctx: &mut LoopContext<'_>) {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
+                "cached_tokens": cached_tokens,
                 "has_tool_calls": has_tool_calls,
             }),
         )
@@ -2091,6 +2093,7 @@ mod tests {
                         prompt_tokens: 3,
                         completion_tokens: 2,
                         total_tokens: 5,
+                        cached_tokens: 0,
                     },
                     stop_reason: StopReason::EndTurn,
                 },
@@ -2150,6 +2153,7 @@ mod tests {
                         prompt_tokens: 3,
                         completion_tokens: 2,
                         total_tokens: 5,
+                        cached_tokens: 0,
                     },
                 )
             } else {
@@ -2159,6 +2163,7 @@ mod tests {
                         prompt_tokens: 7,
                         completion_tokens: 1,
                         total_tokens: 8,
+                        cached_tokens: 0,
                     },
                 )
             };
@@ -2574,6 +2579,7 @@ mod tests {
                             prompt_tokens: 10,
                             completion_tokens: 2,
                             total_tokens: 12,
+                            cached_tokens: 0,
                         },
                         stop_reason: StopReason::EndTurn,
                     },
@@ -2594,6 +2600,7 @@ mod tests {
                         prompt_tokens: 10,
                         completion_tokens: 5,
                         total_tokens: 15,
+                        cached_tokens: 0,
                     },
                     stop_reason: StopReason::ToolUse,
                 },

@@ -241,6 +241,7 @@ pub(crate) fn wire_response_to_llm_response(wire: &WireResponse) -> LlmResponse 
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                cached_tokens: 0,
             },
             stop_reason: StopReason::EndTurn,
         },
@@ -293,6 +294,7 @@ pub(crate) fn wire_choice_to_assistant_message(choice: &WireChoice) -> Assistant
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            cached_tokens: 0,
         },
         stop_reason,
     }
@@ -303,6 +305,11 @@ pub(crate) fn wire_usage_to_usage(wire: &WireUsage) -> Usage {
         prompt_tokens: wire.prompt_tokens as usize,
         completion_tokens: wire.completion_tokens as usize,
         total_tokens: wire.total_tokens as usize,
+        cached_tokens: wire
+            .prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens as usize)
+            .unwrap_or(0),
     }
 }
 
@@ -439,6 +446,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                prompt_tokens_details: None,
             },
             warnings: None,
             kv_transfer_params: None,

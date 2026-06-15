@@ -198,16 +198,17 @@ impl OpenAiFamilyProvider {
         }
 
         if !content_type.to_lowercase().starts_with("text/event-stream") {
-            let preview = response
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .take(200)
-                .collect::<String>();
+            let full_response = response.text().await.unwrap_or_default();
+            crate::error::write_stream_error_log(
+                url,
+                Some(&headers),
+                &full_response,
+                &format!("unexpected content type: {}", content_type),
+                Some(status.as_u16()),
+            );
             return Err(LlmError::ApiError(format!(
-                "unexpected content type: {content_type}; expected text/event-stream. \
-                 Response body preview: {preview}",
+                "unexpected content type: {} (详见 ~/.xiaoo/log/error.log)",
+                content_type
             )));
         }
 
@@ -222,8 +223,17 @@ impl OpenAiFamilyProvider {
         let mut byte_stream = response.bytes_stream();
 
         while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmError::StreamError {
-                message: e.to_string(),
+            let bytes = chunk_result.map_err(|e| {
+                crate::error::write_stream_error_log(
+                    url,
+                    Some(&headers),
+                    &buffer,
+                    &e.to_string(),
+                    Some(status.as_u16()),
+                );
+                LlmError::StreamError {
+                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
+                }
             })?;
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
@@ -922,11 +932,15 @@ fn accumulate_tool_call_deltas(
             }
             let tc = &mut full_tool_calls[idx];
             if let Some(ref id) = delta.id {
-                tc.id = id.clone();
+                if !id.is_empty() {
+                    tc.id = id.clone();
+                }
             }
             if let Some(ref func) = delta.function {
                 if let Some(ref name) = func.name {
-                    tc.function.name = name.clone();
+                    if !name.is_empty() {
+                        tc.function.name = name.clone();
+                    }
                 }
                 if let Some(ref args) = func.arguments {
                     tc.function.arguments.push_str(args);
