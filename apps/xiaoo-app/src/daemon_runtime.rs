@@ -555,6 +555,7 @@ mod tests {
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
         };
 
         let prompt = build_system_prompt(
@@ -620,6 +621,7 @@ mod tests {
             },
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)

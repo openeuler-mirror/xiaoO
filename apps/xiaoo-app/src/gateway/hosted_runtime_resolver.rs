@@ -139,20 +139,18 @@ impl HostedSessionRuntimeResolver {
     fn build_tool_registry(
         &self,
         agent_id: &AgentId,
+        apply_readonly_profile: bool,
         services: ToolRuntimeServices,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let Some(visible_tool_names) = self.config.visible_tool_names.as_ref() else {
             let tool_sources = load_tool_sources_with_services(services.clone());
-            // A spawned subagent is read-only exploration fan-out (see the
-            // spawn_subagent spec), so restrict it to the search/read allowlist
-            // rather than letting it inherit the parent's full toolset; the main
-            // agent keeps everything.
-            let is_subagent = *agent_id != self.config.descriptor.agent_id;
+            // Default exploration subagents get the read-only search/read allowlist;
+            // the main agent and custom-role subagents keep the full toolset.
             let all_tool_names = tool_sources
                 .iter()
                 .flat_map(|source| source.discover())
                 .map(|tool| tool.spec.name().clone())
-                .filter(|name| !is_subagent || is_subagent_allowed_tool(&name.0))
+                .filter(|name| !apply_readonly_profile || is_subagent_allowed_tool(&name.0))
                 .collect();
             let mut per_agent_allowed_tools = HashMap::new();
             per_agent_allowed_tools.insert(agent_id.clone(), all_tool_names);
@@ -175,10 +173,9 @@ impl HostedSessionRuntimeResolver {
             return Ok(None);
         }
 
-        let is_subagent = *agent_id != self.config.descriptor.agent_id;
         let allowed: Vec<ToolName> = visible_tool_names
             .iter()
-            .filter(|name| !is_subagent || is_subagent_allowed_tool(name.as_str()))
+            .filter(|name| !apply_readonly_profile || is_subagent_allowed_tool(name.as_str()))
             .cloned()
             .map(ToolName)
             .collect();
@@ -268,8 +265,9 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
         descriptor.agent_id = agent_id.clone();
 
         let is_subagent = agent_id != self.config.descriptor.agent_id;
+        let is_default_subagent = is_subagent && request.subagent_role_id.is_none();
 
-        if is_subagent {
+        if is_default_subagent {
             // The child gets the slim exploration prompt, not the parent's full
             // composed one (re-billed every child turn). Its task arrives via the
             // spawn_subagent template as the first user message, so the system
@@ -284,9 +282,11 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
                 "{{skills_dirs_table}}",
                 &generate_skills_dirs_table(&self.config.skills_config.skills_dirs),
             );
-            if let Some(repo_map) = compose_repo_map(&descriptor.workspace_root) {
-                descriptor.system_prompt.push_str("\n\n");
-                descriptor.system_prompt.push_str(&repo_map);
+            if !is_subagent {
+                if let Some(repo_map) = compose_repo_map(&descriptor.workspace_root) {
+                    descriptor.system_prompt.push_str("\n\n");
+                    descriptor.system_prompt.push_str(&repo_map);
+                }
             }
         }
 
@@ -310,10 +310,11 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             descriptor,
             entry_kind: request.entry.kind.clone(),
             llm_provider,
-            tool_registry: self.build_tool_registry(&agent_id, services)?,
-            // Children don't get the skills catalog: more per-turn prompt surface,
-            // and the `skill` tool is outside their allowlist anyway.
-            skill_registry: if is_subagent {
+            tool_registry: self.build_tool_registry(&agent_id, is_default_subagent, services)?,
+            // The default exploration child doesn't get the skills catalog: more
+            // per-turn prompt surface, and the `skill` tool is outside its allowlist
+            // anyway. Custom-role subagents keep skills, like the main agent.
+            skill_registry: if is_default_subagent {
                 None
             } else {
                 Some(Self::build_skill_registry(&self.config.skills_config))
