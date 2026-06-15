@@ -74,6 +74,15 @@ PASSWORD_MODIFY_PATTERNS: list[str] = [
     r"\bnewusers\b",               # 批量添加用户
     r"\bpasswd\s+-[a-zA-Z]*d\b",   # 删除密码 (passwd -d)
     r"\bpasswd\s+-[a-zA-Z]*l\b",   # 锁定账户 (passwd -l)
+    r"\blpasswd\s",                # lpasswd（libuser 版 passwd）
+    r"\bgpasswd\s+(?!-[adA])",     # 组密码管理（排除 -a/-d/-A 成员管理）
+    r"\b(useradd|luseradd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",  # 通用命令 + -p 参数
+]
+
+# ==================== 用户删除命令模式 ====================
+USER_DELETION_PATTERNS: list[str] = [
+    r"\buserdel\s",
+    r"\bdeluser\s",
 ]
 
 # ==================== 意图偏离关键词对 ====================
@@ -138,6 +147,11 @@ class LogicRulesChecker:
         consent_result = self._check_password_consent(action_history, a_next)
         if consent_result.hit:
             return consent_result
+
+        # 6. 用户删除授权检测
+        user_del_result = self._check_user_deletion_consent(action_history, a_next)
+        if user_del_result.hit:
+            return user_del_result
 
         return LogicRuleResult(hit=False)
 
@@ -394,6 +408,46 @@ class LogicRulesChecker:
             reason=(
                 "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 "
                 "ask_user_question 操作，可能存在未授权的密码修改风险"
+            ),
+            risk_type="consent_missing",
+        )
+
+    def _check_user_deletion_consent(
+        self, action_history: list[dict[str, object]], a_next: dict[str, str]
+    ) -> LogicRuleResult:
+        """
+        用户删除授权检测：
+        删除用户的命令必须在 action_history 中有 ask_user_question 且用户确认了操作。
+        """
+        action_detail = a_next.get("action_detail", "").lower()
+        action_type = a_next.get("action_type", "").lower()
+
+        # 只检测 bash 工具中的用户删除命令
+        if action_type != "bash":
+            return LogicRuleResult(hit=False)
+
+        is_user_deletion = any(
+            re.search(p, action_detail, re.IGNORECASE) for p in USER_DELETION_PATTERNS
+        )
+        if not is_user_deletion:
+            return LogicRuleResult(hit=False)
+
+        # 检查 action_history 中是否有 ask_user_question 且用户确认了
+        for action in action_history:
+            if not isinstance(action, dict):
+                continue
+            hist_type = str(action.get("action_type", action.get("name", ""))).lower()
+            output = str(action.get("output", ""))
+            if hist_type == "ask_user_question" and output.strip():
+                return LogicRuleResult(hit=False)  # 用户已授权，放行
+
+        return LogicRuleResult(
+            hit=True,
+            violated_rule="user_deletion_requires_consent",
+            risk_level="high",
+            reason=(
+                "执行删除系统用户命令，但历史执行序列中未发现向用户确认的 "
+                "ask_user_question 操作，可能存在未授权的用户删除风险"
             ),
             risk_type="consent_missing",
         )
