@@ -1256,7 +1256,6 @@ mod tests {
             multi_select: false,
             is_secret: false,
             default_index: Some(0),
-            is_secret: false,
         }
     }
 }

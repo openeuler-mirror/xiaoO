@@ -107,7 +107,7 @@ E2B runtime checkpoint and checkout include provider-side sandbox work:
 | `POST /api/v1/runtimes/checkpoint` | Calls the E2B snapshot API for the source sandbox when the backend is dirty or has no reusable checkpoint | Clean backends with an existing checkpoint can reuse the prior `BackendCheckpointRef` and avoid a new provider snapshot |
 | `POST /api/v1/runtimes/checkout` | Starts a new E2B sandbox from the provider snapshot and binds it to the child runtime id | The child runtime receives a generated id; callers cannot provide it in v1 |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Deletes the E2B snapshot/template by calling the E2B delete-template API | This is explicit cleanup for snapshots the caller no longer needs for future checkout |
-| `POST /api/v1/sessions/close` | Releases the session backend and deletes the E2B sandbox when no sessions remain bound to that backend | Close time is separate from checkpoint/checkout timing |
+| `POST /api/v1/runtimes/close` | Releases the runtime backend and deletes the E2B sandbox when no runtimes remain bound to that backend | Close time is separate from checkpoint/checkout timing |
 
 Use `curl -w '%{time_total}'` around the checkpoint and checkout requests when
 measuring from a client. That value is end-to-end HTTP latency as observed by the

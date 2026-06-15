@@ -1,15 +1,15 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 
-use crate::app_state::{sandbox_display_name, AppState};
+use crate::app_state::{AppState, sandbox_display_name};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{
-    AppTurnRequest, GatewayEntryContext, SessionCancelRequest, SessionInteractionRequest,
-    SessionOpenRequest,
+    GatewayEntryContext, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest,
+    RuntimeOpenRequest, RuntimeTurnRequest,
 };
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 use crate::remote_sessions_service::record_remote_session;
@@ -58,6 +58,7 @@ enum RemoteSseEvent {
         raw_reply: String,
         #[allow(dead_code)]
         conversation_id: String,
+        #[serde(rename = "runtime_id", alias = "session_id")]
         #[allow(dead_code)]
         session_id: String,
         #[allow(dead_code)]
@@ -74,6 +75,7 @@ enum RemoteSseEvent {
         error: String,
     },
     Cancelled {
+        #[serde(rename = "runtime_id", alias = "session_id")]
         session_id: String,
     },
 }
@@ -185,7 +187,7 @@ impl GatewayRuntime {
                 &client,
                 &remote,
                 token.as_deref(),
-                "/api/v1/sessions/open",
+                "/api/v1/runtimes/open",
                 &open_request,
             )
             .await?;
@@ -253,8 +255,8 @@ impl GatewayRuntime {
             &client,
             &remote,
             token.as_deref(),
-            "/api/v1/sessions/close",
-            &crate::gateway::SessionCloseRequest {
+            "/api/v1/runtimes/close",
+            &RuntimeCloseRequest {
                 session_id: session_id.to_string(),
             },
         )
@@ -275,14 +277,14 @@ impl GatewayRuntime {
                 &client,
                 &remote,
                 token.as_deref(),
-                "/api/v1/sessions/cancel",
-                &SessionCancelRequest { session_id },
+                "/api/v1/runtimes/cancel",
+                &RuntimeCancelRequest { session_id },
             )
             .await;
         });
     }
 
-    fn remote_session_open_request(&self, state: &AppState) -> Result<SessionOpenRequest, String> {
+    fn remote_session_open_request(&self, state: &AppState) -> Result<RuntimeOpenRequest, String> {
         Self::remote_session_open_request_for(
             state,
             self.remote.as_ref().map(|remote| remote.base_url.clone()),
@@ -292,9 +294,9 @@ impl GatewayRuntime {
     fn remote_session_open_request_for(
         state: &AppState,
         base_url: Option<String>,
-    ) -> Result<SessionOpenRequest, String> {
+    ) -> Result<RuntimeOpenRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
-        Ok(SessionOpenRequest {
+        Ok(RuntimeOpenRequest {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
@@ -309,9 +311,9 @@ impl GatewayRuntime {
         &self,
         state: &AppState,
         text: String,
-    ) -> Result<AppTurnRequest, String> {
+    ) -> Result<RuntimeTurnRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
-        Ok(AppTurnRequest {
+        Ok(RuntimeTurnRequest {
             session_id: state.session_id.clone(),
             entry: GatewayEntryContext::tui(self.remote.as_ref().map(|r| r.base_url.clone())),
             channel: None,
@@ -334,11 +336,11 @@ async fn run_remote_stream(
     client: reqwest::Client,
     remote: RemoteRuntimeConfig,
     token: Option<String>,
-    turn_request: AppTurnRequest,
+    turn_request: RuntimeTurnRequest,
     updates_tx: UnboundedSender<SessionTurnUpdate>,
     mut interaction_rx: UnboundedReceiver<UserPromptResult>,
 ) {
-    let url = format!("{}/api/v1/sessions/input", remote.base_url);
+    let url = format!("{}/api/v1/runtimes/input", remote.base_url);
     let mut request = client.post(url).json(&turn_request);
     if let Some(token) = token.as_ref() {
         request = request.bearer_auth(token);
@@ -461,8 +463,8 @@ async fn handle_remote_event(
                     client,
                     remote,
                     token,
-                    "/api/v1/sessions/interaction",
-                    &SessionInteractionRequest {
+                    "/api/v1/runtimes/interaction",
+                    &RuntimeInteractionRequest {
                         session_id: session_id.to_string(),
                         response,
                     },
@@ -680,7 +682,7 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sse_frame, take_sse_frame, RemoteSseEvent};
+    use super::{RemoteSseEvent, parse_sse_frame, take_sse_frame};
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {

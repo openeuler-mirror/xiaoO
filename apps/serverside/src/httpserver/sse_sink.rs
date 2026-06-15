@@ -39,6 +39,7 @@ pub enum SseStreamEvent {
         reply: String,
         raw_reply: String,
         conversation_id: String,
+        #[serde(rename = "runtime_id")]
         session_id: String,
         turn_count: u32,
         total_tokens: usize,
@@ -52,6 +53,7 @@ pub enum SseStreamEvent {
         error: String,
     },
     Cancelled {
+        #[serde(rename = "runtime_id")]
         session_id: String,
     },
 }
@@ -175,4 +177,20 @@ pub fn sse_stream_from_receiver(
             serde_json::to_string(&event).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
         Ok(sse::Event::default().event(name).data(data))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_event_serializes_runtime_id() {
+        let value = serde_json::to_value(SseStreamEvent::Cancelled {
+            session_id: "runtime-1".to_string(),
+        })
+        .expect("event should serialize");
+
+        assert_eq!(value["runtime_id"], "runtime-1");
+        assert!(value.get("session_id").is_none());
+    }
 }

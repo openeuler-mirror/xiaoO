@@ -48,6 +48,7 @@ pub struct SessionRuntimeSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
     pub conversation_id: String,
     pub sender_id: String,
