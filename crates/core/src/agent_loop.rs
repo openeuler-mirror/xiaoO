@@ -10,7 +10,7 @@ use agent_types::compression::CompressedView;
 use agent_types::context::prompt::result::PromptBuildResult;
 use agent_types::events::ToolResultEvent;
 use agent_types::outcome::{AgentError, AgentOutcome};
-use agent_types::tool::{RawToolCall, RawToolOutcome, ToolExecutionResult};
+use agent_types::tool::{EffectProfile, RawToolCall, RawToolOutcome, ToolExecutionResult};
 use agent_types::{
     AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk, ToolUseBlock,
 };
@@ -128,7 +128,6 @@ pub async fn run_agent_loop(
             .await;
             return Err(error);
         }
-        prune_stale_tool_output(&mut ctx);
         if let Err(error) = build_messages(&mut ctx).await {
             end_turn_span(
                 &mut ctx,
@@ -706,12 +705,11 @@ fn microcompact(ctx: &mut LoopContext<'_>) {
     }
 }
 
-fn prune_stale_tool_output(ctx: &mut LoopContext<'_>) {
+fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
     const KEEP_RECENT_TOOL_BYTES: usize = 40_000;
     const MIN_PRUNABLE_BYTES: usize = 1_000;
     const PRUNED_MARKER: &str =
         "[older tool output pruned to save context — re-run the tool or read the file if you still need it]";
-    let mut messages = ctx.state.messages.write();
     let mut kept = 0usize;
     let mut pruned = 0usize;
     for message in messages.iter_mut().rev() {
@@ -729,7 +727,6 @@ fn prune_stale_tool_output(ctx: &mut LoopContext<'_>) {
             }
         }
     }
-    drop(messages);
     if pruned > 0 {
         tracing::debug!(pruned, "pruned stale tool output beyond recent window");
     }
@@ -830,9 +827,12 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         ctx.input.visible_tools.clone()
     };
 
+    let mut projected_messages = ctx.state.messages.read().clone();
+    prune_stale_tool_output(&mut projected_messages);
+
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
-        messages: ctx.state.messages.read().clone(),
+        messages: projected_messages,
         visible_tools,
         skill_summaries,
         memory_snippets: live_context_snippets(ctx),
@@ -1388,23 +1388,17 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
     }
 
     let serialize_batch = {
-        let mut path_touches: std::collections::HashMap<&str, (u32, bool)> =
-            std::collections::HashMap::new();
-        for call in built.iter().filter_map(|b| b.as_ref().ok()) {
-            let final_call = call.final_call();
-            let is_write = matches!(final_call.tool_name.as_str(), "file_write" | "file_edit");
-            let is_read = final_call.tool_name.as_str() == "file_read";
-            if is_write || is_read {
-                if let Some(path) = final_call.input.get("file_path").and_then(|v| v.as_str()) {
-                    let entry = path_touches.entry(path).or_insert((0, false));
-                    entry.0 += 1;
-                    entry.1 |= is_write;
-                }
-            }
-        }
-        path_touches
-            .values()
-            .any(|(count, has_write)| *count >= 2 && *has_write)
+        let profiles: std::collections::HashMap<&str, &EffectProfile> = ctx
+            .input
+            .visible_tools
+            .iter()
+            .map(|tool| (tool.name().0.as_str(), tool.effect_profile()))
+            .collect();
+        !built.iter().filter_map(|b| b.as_ref().ok()).all(|call| {
+            profiles
+                .get(call.final_call().tool_name.as_str())
+                .is_some_and(|profile| is_parallel_safe(profile))
+        })
     };
 
     // Pass 2 — execute the successfully built calls. Clone the Arc runtime handle
@@ -1451,8 +1445,12 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
     // side-effecting sibling already has its tool_result recorded.
     let mut streak_note: Option<String> = None;
     let mut suspended_calls: Vec<SuspendedToolCall> = Vec::new();
+    let mut stop_after_batch = false;
     for result in results {
-        let should_stop_after_result = should_stop_after_tool_result(ctx, &result);
+        ctx.state.tool_executed = true;
+        if should_stop_after_tool_result(ctx, &result) {
+            stop_after_batch = true;
+        }
         emit_tool_result_event(ctx, &result);
 
         if let Some(suspended_call) = SuspendedToolCall::from_tool_result(&result) {
@@ -1471,11 +1469,10 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
             streak_note = Some(note);
         }
         ctx.turn.tool_results.push(result);
+    }
 
-        if should_stop_after_result {
-            ctx.turn.force_return_complete = true;
-            break;
-        }
+    if stop_after_batch && suspended_calls.is_empty() {
+        ctx.turn.force_return_complete = true;
     }
 
     // A pending suspend must not be followed by an injected user message: the
@@ -1542,6 +1539,12 @@ fn update_tool_failure_streak(
     None
 }
 
+fn is_parallel_safe(profile: &EffectProfile) -> bool {
+    !profile.writes_filesystem
+        && !profile.side_effects
+        && (profile.reads_filesystem || profile.network_access)
+}
+
 fn is_failure_result(result: &ToolExecutionResult) -> bool {
     matches!(
         result,
@@ -1591,7 +1594,9 @@ fn repair_tool_names(
     let mut normalized = std::collections::HashMap::new();
     for tool in visible {
         let name = tool.name().0.clone();
-        normalized.entry(normalize(&name)).or_insert_with(|| name.clone());
+        normalized
+            .entry(normalize(&name))
+            .or_insert_with(|| name.clone());
         canonical.insert(name);
     }
     for tc in msg.tool_calls.iter_mut() {
@@ -1892,7 +1897,7 @@ fn decide(ctx: &mut LoopContext<'_>) {
     // reply through a wasted extra round-trip). Gate on tools being available.
     if !ctx.state.completion_nudged
         && ctx.turn.turn_number < ctx.snapshot.max_turns
-        && !ctx.input.visible_tools.is_empty()
+        && ctx.state.tool_executed
     {
         ctx.state.completion_nudged = true;
         let checklist = "You are about to finish. Before you stop, re-read the ORIGINAL task and verify, do not assume:\n\
@@ -2156,9 +2161,10 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
 
     use agent_contracts::context::budget::TokenBudgetPolicy;
-    use agent_contracts::tool::ToolSpecView;
+    use agent_contracts::tool::{ToolExecutor, ToolFilter, ToolRegistry, ToolSpecView};
     use agent_contracts::{
-        CompressionPipeline, LlmProvider, PromptBuilder, ProviderCapabilities, SkillRegistry,
+        CompressionPipeline, LlmProvider, PromptBuilder, ProviderCapabilities, RuntimeView,
+        SkillRegistry,
     };
     use agent_llm::LlmRequestExt;
     use agent_types::common::ids::{AgentId, ToolId, ToolName};
@@ -2166,7 +2172,9 @@ mod tests {
     use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
     use agent_types::context::{FeatureFlags, TokenBudgetConfig};
     use agent_types::events::LoopEndSummary;
+    use agent_types::tool::execution_types::{ToolExecutionError, ToolExecutorOutput};
     use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
+    use agent_types::tool::FinalToolCall;
     use agent_types::{
         AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, ToolUseBlock,
         Usage,
@@ -2634,10 +2642,17 @@ mod tests {
         provider: Arc<LlmProviderWrapper>,
         max_turns: u32,
     ) -> AgentRuntime {
+        test_runtime_with_registry(provider, max_turns, Arc::new(EmptyToolRegistry::new()))
+    }
+
+    fn test_runtime_with_registry(
+        provider: Arc<LlmProviderWrapper>,
+        max_turns: u32,
+        tool_registry: Arc<dyn ToolRegistry>,
+    ) -> AgentRuntime {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(FixedPromptBuilder);
         let compression_pipeline: Arc<dyn CompressionPipeline> =
             Arc::new(compact::PassthroughCompressionPipeline::new());
-        let tool_registry = Arc::new(EmptyToolRegistry::new());
         let skill_registry: Arc<dyn SkillRegistry> = Arc::new(EmptySkillRegistry::new());
         let budget_config = TokenBudgetConfig {
             total_budget: 4096,
@@ -3148,5 +3163,304 @@ mod tests {
 
         let secrets3 = extract_secrets_from_messages(&vec![message_other_tool]);
         assert_eq!(secrets3.len(), 0);
+    }
+
+    #[test]
+    fn is_parallel_safe_allows_pure_readers_only() {
+        let reader = EffectProfile {
+            reads_filesystem: true,
+            writes_filesystem: false,
+            network_access: false,
+            side_effects: false,
+        };
+        let network_reader = EffectProfile {
+            reads_filesystem: false,
+            writes_filesystem: false,
+            network_access: true,
+            side_effects: false,
+        };
+        assert!(is_parallel_safe(&reader));
+        assert!(is_parallel_safe(&network_reader));
+    }
+
+    #[test]
+    fn is_parallel_safe_serializes_writers_side_effects_and_interactive() {
+        let writer = EffectProfile {
+            reads_filesystem: true,
+            writes_filesystem: true,
+            network_access: false,
+            side_effects: false,
+        };
+        let side_effecting = EffectProfile {
+            reads_filesystem: true,
+            writes_filesystem: true,
+            network_access: false,
+            side_effects: true,
+        };
+        let stateful = EffectProfile {
+            reads_filesystem: false,
+            writes_filesystem: false,
+            network_access: false,
+            side_effects: true,
+        };
+        let interactive = EffectProfile::default();
+        assert!(!is_parallel_safe(&writer));
+        assert!(!is_parallel_safe(&side_effecting));
+        assert!(!is_parallel_safe(&stateful));
+        assert!(
+            !is_parallel_safe(&interactive),
+            "an interactive prompt declares no read/network and must serialize"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_nudge_skips_conversational_run_with_visible_tools() {
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime(provider);
+        let input = AgentLoopInput::new("explain how this code works")
+            .with_agent_id(AgentId("test-agent".to_string()))
+            .with_visible_tools(dummy_visible_tools())
+            .with_runtime_view(Arc::new(NoopRuntimeView::new()));
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, input)
+            .await
+            .expect("conversational loop should complete");
+
+        assert!(matches!(
+            outcome,
+            LoopRunResult::Complete(AgentOutcome::Complete { .. })
+        ));
+        assert!(
+            !loop_state.tool_executed,
+            "no tool ran, so the run is conversational"
+        );
+        assert_eq!(loop_state.turn_count, 1);
+    }
+
+    struct AlwaysSucceedsExecutor {
+        spec: Arc<VisibleToolSpec>,
+    }
+
+    #[async_trait]
+    impl ToolExecutor for AlwaysSucceedsExecutor {
+        fn spec(&self) -> &dyn ToolSpecView {
+            self.spec.as_ref()
+        }
+
+        async fn invoke(
+            &self,
+            call: &FinalToolCall,
+            _runtime: &dyn RuntimeView,
+        ) -> Result<ToolExecutorOutput, ToolExecutionError> {
+            Ok(ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Success {
+                    output: format!("ran {}", call.call_id),
+                },
+            })
+        }
+    }
+
+    struct SingleToolRegistry {
+        spec: Arc<VisibleToolSpec>,
+        executor: Arc<dyn ToolExecutor>,
+    }
+
+    impl SingleToolRegistry {
+        fn new() -> Self {
+            let spec = Arc::new(VisibleToolSpec {
+                id: ToolId("tool.peek".to_string()),
+                name: ToolName("peek".to_string()),
+                description: "Read-only peek".to_string(),
+                input_schema: InputSchemaRef {
+                    schema: serde_json::json!({"type": "object"}),
+                },
+                output_contract: OutputContract {
+                    description: "peeked".to_string(),
+                },
+                effect_profile: EffectProfile {
+                    reads_filesystem: true,
+                    writes_filesystem: false,
+                    network_access: false,
+                    side_effects: false,
+                },
+            });
+            let executor: Arc<dyn ToolExecutor> = Arc::new(AlwaysSucceedsExecutor {
+                spec: Arc::clone(&spec),
+            });
+            Self { spec, executor }
+        }
+
+        fn visible(&self) -> Vec<Arc<dyn ToolSpecView>> {
+            vec![Arc::clone(&self.spec) as Arc<dyn ToolSpecView>]
+        }
+    }
+
+    impl ToolRegistry for SingleToolRegistry {
+        fn get_executor(&self, id: &ToolId) -> Option<Arc<dyn ToolExecutor>> {
+            (id == self.spec.id()).then(|| Arc::clone(&self.executor))
+        }
+
+        fn get_spec(&self, id: &ToolId) -> Option<&dyn ToolSpecView> {
+            (id == self.spec.id()).then(|| self.spec.as_ref() as &dyn ToolSpecView)
+        }
+
+        fn list_specs(&self) -> Vec<&dyn ToolSpecView> {
+            vec![self.spec.as_ref()]
+        }
+
+        fn filter_for(&self, _agent_id: &AgentId) -> Box<dyn ToolFilter> {
+            tool_filter_from_specs(&self.visible(), self)
+        }
+    }
+
+    struct TwoToolCallProvider {
+        capabilities: ProviderCapabilities,
+        calls: Arc<StdMutex<usize>>,
+    }
+
+    impl TwoToolCallProvider {
+        fn new() -> Self {
+            Self {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: true,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "two-tool-call-test".to_string(),
+                },
+                calls: Arc::new(StdMutex::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for TwoToolCallProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            let call_number = {
+                let mut calls = self.calls.lock().expect("call counter mutex poisoned");
+                *calls += 1;
+                *calls
+            };
+
+            if call_number == 1 {
+                return Ok(LlmResponse {
+                    message: AssistantMessage {
+                        text: Some("calling tools".to_string()),
+                        reasoning_content: None,
+                        tool_calls: vec![
+                            ToolUseBlock {
+                                call_id: "call_a".to_string(),
+                                tool_name: "peek".to_string(),
+                                input: serde_json::json!({}),
+                            },
+                            ToolUseBlock {
+                                call_id: "call_b".to_string(),
+                                tool_name: "peek".to_string(),
+                                input: serde_json::json!({}),
+                            },
+                        ],
+                        usage: Usage {
+                            prompt_tokens: 5,
+                            completion_tokens: 3,
+                            total_tokens: 8,
+                        },
+                        stop_reason: StopReason::ToolUse,
+                    },
+                    kv_cache_chunk_hashes: vec![],
+                });
+            }
+
+            Ok(LlmResponse {
+                message: AssistantMessage {
+                    text: Some("done".to_string()),
+                    reasoning_content: None,
+                    tool_calls: Vec::new(),
+                    usage: Usage {
+                        prompt_tokens: 5,
+                        completion_tokens: 1,
+                        total_tokens: 6,
+                    },
+                    stop_reason: StopReason::EndTurn,
+                },
+                kv_cache_chunk_hashes: vec![],
+            })
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_batch_stop_still_records_every_executed_result() {
+        let registry = Arc::new(SingleToolRegistry::new());
+        let visible = registry.visible();
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(TwoToolCallProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime_with_registry(provider, 4, registry);
+        let input = AgentLoopInput::new("go")
+            .with_agent_id(AgentId("test-agent".to_string()))
+            .with_visible_tools(visible)
+            .with_runtime_view(Arc::new(NoopRuntimeView::new()))
+            .with_stop_rules([LoopStopRule::AfterSuccessfulTool {
+                tool_name: "peek".to_string(),
+            }]);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, input)
+            .await
+            .expect("loop should complete via the stop rule");
+
+        assert!(matches!(
+            outcome,
+            LoopRunResult::Complete(AgentOutcome::Complete { .. })
+        ));
+        assert_eq!(loop_state.turn_count, 1);
+
+        let messages = loop_state.messages.read();
+        let tool_use_ids: Vec<String> = messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let tool_result_ids: Vec<String> = messages
+            .iter()
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            tool_use_ids,
+            vec!["call_a".to_string(), "call_b".to_string()],
+            "both tool calls should be in history"
+        );
+        assert_eq!(
+            tool_result_ids,
+            vec!["call_a".to_string(), "call_b".to_string()],
+            "every executed tool_use must keep its paired tool_result even when an \
+             earlier call in the batch triggered the stop rule"
+        );
     }
 }

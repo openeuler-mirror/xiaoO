@@ -22,6 +22,7 @@ pub struct LoopState {
     pub completion_nudged: bool,
     pub last_success_sig: Option<u64>,
     pub repeated_success_count: u32,
+    pub tool_executed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +51,7 @@ impl LoopState {
             completion_nudged: false,
             last_success_sig: None,
             repeated_success_count: 0,
+            tool_executed: false,
         }
     }
 
@@ -79,6 +81,7 @@ impl LoopState {
             completion_nudged: false,
             last_success_sig: None,
             repeated_success_count: 0,
+            tool_executed: false,
         }
     }
 
