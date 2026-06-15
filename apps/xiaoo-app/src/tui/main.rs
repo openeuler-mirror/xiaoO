@@ -7,6 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::io;
 use std::path::PathBuf;
 
@@ -43,6 +44,8 @@ const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     let config_arg = parse_config_path()?;
     let config = load_tui_config(&config_arg)?;
     config::load_llm_secrets_to_memory(&config_arg.path).with_context(|| {

@@ -12,6 +12,10 @@ regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "time"] }
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bin]]
 name = "xiaoo-backend-cli"

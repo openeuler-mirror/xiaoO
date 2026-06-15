@@ -6,6 +6,7 @@ use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -26,6 +27,8 @@ use xiaoo_app::httpserver::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     init_tracing();
     let cli = Cli::parse(env::args().skip(1))?;
     match cli.command {
