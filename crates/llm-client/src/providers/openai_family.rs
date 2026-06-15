@@ -932,11 +932,15 @@ fn accumulate_tool_call_deltas(
             }
             let tc = &mut full_tool_calls[idx];
             if let Some(ref id) = delta.id {
-                tc.id = id.clone();
+                if !id.is_empty() {
+                    tc.id = id.clone();
+                }
             }
             if let Some(ref func) = delta.function {
                 if let Some(ref name) = func.name {
-                    tc.function.name = name.clone();
+                    if !name.is_empty() {
+                        tc.function.name = name.clone();
+                    }
                 }
                 if let Some(ref args) = func.arguments {
                     tc.function.arguments.push_str(args);
