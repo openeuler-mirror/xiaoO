@@ -169,6 +169,7 @@ impl ChannelInteractionHandle {
             InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
             InteractionRequest::TextInput { .. } => InteractionResponse::Text {
                 value: Some(sentinel),
+                display_value: None,
             },
             InteractionRequest::Choice { .. } => InteractionResponse::Choice {
                 value: Some(sentinel),
@@ -198,6 +199,7 @@ pub fn resolve_interaction_from_text(
         }
         InteractionRequest::TextInput { .. } => InteractionResponse::Text {
             value: Some(trimmed.to_string()),
+            display_value: None,
         },
         InteractionRequest::Choice { options, .. } => {
             if let Ok(index) = trimmed.parse::<usize>() {

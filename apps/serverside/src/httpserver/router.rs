@@ -1,31 +1,31 @@
 use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
+use crate::httpserver::GatewayServiceError;
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
-use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
-use crate::httpserver::GatewayServiceError;
+use crate::httpserver::sse_sink::{SseLoopEventSink, SseStreamEvent, sse_stream_from_receiver};
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, Request, StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
     },
     middleware::{self, Next},
     response::{
-        sse::{KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tracing::warn;
 use xiaoo_shared::gateway::SessionService;
 
@@ -162,7 +162,10 @@ impl InteractionHandle for RemoteSseInteractionHandle {
 fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
     match request {
         InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+            value: None,
+            display_value: None,
+        },
         InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
     }
 }
@@ -230,16 +233,16 @@ fn create_router_from_state(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    let protected_session_routes = apply_http_bearer_auth(
+    let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
-            .route("/api/v1/sessions/open", post(handle_session_open))
-            .route("/api/v1/sessions/input", post(handle_session_input))
+            .route("/api/v1/runtimes/open", post(handle_session_open))
+            .route("/api/v1/runtimes/input", post(handle_session_input))
             .route(
-                "/api/v1/sessions/interaction",
+                "/api/v1/runtimes/interaction",
                 post(handle_session_interaction),
             )
-            .route("/api/v1/sessions/cancel", post(handle_session_cancel))
-            .route("/api/v1/sessions/close", post(handle_session_close))
+            .route("/api/v1/runtimes/cancel", post(handle_session_cancel))
+            .route("/api/v1/runtimes/close", post(handle_session_close))
             .route(
                 "/api/v1/runtimes/checkpoint",
                 post(handle_runtime_checkpoint),
@@ -258,7 +261,7 @@ fn create_router_from_state(
             "/api/v1/channels/:channel_id/events",
             post(handle_channel_events),
         )
-        .merge(protected_session_routes)
+        .merge(protected_runtime_routes)
         .with_state(Arc::new(state));
 
     match rate_limit.and_then(|c| c.governor_layer()) {
@@ -354,7 +357,7 @@ async fn health_check() -> Json<GatewayHealthResponse> {
 
 async fn handle_session_open(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::SessionOpenRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeOpenRequest>,
 ) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -374,7 +377,7 @@ async fn handle_session_open(
 
 async fn handle_session_input(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::AppTurnRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeTurnRequest>,
 ) -> Response {
     stream_session_input(state, payload.session_id.clone(), payload).await
 }
@@ -382,7 +385,7 @@ async fn handle_session_input(
 async fn stream_session_input(
     state: Arc<GatewayAppState>,
     session_id: String,
-    payload: xiaoo_shared::gateway::AppTurnRequest,
+    payload: xiaoo_shared::gateway::RuntimeTurnRequest,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
     let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
@@ -401,6 +404,7 @@ async fn stream_session_input(
         {
             Ok(result) => {
                 let summary = sink.take_loop_summary();
+                let filtered_messages = filter_messages_for_display(&result.messages);
                 let _ = tx.send(SseStreamEvent::Done {
                     reply: result.visible_reply.clone(),
                     raw_reply: result.raw_reply,
@@ -411,7 +415,7 @@ async fn stream_session_input(
                     prompt_tokens: result.prompt_tokens,
                     completion_tokens: result.completion_tokens,
                     estimated_input_tokens: result.estimated_input_tokens,
-                    messages: result.messages,
+                    messages: filtered_messages,
                     stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
                 });
             }
@@ -430,7 +434,7 @@ async fn stream_session_input(
 
 async fn handle_session_interaction(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::SessionInteractionRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeInteractionRequest>,
 ) -> Response {
     if state
         .remote_interactions
@@ -451,7 +455,7 @@ async fn handle_session_interaction(
 
 async fn handle_session_cancel(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::SessionCancelRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeCancelRequest>,
 ) -> Response {
     let session_id = payload.session_id;
     let Some(control_plane) = state.session_control_plane.as_ref() else {
@@ -482,7 +486,7 @@ async fn handle_session_cancel(
 
 async fn handle_session_close(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<xiaoo_shared::gateway::SessionCloseRequest>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeCloseRequest>,
 ) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -614,10 +618,7 @@ async fn handle_channel_events(
                     {
                         warn!(
                             "failed to acknowledge channel message: channel={} id={} conversation={} error={}",
-                            runtime.meta.id,
-                            message.message_id,
-                            message.conversation_id,
-                            error
+                            runtime.meta.id, message.message_id, message.conversation_id, error
                         );
                     }
                 }
@@ -707,8 +708,8 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, handle_channel_events, GatewayAppState, GatewayErrorResponse,
-        HttpBearerAuthConfig,
+        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig, create_router_with_auth,
+        handle_channel_events,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -717,20 +718,20 @@ mod tests {
     use agent_contracts::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
-        body::{to_bytes, Body, Bytes},
+        body::{Body, Bytes, to_bytes},
         extract::{Path, Query, State},
         http::{HeaderMap, Request, StatusCode},
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use tokio::time::{sleep, timeout, Duration};
+    use tokio::time::{Duration, sleep, timeout};
     use tower::util::ServiceExt;
     use xiaoo_shared::gateway::{
         AppTurnRequest, AppTurnResult, SessionService, SessionServiceError,
     };
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_rejects_missing_token_for_session_input() {
+    async fn bearer_auth_rejects_missing_token_for_runtime_input() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -741,10 +742,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/input")
+                    .uri("/api/v1/runtimes/input")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
+                        r#"{"runtime_id":"runtime-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
                     ))
                     .expect("request should build"),
             )
@@ -769,7 +770,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_allows_valid_token_for_session_input() {
+    async fn bearer_auth_allows_valid_token_for_runtime_input() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -780,11 +781,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/input")
+                    .uri("/api/v1/runtimes/input")
                     .header("authorization", "Bearer secret-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
+                        r#"{"runtime_id":"runtime-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
                     ))
                     .expect("request should build"),
             )
@@ -867,7 +868,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_close_uses_body_session_id_route() {
+    async fn runtime_close_uses_body_runtime_id_route() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -878,10 +879,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/close")
+                    .uri("/api/v1/runtimes/close")
                     .header("authorization", "Bearer secret-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"session_id":"session-1"}"#))
+                    .body(Body::from(r#"{"runtime_id":"runtime-1"}"#))
                     .expect("request should build"),
             )
             .await
@@ -891,26 +892,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn session_close_old_path_is_not_registered() {
+    async fn old_session_control_plane_routes_are_not_registered() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
             None,
         );
 
-        let response = router
+        let input_response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/sessions/session-1/close")
+                    .uri("/api/v1/sessions/input")
                     .header("authorization", "Bearer secret-token")
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"session_id":"session-1","entry":{"kind":"tui"},"channel":"tui","conversation_id":"conv-1","sender_id":"user-1","text":"hello","mentions":[]}"#,
+                    ))
                     .expect("request should build"),
             )
             .await
             .expect("router should respond");
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(input_response.status(), StatusCode::NOT_FOUND);
+
+        let close_response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sessions/close")
+                    .header("authorization", "Bearer secret-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"runtime_id":"runtime-1"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(close_response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1190,11 +1210,13 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(session_service
-            .requests
-            .lock()
-            .expect("session service mutex poisoned")
-            .is_empty());
+        assert!(
+            session_service
+                .requests
+                .lock()
+                .expect("session service mutex poisoned")
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1244,11 +1266,13 @@ mod tests {
         .expect("async webhook route should acknowledge immediately");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(session_service
-            .requests
-            .lock()
-            .expect("session service mutex poisoned")
-            .is_empty());
+        assert!(
+            session_service
+                .requests
+                .lock()
+                .expect("session service mutex poisoned")
+                .is_empty()
+        );
 
         sleep(Duration::from_millis(250)).await;
 
@@ -1266,4 +1290,77 @@ mod tests {
         assert_eq!(sent_texts.len(), 1);
         assert_eq!(sent_texts[0].1, "处理完成");
     }
+}
+
+fn filter_messages_for_display(
+    messages: &[llm_client::ChatMessage],
+) -> Vec<llm_client::ChatMessage> {
+    messages.iter().map(filter_message_for_display).collect()
+}
+
+fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::ChatMessage {
+    use agent_types::llm::ContentBlock;
+    let filtered_blocks: Vec<ContentBlock> = message
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                is_error,
+            } => {
+                if tool_name == "ask_user_question" {
+                    let filtered_output = filter_ask_user_question_output(output);
+                    ContentBlock::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        output: filtered_output,
+                        is_error: *is_error,
+                    }
+                } else {
+                    block.clone()
+                }
+            }
+            _ => block.clone(),
+        })
+        .collect();
+
+    llm_client::ChatMessage {
+        role: message.role.clone(),
+        blocks: filtered_blocks,
+        message_id: message.message_id.clone(),
+        timestamp_ms: message.timestamp_ms,
+        api_usage_tokens: message.api_usage_tokens,
+        reasoning_content: message.reasoning_content.clone(),
+        estimated_tokens: message.estimated_tokens,
+    }
+}
+
+fn filter_ask_user_question_output(output: &str) -> String {
+    if let Ok(mut json_value) = serde_json::from_str::<serde_json::Value>(output) {
+        if let Some(answers) = json_value.get_mut("answers") {
+            if let Some(answers_array) = answers.as_array_mut() {
+                for answer in answers_array {
+                    if let Some(kind) = answer.get("kind") {
+                        if kind.as_str() == Some("text") {
+                            let display_value = answer
+                                .get("display_value")
+                                .and_then(|v| if v.is_null() { None } else { Some(v.clone()) });
+                            if let Some(display_val) = display_value {
+                                if let Some(obj) = answer.as_object_mut() {
+                                    obj["value"] = display_val;
+                                    obj.remove("display_value");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(filtered_output) = serde_json::to_string(&json_value) {
+            return filtered_output;
+        }
+    }
+    output.to_string()
 }

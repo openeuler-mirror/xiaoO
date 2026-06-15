@@ -1,6 +1,10 @@
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 pub use agent_types::LlmError;
+use chrono::Local;
 use regex::Regex;
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -183,6 +187,97 @@ fn overflow_patterns() -> &'static [Regex] {
 
 static OVERFLOW_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 static NO_BODY_OVERFLOW_RE: OnceLock<Regex> = OnceLock::new();
+
+/// 记录 LLM 流式请求失败的详细信息到 error.log（完整记录，不截断）
+pub(crate) fn write_stream_error_log(
+    url: &str,
+    response_headers: Option<&reqwest::header::HeaderMap>,
+    partial_response_buffer: &str,
+    error_message: &str,
+    http_status: Option<u16>,
+) {
+    let log_path = get_error_log_path();
+
+    if let Some(parent) = log_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::error!("Failed to create error log directory: {}", e);
+            return;
+        }
+    }
+
+    match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(mut file) => {
+            let timestamp = Local::now().to_rfc3339();
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file, "===== {} source=llm_stream_error =====", timestamp).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+
+            writeln!(file).ok();
+            writeln!(file, "[Basic Info]").ok();
+            writeln!(file, "URL: {}", url).ok();
+            if let Some(status) = http_status {
+                writeln!(file, "HTTP Status: {}", status).ok();
+            }
+            writeln!(file, "Error: {}", error_message).ok();
+
+            if let Some(headers) = response_headers {
+                writeln!(file).ok();
+                writeln!(file, "[Key Headers]").ok();
+
+                let essential_keys = ["content-type", "transfer-encoding"];
+                let debug_keys = [
+                    "x-request-id",
+                    "retry-after",
+                    "x-ratelimit-limit",
+                    "x-ratelimit-remaining",
+                    "x-ratelimit-reset",
+                    "openai-model",
+                    "x-api-key",
+                ];
+
+                for (key, value) in headers.iter() {
+                    let key_str = key.as_str();
+                    if essential_keys.contains(&key_str) || debug_keys.contains(&key_str) {
+                        let value_str = value.to_str().unwrap_or("<binary>");
+                        writeln!(file, "  {}: {}", key, value_str).ok();
+                    }
+                }
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "[Response Body]").ok();
+            writeln!(file, "Length: {} bytes", partial_response_buffer.len()).ok();
+            if !partial_response_buffer.is_empty() {
+                writeln!(file, "{}", partial_response_buffer).ok();
+            }
+
+            writeln!(file).ok();
+            writeln!(file, "{}", "=".repeat(60)).ok();
+            writeln!(file).ok();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!("Failed to set error.log permissions: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to write stream error log: {}", e);
+        }
+    }
+}
+
+fn get_error_log_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".xiaoo").join("log").join("error.log"))
+        .unwrap_or_else(|| PathBuf::from(".xiaoo_error.log"))
+}
 
 #[cfg(test)]
 mod tests {

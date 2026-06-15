@@ -255,20 +255,20 @@ Health check endpoint for liveness probes and load balancing.
 
 #### Session And Runtime Control Plane
 
-The daemon exposes session APIs for remote TUI and other first-class clients,
-plus runtime checkpoint APIs for callers that need branching execution state.
+The daemon exposes runtime APIs for remote TUI and other first-class clients,
+plus checkpoint APIs for callers that need branching execution state.
 These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
-LLM provider settings are resolved per session/turn: request payloads may pass an
+LLM provider settings are resolved per runtime/turn: request payloads may pass an
 optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
 config. The daemon does not require the LLM API key at process startup.
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
-| `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
-| `POST /api/v1/sessions/interaction` | Send a user interaction response back to the daemon |
-| `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
-| `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/open` | Open or resume a runtime using `RuntimeOpenRequest` |
+| `POST /api/v1/runtimes/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/runtimes/interaction` | Send a user interaction response back to the daemon |
+| `POST /api/v1/runtimes/cancel` | Request cancellation of the current turn |
+| `POST /api/v1/runtimes/close` | Close the runtime, remove its record, and fire lifecycle hooks |
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint using `RuntimeCheckpointRequest` |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot/template referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint using `RuntimeCheckoutRequest` |
@@ -279,14 +279,14 @@ internal `session_id`; backend ids remain internal and are not returned in
 `RuntimeRecord`. See [Runtime Checkpoint Control](./runtime_checkpoint.md)
 for the current layering and checkpoint semantics.
 
-**Open session example:**
+**Open runtime example:**
 
 ```bash
-curl -X POST http://localhost:18080/api/v1/sessions/open \
+curl -X POST http://localhost:18080/api/v1/runtimes/open \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "tui-demo",
+    "runtime_id": "tui-demo",
     "conversation_id": "conv-demo",
     "sender_id": "user-1",
     "entry": { "kind": "tui" },
@@ -299,25 +299,25 @@ curl -X POST http://localhost:18080/api/v1/sessions/open \
   }'
 ```
 
-**Close session example:**
+**Close runtime example:**
 
 ```bash
-curl -X POST http://localhost:18080/api/v1/sessions/close \
+curl -X POST http://localhost:18080/api/v1/runtimes/close \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "tui-demo"
+    "runtime_id": "tui-demo"
   }'
 ```
 
 **Submit input stream example:**
 
 ```bash
-curl -N -X POST http://localhost:18080/api/v1/sessions/input \
+curl -N -X POST http://localhost:18080/api/v1/runtimes/input \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "tui-demo",
+    "runtime_id": "tui-demo",
     "entry": { "kind": "tui" },
     "channel": "tui",
     "conversation_id": "conv-demo",
@@ -335,10 +335,10 @@ curl -N -X POST http://localhost:18080/api/v1/sessions/input \
 **Runtime checkpoint / checkout example with timing:**
 
 The runtime checkpoint APIs require the source runtime to be idle. In the
-current v1 implementation, the `runtime_id` is the same value as the session id
-returned by `/api/v1/sessions/open`. The following flow creates a session, runs
+current v1 implementation, the `runtime_id` is the same value as the runtime id
+returned by `/api/v1/runtimes/open`. The following flow creates a runtime, runs
 one turn to make the backend dirty, captures a checkpoint, checks out a child
-runtime, runs both branches, and closes both sessions.
+runtime, runs both branches, and closes both runtimes.
 
 The example requires Bash, `curl`, and `jq`. It only adds the `Authorization`
 header when `XIAOO_HTTP_BEARER_TOKEN` is present. It uses
@@ -347,8 +347,8 @@ checkpoint and checkout control-plane calls.
 
 ```bash
 BASE_URL="http://localhost:18080"
-SESSION="checkpoint-demo-$(date +%Y%m%d%H%M%S)"
-CONV="conv-${SESSION}"
+RUNTIME="checkpoint-demo-$(date +%Y%m%d%H%M%S)"
+CONV="conv-${RUNTIME}"
 SENDER="checkpoint-demo-user"
 
 AUTH_HEADER=()
@@ -356,15 +356,15 @@ if [ -n "${XIAOO_HTTP_BEARER_TOKEN:-}" ]; then
   AUTH_HEADER=(-H "Authorization: Bearer ${XIAOO_HTTP_BEARER_TOKEN}")
 fi
 
-jq -n --arg session "$SESSION" --arg conv "$CONV" --arg sender "$SENDER" \
+jq -n --arg runtime "$RUNTIME" --arg conv "$CONV" --arg sender "$SENDER" \
   '{
-    session_id: $session,
+    runtime_id: $runtime,
     conversation_id: $conv,
     sender_id: $sender,
     entry: { kind: "http_api", instance_id: "checkpoint-demo" }
   }' > /tmp/xiaoo_open.json
 
-curl -sS -X POST "$BASE_URL/api/v1/sessions/open" \
+curl -sS -X POST "$BASE_URL/api/v1/runtimes/open" \
   "${AUTH_HEADER[@]}" \
   -H "Content-Type: application/json" \
   --data @/tmp/xiaoo_open.json \
@@ -375,12 +375,12 @@ curl -sS -X POST "$BASE_URL/api/v1/sessions/open" \
 INIT_TEXT="请在当前 agent runtime 的工作区创建文件 /home/user/workspace/checkpoint_demo.txt，内容为两行：第一行 checkpoint base，第二行 runtime parent initialized。完成后读取该文件并回复其完整内容。"
 
 jq -n \
-  --arg session "$SESSION" \
+  --arg runtime "$RUNTIME" \
   --arg conv "$CONV" \
   --arg sender "$SENDER" \
   --arg text "$INIT_TEXT" \
   '{
-    session_id: $session,
+    runtime_id: $runtime,
     entry: { kind: "http_api", instance_id: "checkpoint-demo" },
     channel: null,
     message_id: null,
@@ -396,7 +396,7 @@ jq -n \
     llm: null
   }' > /tmp/xiaoo_initial_turn.json
 
-curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
   "${AUTH_HEADER[@]}" \
   -H "Content-Type: application/json" \
   --data @/tmp/xiaoo_initial_turn.json \
@@ -404,7 +404,7 @@ curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
 ```
 
 ```bash
-jq -n --arg runtime "$SESSION" \
+jq -n --arg runtime "$RUNTIME" \
   '{
     runtime_id: $runtime,
     name: "fork-test-base",
@@ -430,7 +430,7 @@ printf "checkpoint_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkpoint.time)"
 ```bash
 jq -n \
   --arg checkpoint "$CHECKPOINT_ID" \
-  --arg child_conv "conv-${SESSION}-child" \
+  --arg child_conv "conv-${RUNTIME}-child" \
   '{
     checkpoint_id: $checkpoint,
     conversation_id: $child_conv,
@@ -450,7 +450,7 @@ curl -sS \
   --data @/tmp/xiaoo_checkout.json \
   > /tmp/xiaoo_checkout.time
 
-CHILD_SESSION="$(jq -r '.runtime.runtime_id' /tmp/xiaoo_checkout.out)"
+CHILD_RUNTIME="$(jq -r '.runtime.runtime_id' /tmp/xiaoo_checkout.out)"
 printf "checkout_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkout.time)"
 ```
 
@@ -474,9 +474,9 @@ curl -sS -X POST "$BASE_URL/api/v1/runtimes/checkpoint/delete-snapshot" \
 PARENT_TEXT="你是父 runtime。请不要写入“测试fork”。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：parent runtime complete。完成后读取该文件并回复完整内容。"
 CHILD_TEXT="你是 checkpoint checkout 出来的子 runtime。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：测试fork。完成后读取该文件并回复完整内容。"
 
-jq -n --arg session "$SESSION" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
+jq -n --arg runtime "$RUNTIME" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
   '{
-    session_id: $session,
+    runtime_id: $runtime,
     entry: { kind: "http_api", instance_id: "checkpoint-demo" },
     channel: null,
     message_id: null,
@@ -492,15 +492,15 @@ jq -n --arg session "$SESSION" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
     llm: null
   }' > /tmp/xiaoo_parent_final.json
 
-curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
   "${AUTH_HEADER[@]}" \
   -H "Content-Type: application/json" \
   --data @/tmp/xiaoo_parent_final.json \
   > /tmp/xiaoo_parent_final.sse
 
-jq -n --arg session "$CHILD_SESSION" --arg text "$CHILD_TEXT" \
+jq -n --arg runtime "$CHILD_RUNTIME" --arg text "$CHILD_TEXT" \
   '{
-    session_id: $session,
+    runtime_id: $runtime,
     entry: { kind: "http_api", instance_id: "checkpoint-demo-child" },
     channel: null,
     message_id: null,
@@ -516,7 +516,7 @@ jq -n --arg session "$CHILD_SESSION" --arg text "$CHILD_TEXT" \
     llm: null
   }' > /tmp/xiaoo_child_final.json
 
-curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
   "${AUTH_HEADER[@]}" \
   -H "Content-Type: application/json" \
   --data @/tmp/xiaoo_child_final.json \
@@ -524,10 +524,10 @@ curl -sS -N -X POST "$BASE_URL/api/v1/sessions/input" \
 ```
 
 ```bash
-for id in "$SESSION" "$CHILD_SESSION"; do
-  jq -n --arg session "$id" '{ session_id: $session }' \
+for id in "$RUNTIME" "$CHILD_RUNTIME"; do
+  jq -n --arg runtime "$id" '{ runtime_id: $runtime }' \
     > "/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
-  curl -sS -X POST "$BASE_URL/api/v1/sessions/close" \
+  curl -sS -X POST "$BASE_URL/api/v1/runtimes/close" \
     "${AUTH_HEADER[@]}" \
     -H "Content-Type: application/json" \
     --data @"/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
@@ -545,7 +545,7 @@ measured:
 These values are examples, not guarantees. They vary with E2B provider latency,
 network path, snapshot size, template cold/warm state, and daemon host load. The
 numbers above do not include the LLM turns before or after the checkpoint, and
-they do not include closing the sessions. Closing an E2B-backed session calls
+they do not include closing the runtimes. Closing an E2B-backed runtime calls
 backend release, which deletes the corresponding E2B sandbox.
 
 **SSE Event Types:**
@@ -557,19 +557,19 @@ backend release, which deletes the corresponding E2B sandbox.
 | `thinking_delta` | `delta`, `snapshot` | Emitted for assistant reasoning updates |
 | `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
 | `interaction_requested` | `request` | Emitted when the daemon needs a user confirmation/input/choice |
-| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
 | `error` | `error` | Emitted on failure |
-| `cancelled` | `session_id` | Emitted as cancellation acknowledgement |
+| `cancelled` | `runtime_id` | Emitted as cancellation acknowledgement |
 
 **Common Error Responses:**
 
-- `400 Bad Request` — malformed request or path/session mismatch
+- `400 Bad Request` — malformed request or path/runtime mismatch
 - `401 Unauthorized` — missing or invalid Bearer token when `[http]` auth is configured
-- `404 Not Found` — session not found
+- `404 Not Found` — runtime not found
 - `429 Too Many Requests` — rate limit exceeded when `[http.rate_limit]` is enabled
-- `500 Internal Server Error` — session service internal error
+- `500 Internal Server Error` — runtime service internal error
 
-> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/sessions/*`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
+> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/runtimes/*`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
 
 ---
 

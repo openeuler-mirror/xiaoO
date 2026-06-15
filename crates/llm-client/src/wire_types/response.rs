@@ -65,6 +65,14 @@ pub(crate) struct WireUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    #[serde(default)]
+    pub prompt_tokens_details: Option<WirePromptTokensDetails>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct WirePromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 #[cfg(test)]
@@ -100,6 +108,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                prompt_tokens_details: None,
             },
             warnings: Some(vec![Warning::new(
                 "response_format",
@@ -125,6 +134,7 @@ mod tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                prompt_tokens_details: None,
             },
             warnings: None,
             kv_transfer_params: None,

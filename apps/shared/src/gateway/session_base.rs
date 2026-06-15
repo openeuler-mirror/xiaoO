@@ -14,6 +14,7 @@ pub fn channel_session_id(
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionOpenRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
     pub conversation_id: String,
     pub sender_id: String,
@@ -50,11 +51,13 @@ impl SessionOpenRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCloseRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCancelRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
 }
 
@@ -78,9 +81,15 @@ pub struct SessionForkResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInteractionRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
     pub response: InteractionResponse,
 }
+
+pub type RuntimeOpenRequest = SessionOpenRequest;
+pub type RuntimeCloseRequest = SessionCloseRequest;
+pub type RuntimeCancelRequest = SessionCancelRequest;
+pub type RuntimeInteractionRequest = SessionInteractionRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -113,4 +122,31 @@ pub enum SessionInputKind {
 pub struct SessionSubmitReceipt {
     pub session_id: String,
     pub accepted_kind: SessionInputKind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_open_request_serializes_runtime_id_and_accepts_legacy_session_id() {
+        let request = RuntimeOpenRequest {
+            session_id: "runtime-1".to_string(),
+            conversation_id: "conv-1".to_string(),
+            sender_id: "user-1".to_string(),
+            entry: GatewayEntryContext::default(),
+            channel: None,
+            channel_instance_id: None,
+            llm: None,
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+        assert_eq!(value["runtime_id"], "runtime-1");
+        assert!(value.get("session_id").is_none());
+
+        let legacy: RuntimeCloseRequest =
+            serde_json::from_str(r#"{"session_id":"legacy-runtime"}"#)
+                .expect("legacy session_id should deserialize");
+        assert_eq!(legacy.session_id, "legacy-runtime");
+    }
 }

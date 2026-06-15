@@ -14,14 +14,14 @@ Remote TUI lets one machine run the XiaoO gateway daemon while another machine r
 Machine B                         Machine A
 xiaoo                         xiaoo-daemon
 ---------                         ----------------
-TUI input/rendering   HTTP/SSE    Gateway session APIs
+TUI input/rendering   HTTP/SSE    Gateway runtime APIs
 /remote commands   ----------->   Agent loop
 Interaction prompt  <---------->  Tools / hooks / workspace
 ```
 
 Local TUI remains the default. Remote mode is opt-in:
 
-- `Local`: TUI opens sessions and runs the agent loop in the local process.
+- `Local`: TUI opens runtimes and runs the agent loop in the local process.
 - `Remote`: TUI sends turns to the daemon and renders the daemon's SSE events.
 
 In remote mode, all tool execution happens on Machine A. The workspace shown in the TUI status bar is marked as remote to avoid confusing it with Machine B's local directory.
@@ -116,23 +116,22 @@ After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. Th
 
 ## 5. Remote Session And Runtime API
 
-Remote TUI uses the daemon's session APIs. The same protected route group also
-contains runtime checkpoint APIs for programmatic clients that need branching
+Remote TUI uses the daemon's runtime control APIs. The same protected route
+group also contains checkpoint APIs for programmatic clients that need branching
 runtime state.
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/v1/sessions/open` | Open or resume a gateway session using `SessionOpenRequest` |
-| `POST /api/v1/sessions/input` | Submit one user input and stream SSE events |
-| `POST /api/v1/sessions/interaction` | Send a user interaction response back to the daemon |
-| `POST /api/v1/sessions/cancel` | Request cancellation of the current turn |
-| `POST /api/v1/sessions/close` | Close the session, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/open` | Open or resume a runtime using `RuntimeOpenRequest` |
+| `POST /api/v1/runtimes/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/runtimes/interaction` | Send a user interaction response back to the daemon |
+| `POST /api/v1/runtimes/cancel` | Request cancellation of the current turn |
+| `POST /api/v1/runtimes/close` | Close the runtime, remove its record, and fire lifecycle hooks |
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint |
 
-For the checkpoint API, callers use `runtime_id` and `checkpoint_id`. Current
-v1 runtime ids are backed by internal session ids, while backend ids and
-provider-native instance ids stay internal to the daemon.
+Runtime control payloads use `runtime_id` and `checkpoint_id` as their public
+vocabulary.
 
 SSE event types:
 
@@ -142,7 +141,7 @@ SSE event types:
 | `text_delta` | Assistant text update; includes both incremental `delta` and cumulative `snapshot` |
 | `tool_result` | Tool execution result summary |
 | `interaction_requested` | Daemon asks the TUI to show an interaction prompt |
-| `done` | Turn completed; includes token usage and session messages |
+| `done` | Turn completed; includes token usage and runtime messages |
 | `error` | Turn failed |
 | `cancelled` | Cancellation acknowledgement |
 
@@ -154,7 +153,7 @@ SSE event types:
 - Machine B's local provider/model config is still used for normal local mode and for TUI bootstrap, but remote turns execute with Machine A's daemon config.
 - Use bearer auth for any daemon bound to a non-loopback interface.
 - For untrusted networks, prefer an SSH tunnel or TLS-terminating reverse proxy in front of the daemon.
-- Remote session state is kept in the daemon's in-memory session store. Restarting Machine A's daemon loses active remote sessions in the current implementation.
+- Remote runtime state is kept in the daemon's in-memory control-plane store. Restarting Machine A's daemon loses active remote runtimes in the current implementation.
 
 ---
 

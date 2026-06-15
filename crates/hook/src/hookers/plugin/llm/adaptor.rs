@@ -248,6 +248,7 @@ impl PluginLlmHookerAdaptor {
                     "prompt_tokens": response.message.usage.prompt_tokens,
                     "completion_tokens": response.message.usage.completion_tokens,
                     "total_tokens": response.message.usage.total_tokens,
+                    "cached_tokens": response.message.usage.cached_tokens,
                 },
                 "stop_reason": match &response.message.stop_reason {
                     StopReason::EndTurn => "end_turn",
@@ -434,7 +435,11 @@ impl PluginLlmHookerAdaptor {
                 InteractionRequest::Confirm { prompt, source }
             }
             PluginAskUserRequest::TextInput { prompt, source: _ } => {
-                InteractionRequest::TextInput { prompt, source }
+                InteractionRequest::TextInput {
+                    prompt,
+                    source,
+                    is_secret: false, // Default to false for plugin requests
+                }
             }
             PluginAskUserRequest::Choice {
                 prompt,
@@ -650,6 +655,10 @@ impl PluginLlmHookerAdaptor {
                 .unwrap_or(0) as usize,
             total_tokens: usage_value
                 .get("total_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize,
+            cached_tokens: usage_value
+                .get("cached_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize,
         })

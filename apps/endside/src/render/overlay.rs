@@ -19,7 +19,7 @@ use crate::remote_sessions_service::{
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
-use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
+use super::utils::{line_prefix_width, sanitize_terminal_text};
 
 /// Flatten newlines and truncate `text` to fit within `max_width` terminal columns,
 /// appending "..." when truncated.
@@ -167,8 +167,10 @@ impl App {
         } else {
             available_width
         };
-        let available_height = area.height.saturating_sub(4).max(1);
-        let desired_height = interaction_prompt_outer_height(&prompt.request).max(6);
+        let inner_width = width.saturating_sub(2);
+        let max_height = (area.height as f32 * 0.8).ceil() as u16;
+        let available_height = area.height.saturating_sub(4).max(1).min(max_height);
+        let desired_height = interaction_prompt_outer_height(&prompt.request, inner_width).max(6);
         let height = desired_height.min(available_height);
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -308,9 +310,9 @@ impl App {
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if has_tool_cards {
-            " Enter 发送 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
+            " Enter 发送 | Alt+Enter 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
         } else {
-            " Enter 发送 | / 命令 | Ctrl+C 退出 "
+            " Enter 发送 | Alt+Enter 换行 | / 命令 | Ctrl+C 退出 "
         };
         let input_style = self.state.theme.default_style();
         let block = Block::default()
@@ -325,16 +327,13 @@ impl App {
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
         let selection = self.state.chat_state.input.selected_range();
-        let (row, col) = cursor_row_col(value, cursor);
-        let lines: Vec<&str> = value.split('\n').collect();
-        let line = lines.get(row).copied().unwrap_or("");
 
         let inner_height = inner.height.max(1) as usize;
-        let scroll_y = row.saturating_sub(inner_height.saturating_sub(1));
+        let max_width = inner.width.max(1) as usize;
 
-        let max_width = inner.width.max(1).saturating_sub(1) as usize;
-        let visual_x = line_prefix_width(line, col);
-        let scroll_x = visual_x.max(max_width) - max_width;
+        // Calculate visual cursor position considering line wrapping
+        let (visual_row, visual_col) = calculate_visual_cursor_position(value, cursor, max_width);
+        let scroll_y = visual_row.saturating_sub(inner_height.saturating_sub(1));
 
         let selection_style = Style::default()
             .fg(self.state.theme.background)
@@ -346,12 +345,14 @@ impl App {
             let text =
                 build_input_text_with_selection(value, &sel_range, input_style, selection_style);
             Paragraph::new(text)
-                .scroll((scroll_y as u16, scroll_x as u16))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_y as u16, 0))
                 .block(block)
         } else {
             Paragraph::new(value)
                 .style(input_style)
-                .scroll((scroll_y as u16, scroll_x as u16))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_y as u16, 0))
                 .block(block)
         };
         frame.render_widget(paragraph, area);
@@ -373,10 +374,14 @@ impl App {
                     | InputMode::SessionSnapshotSelection
             )
         {
-            let y_on_screen = row - scroll_y;
+            let y_on_screen = visual_row.saturating_sub(scroll_y);
             if y_on_screen < inner_height {
-                let x_on_screen = visual_x.saturating_sub(scroll_x);
-                let cursor_x = inner.x.saturating_add(x_on_screen.min(max_width) as u16);
+                let adjusted_visual_col = if visual_col >= inner.width as usize {
+                    inner.width.saturating_sub(1) as usize
+                } else {
+                    visual_col
+                };
+                let cursor_x = inner.x.saturating_add(adjusted_visual_col as u16);
                 let cursor_y = inner.y.saturating_add(y_on_screen as u16);
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
@@ -1141,4 +1146,52 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut truncated: String = value.chars().take(max_chars - 1).collect();
     truncated.push('…');
     truncated
+}
+
+/// Calculate the visual cursor position considering automatic line wrapping.
+/// Returns (visual_row, visual_col) where visual_row is the row on screen
+/// and visual_col is the column position within that row (visual width units).
+fn calculate_visual_cursor_position(
+    value: &str,
+    cursor: usize,
+    max_width: usize,
+) -> (usize, usize) {
+    if max_width == 0 {
+        return (0, 0);
+    }
+
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+
+    let mut visual_row = 0usize;
+    let mut visual_col = 0usize;
+    let mut current_row_width = 0usize;
+
+    for (idx, &ch) in chars.iter().enumerate() {
+        if idx == cursor {
+            return (visual_row, visual_col);
+        }
+
+        if ch == '\n' {
+            // Explicit newline: move to next line
+            visual_row += 1;
+            visual_col = 0;
+            current_row_width = 0;
+        } else {
+            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+
+            if current_row_width + char_width > max_width {
+                // Automatic line wrap: move to next line, then add character
+                visual_row += 1;
+                current_row_width = 0;
+            }
+
+            // Add character width to current row
+            current_row_width += char_width;
+            visual_col = current_row_width;
+        }
+    }
+
+    // Cursor at end of text
+    (visual_row, visual_col)
 }

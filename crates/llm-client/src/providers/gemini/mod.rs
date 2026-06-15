@@ -154,6 +154,7 @@ impl LlmProvider for GeminiProvider {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    cached_tokens: 0,
                 },
                 stop_reason,
             },
@@ -185,8 +186,8 @@ impl LlmProvider for GeminiProvider {
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         if !status.is_success() {
-            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
             return Err(map_api_status_error(
                 status,
@@ -205,8 +206,17 @@ impl LlmProvider for GeminiProvider {
         let mut byte_stream = response.bytes_stream();
 
         while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmError::StreamError {
-                message: e.to_string(),
+            let bytes = chunk_result.map_err(|e| {
+                crate::error::write_stream_error_log(
+                    &url,
+                    Some(&headers),
+                    &buffer,
+                    &e.to_string(),
+                    Some(status.as_u16()),
+                );
+                LlmError::StreamError {
+                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
+                }
             })?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -261,6 +271,7 @@ impl LlmProvider for GeminiProvider {
                     completion_tokens: u.candidates_token_count.unwrap_or(0),
                     total_tokens: u.prompt_token_count.unwrap_or(0)
                         + u.candidates_token_count.unwrap_or(0),
+                    prompt_tokens_details: None,
                 });
                 if let Some(ref u) = usage {
                     final_usage = Some(wire_usage_to_usage(u));

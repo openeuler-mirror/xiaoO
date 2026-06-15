@@ -10,6 +10,7 @@ use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
 use super::super::validation::backend as validation;
+use super::super::validation::interactive;
 use super::constants::{default_timeout_ms, MAX_OUTPUT_BYTES_PER_STREAM};
 use super::input::BashInput;
 use super::output::BashOutput;
@@ -121,6 +122,19 @@ impl ToolExecutor for BashExecutor {
             let error_message = validation_result
                 .message
                 .unwrap_or_else(|| "Validation failed".to_string());
+            let error_code = validation_result.error_code.unwrap_or(0);
+            return Ok(ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Error {
+                    message: format!("[error_code={}] {}", error_code, error_message),
+                },
+            });
+        }
+
+        let validation_result = interactive::validate_interactive_command(&input);
+        if !validation_result.result {
+            let error_message = validation_result
+                .message
+                .unwrap_or_else(|| "Interactive command validation failed".to_string());
             let error_code = validation_result.error_code.unwrap_or(0);
             return Ok(ToolExecutorOutput::Completed {
                 raw_outcome: RawToolOutcome::Error {

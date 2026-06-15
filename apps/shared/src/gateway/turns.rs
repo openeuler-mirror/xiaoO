@@ -83,6 +83,7 @@ pub struct TurnMention {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppTurnRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
     #[serde(default)]
     pub entry: GatewayEntryContext,
@@ -101,4 +102,35 @@ pub struct AppTurnRequest {
     pub reasoning_effort: ReasoningEffort,
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
+}
+
+pub type RuntimeTurnRequest = AppTurnRequest;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_turn_request_serializes_runtime_id() {
+        let request = RuntimeTurnRequest {
+            session_id: "runtime-1".to_string(),
+            entry: GatewayEntryContext::default(),
+            channel: None,
+            message_id: None,
+            conversation_id: "conv-1".to_string(),
+            sender_id: "user-1".to_string(),
+            text: "hello".to_string(),
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            reply_to_message_id: None,
+            root_message_id: None,
+            mentions: Vec::new(),
+            reasoning_effort: ReasoningEffort::default(),
+            llm: None,
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+        assert_eq!(value["runtime_id"], "runtime-1");
+        assert!(value.get("session_id").is_none());
+    }
 }

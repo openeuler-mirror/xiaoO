@@ -1,14 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// 对应 InteractionRequest 的三种变体，用 serde tag 区分。
+/// Three variants corresponding to InteractionRequest, differentiated by serde tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuestionItem {
-    /// 确认类问题（是/否）
+    /// Confirmation question (yes/no)
     Confirm { prompt: String },
-    /// 文本输入类问题
-    TextInput { prompt: String },
-    /// 单选/多选类问题
+    /// Text input question
+    TextInput {
+        prompt: String,
+        #[serde(default)]
+        is_secret: bool,
+    },
+    /// Single/multi-choice question
     Choice {
         prompt: String,
         options: Vec<String>,
@@ -17,9 +21,9 @@ pub enum QuestionItem {
     },
 }
 
-/// AskUserQuestion 工具的输入结构。
+/// Input structure for AskUserQuestion tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskUserQuestionInput {
-    /// 要向用户提出的问题列表（1–4 个）。
+    /// List of questions to ask the user (1–4 items).
     pub questions: Vec<QuestionItem>,
 }

@@ -48,7 +48,10 @@ impl InteractionHandle for NoopInteractionHandle {
     async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
         match request {
             InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-            InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+            InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+                value: None,
+                display_value: None,
+            },
             InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
         }
     }

@@ -326,14 +326,37 @@ impl App {
                 // Esc clears an active transcript selection (mirrors opencode's Esc handler).
                 self.state.transcript_selection = None;
             }
-            KeyCode::Enter => self.submit_editing_input().await?,
+            KeyCode::Enter => {
+                if key.modifiers.contains(event::KeyModifiers::ALT) {
+                    self.state
+                        .chat_state
+                        .input
+                        .handle(crate::input::InputRequest::InsertChar('\n'));
+                    self.state.chat_state.reset_input_history_navigation();
+                    self.state.note_input_changed();
+                } else {
+                    self.submit_editing_input().await?
+                }
+            }
             KeyCode::Up if key.modifiers.is_empty() => {
-                if self.state.chat_state.previous_input_history() {
+                if self.state.chat_state.input_history_cursor.is_some()
+                    || self.state.chat_state.input.value().is_empty()
+                {
+                    self.state.chat_state.previous_input_history();
+                    self.state.note_input_changed();
+                } else {
+                    self.state.chat_state.input.handle_event(&Event::Key(key));
                     self.state.note_input_changed();
                 }
             }
             KeyCode::Down if key.modifiers.is_empty() => {
-                if self.state.chat_state.next_input_history() {
+                if self.state.chat_state.input_history_cursor.is_some()
+                    || self.state.chat_state.input.value().is_empty()
+                {
+                    self.state.chat_state.next_input_history();
+                    self.state.note_input_changed();
+                } else {
+                    self.state.chat_state.input.handle_event(&Event::Key(key));
                     self.state.note_input_changed();
                 }
             }

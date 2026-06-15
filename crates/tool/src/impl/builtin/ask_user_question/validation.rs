@@ -1,29 +1,29 @@
 //! Input validation for AskUserQuestionTool.
 //!
 //! Validates AskUserQuestionInput before processing to ensure:
-//! - questions 列表包含 1–4 个条目
-//! - 每个问题的 prompt 非空
-//! - Choice 类型问题至少有 2 个选项，且每个选项非空
-//! - questions 的 prompt 在列表内唯一（不重复）
-//! - Choice 类型问题的选项在该问题内唯一
+//! - questions list contains 1–4 entries
+//! - each question's prompt is non-empty
+//! - Choice type questions have at least 2 options, each non-empty
+//! - questions' prompts are unique within the list (no duplicates)
+//! - Choice type questions' options are unique within that question
 
 use super::input::{AskUserQuestionInput, QuestionItem};
 
 /// Validation error codes.
 pub mod error_code {
-    /// questions 列表为空（error_code = 1）
+    /// questions list is empty (error_code = 1)
     pub const QUESTIONS_EMPTY: u32 = 1;
-    /// questions 列表超过 4 个（error_code = 2）
+    /// questions list exceeds 4 items (error_code = 2)
     pub const QUESTIONS_TOO_MANY: u32 = 2;
-    /// 某个问题的 prompt 为空字符串（error_code = 3）
+    /// a question's prompt is empty string (error_code = 3)
     pub const PROMPT_EMPTY: u32 = 3;
-    /// Choice 选项数量不足 2 个（error_code = 4）
+    /// Choice has fewer than 2 options (error_code = 4)
     pub const CHOICE_TOO_FEW_OPTIONS: u32 = 4;
-    /// Choice 某个选项为空字符串（error_code = 5）
+    /// a Choice option is empty string (error_code = 5)
     pub const CHOICE_OPTION_EMPTY: u32 = 5;
-    /// questions 中存在重复的 prompt（error_code = 6）
+    /// duplicate prompts in questions (error_code = 6)
     pub const DUPLICATE_PROMPT: u32 = 6;
-    /// 同一 Choice 问题内存在重复选项（error_code = 7）
+    /// duplicate options within a Choice question (error_code = 7)
     pub const DUPLICATE_CHOICE_OPTION: u32 = 7;
 }
 
@@ -58,7 +58,7 @@ impl ValidationResult {
 
 /// Validates AskUserQuestionInput.
 pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
-    // 1. 数量下限
+    // 1. Minimum count
     if input.questions.is_empty() {
         return ValidationResult::error(
             "questions 不能为空，至少需要 1 个问题",
@@ -66,7 +66,7 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
         );
     }
 
-    // 2. 数量上限
+    // 2. Maximum count
     if input.questions.len() > 4 {
         return ValidationResult::error(
             format!(
@@ -77,12 +77,12 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
         );
     }
 
-    // 3. 逐条校验每个问题
+    // 3. Validate each question
     for (idx, question) in input.questions.iter().enumerate() {
         let pos = idx + 1; // 1-based index for user-facing messages
 
         match question {
-            QuestionItem::Confirm { prompt } | QuestionItem::TextInput { prompt } => {
+            QuestionItem::Confirm { prompt } | QuestionItem::TextInput { prompt, .. } => {
                 if prompt.trim().is_empty() {
                     return ValidationResult::error(
                         format!("第 {} 个问题的 prompt 不能为空", pos),
@@ -93,7 +93,7 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
             QuestionItem::Choice {
                 prompt, options, ..
             } => {
-                // prompt 非空
+                // prompt must be non-empty
                 if prompt.trim().is_empty() {
                     return ValidationResult::error(
                         format!("第 {} 个问题的 prompt 不能为空", pos),
@@ -101,7 +101,7 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
                     );
                 }
 
-                // options 数量下限
+                // options minimum count
                 if options.len() < 2 {
                     return ValidationResult::error(
                         format!(
@@ -113,7 +113,7 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
                     );
                 }
 
-                // 每个 option 非空
+                // each option must be non-empty
                 for (opt_idx, opt) in options.iter().enumerate() {
                     if opt.trim().is_empty() {
                         return ValidationResult::error(
@@ -123,7 +123,7 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
                     }
                 }
 
-                // 选项唯一性（大小写敏感）
+                // option uniqueness (case-sensitive)
                 let unique_options: std::collections::HashSet<&str> =
                     options.iter().map(|o| o.as_str()).collect();
                 if unique_options.len() != options.len() {
@@ -136,13 +136,13 @@ pub fn validate_input(input: &AskUserQuestionInput) -> ValidationResult {
         }
     }
 
-    // 4. questions prompt 唯一性
+    // 4. questions prompt uniqueness
     let prompts: Vec<&str> = input
         .questions
         .iter()
         .map(|q| match q {
             QuestionItem::Confirm { prompt }
-            | QuestionItem::TextInput { prompt }
+            | QuestionItem::TextInput { prompt, .. }
             | QuestionItem::Choice { prompt, .. } => prompt.as_str(),
         })
         .collect();
@@ -172,6 +172,7 @@ mod tests {
     fn text_input(prompt: &str) -> QuestionItem {
         QuestionItem::TextInput {
             prompt: prompt.to_string(),
+            is_secret: false,
         }
     }
 

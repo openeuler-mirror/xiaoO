@@ -62,6 +62,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            prompt_tokens_details: None,
         };
         let chunk = ParsedChunk {
             content: Some("Hello".to_string()),

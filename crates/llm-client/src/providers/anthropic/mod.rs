@@ -16,7 +16,7 @@ use agent_types::{
 mod convert;
 
 use convert::{
-    anthropic_messages, anthropic_system_message, extract_anthropic_tool_calls,
+    anthropic_messages, anthropic_system_blocks, extract_anthropic_tool_calls,
     to_anthropic_output_format, to_anthropic_tool, to_anthropic_tool_choice,
 };
 
@@ -64,7 +64,7 @@ impl AnthropicProvider {
     }
 
     fn build_body(&self, request: &LlmRequest, stream: bool) -> serde_json::Value {
-        let system_message = anthropic_system_message(&request.messages);
+        let system_blocks = anthropic_system_blocks(&request.messages);
         let other_messages = anthropic_messages(&request.messages);
 
         let max_tokens = request.max_tokens.unwrap_or(16384);
@@ -81,8 +81,20 @@ impl AnthropicProvider {
             body["stream"] = serde_json::json!(true);
         }
 
-        if !system_message.is_empty() {
-            body["system"] = serde_json::json!(system_message);
+        if !system_blocks.is_empty() {
+            let block_count = system_blocks.len();
+            let blocks: Vec<serde_json::Value> = system_blocks
+                .into_iter()
+                .enumerate()
+                .map(|(idx, text)| {
+                    let mut block = serde_json::json!({ "type": "text", "text": text });
+                    if block_count == 1 || idx + 1 < block_count {
+                        block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    }
+                    block
+                })
+                .collect();
+            body["system"] = serde_json::json!(blocks);
         }
 
         if !request.tools.is_empty() {
@@ -194,6 +206,7 @@ impl LlmProvider for AnthropicProvider {
             total_tokens: (usage_val["input_tokens"].as_u64().unwrap_or(0)
                 + usage_val["output_tokens"].as_u64().unwrap_or(0))
                 as usize,
+            cached_tokens: usage_val["cache_read_input_tokens"].as_u64().unwrap_or(0) as usize,
         };
 
         let finish_reason = anthropic_response["stop_reason"]
@@ -251,8 +264,8 @@ impl LlmProvider for AnthropicProvider {
             .map_err(map_reqwest_error)?;
 
         let status = response.status();
+        let headers = response.headers().clone();
         if !status.is_success() {
-            let headers = response.headers().clone();
             let error_body = response.text().await.unwrap_or_default();
             return Err(map_api_status_error(
                 status,
@@ -272,8 +285,17 @@ impl LlmProvider for AnthropicProvider {
         let mut byte_stream = response.bytes_stream();
 
         while let Some(chunk_result) = byte_stream.next().await {
-            let bytes = chunk_result.map_err(|e| LlmError::StreamError {
-                message: e.to_string(),
+            let bytes = chunk_result.map_err(|e| {
+                crate::error::write_stream_error_log(
+                    &url,
+                    Some(&headers),
+                    &buffer,
+                    &e.to_string(),
+                    Some(status.as_u16()),
+                );
+                LlmError::StreamError {
+                    message: format!("{} (详见 ~/.xiaoo/log/error.log)", e),
+                }
             })?;
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
@@ -378,6 +400,7 @@ impl AnthropicProvider {
                     prompt_tokens: t,
                     completion_tokens: 0,
                     total_tokens: t,
+                    prompt_tokens_details: None,
                 });
                 Ok(Some(ParsedChunk {
                     content: None,
@@ -448,6 +471,7 @@ impl AnthropicProvider {
                     prompt_tokens: 0,
                     completion_tokens: t,
                     total_tokens: t,
+                    prompt_tokens_details: None,
                 });
                 Ok(Some(ParsedChunk {
                     content: None,
@@ -468,6 +492,7 @@ fn merge_usage(existing: Option<Usage>, incoming: Usage) -> Usage {
     let mut merged = existing.unwrap_or_default();
     merged.prompt_tokens = merged.prompt_tokens.max(incoming.prompt_tokens);
     merged.completion_tokens = merged.completion_tokens.max(incoming.completion_tokens);
+    merged.cached_tokens = merged.cached_tokens.max(incoming.cached_tokens);
     merged.total_tokens = merged.prompt_tokens + merged.completion_tokens;
     merged
 }
@@ -538,11 +563,13 @@ mod tests {
                 prompt_tokens: 21,
                 completion_tokens: 0,
                 total_tokens: 21,
+                cached_tokens: 0,
             }),
             Usage {
                 prompt_tokens: 0,
                 completion_tokens: 15,
                 total_tokens: 15,
+                cached_tokens: 0,
             },
         );
 
@@ -599,12 +626,12 @@ mod tests {
     }
 
     #[test]
-    fn build_body_concatenates_multiple_system_messages() {
+    fn build_body_emits_system_blocks_caching_only_the_stable_prefix() {
         let provider = make_provider();
         let request = LlmRequest {
             messages: vec![
                 agent_types::ChatMessage::system("base system"),
-                agent_types::ChatMessage::system("workspace rules"),
+                agent_types::ChatMessage::system("# Context\n\nvolatile tail"),
                 agent_types::ChatMessage::user("hello"),
             ],
             tools: Vec::new(),
@@ -617,8 +644,39 @@ mod tests {
 
         let body = provider.build_body(&request, false);
 
-        assert_eq!(body["system"], "base system\n\nworkspace rules");
+        let system = body["system"].as_array().expect("system should be an array");
+        assert_eq!(system.len(), 2);
+        // Stable prefix carries the cache breakpoint; the volatile tail does not,
+        // so a per-turn change to the tail never invalidates the cached prefix.
+        assert_eq!(system[0]["text"], "base system");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(system[1]["text"], "# Context\n\nvolatile tail");
+        assert!(system[1].get("cache_control").is_none());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_body_caches_single_system_block() {
+        let provider = make_provider();
+        let request = LlmRequest {
+            messages: vec![
+                agent_types::ChatMessage::system("base system only"),
+                agent_types::ChatMessage::user("hello"),
+            ],
+            tools: Vec::new(),
+            tool_choice: agent_types::ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            response_format: agent_types::ResponseFormat::Text,
+            reasoning_effort: agent_types::ReasoningEffort::Off,
+        };
+
+        let body = provider.build_body(&request, false);
+
+        let system = body["system"].as_array().expect("system should be an array");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "base system only");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
