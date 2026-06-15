@@ -109,6 +109,153 @@ directory and applicable parent directories. Later files are more specific and t
     section.trim_end().to_string()
 }
 
+const REPO_MAP_MAX_FILES: usize = 50;
+const REPO_MAP_MAX_SIGS_PER_FILE: usize = 8;
+const REPO_MAP_MAX_BYTES: usize = 6000;
+const REPO_MAP_MAX_DEPTH: usize = 3;
+const REPO_MAP_MAX_VISIT: usize = 5000;
+const REPO_MAP_SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "__pycache__",
+    "dist",
+    "build",
+    "vendor",
+];
+
+fn repo_map_is_source(name: &str) -> bool {
+    const EXTS: &[&str] = &[
+        "rs", "py", "js", "ts", "tsx", "jsx", "go", "java", "rb", "c", "cc", "cpp", "h", "hpp",
+        "cs", "php", "kt", "swift", "scala", "sh", "lua", "ex", "exs",
+    ];
+    name.rsplit('.')
+        .next()
+        .map(|e| EXTS.contains(&e))
+        .unwrap_or(false)
+}
+
+fn repo_map_collect(dir: &Path, out: &mut Vec<PathBuf>, visited: &mut usize, depth: usize) {
+    if depth > REPO_MAP_MAX_DEPTH || *visited >= REPO_MAP_MAX_VISIT {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut subdirs = Vec::new();
+    for entry in entries.flatten() {
+        *visited += 1;
+        if *visited >= REPO_MAP_MAX_VISIT {
+            break;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if name.starts_with('.') || REPO_MAP_SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            subdirs.push(path);
+        } else if file_type.is_file() && repo_map_is_source(name) {
+            out.push(path);
+        }
+    }
+    for sub in subdirs {
+        repo_map_collect(&sub, out, visited, depth + 1);
+    }
+}
+
+fn repo_map_signatures(path: &Path) -> Vec<String> {
+    const KW: &[&str] = &[
+        "pub fn ",
+        "pub async fn ",
+        "async fn ",
+        "fn ",
+        "pub struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub trait ",
+        "trait ",
+        "impl ",
+        "def ",
+        "async def ",
+        "class ",
+        "func ",
+        "function ",
+        "export function ",
+        "export class ",
+        "export const ",
+        "export default ",
+        "interface ",
+        "type ",
+    ];
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() <= 512 * 1024 => {}
+        _ => return Vec::new(),
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut sigs = Vec::new();
+    for line in content.lines().take(3000) {
+        let trimmed = line.trim_start();
+        if KW.iter().any(|kw| trimmed.starts_with(kw)) {
+            let mut sig: String = trimmed.chars().take(110).collect();
+            if let Some(idx) = sig.find(|c| c == '{' || c == ';' || c == '=') {
+                sig.truncate(idx);
+            }
+            let sig = sig.trim_end().to_string();
+            if !sig.is_empty() {
+                sigs.push(sig);
+            }
+            if sigs.len() >= REPO_MAP_MAX_SIGS_PER_FILE {
+                break;
+            }
+        }
+    }
+    sigs
+}
+
+pub fn compose_repo_map(workspace_root: &Path) -> Option<String> {
+    let root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let mut files = Vec::new();
+    let mut visited = 0usize;
+    repo_map_collect(&root, &mut files, &mut visited, 0);
+    if files.is_empty() {
+        return None;
+    }
+    files.sort();
+    files.truncate(REPO_MAP_MAX_FILES);
+    let mut out = String::from(
+        "## Repository map\nStatic overview of source files and their top-level definitions \
+(not exhaustive; use glob/grep for full detail):\n",
+    );
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .display()
+            .to_string();
+        out.push('\n');
+        out.push_str(&rel);
+        for sig in repo_map_signatures(file) {
+            out.push_str("\n  ");
+            out.push_str(&sig);
+        }
+        if out.len() >= REPO_MAP_MAX_BYTES {
+            out.push_str("\n…[repo map truncated]…");
+            break;
+        }
+    }
+    Some(out.trim_end().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::compose_workspace_system_prompt;

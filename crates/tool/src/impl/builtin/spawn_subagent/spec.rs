@@ -81,6 +81,11 @@ impl SpawnSubagentToolSpec {
                         },
                         "required": ["count"]
                     }]
+                },
+                "max_turns": {
+                    "type": "integer",
+                    "description": "Optional turn budget for this exploration child. A bounded cap (around 20) lets it explore aggressively in parallel without running away; it is force-terminated after this many turns. Omit to use the default budget.",
+                    "examples": [20]
                 }
             },
             "required": ["description", "task_goal", "task_context"]

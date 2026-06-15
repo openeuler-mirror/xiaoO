@@ -246,6 +246,7 @@ impl SessionSupervisor {
             SessionAgentRecord {
                 agent_id: child_agent_id.clone(),
                 parent_agent_id: Some(request.parent_agent_id.clone()),
+                subagent_role_id: request.subagent_role_id.clone(),
                 loop_state: None,
                 memory_snapshot: None,
                 tool_manifest: None,
@@ -846,6 +847,10 @@ fn runtime_input_from_session(
     max_turns_override: Option<u32>,
 ) -> SessionRuntimeBuildInput {
     let is_subagent = agent_id != session.runtime.agent_id;
+    let subagent_role_id = session
+        .agents
+        .get(&agent_id.0)
+        .and_then(|record| record.subagent_role_id.clone());
     SessionRuntimeBuildInput {
         session_id: session.session_id.clone(),
         conversation_id: session.conversation_id.clone(),
@@ -856,6 +861,7 @@ fn runtime_input_from_session(
         entry: session.entry.clone(),
         agent_id_override: if is_subagent { Some(agent_id) } else { None },
         max_turns_override,
+        subagent_role_id,
     }
 }
 
