@@ -17,13 +17,22 @@ use crate::service::LspService;
 /// while a conch backend would have its own set (once supported).
 pub struct LspServiceRegistry {
     extra_configs: Vec<ServerConfig>,
+    disabled_servers: Vec<String>,
     services: Mutex<HashMap<String, Arc<dyn LspProvider>>>,
 }
 
 impl LspServiceRegistry {
     pub fn new(extra_configs: Vec<ServerConfig>) -> Self {
+        Self::new_with_disabled(extra_configs, Vec::new())
+    }
+
+    pub fn new_with_disabled(
+        extra_configs: Vec<ServerConfig>,
+        disabled_servers: Vec<String>,
+    ) -> Self {
         Self {
             extra_configs,
+            disabled_servers,
             services: Mutex::new(HashMap::new()),
         }
     }
@@ -47,8 +56,11 @@ impl LspServiceRegistry {
         }
 
         let env = Arc::new(LocalLspEnv::new(Arc::clone(&backend)));
-        let svc =
-            Arc::new(LspService::new(self.extra_configs.clone(), env)) as Arc<dyn LspProvider>;
+        let svc = Arc::new(LspService::new_with_disabled(
+            self.extra_configs.clone(),
+            self.disabled_servers.clone(),
+            env,
+        )) as Arc<dyn LspProvider>;
         services.insert(backend_id, Arc::clone(&svc));
         Some(svc)
     }

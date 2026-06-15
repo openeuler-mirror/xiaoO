@@ -2,7 +2,7 @@
 
 Configuration file location: `~/.config/xiaoo/config.toml`
 
-This document focuses on **common configuration items** applicable to CLI, TUI, and Daemon modes.
+This document focuses on shared configuration items plus local client runtime settings.
 
 > **Mode-specific Configuration**:
 > - CLI: [cli_config.md](./cli_config.md)
@@ -13,7 +13,7 @@ This document focuses on **common configuration items** applicable to CLI, TUI, 
 
 ## Common Configuration Items Overview
 
-Configuration items supported by all modes:
+Configuration items covered in this guide:
 
 | Configuration | Description | Details |
 |--------|------|----------|
@@ -23,7 +23,7 @@ Configuration items supported by all modes:
 | `[compact]` | Context compression strategy | [View Details](#compact---context-compression-strategy) |
 | `[trace]` | Tracing/Observability | [View Details](#trace---tracingobservability) |
 | `[hooker]` | Hooker configuration | [View Details](#hooker---hooker-configuration) |
-| `[operation_backend]` | Operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
+| `[operation_backend]` | CLI/TUI operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
 
 ---
 
@@ -252,11 +252,14 @@ For detailed hooker configuration and plugin instructions, please refer to [plug
 
 ## [operation_backend] - Operation Backend Configuration
 
-**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+**Applicable to**: CLI ✅ | TUI ✅ | Daemon ❌
+
+Daemon mode reads operation backend configuration from
+`[server.operation_backend]`; see [Daemon Configuration](./daemon_config.md).
 
 ```toml
 [operation_backend]
-kind = "local"                       # Operation backend kind: local, conch
+kind = "local"                       # Operation backend kind for local clients
 options = { ... }                    # Backend-specific options
 ```
 
