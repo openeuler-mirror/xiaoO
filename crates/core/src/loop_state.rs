@@ -16,6 +16,13 @@ pub struct LoopState {
     pub compression_meta: CompressionMeta,
     pub kv_cache_map: KvCacheMap,
     pub cancel: CancellationToken,
+    pub plan_nudged: bool,
+    pub last_failure_sig: Option<u64>,
+    pub repeated_failure_count: u32,
+    pub completion_nudged: bool,
+    pub last_success_sig: Option<u64>,
+    pub repeated_success_count: u32,
+    pub tool_executed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,7 +48,14 @@ impl LoopState {
             token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
             kv_cache_map: KvCacheMap::default(),
-            cancel,
+            cancel: CancellationToken::new(),
+            plan_nudged: false,
+            last_failure_sig: None,
+            repeated_failure_count: 0,
+            completion_nudged: false,
+            last_success_sig: None,
+            repeated_success_count: 0,
+            tool_executed: false,
         }
     }
 
@@ -65,6 +79,13 @@ impl LoopState {
             compression_meta: snapshot.compression_meta,
             kv_cache_map: snapshot.kv_cache_map,
             cancel,
+            plan_nudged: false,
+            last_failure_sig: None,
+            repeated_failure_count: 0,
+            completion_nudged: false,
+            last_success_sig: None,
+            repeated_success_count: 0,
+            tool_executed: false,
         }
     }
 

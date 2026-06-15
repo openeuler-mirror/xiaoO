@@ -8,5 +8,6 @@ mod source_loader;
 pub mod tool_input;
 
 pub use builtin::file_read;
+pub use builtin::open_todo_lines;
 pub use runtime_services::{SubagentRoleConfig, ToolRuntimeServices};
 pub use source_loader::{load_tool_sources, load_tool_sources_with_services};
