@@ -1700,10 +1700,12 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "temp-env",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "uuid",
 ]
@@ -3233,6 +3235,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "smawk"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7c388c1b5e93756d0c740965c41e8822f866621d41acbdf6336a6a168f8840c"
+
+[[package]]
 name = "socket2"
 version = "0.5.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3390,6 +3398,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "temp-env"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96374855068f47402c3121c6eed88d29cb1de8f3ab27090e273e420bdabcf050"
+dependencies = [
+ "parking_lot",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3410,6 +3427,17 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
+]
+
+[[package]]
+name = "textwrap"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c13547615a44dc9c452a8a534638acdf07120d4b6847c8178705da06306a3057"
+dependencies = [
+ "smawk",
+ "unicode-linebreak",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -3694,9 +3722,11 @@ dependencies = [
  "htmd",
  "html2text",
  "image",
+ "lazy_static",
  "lopdf",
  "lsp",
  "operation_backend",
+ "regex",
  "reqwest",
  "rustls-native-certs",
  "serde",
@@ -3948,6 +3978,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-linebreak"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
 
 [[package]]
 name = "unicode-segmentation"
@@ -4814,6 +4850,7 @@ dependencies = [
  "subagent",
  "sysinfo",
  "tempfile",
+ "textwrap",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
@@ -4845,6 +4882,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "compact",
+ "futures-util",
  "llm-client",
  "parking_lot",
  "reqwest",
