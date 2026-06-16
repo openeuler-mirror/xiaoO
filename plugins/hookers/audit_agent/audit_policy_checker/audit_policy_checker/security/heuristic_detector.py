@@ -229,6 +229,38 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "script_execution",
         "reason": "检测到锁定用户账户操作 (passwd -l)",
     },
+    # ---- 删除系统用户操作 — 不可逆高危操作，需用户授权 ----
+    {
+        "pattern": r"\buserdel\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除系统用户操作 (userdel)",
+    },
+    {
+        "pattern": r"\bdeluser\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除系统用户操作 (deluser)",
+    },
+    # ---- 用户/组密码修改操作 — 同 passwd 类高危 ----
+    {
+        "pattern": r"\blpasswd\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到非交互式密码修改操作 (lpasswd)",
+    },
+    {
+        "pattern": r"\bgpasswd\s+(?!-[adA])",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到组密码管理操作 (gpasswd)",
+    },
+    {
+        "pattern": r"\b(useradd|luseradd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到通过 -p 参数设置或修改密码 (useradd/usermod/groupmod)",
+    },
 ]
 
 # ==================== Prompt 注入检测关键词 ====================
