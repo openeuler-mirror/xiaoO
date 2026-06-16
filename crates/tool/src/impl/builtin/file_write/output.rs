@@ -50,12 +50,10 @@ pub struct GitDiff {
 pub struct CreateOutput {
     /// The path to the file that was created.
     pub file_path: String,
-    /// The content written to the file.
-    pub content: String,
-    /// Structured patch representation.
+    /// Number of lines written to the new file (post-change diagnostic).
+    pub new_lines: u32,
+    /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// Original file content (null for new files).
-    pub original_file: serde_json::Value,
     /// Git diff information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<GitDiff>,
@@ -70,12 +68,10 @@ pub struct CreateOutput {
 pub struct UpdateOutput {
     /// The path to the file that was updated.
     pub file_path: String,
-    /// The content written to the file.
-    pub content: String,
-    /// Structured patch representation.
+    /// Number of lines in the file after the write (post-change diagnostic).
+    pub new_lines: u32,
+    /// Structured patch representation (delta only).
     pub structured_patch: StructuredPatch,
-    /// Original file content before update.
-    pub original_file: String,
     /// Git diff information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_diff: Option<GitDiff>,

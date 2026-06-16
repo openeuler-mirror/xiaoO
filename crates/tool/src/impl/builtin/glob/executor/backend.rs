@@ -76,11 +76,19 @@ impl GlobToolExecutor {
         let filenames: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
         let num_files = filenames.len() as u64;
 
+        let truncation_note = truncated.then(|| {
+            format!(
+                "Results capped at {GLOB_LIMIT} matches; the glob backend does not page. \
+                 Narrow the `pattern` or pass a more specific `path` to surface the rest."
+            )
+        });
+
         let output = GlobOutput {
             duration_ms,
             num_files,
             filenames,
             truncated,
+            truncation_note,
         };
 
         serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {}", e))

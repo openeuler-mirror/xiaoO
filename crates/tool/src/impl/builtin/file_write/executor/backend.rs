@@ -42,7 +42,7 @@ impl FileWriteExecutor {
         let diff = TextDiff::from_lines(old_content, new_content);
 
         let mut hunks = Vec::new();
-        let mut updated_lines = Vec::new();
+        let mut changed_lines = Vec::new();
         let mut has_changes = false;
 
         for change in diff.iter_all_changes() {
@@ -54,11 +54,9 @@ impl FileWriteExecutor {
                     } else {
                         "+"
                     };
-                    updated_lines.push(format!("{}{}", sign, change));
+                    changed_lines.push(format!("{}{}", sign, change));
                 }
-                ChangeTag::Equal => {
-                    updated_lines.push(format!(" {}", change));
-                }
+                ChangeTag::Equal => {}
             }
         }
 
@@ -66,15 +64,15 @@ impl FileWriteExecutor {
             return StructuredPatch { hunks: None };
         }
 
-        let old_lines_count = old_content.lines().count() as u32;
-        let new_lines_count = new_content.lines().count() as u32;
+        let old_lines_count = changed_lines.iter().filter(|l| l.starts_with('-')).count() as u32;
+        let new_lines_count = changed_lines.iter().filter(|l| l.starts_with('+')).count() as u32;
 
         hunks.push(Hunk {
             old_start: 1,
             old_lines: old_lines_count,
             new_start: 1,
             new_lines: new_lines_count,
-            lines: updated_lines,
+            lines: changed_lines,
         });
 
         StructuredPatch { hunks: Some(hunks) }
@@ -222,20 +220,19 @@ impl ToolExecutor for FileWriteExecutor {
             None
         };
 
+        let new_lines = input.content.lines().count() as u32;
         let output: FileWriteOutput = match original_content {
-            Some(old_content) => FileWriteOutput::Update(UpdateOutput {
+            Some(_old_content) => FileWriteOutput::Update(UpdateOutput {
                 file_path: input.file_path.clone(),
-                content: input.content.clone(),
+                new_lines,
                 structured_patch,
-                original_file: old_content,
                 git_diff: None,
                 lsp_diagnostics: lsp_diagnostics.clone(),
             }),
             None => FileWriteOutput::Create(CreateOutput {
                 file_path: input.file_path.clone(),
-                content: input.content.clone(),
+                new_lines,
                 structured_patch,
-                original_file: serde_json::Value::Null,
                 git_diff: None,
                 lsp_diagnostics,
             }),

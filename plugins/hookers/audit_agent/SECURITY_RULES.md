@@ -441,6 +441,11 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `newusers` | script_execution | 批量用户添加命令 | ✓ Deny |
 | `passwd -d` | script_execution | 删除用户密码操作 | ✓ Deny |
 | `passwd -l` | script_execution | 锁定用户账户操作 | ✓ Deny |
+| `userdel` | script_execution | 删除系统用户 | ✓ Deny |
+| `deluser` | script_execution | 删除系统用户（Debian） | ✓ Deny |
+| `lpasswd` | script_execution | 非交互式密码修改（libuser） | ✓ Deny |
+| `gpasswd`（非 -a/-d/-A） | script_execution | 组密码管理 | ✓ Deny |
+| `useradd/usermod/groupmod -p` | script_execution | 通过 -p 参数设置或修改密码 | ✓ Deny |
 
 **示例 1：`rm -r /tmp/test.sh`**
 
@@ -1130,12 +1135,18 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 **规则**：非交互式密码修改命令必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码。
 
 **检测范围**：以下命令模式被视为非交互式密码修改：
-- `| passwd`（管道方式调用 passwd）
-- `passwd --stdin`
-- `chpasswd`（批量密码修改）
-- `newusers`（批量用户添加）
-- `passwd -d`（删除密码）
-- `passwd -l`（锁定账户）
+
+| 类别 | 模式 | 说明 |
+|------|------|------|
+| 管道 passwd | `\| passwd` | 管道方式调用 passwd |
+| passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
+| 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `newusers` | 批量用户添加 |
+| passwd 参数 | `passwd -d` | 删除密码 |
+| passwd 参数 | `passwd -l` | 锁定账户 |
+| libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
+| 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
+| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
 
 **豁免条件**：
 - `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已返回密码）
@@ -1185,6 +1196,49 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 结果: Deny
 原因: "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作"
 风险等级: high
+```
+
+---
+
+### 2.6 用户删除授权检测
+
+**规则**：删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作。
+
+**检测范围**：
+- `userdel` — 删除系统用户
+- `deluser` — 删除系统用户（Debian/Ubuntu）
+
+**豁免条件**：
+- `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已确认）
+
+**示例 1：违规 - 未授权的用户删除**
+
+```
+输入:
+  action_history: []
+  a_next:
+    action_type: "bash"
+    action_detail: "userdel foo"
+
+匹配: \buserdel\s → 用户删除操作
+历史: 未发现 ask_user_question 操作
+结果: Deny
+原因: "执行删除系统用户命令，但历史执行序列中未发现向用户确认的 ask_user_question 操作，可能存在未授权的用户删除风险"
+风险等级: high
+```
+
+**示例 2：合规 - 用户已授权**
+
+```
+输入:
+  action_history: [{"action_type": "ask_user_question", "output": "yes"}]
+  a_next:
+    action_type: "bash"
+    action_detail: "userdel -r foo"
+
+匹配: \buserdel\s → 用户删除操作
+历史: 发现 ask_user_question 且用户已确认
+结果: 通过（用户已授权）
 ```
 
 ---
