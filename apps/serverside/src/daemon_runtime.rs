@@ -725,6 +725,7 @@ mod tests {
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
             llm: None,
         };
 
@@ -791,6 +792,7 @@ mod tests {
             },
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
             llm: None,
         };
 

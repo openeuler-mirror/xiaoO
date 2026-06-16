@@ -107,7 +107,7 @@ impl ToolExecutor for SpawnSubagentExecutor {
                 output_schema: input.output_schema,
                 subagent_role_id: input.subagent_role_id,
                 predefined_prompt: None,
-                max_turns: None,
+                max_turns: Some(input.max_turns.unwrap_or(20)),
             })
             .await
             .map_err(|error| ToolExecutionError::ExecutionFailed {

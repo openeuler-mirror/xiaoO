@@ -1149,49 +1149,178 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 /// Calculate the visual cursor position considering automatic line wrapping.
-/// Returns (visual_row, visual_col) where visual_row is the row on screen
-/// and visual_col is the column position within that row (visual width units).
+/// Matches ratatui's WordWrapper: tracks pending whitespace separately,
+/// consumes trailing whitespace on wrap, preserves word continuity across wraps.
 fn calculate_visual_cursor_position(
     value: &str,
     cursor: usize,
     max_width: usize,
 ) -> (usize, usize) {
-    if max_width == 0 {
+    if max_width == 0 || value.is_empty() {
         return (0, 0);
     }
 
     let chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
 
-    let mut visual_row = 0usize;
-    let mut visual_col = 0usize;
-    let mut current_row_width = 0usize;
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0usize;
+    let mut line_width = 0usize;
+    let mut word_start = 0usize;
+    let mut word_width = 0usize;
+    let mut pending_space = 0usize;
 
     for (idx, &ch) in chars.iter().enumerate() {
-        if idx == cursor {
-            return (visual_row, visual_col);
+        if ch == '\n' {
+            if idx == cursor {
+                return (lines.len(), line_width + pending_space + word_width);
+            }
+            lines.push((line_start, idx));
+            line_start = idx + 1;
+            line_width = 0;
+            word_start = idx + 1;
+            word_width = 0;
+            pending_space = 0;
+            continue;
         }
 
-        if ch == '\n' {
-            // Explicit newline: move to next line
-            visual_row += 1;
-            visual_col = 0;
-            current_row_width = 0;
-        } else {
-            let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
 
-            if current_row_width + char_width > max_width {
-                // Automatic line wrap: move to next line, then add character
-                visual_row += 1;
-                current_row_width = 0;
+        if ch.is_whitespace() {
+            if word_width > 0 {
+                let total = line_width + pending_space + word_width;
+                if total > max_width && line_width > 0 {
+                    push_line_consume_whitespace(
+                        &mut lines,
+                        &chars,
+                        &mut line_start,
+                        &mut line_width,
+                        word_start,
+                        &mut pending_space,
+                        max_width,
+                    );
+                } else {
+                    line_width += pending_space + word_width;
+                }
+                word_width = 0;
             }
+            pending_space += char_width;
+            word_start = idx + 1;
+        } else {
+            if word_width == 0 {
+                word_start = idx;
+            }
+            word_width += char_width;
 
-            // Add character width to current row
-            current_row_width += char_width;
-            visual_col = current_row_width;
+            let total = line_width + pending_space + word_width;
+            if total > max_width {
+                if line_width > 0 {
+                    push_line_consume_whitespace(
+                        &mut lines,
+                        &chars,
+                        &mut line_start,
+                        &mut line_width,
+                        word_start,
+                        &mut pending_space,
+                        max_width,
+                    );
+                }
+
+                while word_width > max_width {
+                    let mut break_idx = line_start;
+                    let mut break_width = 0usize;
+                    for &c in chars[line_start..=idx].iter() {
+                        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                        if break_width + w > max_width && break_width > 0 {
+                            break;
+                        }
+                        break_width += w;
+                        break_idx += 1;
+                    }
+                    lines.push((line_start, break_idx));
+                    line_start = break_idx;
+                    word_width -= break_width;
+                }
+            }
         }
     }
 
-    // Cursor at end of text
-    (visual_row, visual_col)
+    if line_start < chars.len() {
+        lines.push((line_start, chars.len()));
+    }
+
+    for (row, (start, end)) in lines.iter().enumerate() {
+        if cursor >= *start && cursor <= *end {
+            let col: usize = chars[*start..cursor.min(*end)]
+                .iter()
+                .map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
+                .sum();
+            return (row, col);
+        }
+    }
+
+    if cursor >= line_start {
+        return (lines.len(), 0);
+    }
+
+    (0, 0)
+}
+
+fn push_line_consume_whitespace(
+    lines: &mut Vec<(usize, usize)>,
+    chars: &[char],
+    line_start: &mut usize,
+    line_width: &mut usize,
+    word_start: usize,
+    pending_space: &mut usize,
+    max_width: usize,
+) {
+    if *pending_space <= max_width.saturating_sub(*line_width) {
+        *pending_space = 0;
+    }
+    let mut line_end = word_start;
+    while line_end > *line_start && chars[line_end - 1].is_whitespace() {
+        line_end -= 1;
+    }
+    lines.push((*line_start, line_end));
+    *line_start = word_start;
+    *line_width = 0;
+
+    while *pending_space > 0
+        && *line_start > line_end
+        && chars[*line_start - 1].is_whitespace()
+    {
+        let w = unicode_width::UnicodeWidthChar::width(chars[*line_start - 1]).unwrap_or(0);
+        *line_start -= 1;
+        *pending_space = pending_space.saturating_sub(w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic() {
+        let (row, col) = calculate_visual_cursor_position("hello", 3, 10);
+        assert_eq!((row, col), (0, 3));
+    }
+
+    #[test]
+    fn test_newline() {
+        let (row, col) = calculate_visual_cursor_position("hello\nworld", 6, 10);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn test_cursor_after_newline() {
+        let (row, col) = calculate_visual_cursor_position("hello\n", 6, 10);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn test_empty() {
+        let (row, col) = calculate_visual_cursor_position("", 0, 10);
+        assert_eq!((row, col), (0, 0));
+    }
 }

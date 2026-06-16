@@ -249,6 +249,7 @@ impl SessionSupervisor {
             SessionAgentRecord {
                 agent_id: child_agent_id.clone(),
                 parent_agent_id: Some(request.parent_agent_id.clone()),
+                subagent_role_id: request.subagent_role_id.clone(),
                 loop_state: None,
                 memory_snapshot: None,
                 tool_manifest: None,
@@ -415,14 +416,7 @@ impl SessionSupervisor {
                     .await?;
                     return Ok(terminal);
                 }
-                LoopRunResult::Suspended(suspended_call) => {
-                    let join_id = suspended_join_id(&suspended_call)?;
-                    let receiver = self.take_join_receiver(&join_id).await?;
-                    let terminal = receiver.await.map_err(|_| SessionServiceError::CoreRun {
-                        message: format!("pending join receiver dropped before wake: {join_id}"),
-                    })?;
-                    self.remove_pending_join(&join_id).await;
-
+                LoopRunResult::Suspended(suspended_calls) => {
                     let mut resumed_loop_state =
                         loop_state
                             .clone()
@@ -432,42 +426,48 @@ impl SessionSupervisor {
                                     input.agent_id
                                 ),
                             })?;
-                    let tool_result_msg =
-                        build_join_tool_result_message(&suspended_call, terminal.clone())?;
 
-                    let resolved_call_id = &suspended_call.final_call.call_id;
-                    if let Some(last_msg) = resumed_loop_state.messages.last_mut() {
-                        if matches!(last_msg.role, agent_types::llm::MessageRole::Assistant) {
-                            last_msg.blocks.retain(|b| match b {
-                                agent_types::llm::ContentBlock::ToolUse { call_id, .. } => {
-                                    call_id == resolved_call_id
-                                }
-                                _ => true,
-                            });
+                    for suspended_call in &suspended_calls {
+                        let join_id = suspended_join_id(suspended_call)?;
+                        let receiver = self.take_join_receiver(&join_id).await?;
+                        let terminal =
+                            receiver.await.map_err(|_| SessionServiceError::CoreRun {
+                                message: format!(
+                                    "pending join receiver dropped before wake: {join_id}"
+                                ),
+                            })?;
+                        self.remove_pending_join(&join_id).await;
+
+                        let tool_result_msg =
+                            build_join_tool_result_message(suspended_call, terminal.clone())?;
+                        resumed_loop_state.messages.push(tool_result_msg);
+
+                        if let Some(sink) = loop_event_sink.as_ref() {
+                            let output_preview = serde_json::to_string(
+                                &serde_json::json!({ "terminal": terminal }),
+                            )
+                            .unwrap_or_default();
+                            let is_error =
+                                terminal.status == subagent::SubagentTerminalKind::Failed;
+                            sink.on_tool_result(
+                                &input.agent_id,
+                                &agent_types::events::ToolResultEvent {
+                                    call_id: suspended_call.final_call.call_id.clone(),
+                                    tool_name: suspended_call.final_call.tool_name.clone(),
+                                    output_preview,
+                                    is_error,
+                                    args_preview: serde_json::to_string_pretty(
+                                        &suspended_call.final_call.input,
+                                    )
+                                    .unwrap_or_else(|_| {
+                                        suspended_call.final_call.input.to_string()
+                                    }),
+                                },
+                            );
                         }
                     }
 
-                    resumed_loop_state.messages.push(tool_result_msg.clone());
-
-                    if let Some(sink) = loop_event_sink.as_ref() {
-                        let output_preview =
-                            serde_json::to_string(&serde_json::json!({ "terminal": terminal }))
-                                .unwrap_or_default();
-                        let is_error = terminal.status == subagent::SubagentTerminalKind::Failed;
-                        sink.on_tool_result(
-                            &input.agent_id,
-                            &agent_types::events::ToolResultEvent {
-                                call_id: suspended_call.final_call.call_id.clone(),
-                                tool_name: suspended_call.final_call.tool_name.clone(),
-                                output_preview,
-                                is_error,
-                                args_preview: serde_json::to_string_pretty(
-                                    &suspended_call.final_call.input,
-                                )
-                                .unwrap_or_else(|_| suspended_call.final_call.input.to_string()),
-                            },
-                        );
-                    }
+                    drop_unanswered_tool_uses(&mut resumed_loop_state.messages);
 
                     loop_state = Some(resumed_loop_state.clone());
                     self.persist_lane_state(
@@ -853,6 +853,10 @@ fn runtime_input_from_session(
     max_turns_override: Option<u32>,
 ) -> SessionRuntimeBuildInput {
     let is_subagent = agent_id != session.runtime.agent_id;
+    let subagent_role_id = session
+        .agents
+        .get(&agent_id.0)
+        .and_then(|record| record.subagent_role_id.clone());
     SessionRuntimeBuildInput {
         session_id: session.session_id.clone(),
         conversation_id: session.conversation_id.clone(),
@@ -863,6 +867,7 @@ fn runtime_input_from_session(
         entry: session.entry.clone(),
         agent_id_override: if is_subagent { Some(agent_id) } else { None },
         max_turns_override,
+        subagent_role_id,
         llm: session.runtime.llm.clone(),
     }
 }
@@ -947,6 +952,31 @@ fn terminal_from_outcome(
         },
         loop_state,
         memory_snapshot,
+    }
+}
+
+/// Remove assistant `ToolUse` blocks whose `call_id` has no matching `ToolResult`
+/// anywhere in the history, so a resumed conversation never sends a dangling
+/// tool_use (which providers reject). After every suspended call of a turn is
+/// resolved this is a no-op; it only fires for a sibling stranded by a stop
+/// short-circuit in the same batch.
+fn drop_unanswered_tool_uses(messages: &mut [agent_types::ChatMessage]) {
+    use agent_types::llm::{ContentBlock, MessageRole};
+    let answered: std::collections::HashSet<String> = messages
+        .iter()
+        .flat_map(|m| m.blocks.iter())
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for message in messages.iter_mut() {
+        if matches!(message.role, MessageRole::Assistant) {
+            message.blocks.retain(|b| match b {
+                ContentBlock::ToolUse { call_id, .. } => answered.contains(call_id),
+                _ => true,
+            });
+        }
     }
 }
 

@@ -78,6 +78,36 @@ impl ToolExecutor for TodoWriteToolExecutor {
     }
 }
 
+/// Live plan readout for the agent loop: one formatted line per open
+/// (non-`Completed`) todo for `runtime`'s session — `[~]` in-progress, `[ ]`
+/// pending — or empty when no plan was written or all items are done. Lets the
+/// loop re-inject open items each turn and consult them before accepting a stop.
+pub fn open_todo_lines(runtime: &dyn RuntimeView) -> Vec<String> {
+    let key = todo_key(runtime);
+    let Some(store) = TODO_STORE.get() else {
+        return Vec::new();
+    };
+    let Ok(store) = store.lock() else {
+        return Vec::new();
+    };
+    store
+        .get(&key)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter(|todo| !matches!(todo.status, TodoStatus::Completed))
+                .map(|todo| {
+                    let mark = match todo.status {
+                        TodoStatus::InProgress => "~",
+                        _ => " ",
+                    };
+                    format!("[{mark}] {}", todo.content.trim())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn todo_key(runtime: &dyn RuntimeView) -> String {
     let metadata = runtime.agent_context().metadata();
     metadata

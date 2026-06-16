@@ -78,6 +78,8 @@ pub struct SessionAgentRecord {
     pub agent_id: AgentId,
     #[serde(default)]
     pub parent_agent_id: Option<AgentId>,
+    #[serde(default)]
+    pub subagent_role_id: Option<String>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     #[serde(default)]

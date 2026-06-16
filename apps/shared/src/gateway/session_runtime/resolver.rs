@@ -60,6 +60,8 @@ pub struct SessionRuntimeBuildInput {
     pub entry: GatewayEntryContext,
     pub agent_id_override: Option<AgentId>,
     pub max_turns_override: Option<u32>,
+    #[serde(default)]
+    pub subagent_role_id: Option<String>,
     pub llm: Option<LlmRuntimeConfig>,
 }
 
@@ -75,6 +77,7 @@ impl SessionRuntimeBuildInput {
             entry: request.entry.clone(),
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
             llm: request.llm.clone(),
         }
     }
@@ -90,6 +93,7 @@ impl SessionRuntimeBuildInput {
             entry: request.entry.clone(),
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
             llm: request.llm.clone(),
         }
     }

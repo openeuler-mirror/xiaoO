@@ -4818,6 +4818,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "compact",
+ "futures-util",
  "llm-client",
  "parking_lot",
  "reqwest",

@@ -16,7 +16,7 @@ pub struct SuspendedToolCall {
 
 pub enum LoopRunResult {
     Complete(agent_types::outcome::AgentOutcome),
-    Suspended(SuspendedToolCall),
+    Suspended(Vec<SuspendedToolCall>),
 }
 
 impl SuspendedToolCall {
