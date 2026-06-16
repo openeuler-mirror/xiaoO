@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
 use skill::registry::FileSkillRegistry;
@@ -110,7 +111,8 @@ enum SkillCommands {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing (reads RUST_LOG env)
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)

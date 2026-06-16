@@ -644,7 +644,9 @@ mod tests {
 
         let body = provider.build_body(&request, false);
 
-        let system = body["system"].as_array().expect("system should be an array");
+        let system = body["system"]
+            .as_array()
+            .expect("system should be an array");
         assert_eq!(system.len(), 2);
         // Stable prefix carries the cache breakpoint; the volatile tail does not,
         // so a per-turn change to the tail never invalidates the cached prefix.
@@ -673,7 +675,9 @@ mod tests {
 
         let body = provider.build_body(&request, false);
 
-        let system = body["system"].as_array().expect("system should be an array");
+        let system = body["system"]
+            .as_array()
+            .expect("system should be an array");
         assert_eq!(system.len(), 1);
         assert_eq!(system[0]["text"], "base system only");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
