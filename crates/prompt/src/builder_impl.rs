@@ -7,7 +7,7 @@ use agent_types::{
 };
 use async_trait::async_trait;
 
-use crate::compose::compose_system_text;
+use crate::compose::compose_system_parts;
 use crate::context::collect_prompt_context;
 use crate::decision::decide_prompt;
 
@@ -31,14 +31,19 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let system_text = compose_system_text(&input.system_prompt, &context);
+        let (stable_system, volatile_system) =
+            compose_system_parts(&input.system_prompt, &context);
 
-        if system_text.trim().is_empty() {
+        if stable_system.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
                 message: "missing required context: system_prompt".to_string(),
             });
         }
 
+        let system_text = match volatile_system {
+            Some(v) if !v.trim().is_empty() => format!("{stable_system}\n\n{v}"),
+            _ => stable_system,
+        };
         let mut messages = Vec::with_capacity(input.messages.len() + 1);
         messages.push(ChatMessage::system(system_text));
 
@@ -357,6 +362,7 @@ mod tests {
         let system_text = result.request.messages[0].text_content().unwrap();
         assert!(system_text.contains("New system prompt"));
         assert!(system_text.contains("Environment"));
+        assert!(!system_text.contains("Old system prompt"), "Old system messages should be filtered out");
 
         assert_eq!(
             result.request.messages[1].role,
@@ -369,15 +375,5 @@ mod tests {
             agent_types::MessageRole::Assistant
         );
         assert_eq!(result.request.messages[2].text_content(), Some("response"));
-
-        for message in &result.request.messages {
-            if message.role == agent_types::MessageRole::System {
-                let text = message.text_content().unwrap();
-                assert!(
-                    !text.contains("Old system prompt"),
-                    "Old system messages should be filtered out"
-                );
-            }
-        }
     }
 }
