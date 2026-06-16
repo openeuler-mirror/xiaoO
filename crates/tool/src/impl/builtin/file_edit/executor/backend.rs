@@ -191,9 +191,7 @@ impl ToolExecutor for FileEditExecutor {
 
             let output = FileEditOutput {
                 file_path: input.file_path.clone(),
-                old_string: String::new(),
-                new_string: input.new_string.clone(),
-                original_file: String::new(),
+                new_lines: input.new_string.lines().count() as u32,
                 structured_patch: Vec::new(),
                 user_modified: false,
                 replace_all: false,
@@ -216,8 +214,6 @@ impl ToolExecutor for FileEditExecutor {
         let content = file_content.ok_or_else(|| ToolExecutionError::ExecutionFailed {
             message: format!("File not found: {}", resolved_str),
         })?;
-
-        let original_file = content.clone();
 
         let actual_old_string =
             find_actual_string(&content, &input.old_string).ok_or_else(|| {
@@ -283,9 +279,7 @@ impl ToolExecutor for FileEditExecutor {
 
         let output = FileEditOutput {
             file_path: input.file_path.clone(),
-            old_string: actual_old_string,
-            new_string: styled_new_string,
-            original_file,
+            new_lines: updated_content.lines().count() as u32,
             structured_patch,
             user_modified: false,
             replace_all: input.replace_all,

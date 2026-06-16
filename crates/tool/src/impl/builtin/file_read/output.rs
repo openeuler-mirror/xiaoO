@@ -124,6 +124,10 @@ pub struct PartsOutput {
 pub struct FileUnchangedOutput {
     /// The path to the file that was read without changes.
     pub file_path: String,
+    /// Why the content was withheld and how to get it; without this the model
+    /// tends to retry the read instead of reusing the copy already in context.
+    #[serde(default)]
+    pub note: String,
 }
 
 /// Enum representing all possible FileReadTool outputs.
