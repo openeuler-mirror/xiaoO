@@ -60,19 +60,16 @@ pub struct GitDiff {
 
 /// Complete output from a FileEditTool operation.
 ///
-/// Represents all information about a file edit, including the original
-/// and new content, the structured patch, and optional git diff metadata.
+/// Sized by the change it reports, not the file it touched: carries the
+/// structured patch and post-change diagnostics, never the pre-edit file
+/// content or an echo of the caller's old/new strings (re-billed every turn).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEditOutput {
     /// The path to the file that was edited.
     pub file_path: String,
-    /// The original string content that was replaced.
-    pub old_string: String,
-    /// The new string content that replaced the old content.
-    pub new_string: String,
-    /// The original file content before any edits.
-    pub original_file: String,
+    /// Number of lines in the file after the edit (post-change diagnostic).
+    pub new_lines: u32,
     /// The structured patch representing the changes made.
     pub structured_patch: StructuredPatch,
     /// Whether the file was modified by user action.

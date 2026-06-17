@@ -7,6 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -48,6 +49,8 @@ const CLI_SWITCH: &str = "--cli";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     match classify_args(env::args_os().collect()) {
         EntryInvocation::Help { program } => {
             print_end_side_usage(&program);

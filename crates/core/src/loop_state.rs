@@ -48,7 +48,7 @@ impl LoopState {
             token_usage: TokenUsage::default(),
             compression_meta: CompressionMeta::default(),
             kv_cache_map: KvCacheMap::default(),
-            cancel: CancellationToken::new(),
+            cancel,
             plan_nudged: false,
             last_failure_sig: None,
             repeated_failure_count: 0,
@@ -92,5 +92,20 @@ impl LoopState {
     /// Get a clone of the shared message storage Arc.
     pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
         Arc::clone(&self.messages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_with_cancel_uses_provided_token() {
+        let cancel = CancellationToken::new();
+        let state = LoopState::new_with_cancel(uuid::Uuid::new_v4(), cancel.clone());
+
+        cancel.cancel();
+
+        assert!(state.cancel.is_cancelled());
     }
 }

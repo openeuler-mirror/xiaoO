@@ -757,7 +757,21 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 #### 2.5 密码修改授权检测
 
-非交互式密码修改命令（`echo ... | passwd`、`chpasswd`、`passwd --stdin`、`passwd -d`、`passwd -l` 等）必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码，否则拦截。交互式 `passwd`（无参数）不在此列，因为 LLM 无法完成交互式输入。
+非交互式密码修改命令必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码，否则拦截。交互式 `passwd`（无参数）不在此列，因为 LLM 无法完成交互式输入。
+
+**检测范围**：
+
+| 类别 | 模式 | 说明 |
+|------|------|------|
+| 管道 passwd | `\| passwd` | 管道方式调用 passwd |
+| passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
+| 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `newusers` | 批量用户添加 |
+| passwd 参数 | `passwd -d` | 删除密码 |
+| passwd 参数 | `passwd -l` | 锁定账户 |
+| libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
+| 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
+| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
 
 **扫描示例**：
 ```
@@ -779,6 +793,27 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 输入: a_next = {"action_type": "shell_command", "action_detail": "rm -rf /tmp/log/*"}
 匹配: 通配符 "*" + 删除 "rm" → risk_level=high
 结果: Deny, reason="检测到通配符结合删除操作，可能造成批量误删"
+```
+
+
+
+#### 2.6 用户删除授权检测
+
+删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作，否则拦截。
+
+**扫描示例**：
+```
+输入: a_next = {"action_type": "bash", "action_detail": "userdel foo"}
+      action_history = []
+匹配: \buserdel\s → 用户删除操作
+历史: 未发现 ask_user_question 操作
+结果: Deny, reason="执行删除系统用户命令，但历史执行序列中未发现向用户确认的 ask_user_question 操作"
+
+输入: a_next = {"action_type": "bash", "action_detail": "userdel -r foo"}
+      action_history = [{"action_type": "ask_user_question", "output": "yes"}]
+匹配: \buserdel\s → 用户删除操作
+历史: 发现 ask_user_question 且用户已确认
+结果: 通过（用户已授权）
 ```
 
 ---

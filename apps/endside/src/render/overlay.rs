@@ -1286,10 +1286,7 @@ fn push_line_consume_whitespace(
     *line_start = word_start;
     *line_width = 0;
 
-    while *pending_space > 0
-        && *line_start > line_end
-        && chars[*line_start - 1].is_whitespace()
-    {
+    while *pending_space > 0 && *line_start > line_end && chars[*line_start - 1].is_whitespace() {
         let w = unicode_width::UnicodeWidthChar::width(chars[*line_start - 1]).unwrap_or(0);
         *line_start -= 1;
         *pending_space = pending_space.saturating_sub(w);

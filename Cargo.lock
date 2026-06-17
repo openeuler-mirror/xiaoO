@@ -2156,10 +2156,12 @@ dependencies = [
  "agent-contracts",
  "async-trait",
  "glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4850,6 +4852,7 @@ dependencies = [
  "futures-util",
  "llm-client",
  "lsp",
+ "operation_backend",
  "ratatui",
  "reqwest",
  "serde",
@@ -4885,6 +4888,7 @@ dependencies = [
  "llm-client",
  "lsp",
  "mime_guess",
+ "operation_backend",
  "prompt",
  "prost",
  "regex",

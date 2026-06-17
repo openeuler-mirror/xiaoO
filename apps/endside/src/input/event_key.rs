@@ -633,12 +633,7 @@ impl App {
     }
 
     fn external_command_body(&self, trimmed: &str) -> Option<String> {
-        let cmd_name = trimmed.strip_prefix('/')?;
-        self.state
-            .external_commands
-            .iter()
-            .find(|c| c.name.eq_ignore_ascii_case(cmd_name))
-            .map(|cmd| cmd.body.clone())
+        expand_external_command(trimmed, &self.state.external_commands)
     }
 
     async fn handle_remote_command(&mut self, trimmed: &str) {
@@ -1254,5 +1249,91 @@ fn normalize_remote_url_input(value: &str) -> String {
         trimmed.to_string()
     } else {
         format!("http://{trimmed}")
+    }
+}
+
+fn expand_external_command(
+    trimmed: &str,
+    external: &[crate::services::command_loader::ExternalCommand],
+) -> Option<String> {
+    let (cmd_name, user_args) = external_command_parts(trimmed)?;
+    external
+        .iter()
+        .find(|cmd| cmd.name.eq_ignore_ascii_case(cmd_name))
+        .map(|cmd| append_external_command_args(&cmd.body, user_args))
+}
+
+fn external_command_parts(trimmed: &str) -> Option<(&str, &str)> {
+    let first = trimmed.split_whitespace().next()?;
+    let cmd_name = first.strip_prefix('/')?;
+    if cmd_name.is_empty() {
+        return None;
+    }
+    let user_args = trimmed[first.len()..].trim();
+    Some((cmd_name, user_args))
+}
+
+fn append_external_command_args(body: &str, user_args: &str) -> String {
+    if user_args.is_empty() {
+        return body.to_string();
+    }
+    if body.is_empty() {
+        return user_args.to_string();
+    }
+    format!("{body}\n\n{user_args}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::command_loader::ExternalCommand;
+
+    fn external_commands() -> Vec<ExternalCommand> {
+        vec![ExternalCommand {
+            name: "review".to_string(),
+            description: "Review code".to_string(),
+            body: "Review this carefully.".to_string(),
+        }]
+    }
+
+    #[test]
+    fn external_command_exact_match_expands_to_body() {
+        assert_eq!(
+            expand_external_command("/review", &external_commands()),
+            Some("Review this carefully.".to_string())
+        );
+    }
+
+    #[test]
+    fn external_command_appends_user_input_after_command_token() {
+        assert_eq!(
+            expand_external_command("/review src/main.rs 看一下边界条件", &external_commands()),
+            Some("Review this carefully.\n\nsrc/main.rs 看一下边界条件".to_string())
+        );
+    }
+
+    #[test]
+    fn external_command_match_only_uses_first_token() {
+        assert_eq!(
+            expand_external_command("/review-extra input", &external_commands()),
+            None
+        );
+        assert_eq!(
+            expand_external_command("/reviewer input", &external_commands()),
+            None
+        );
+    }
+
+    #[test]
+    fn external_command_with_empty_body_uses_user_input() {
+        let commands = vec![ExternalCommand {
+            name: "ask".to_string(),
+            description: String::new(),
+            body: String::new(),
+        }];
+        assert_eq!(
+            expand_external_command("/ask hello", &commands),
+            Some("hello".to_string())
+        );
     }
 }

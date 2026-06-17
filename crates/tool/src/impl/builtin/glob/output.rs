@@ -20,4 +20,8 @@ pub struct GlobOutput {
     pub filenames: Vec<String>,
     /// Whether results were limited.
     pub truncated: bool,
+    /// When `truncated`, how to retrieve the rest: the backend caps at a fixed
+    /// limit and does not page, so the affordance is to narrow the query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation_note: Option<String>,
 }

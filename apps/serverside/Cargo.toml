@@ -24,6 +24,7 @@ governor = "0.6"
 llm-client = { path = "../../crates/llm-client" }
 lsp = { path = "../../crates/lsp" }
 mime_guess.workspace = true
+operation_backend = { path = "../../crates/operation_backend" }
 prompt = { path = "../../crates/prompt" }
 prost = "0.13"
 regex = "1.11"

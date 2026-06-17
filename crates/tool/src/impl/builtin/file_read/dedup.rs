@@ -79,11 +79,15 @@ pub fn get_file_mtime(path: &Path) -> Option<i64> {
         .ok()
         .and_then(|meta| meta.modified().ok())
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| duration.as_millis() as i64)
 }
 
+// Millisecond resolution, not seconds: dedup now suppresses *full* re-reads (not
+// just paged ones), so a re-read after an edit that landed in the same wall-clock
+// second as the prior read must still be seen as changed — otherwise the agent
+// gets a stale "File is unchanged" and never sees the new content.
 pub fn system_time_to_timestamp(time: Option<SystemTime>) -> i64 {
     time.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
