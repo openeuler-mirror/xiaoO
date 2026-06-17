@@ -400,8 +400,8 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::gateway::{
-        AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionRuntimeBindings,
-        SessionRuntimeDescriptor, backend::GatewayBackendConfig,
+        backend::GatewayBackendConfig, AppBootstrap, GatewayEntryContext, InMemorySessionStore,
+        SessionRuntimeBindings, SessionRuntimeDescriptor,
     };
     use agent_contracts::backend::BackendLifecycleState;
     use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -410,7 +410,7 @@ mod tests {
     use agent_types::hook::HookerRegistryConfig;
     use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
     use llm_client::LlmProviderWrapper;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use tempfile::TempDir;
 
     struct StubLlmProvider {

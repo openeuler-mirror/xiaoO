@@ -192,6 +192,75 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
     },
     # 注意：/dev/null 已从检测列表移除，因为它通常只用于 shell 重定向（如 2>/dev/null），
     # 不是真正的安全风险。真正的攻击不会通过读取 /dev/null 来实现。
+    # ---- 非交互式密码修改 — 可能被 LLM 自动执行，需用户授权 ----
+    {
+        "pattern": r"\|\s*passwd\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到管道方式调用 passwd（非交互式密码修改）",
+    },
+    {
+        "pattern": r"\bpasswd\s+--stdin\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 passwd --stdin 非交互式密码输入",
+    },
+    {
+        "pattern": r"\bchpasswd\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 chpasswd 批量密码修改命令",
+    },
+    {
+        "pattern": r"\bnewusers\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到 newusers 批量用户添加命令",
+    },
+    {
+        "pattern": r"\bpasswd\s+-[a-zA-Z]*d\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除用户密码操作 (passwd -d)",
+    },
+    {
+        "pattern": r"\bpasswd\s+-[a-zA-Z]*l\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到锁定用户账户操作 (passwd -l)",
+    },
+    # ---- 删除系统用户操作 — 不可逆高危操作，需用户授权 ----
+    {
+        "pattern": r"\buserdel\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除系统用户操作 (userdel)",
+    },
+    {
+        "pattern": r"\bdeluser\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除系统用户操作 (deluser)",
+    },
+    # ---- 用户/组密码修改操作 — 同 passwd 类高危 ----
+    {
+        "pattern": r"\blpasswd\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到非交互式密码修改操作 (lpasswd)",
+    },
+    {
+        "pattern": r"\bgpasswd\s+(?!-[adA])",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到组密码管理操作 (gpasswd)",
+    },
+    {
+        "pattern": r"\b(useradd|luseradd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到通过 -p 参数设置或修改密码 (useradd/usermod/groupmod)",
+    },
 ]
 
 # ==================== Prompt 注入检测关键词 ====================
@@ -288,6 +357,19 @@ FULLY_SAFE_BASH_PATTERNS = [
     r"^command\s+",
     r"^basename\s+",
     r"^dirname\s+",
+    # 系统信息查询（只读，不涉及文件/网络/权限）
+    r"^whoami(?:\s|$)",
+    r"^id(?:\s|$)",
+    r"^hostname(?:\s|$)",
+    r"^uname(?:\s|$)",
+    r"^date(?:\s|$)",
+    r"^env(?:\s|$)",
+    r"^printenv(?:\s|$)",
+    r"^tty(?:\s|$)",
+    r"^arch(?:\s|$)",
+    r"^uptime(?:\s|$)",
+    r"^groups(?:\s|$)",
+    r"^logname(?:\s|$)",
 ]
 
 # 安全但可能访问敏感路径的 bash 子命令：跳过 Layer 3，保留 Layer 2

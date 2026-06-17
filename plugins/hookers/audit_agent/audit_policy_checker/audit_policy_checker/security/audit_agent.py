@@ -33,6 +33,11 @@ FULLY_SAFE_TOOLS = frozenset({
     "filemgr-globfiles",
 })
 
+# 内置安全 Skill 白名单：这些是 xiaoO 系统自带的安全 Skill，加载时直接放行
+TRUSTED_SKILLS = frozenset({
+    "xiaoo-guardian",
+})
+
 # 安全但可能访问敏感路径：跳过 Layer 3，保留 Layer 2 敏感路径检测
 READONLY_SENSITIVE_TOOLS = frozenset({
     "read", "file_read", "read_file", "head", "tail", "grep",
@@ -142,13 +147,33 @@ class xiaoOSecBot:
 
         # --- 完全放行：跳过 L2 + L3 ---
         is_fully_safe_tool = action_type in FULLY_SAFE_TOOLS
+        # 内置安全 Skill 直接放行（如 xiaoo-guardian）
+        is_trusted_skill = (
+            action_type == "skill"
+            and action_detail in TRUSTED_SKILLS
+        )
         is_fully_safe_bash = (
             action_type == "bash"
             and is_fully_safe_bash_command(action_detail)
             and no_high_risk
         )
 
-        if is_fully_safe_tool and no_high_risk:
+        # 安全兜底：is_fully_safe_bash_command 只检查管道前的第一段命令，
+        # 对于 "echo ... | passwd" 等管道命令，第一段 (echo) 是安全的，
+        # 但完整命令包含危险模式。此处用 CommandPatternScanner 扫描完整命令，
+        # 如果命中 high/critical 模式则不允许白名单放行。
+        if is_fully_safe_bash:
+            from .heuristic_detector import CommandPatternScanner
+            _full_cmd_scanner = CommandPatternScanner()
+            _full_scan = _full_cmd_scanner.scan(action_detail)
+            if _full_scan.hit and _full_scan.risk_level in ("high", "critical"):
+                is_fully_safe_bash = False
+                logger.info(
+                    "白名单放行覆盖: 完整命令命中高危模式 [%s]: %s",
+                    _full_scan.risk_level, _full_scan.reason,
+                )
+
+        if (is_fully_safe_tool or is_trusted_skill) and no_high_risk:
             logger.info(
                 "完全安全工具快速放行: action_type=%s, heuristic_risk=%s",
                 action_type, heuristic_risk,

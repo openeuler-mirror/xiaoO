@@ -14,7 +14,7 @@ pub struct AskUserQuestionToolSpec {
 
 impl AskUserQuestionToolSpec {
     pub fn new() -> Self {
-        // JSON Schema 支持三种 kind 的 oneOf 变体
+        // JSON Schema supports three kind variants via oneOf
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -40,7 +40,12 @@ impl AskUserQuestionToolSpec {
                                 "description": "文本输入类问题，用户可自由输入文本。",
                                 "properties": {
                                     "kind":   { "type": "string", "enum": ["text_input"] },
-                                    "prompt": { "type": "string", "description": "向用户展示的问题文本。" }
+                                    "prompt": { "type": "string", "description": "向用户展示的问题文本。" },
+                                    "is_secret": {
+                                        "type": "boolean",
+                                        "description": "是否隐藏用户输入（如密码），默认false。设为true时输入内容用*遮蔽。",
+                                        "default": false
+                                    }
                                 },
                                 "required": ["kind", "prompt"],
                                 "additionalProperties": false
@@ -79,7 +84,7 @@ impl AskUserQuestionToolSpec {
             description: "向用户提出一个或多个问题并收集回答。\n\
                 支持三种问题类型：\n\
                 - confirm：是/否确认\n\
-                - text_input：自由文本输入\n\
+                - text_input：自由文本输入（is_secret=true 时输入内容用*遮蔽，适用于密码等敏感信息）\n\
                 - choice：从给定选项中选择（可选允许自定义输入）\n\
                 每次调用最多可提出 4 个问题，按顺序依次与用户交互。"
                 .to_string(),

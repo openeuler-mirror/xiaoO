@@ -70,7 +70,12 @@ mod tests {
     fn strict_input_parses_unchanged() {
         let value = serde_json::json!({ "items": [{ "content": "a" }] });
         let parsed: Input = parse_tool_input(&value).expect("strict input should parse");
-        assert_eq!(parsed.items, vec![Item { content: "a".into() }]);
+        assert_eq!(
+            parsed.items,
+            vec![Item {
+                content: "a".into()
+            }]
+        );
     }
 
     #[test]
@@ -78,7 +83,12 @@ mod tests {
         let value = serde_json::json!({ "items": "[{\"content\": \"a\"}]" });
         let parsed: Input =
             parse_tool_input(&value).expect("stringified array should be recovered");
-        assert_eq!(parsed.items, vec![Item { content: "a".into() }]);
+        assert_eq!(
+            parsed.items,
+            vec![Item {
+                content: "a".into()
+            }]
+        );
     }
 
     #[test]
@@ -86,7 +96,12 @@ mod tests {
         let value = serde_json::json!({ "settings": "{\"mode\": \"fast\"}" });
         let parsed: Config =
             parse_tool_input(&value).expect("stringified object should be recovered");
-        assert_eq!(parsed.settings, Settings { mode: "fast".into() });
+        assert_eq!(
+            parsed.settings,
+            Settings {
+                mode: "fast".into()
+            }
+        );
     }
 
     #[test]
@@ -99,8 +114,7 @@ mod tests {
     #[test]
     fn json_looking_string_field_is_preserved() {
         let value = serde_json::json!({ "label": "[1, 2, 3]" });
-        let parsed: Labeled =
-            parse_tool_input(&value).expect("string field should parse strictly");
+        let parsed: Labeled = parse_tool_input(&value).expect("string field should parse strictly");
         assert_eq!(parsed.label, "[1, 2, 3]");
     }
 

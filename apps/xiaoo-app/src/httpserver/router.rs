@@ -190,7 +190,10 @@ impl InteractionHandle for RemoteSseInteractionHandle {
 fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
     match request {
         InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text { value: None },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+            value: None,
+            display_value: None,
+        },
         InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
     }
 }
@@ -543,6 +546,7 @@ async fn handle_session_turn_stream(
         {
             Ok(result) => {
                 let summary = sink.take_loop_summary();
+                let filtered_messages = filter_messages_for_display(&result.messages);
                 let _ = tx.send(SseStreamEvent::Done {
                     reply: result.visible_reply.clone(),
                     raw_reply: result.raw_reply,
@@ -553,7 +557,7 @@ async fn handle_session_turn_stream(
                     prompt_tokens: result.prompt_tokens,
                     completion_tokens: result.completion_tokens,
                     estimated_input_tokens: result.estimated_input_tokens,
-                    messages: result.messages,
+                    messages: filtered_messages,
                     stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
                 });
             }
@@ -1426,4 +1430,81 @@ mod tests {
         assert_eq!(sent_texts.len(), 1);
         assert_eq!(sent_texts[0].1, "处理完成");
     }
+}
+
+fn filter_messages_for_display(
+    messages: &[llm_client::ChatMessage],
+) -> Vec<llm_client::ChatMessage> {
+    messages.iter().map(filter_message_for_display).collect()
+}
+
+fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::ChatMessage {
+    use agent_types::llm::ContentBlock;
+    let filtered_blocks: Vec<ContentBlock> = message
+        .blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                is_error,
+            } => {
+                if tool_name == "ask_user_question" {
+                    let filtered_output = filter_ask_user_question_output(output);
+                    ContentBlock::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        output: filtered_output,
+                        is_error: *is_error,
+                    }
+                } else {
+                    block.clone()
+                }
+            }
+            _ => block.clone(),
+        })
+        .collect();
+
+    llm_client::ChatMessage {
+        role: message.role.clone(),
+        blocks: filtered_blocks,
+        message_id: message.message_id.clone(),
+        timestamp_ms: message.timestamp_ms,
+        api_usage_tokens: message.api_usage_tokens,
+        reasoning_content: message.reasoning_content.clone(),
+        estimated_tokens: message.estimated_tokens,
+    }
+}
+
+fn filter_ask_user_question_output(output: &str) -> String {
+    if let Ok(mut json_value) = serde_json::from_str::<serde_json::Value>(output) {
+        if let Some(answers) = json_value.get_mut("answers") {
+            if let Some(answers_array) = answers.as_array_mut() {
+                for answer in answers_array {
+                    if let Some(kind) = answer.get("kind") {
+                        if kind.as_str() == Some("text") {
+                            let display_value = answer.get("display_value").and_then(|v| {
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.clone())
+                                }
+                            });
+                            if let Some(display_val) = display_value {
+                                if let Some(obj) = answer.as_object_mut() {
+                                    obj["value"] = display_val;
+                                    obj.remove("display_value");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(filtered_output) = serde_json::to_string(&json_value) {
+            return filtered_output;
+        }
+    }
+    output.to_string()
 }

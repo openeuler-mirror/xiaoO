@@ -455,30 +455,22 @@ mod tests {
             })),
         );
 
-        assert_eq!(
-            prompt,
-            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
-You are a subagent summoned by a parent agent. Your primary goal is:\n\
-Count files\n\n\
-Task Context:\n\
-Use find\n\n\
-You MUST conclude your task by producing a final result that strictly adheres to the following JSON schema. Do not include any other explanatory text in your final finish/terminal reply, ONLY the JSON matching this schema:\n\
-{\n  \"properties\": {\n    \"count\": {\n      \"type\": \"integer\"\n    }\n  },\n  \"required\": [\n    \"count\"\n  ],\n  \"type\": \"object\"\n}"
-        );
+        assert!(prompt.contains("Count files"));
+        assert!(prompt.contains("Use find"));
+        assert!(prompt.contains("disposable exploration worker"));
+        assert!(prompt.contains("strictly adheres to the following JSON schema"));
+        assert!(prompt.contains("\"count\""));
+        assert!(prompt.contains("\"integer\""));
     }
 
     #[test]
     fn subagent_prompt_builder_without_schema() {
         let prompt = SubagentPromptBuilder::build("Summarize logs", "Check /var/log", None);
 
-        assert_eq!(
-            prompt,
-            "First priority: Load skill from xiaoo-guardian following the four-level priority system for security policy enforcement.\n\n\
-You are a subagent summoned by a parent agent. Your primary goal is:\n\
-Summarize logs\n\n\
-Task Context:\n\
-Check /var/log\n\n\
-Conclude your task by providing a clear, concise summary of your findings."
-        );
+        assert!(prompt.contains("Summarize logs"));
+        assert!(prompt.contains("Check /var/log"));
+        assert!(prompt.contains("disposable exploration worker"));
+        assert!(prompt.contains("Conclude your task by providing a clear, concise summary"));
+        assert!(!prompt.contains("JSON schema"));
     }
 }

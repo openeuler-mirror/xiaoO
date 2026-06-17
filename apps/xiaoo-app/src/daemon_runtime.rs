@@ -19,15 +19,17 @@ use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
 use skill::FileSkillRegistry;
-use std::path::PathBuf;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::{fs, path::Path};
 use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
     ToolRuntimeServices,
 };
-use xiaoo_app::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
+use xiaoo_app::gateway::prompt_utils::{
+    compose_subagent_delegation_rules, generate_skills_dirs_table,
+};
 use xiaoo_app::gateway::session_record::SubagentRoleRecord;
 use xiaoo_app::gateway::{
     backend::GatewayBackendConfig, compose_workspace_system_prompt, ResolvedSessionRuntime,
@@ -83,10 +85,7 @@ impl ConfiguredRuntimeResolver {
             llm_provider.capabilities().max_context_window,
         )
         .await;
-        let token_budget = build_token_budget(
-            effective_context_window,
-            config.max_output_tokens(),
-        );
+        let token_budget = build_token_budget(effective_context_window, config.max_output_tokens());
 
         validate_token_budget_config(
             &token_budget,
@@ -343,10 +342,7 @@ fn resolve_allowed_tool_names(
         .collect()
 }
 
-fn build_token_budget(
-    total_budget: usize,
-    configured_output_tokens: usize,
-) -> TokenBudgetConfig {
+fn build_token_budget(total_budget: usize, configured_output_tokens: usize) -> TokenBudgetConfig {
     let total_budget = total_budget.max(1);
     let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
     let reserved_for_prompt = DEFAULT_MIN_PROMPT_TOKEN_RESERVE.min(
@@ -375,7 +371,8 @@ fn validate_token_budget_config(
     config_path: &Path,
 ) {
     let max_reasonable_output_ratio = 0.5;
-    let max_reasonable_output_tokens = (budget.total_budget as f64 * max_reasonable_output_ratio) as usize;
+    let max_reasonable_output_tokens =
+        (budget.total_budget as f64 * max_reasonable_output_ratio) as usize;
 
     if configured_max_tokens > max_reasonable_output_tokens {
         let warning_msg = format!(
@@ -397,7 +394,10 @@ fn validate_token_budget_config(
         eprintln!();
         eprintln!("Configuration file: {}", config_path.display());
         eprintln!("Suggestions:");
-        eprintln!("  - Reduce max_tokens (currently {}) in [app.llm] section", configured_max_tokens);
+        eprintln!(
+            "  - Reduce max_tokens (currently {}) in [app.llm] section",
+            configured_max_tokens
+        );
         std::process::abort();
     }
 }
@@ -555,10 +555,17 @@ mod tests {
             entry: GatewayEntryContext::channel(None),
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
         };
 
-        let prompt =
-            build_system_prompt("base rules", temp.path(), &request, &BTreeMap::new(), false, &Vec::new());
+        let prompt = build_system_prompt(
+            "base rules",
+            temp.path(),
+            &request,
+            &BTreeMap::new(),
+            false,
+            &Vec::new(),
+        );
 
         assert!(prompt.contains("base rules"));
         assert!(prompt.contains("repo rules"));
@@ -614,6 +621,7 @@ mod tests {
             },
             agent_id_override: None,
             max_turns_override: None,
+            subagent_role_id: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)

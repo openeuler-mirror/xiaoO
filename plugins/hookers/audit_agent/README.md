@@ -372,6 +372,8 @@ cat /tmp/audit_policy_checker/{session_id}.toml
 
 ## 端到端测试
 
+测试脚本通过读取审计日志（`AUDIT_LOG_PATH`）来判断 audit_agent 是否拒绝，比检查 xiaoo 输出更可靠。
+
 ### 源码安装环境
 
 ```bash
@@ -401,19 +403,26 @@ bash run-deny-07-curl-exfil.sh  # curl POST 数据外传
 
 ### RPM 安装环境
 
-需安装两个 RPM 包：
+audit_agent 通过 `xiaoO-hookers` RPM 包安装到 `/usr/lib/.xiaoo/hookers/audit_agent/`，测试用例需从 `src.rpm` 解压获取：
 
 ```bash
-sudo dnf install ./xiaoO-hookers-*.rpm       # audit_agent 主程序
-sudo dnf install ./xiaoO-hookers-tests-*.rpm  # 测试用例（安装到 /usr/lib/.xiaoo/tests/）
+# 安装 xiaoO-hookers（audit_agent 主程序）
+sudo dnf install ./xiaoO-hookers-*.rpm
+
+# 获取测试用例（从 src.rpm 解压）
+rpm -ivh ./xiaoO-*.src.rpm
+cd ~/rpmbuild/SOURCES/ && tar -zxvf xiaoO-*.tar.gz
+
+# 启用 audit_agent
+xiaoo-hookers-install --non-interactive audit-agent
 ```
 
-`--plugin-json` 参数是必需的，因为测试用例和 plugin.json 分属两个不同的 RPM 包，路径不连续：
+测试用例位于 `~/rpmbuild/SOURCES/xiaoO-*/plugins/tests/hookers/audit_agent/xiaoo/`，直接在该目录运行即可：
 
 ```bash
-cd /usr/lib/.xiaoo/tests/hookers/audit_agent/xiaoo
+cd ~/rpmbuild/SOURCES/xiaoO-*/plugins/tests/hookers/audit_agent/xiaoo
 
-# 运行全部用例（完整示例）
+# 运行全部用例
 python3 run_rules_tests.py \
   --api-key "your-api-key" \
   --bin /usr/bin/xiaoo \
@@ -438,14 +447,12 @@ python3 run_rules_tests.py \
   --bin /usr/bin/xiaoo \
   --plugin-json /usr/lib/.xiaoo/hookers/audit_agent/plugin.json \
   --dry-run
-
-# Shell 脚本测试
-export XIAOO_BIN=/usr/bin/xiaoo
-export XIAOO_CONFIG=~/.config/xiaoo/config.toml
-bash run-deny-01-passwd.sh
 ```
 
-> **提示**：如果已通过 `~/.config/xiaoo/config.toml` 配置 LLM（含 `api_key_env`），可省略 `--api-key`，脚本会自动读取。
+> **说明**：
+> - `--plugin-json` 必须指定已安装的 plugin.json 路径
+> - `--bin` 指定已安装的 xiaoo 二进制路径
+> - 测试脚本中的 `PROJECT_ROOT` 变量用于推断开发环境的默认路径，RPM 环境下通过 `--bin` 和 `--plugin-json` 参数覆盖，因此不需要移动测试用例
 
 详细测试指南见 [TEST_GUIDE.md](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md)。
 
@@ -473,7 +480,8 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 类型 | 白名单 |
 |------|--------|
 | 工具类型 | `ask_user_question`、`glob`、`list_dir`、`ls`、`count_text_length`、`filemgr-globfiles` |
-| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command` |
+| 内置安全 Skill | `xiaoo-guardian`（xiaoO 系统自带的安全防护 Skill） |
+| Bash 子命令 | `ls`、`dir`、`pwd`、`which`、`whereis`、`realpath`、`basename`、`dirname`、`file`、`stat`、`du`、`echo`、`printf`、`type`、`command`、`whoami`、`id`、`hostname`、`uname`、`date`、`env`、`printenv`、`tty`、`arch`、`uptime`、`groups`、`logname` |
 
 #### Tier 2：只读敏感 — 跳过 L3，保留 L2
 
@@ -488,6 +496,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 - 管道命令（`|`）和链式命令（`&&`/`||`）只提取第一段命令进行匹配
 - 白名单匹配不区分大小写
 - 层1 命中 high/critical 时，即使工具在白名单中也会被拦截（安全优先）
+- **安全兜底**：白名单放行前，用 `CommandPatternScanner` 扫描完整命令，如果管道尾部包含 high/critical 危险模式（如 `echo ... | passwd`），则不允许白名单放行，避免管道前段命令（`echo`）被误判为安全导致绕过
 
 **性能效果**：
 
@@ -523,6 +532,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 2.2 意图一致性 | 对比 `prompt_session` 与 `a_next` | 需要用户原始 prompt |
 | 2.3 敏感路径访问 | 路径匹配 | `action_detail` 中的路径 |
 | 2.4 危险操作模式 | 通配符+重定向模式 | `action_detail` 中的操作模式 |
+| 2.5 密码修改授权 | 非交互式密码修改 + `ask_user_question` 历史 | `action_detail` + `action_history` |
 
 **本质**：动作与上下文的**逻辑关系审查**，"你说的和做的是不是一回事"。
 
@@ -621,6 +631,12 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `curl POST ... env/secret/key` | high | curl POST 外传敏感信息 |
 | `/dev/zero`/`/dev/random` 等 | high | 访问设备文件 |
 | `xiaoo-guardian` 目录修改 | critical | 尝试修改或删除 xiaoO 安全防护 Skill 目录（系统级/用户级） |
+| `\| passwd` | high | 管道方式非交互式密码修改 |
+| `passwd --stdin` | high | passwd --stdin 非交互式密码输入 |
+| `chpasswd` | high | 批量密码修改 |
+| `newusers` | high | 批量用户添加 |
+| `passwd -d` | high | 删除用户密码 |
+| `passwd -l` | high | 锁定用户账户 |
 
 **扫描示例**：
 ```
@@ -739,11 +755,65 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 > 注意：`file_write`/`file_edit` 类型动作豁免此检测，因为 `action_detail` 包含文件内容而非命令，避免误判。
 
+#### 2.5 密码修改授权检测
+
+非交互式密码修改命令必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码，否则拦截。交互式 `passwd`（无参数）不在此列，因为 LLM 无法完成交互式输入。
+
+**检测范围**：
+
+| 类别 | 模式 | 说明 |
+|------|------|------|
+| 管道 passwd | `\| passwd` | 管道方式调用 passwd |
+| passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
+| 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `newusers` | 批量用户添加 |
+| passwd 参数 | `passwd -d` | 删除密码 |
+| passwd 参数 | `passwd -l` | 锁定账户 |
+| libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
+| 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
+| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
+
+**扫描示例**：
+```
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = []
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 未发现 ask_user_question 操作
+结果: Deny, reason="执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作"
+
+输入: a_next = {"action_type": "bash", "action_detail": "echo 'newpass' | passwd"}
+      action_history = [{"action_type": "ask_user_question", "output": "newpass"}]
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 发现 ask_user_question 且用户已返回密码
+结果: 通过（用户已授权）
+```
+
 **扫描示例**：
 ```
 输入: a_next = {"action_type": "shell_command", "action_detail": "rm -rf /tmp/log/*"}
 匹配: 通配符 "*" + 删除 "rm" → risk_level=high
 结果: Deny, reason="检测到通配符结合删除操作，可能造成批量误删"
+```
+
+
+
+#### 2.6 用户删除授权检测
+
+删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作，否则拦截。
+
+**扫描示例**：
+```
+输入: a_next = {"action_type": "bash", "action_detail": "userdel foo"}
+      action_history = []
+匹配: \buserdel\s → 用户删除操作
+历史: 未发现 ask_user_question 操作
+结果: Deny, reason="执行删除系统用户命令，但历史执行序列中未发现向用户确认的 ask_user_question 操作"
+
+输入: a_next = {"action_type": "bash", "action_detail": "userdel -r foo"}
+      action_history = [{"action_type": "ask_user_question", "output": "yes"}]
+匹配: \buserdel\s → 用户删除操作
+历史: 发现 ask_user_question 且用户已确认
+结果: 通过（用户已授权）
 ```
 
 ---
@@ -867,6 +937,7 @@ LLM 返回结构化 JSON：
               │  │ 2.2 意图一致性检测               ││
               │  │ 2.3 敏感路径访问检测             ││
               │  │ 2.4 危险操作模式检测             ││
+              │  │ 2.5 密码修改授权检测             ││
               │  └──────────────┬──────────────────┘│
               └─────────────────┼───────────────────┘
                     high/critical?──── Yes ───→ Deny
@@ -913,7 +984,7 @@ LLM 返回结构化 JSON：
 | 文档 | 说明 |
 |------|------|
 | [需求分析](audit_policy_checker/docs/requirement-analysis.md) | 完整需求分析与设计文档 |
-| [测试用例](audit_policy_checker/docs/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
+| [测试用例](../../plugins/tests/hookers/audit_agent/test-cases.md) | 28个设计用例（Allow/Deny/边界） |
 | [配置说明](audit_policy_checker/audit_policy_checker/CONFIG.md) | config.json 字段详解 |
 | [端到端测试指南](../../plugins/tests/hookers/audit_agent/TEST_GUIDE.md) | run_rules_tests.py 使用方法 |
 | [测试用例JSON](../../plugins/tests/hookers/audit_agent/cases/) | 可直接运行的测试用例（JSON + Shell） |

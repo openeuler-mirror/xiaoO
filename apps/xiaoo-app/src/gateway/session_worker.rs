@@ -5,15 +5,15 @@ use crate::gateway::{
 };
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
-use agent_types::ReasoningEffort;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::ReasoningEffort;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_core::{
-    AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule, run_agent_loop,
+    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
 };
 
 pub struct SessionWorkerInput {
@@ -136,6 +136,16 @@ impl SessionWorker {
         let loop_result = match loop_result {
             Ok(loop_result) => loop_result,
             Err(error) => {
+                tracing::warn!(
+                    session_id = %input.session.session_id,
+                    agent_id = %input.agent_id,
+                    error = %error,
+                    messages_count = loop_state.messages.read().len(),
+                    "agent loop failed, preserving partial state for recovery"
+                );
+
+                memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
+
                 if let Err(shutdown_error) = shutdown_result {
                     tracing::warn!(
                         session_id = %input.session.session_id,
@@ -144,8 +154,12 @@ impl SessionWorker {
                         "runtime shutdown failed after loop error"
                     );
                 }
-                return Err(SessionServiceError::CoreRun {
+
+                return Err(SessionServiceError::CoreRunWithState {
                     message: error.to_string(),
+                    partial_loop_state: loop_state.to_snapshot(),
+                    partial_memory_snapshot: memory_manager.snapshot().clone(),
+                    tool_manifest,
                 });
             }
         };

@@ -1,3 +1,7 @@
+#[cfg(unix)]
+#[allow(unused_imports)]
+use std::os::unix::process::CommandExt;
+
 use crate::backends::local::backend::LocalBackendState;
 use agent_contracts::backend::{
     capability::{exec::ExecRequest, exec::ExecResult, OperationExec},
@@ -55,11 +59,23 @@ impl OperationExec for LocalExec {
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
 
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+
         let mut child = command
             .spawn()
             .map_err(|error| OperationError::ExecutionFailed {
                 message: error.to_string(),
             })?;
+
+        #[cfg(unix)]
+        let pgid = child.id().unwrap_or(0) as i32;
+        #[cfg(unix)]
+        if pgid > 0 {
+            crate::process_group::register_pgid(pgid);
+        }
 
         let mut stdout = child
             .stdout
@@ -89,15 +105,21 @@ impl OperationExec for LocalExec {
                     let status = status.map_err(|error| OperationError::ExecutionFailed {
                         message: error.to_string(),
                     })?;
+                    #[cfg(unix)]
+                    crate::process_group::unregister_pgid(pgid);
                     (status.code(), false)
                 }
                 Err(_) => {
-                    child
-                        .kill()
-                        .await
-                        .map_err(|error| OperationError::ExecutionFailed {
-                            message: error.to_string(),
-                        })?;
+                    #[cfg(unix)]
+                    {
+                        crate::process_group::send_sigterm_to_group(pgid);
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        crate::process_group::send_sigkill_to_group(pgid);
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = child.kill().await;
+                    }
                     let _ = child.wait().await;
                     (None, true)
                 }
@@ -109,6 +131,8 @@ impl OperationExec for LocalExec {
                 .map_err(|error| OperationError::ExecutionFailed {
                     message: error.to_string(),
                 })?;
+            #[cfg(unix)]
+            crate::process_group::unregister_pgid(pgid);
             (status.code(), false)
         };
 

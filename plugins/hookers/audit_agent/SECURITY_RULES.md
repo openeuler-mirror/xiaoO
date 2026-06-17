@@ -48,6 +48,7 @@ if logic_result.risk_level in ("high", "critical") and not skip_inline_file_acce
 | `ls` | 目录列表 |
 | `count_text_length` | 文本长度统计 |
 | `filemgr-globfiles` | OpenDesk 文件管理器 glob |
+| `xiaoo-guardian`（内置 Skill） | xiaoO 系统自带的安全防护 Skill |
 
 | Bash 子命令 | 说明 |
 |------------|------|
@@ -58,6 +59,8 @@ if logic_result.risk_level in ("high", "critical") and not skip_inline_file_acce
 | `file`、`stat`、`du` | 文件信息 |
 | `echo`、`printf` | 输出 |
 | `type`、`command` | 命令类型查询 |
+| `whoami`、`id`、`hostname`、`uname`、`date` | 系统信息查询 |
+| `env`、`printenv`、`tty`、`arch`、`uptime`、`groups`、`logname` | 环境/终端/用户信息查询 |
 
 ### Tier 2：只读敏感工具 — 跳过 L3，保留 L2
 
@@ -82,11 +85,11 @@ if logic_result.risk_level in ("high", "critical") and not skip_inline_file_acce
   ↓
 命中 high/critical? → Yes → Deny（不走快速放行）
   ↓ No
-工具/命令在 Tier 1 白名单? → Yes → Allow（跳过 L2+L3）
-  ↓ No
-工具/命令在 Tier 2 白名单? → Yes → 标记 skip_llm=True
-  ↓ No
-继续正常流程
+工具/命令在 Tier 1 白名单? → Yes → 安全兜底检查
+  ↓ No                              ↓
+工具/命令在 Tier 2 白名单? → Yes    完整命令命中 high/critical?
+  ↓ No                              ↓ Yes → 不放行，继续 L2/L3
+继续正常流程                         ↓ No → Allow（跳过 L2+L3）
   ↓
 层2 检测（Tier 2 工具也执行层2）
   ↓
@@ -96,6 +99,8 @@ skip_llm=True? → Yes → Allow（跳过 L3）
   ↓ No
 层3 LLM 分析
 ```
+
+> **安全兜底**：Tier 1 白名单放行前，用 `CommandPatternScanner` 扫描完整命令。对于管道命令（如 `echo ... | passwd`），第一段命令（`echo`）匹配白名单，但完整命令的管道尾部包含高危模式（`| passwd`），此时不允许白名单放行，避免绕过。
 
 ---
 
@@ -430,6 +435,17 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `curl POST ... env/secret/key` | data_exfiltration | curl POST 外传敏感信息 | ✓ Deny |
 | `/dev/zero`/`/dev/random` 等 | file_access | 访问设备文件 | ✓ Deny |
 | `>> ~/.bashrc` | persistence | 追加写入 Shell 配置文件 | ✓ Deny |
+| `\| passwd` | script_execution | 管道方式非交互式密码修改 | ✓ Deny |
+| `passwd --stdin` | script_execution | passwd --stdin 非交互式密码输入 | ✓ Deny |
+| `chpasswd` | script_execution | 批量密码修改命令 | ✓ Deny |
+| `newusers` | script_execution | 批量用户添加命令 | ✓ Deny |
+| `passwd -d` | script_execution | 删除用户密码操作 | ✓ Deny |
+| `passwd -l` | script_execution | 锁定用户账户操作 | ✓ Deny |
+| `userdel` | script_execution | 删除系统用户 | ✓ Deny |
+| `deluser` | script_execution | 删除系统用户（Debian） | ✓ Deny |
+| `lpasswd` | script_execution | 非交互式密码修改（libuser） | ✓ Deny |
+| `gpasswd`（非 -a/-d/-A） | script_execution | 组密码管理 | ✓ Deny |
+| `useradd/usermod/groupmod -p` | script_execution | 通过 -p 参数设置或修改密码 | ✓ Deny |
 
 **示例 1：`rm -r /tmp/test.sh`**
 
@@ -547,6 +563,45 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 匹配: ">>\s*(~|/home/[^/]+)/(\.bashrc|\.zshrc|\.profile|\.bash_profile|\.zprofile)"
 结果: Deny
 原因: "检测到修改 Shell 配置文件（~/.bashrc 等），可能用于持久化后门"
+风险等级: high
+```
+
+**示例 10：`| passwd`（管道方式非交互式密码修改）**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "echo -e 'newpass\nnewpass' | passwd"
+
+匹配: "\|\s*passwd\b"
+结果: Deny
+原因: "检测到管道方式调用 passwd（非交互式密码修改）"
+风险等级: high
+```
+
+**示例 11：`chpasswd`（批量密码修改）**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "echo 'user:newpass' | chpasswd"
+
+匹配: "\bchpasswd\b"
+结果: Deny
+原因: "检测到 chpasswd 批量密码修改命令"
+风险等级: high
+```
+
+**示例 12：`passwd -d`（删除密码）**
+
+```
+输入:
+  action_type: "bash"
+  action_detail: "passwd -d user"
+
+匹配: "\bpasswd\s+-[a-zA-Z]*d\b"
+结果: Deny
+原因: "检测到删除用户密码操作 (passwd -d)"
 风险等级: high
 ```
 
@@ -1071,6 +1126,119 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 结果: Deny
 原因: "检测到重定向覆盖写入关键系统目录"
 风险等级: critical
+```
+
+---
+
+### 2.5 密码修改授权检测
+
+**规则**：非交互式密码修改命令必须在 `action_history` 中存在 `ask_user_question` 操作且用户已返回密码。
+
+**检测范围**：以下命令模式被视为非交互式密码修改：
+
+| 类别 | 模式 | 说明 |
+|------|------|------|
+| 管道 passwd | `\| passwd` | 管道方式调用 passwd |
+| passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
+| 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `newusers` | 批量用户添加 |
+| passwd 参数 | `passwd -d` | 删除密码 |
+| passwd 参数 | `passwd -l` | 锁定账户 |
+| libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
+| 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
+| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
+
+**豁免条件**：
+- `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已返回密码）
+- 交互式 `passwd`（无参数）不在此列，由 LLM 通过 `ask_user_question` 获取密码后执行
+
+**示例 1：违规 - 未授权的非交互式密码修改**
+
+```
+输入:
+  action_history: []
+  a_next:
+    action_type: "bash"
+    action_detail: "echo 'newpass' | passwd"
+
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 未发现 ask_user_question 操作
+结果: Deny
+原因: "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作，可能存在未授权的密码修改风险"
+风险等级: high
+```
+
+**示例 2：合规 - 用户已授权**
+
+```
+输入:
+  action_history: [{"action_type": "ask_user_question", "output": "newpass"}]
+  a_next:
+    action_type: "bash"
+    action_detail: "echo 'newpass' | passwd"
+
+匹配: \|\s*passwd\b → 非交互式密码修改
+历史: 发现 ask_user_question 且用户已返回密码
+结果: 通过（用户已授权）
+```
+
+**示例 3：违规 - chpasswd 未授权**
+
+```
+输入:
+  action_history: []
+  a_next:
+    action_type: "bash"
+    action_detail: "echo 'user:newpass' | chpasswd"
+
+匹配: \bchpasswd\b → 非交互式密码修改
+历史: 未发现 ask_user_question 操作
+结果: Deny
+原因: "执行非交互式密码修改命令，但历史执行序列中未发现向用户确认密码的 ask_user_question 操作"
+风险等级: high
+```
+
+---
+
+### 2.6 用户删除授权检测
+
+**规则**：删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作。
+
+**检测范围**：
+- `userdel` — 删除系统用户
+- `deluser` — 删除系统用户（Debian/Ubuntu）
+
+**豁免条件**：
+- `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已确认）
+
+**示例 1：违规 - 未授权的用户删除**
+
+```
+输入:
+  action_history: []
+  a_next:
+    action_type: "bash"
+    action_detail: "userdel foo"
+
+匹配: \buserdel\s → 用户删除操作
+历史: 未发现 ask_user_question 操作
+结果: Deny
+原因: "执行删除系统用户命令，但历史执行序列中未发现向用户确认的 ask_user_question 操作，可能存在未授权的用户删除风险"
+风险等级: high
+```
+
+**示例 2：合规 - 用户已授权**
+
+```
+输入:
+  action_history: [{"action_type": "ask_user_question", "output": "yes"}]
+  a_next:
+    action_type: "bash"
+    action_detail: "userdel -r foo"
+
+匹配: \buserdel\s → 用户删除操作
+历史: 发现 ask_user_question 且用户已确认
+结果: 通过（用户已授权）
 ```
 
 ---
@@ -1749,6 +1917,7 @@ LLM 判断: Deny
 │  │ 2.2 意图一致性检测                                     │  │
 │  │ 2.3 敏感路径访问检测                                   │  │
 │  │ 2.4 危险操作模式检测                                   │  │
+│  │ 2.5 密码修改授权检测                                   │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────┬───────────────────────────────┘
                   high/critical? ──── Yes ────→ Deny

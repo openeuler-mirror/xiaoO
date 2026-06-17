@@ -15,7 +15,7 @@ use crate::provider_dialog::ProviderDialog;
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
 
-use super::utils::{cursor_row_col, line_prefix_width, sanitize_terminal_text};
+use super::utils::sanitize_terminal_text;
 
 /// Flatten newlines and truncate `text` to fit within `max_width` terminal columns,
 /// appending "..." when truncated.
@@ -163,8 +163,10 @@ impl App {
         } else {
             available_width
         };
-        let available_height = area.height.saturating_sub(4).max(1);
-        let desired_height = interaction_prompt_outer_height(&prompt.request).max(6);
+        let inner_width = width.saturating_sub(2);
+        let max_height = (area.height as f32 * 0.8).ceil() as u16;
+        let available_height = area.height.saturating_sub(4).max(1).min(max_height);
+        let desired_height = interaction_prompt_outer_height(&prompt.request, inner_width).max(6);
         let height = desired_height.min(available_height);
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -302,9 +304,9 @@ impl App {
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if has_tool_cards {
-            " Enter 发送 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
+            " Enter 发送 | Alt+Enter 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
         } else {
-            " Enter 发送 | / 命令 | Ctrl+C 退出 "
+            " Enter 发送 | Alt+Enter 换行 | / 命令 | Ctrl+C 退出 "
         };
         let input_style = self.state.theme.default_style();
         let block = Block::default()
@@ -319,16 +321,13 @@ impl App {
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
         let selection = self.state.chat_state.input.selected_range();
-        let (row, col) = cursor_row_col(value, cursor);
-        let lines: Vec<&str> = value.split('\n').collect();
-        let line = lines.get(row).copied().unwrap_or("");
 
         let inner_height = inner.height.max(1) as usize;
-        let scroll_y = row.saturating_sub(inner_height.saturating_sub(1));
+        let max_width = inner.width.max(1) as usize;
 
-        let max_width = inner.width.max(1).saturating_sub(1) as usize;
-        let visual_x = line_prefix_width(line, col);
-        let scroll_x = visual_x.max(max_width) - max_width;
+        // Calculate visual cursor position considering line wrapping
+        let (visual_row, visual_col) = calculate_visual_cursor_position(value, cursor, max_width);
+        let scroll_y = visual_row.saturating_sub(inner_height.saturating_sub(1));
 
         let selection_style = Style::default()
             .fg(self.state.theme.background)
@@ -340,12 +339,14 @@ impl App {
             let text =
                 build_input_text_with_selection(value, &sel_range, input_style, selection_style);
             Paragraph::new(text)
-                .scroll((scroll_y as u16, scroll_x as u16))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_y as u16, 0))
                 .block(block)
         } else {
             Paragraph::new(value)
                 .style(input_style)
-                .scroll((scroll_y as u16, scroll_x as u16))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_y as u16, 0))
                 .block(block)
         };
         frame.render_widget(paragraph, area);
@@ -365,10 +366,14 @@ impl App {
                     | InputMode::SessionSnapshotSelection
             )
         {
-            let y_on_screen = row - scroll_y;
+            let y_on_screen = visual_row.saturating_sub(scroll_y);
             if y_on_screen < inner_height {
-                let x_on_screen = visual_x.saturating_sub(scroll_x);
-                let cursor_x = inner.x.saturating_add(x_on_screen.min(max_width) as u16);
+                let adjusted_visual_col = if visual_col >= inner.width as usize {
+                    inner.width.saturating_sub(1) as usize
+                } else {
+                    visual_col
+                };
+                let cursor_x = inner.x.saturating_add(adjusted_visual_col as u16);
                 let cursor_y = inner.y.saturating_add(y_on_screen as u16);
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
@@ -978,4 +983,178 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut truncated: String = value.chars().take(max_chars - 1).collect();
     truncated.push('…');
     truncated
+}
+
+/// Calculate the visual cursor position considering automatic line wrapping.
+/// Matches ratatui's WordWrapper: tracks pending whitespace separately,
+/// consumes trailing whitespace on wrap, preserves word continuity across wraps.
+fn calculate_visual_cursor_position(
+    value: &str,
+    cursor: usize,
+    max_width: usize,
+) -> (usize, usize) {
+    if max_width == 0 || value.is_empty() {
+        return (0, 0);
+    }
+
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0usize;
+    let mut line_width = 0usize;
+    let mut word_start = 0usize;
+    let mut word_width = 0usize;
+    let mut pending_space = 0usize;
+
+    for (idx, &ch) in chars.iter().enumerate() {
+        if ch == '\n' {
+            if idx == cursor {
+                return (lines.len(), line_width + pending_space + word_width);
+            }
+            lines.push((line_start, idx));
+            line_start = idx + 1;
+            line_width = 0;
+            word_start = idx + 1;
+            word_width = 0;
+            pending_space = 0;
+            continue;
+        }
+
+        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+
+        if ch.is_whitespace() {
+            if word_width > 0 {
+                let total = line_width + pending_space + word_width;
+                if total > max_width && line_width > 0 {
+                    push_line_consume_whitespace(
+                        &mut lines,
+                        &chars,
+                        &mut line_start,
+                        &mut line_width,
+                        word_start,
+                        &mut pending_space,
+                        max_width,
+                    );
+                } else {
+                    line_width += pending_space + word_width;
+                }
+                word_width = 0;
+            }
+            pending_space += char_width;
+            word_start = idx + 1;
+        } else {
+            if word_width == 0 {
+                word_start = idx;
+            }
+            word_width += char_width;
+
+            let total = line_width + pending_space + word_width;
+            if total > max_width {
+                if line_width > 0 {
+                    push_line_consume_whitespace(
+                        &mut lines,
+                        &chars,
+                        &mut line_start,
+                        &mut line_width,
+                        word_start,
+                        &mut pending_space,
+                        max_width,
+                    );
+                }
+
+                while word_width > max_width {
+                    let mut break_idx = line_start;
+                    let mut break_width = 0usize;
+                    for &c in chars[line_start..=idx].iter() {
+                        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                        if break_width + w > max_width && break_width > 0 {
+                            break;
+                        }
+                        break_width += w;
+                        break_idx += 1;
+                    }
+                    lines.push((line_start, break_idx));
+                    line_start = break_idx;
+                    word_width -= break_width;
+                }
+            }
+        }
+    }
+
+    if line_start < chars.len() {
+        lines.push((line_start, chars.len()));
+    }
+
+    for (row, (start, end)) in lines.iter().enumerate() {
+        if cursor >= *start && cursor <= *end {
+            let col: usize = chars[*start..cursor.min(*end)]
+                .iter()
+                .map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
+                .sum();
+            return (row, col);
+        }
+    }
+
+    if cursor >= line_start {
+        return (lines.len(), 0);
+    }
+
+    (0, 0)
+}
+
+fn push_line_consume_whitespace(
+    lines: &mut Vec<(usize, usize)>,
+    chars: &[char],
+    line_start: &mut usize,
+    line_width: &mut usize,
+    word_start: usize,
+    pending_space: &mut usize,
+    max_width: usize,
+) {
+    if *pending_space <= max_width.saturating_sub(*line_width) {
+        *pending_space = 0;
+    }
+    let mut line_end = word_start;
+    while line_end > *line_start && chars[line_end - 1].is_whitespace() {
+        line_end -= 1;
+    }
+    lines.push((*line_start, line_end));
+    *line_start = word_start;
+    *line_width = 0;
+
+    while *pending_space > 0 && *line_start > line_end && chars[*line_start - 1].is_whitespace() {
+        let w = unicode_width::UnicodeWidthChar::width(chars[*line_start - 1]).unwrap_or(0);
+        *line_start -= 1;
+        *pending_space = pending_space.saturating_sub(w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic() {
+        let (row, col) = calculate_visual_cursor_position("hello", 3, 10);
+        assert_eq!((row, col), (0, 3));
+    }
+
+    #[test]
+    fn test_newline() {
+        let (row, col) = calculate_visual_cursor_position("hello\nworld", 6, 10);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn test_cursor_after_newline() {
+        let (row, col) = calculate_visual_cursor_position("hello\n", 6, 10);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn test_empty() {
+        let (row, col) = calculate_visual_cursor_position("", 0, 10);
+        assert_eq!((row, col), (0, 0));
+    }
 }

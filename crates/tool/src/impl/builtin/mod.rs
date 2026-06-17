@@ -17,4 +17,5 @@ mod tool_source;
 mod webfetch;
 mod websearch;
 
+pub use todo_write::open_todo_lines;
 pub use tool_source::BuiltinToolSource;

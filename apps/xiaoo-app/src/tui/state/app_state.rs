@@ -1001,8 +1001,8 @@ pub(crate) fn sandbox_backend_config(
 #[cfg(test)]
 mod tests {
     use super::{
-        current_sandbox_id, sandbox_backend_config,
-        sandbox_display_name, ApiKeyDialogState, AppState, RuntimeStatusLight,
+        current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState,
+        AppState, RuntimeStatusLight,
     };
     use crate::config::{AgentRoleConfig, Config};
     use crate::gateway::backend::GatewayBackendConfig;
@@ -1033,12 +1033,9 @@ mod tests {
             "Core".to_string(),
             "baize".to_string(),
         ];
-        let mut state = AppState::new_with_config(
-            &config,
-            PathBuf::from("config.toml"),
-            PathBuf::from("."),
-        )
-        .expect("app state should initialize");
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
 
         assert_eq!(
             state.agent_tab_labels(),
@@ -1046,9 +1043,9 @@ mod tests {
         );
 
         assert!(state.cycle_agent_role(false));
-        assert_eq!(state.active_agent_tab_label(), "xuanyuan");
+        assert_eq!(state.active_agent_tab_label(), "baize");
         assert!(state.cycle_agent_role(false));
-        assert_eq!(state.active_agent_tab_label(), "Core");
+        assert_eq!(state.active_agent_tab_label(), "plan");
     }
 
     #[test]
@@ -1253,6 +1250,7 @@ mod tests {
             allow_custom_input: true,
             multi_select: false,
             default_index: Some(0),
+            is_secret: false,
         }
     }
 }

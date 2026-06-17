@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
 use skill::registry::FileSkillRegistry;
@@ -79,6 +80,10 @@ enum Command {
         #[arg(long)]
         no_tools: bool,
 
+        /// Restrict to a comma-separated allowlist of tools
+        #[arg(long, value_delimiter = ',')]
+        tools: Option<Vec<String>>,
+
         /// Reasoning effort: off, high, or max
         #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
         reasoning_effort: Option<ReasoningEffort>,
@@ -106,7 +111,8 @@ enum SkillCommands {
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing (reads RUST_LOG env)
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -126,6 +132,7 @@ async fn main() {
             system,
             max_turns,
             no_tools,
+            tools,
             reasoning_effort,
         } => {
             if let Some(path) = config_path.as_ref() {
@@ -175,6 +182,7 @@ async fn main() {
                 system_prompt: system,
                 max_turns,
                 enable_tools: !no_tools,
+                visible_tools: tools.filter(|t| !t.is_empty()),
                 reasoning_effort,
                 kvcache_enabled: llm.and_then(|l| l.kvcache_enabled).unwrap_or(false),
                 kvcache_debug_enabled: llm.and_then(|l| l.kvcache_debug_enabled).unwrap_or(false),
@@ -686,14 +694,20 @@ fn handle_skill_command(command: SkillCommands) {
             // Skill not found anywhere
             eprintln!("Skill '{}' not found in any skills directory.", name);
             eprintln!("Checked directories:");
-            eprintln!("  - {} (project level, highest priority)", project_dir.display());
+            eprintln!(
+                "  - {} (project level, highest priority)",
+                project_dir.display()
+            );
             for config_dir in &config_dirs {
                 eprintln!("  - {} (config directory)", config_dir.display());
             }
             if let Some(ref user_d) = user_dir {
                 eprintln!("  - {} (user level)", user_d.display());
             }
-            eprintln!("  - {} (system level, built-in skills)", system_dir.display());
+            eprintln!(
+                "  - {} (system level, built-in skills)",
+                system_dir.display()
+            );
             std::process::exit(1);
         }
     }
@@ -819,10 +833,10 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         api_key: config.api_key.clone(),
         api_key_env: config.api_key_env.clone(),
         api_base: config.api_base.clone(),
-        visible_tool_names: if config.enable_tools {
-            None
-        } else {
+        visible_tool_names: if !config.enable_tools {
             Some(Vec::new())
+        } else {
+            config.visible_tools.clone()
         },
         compression_pipeline: Some(compression_pipeline),
         llm_provider: Some(llm_provider),

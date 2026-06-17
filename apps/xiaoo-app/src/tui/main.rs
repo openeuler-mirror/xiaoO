@@ -7,6 +7,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::io;
 use std::path::PathBuf;
 
@@ -43,6 +44,8 @@ const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
     let config_arg = parse_config_path()?;
     let config = load_tui_config(&config_arg)?;
     config::load_llm_secrets_to_memory(&config_arg.path).with_context(|| {
@@ -248,7 +251,8 @@ async fn populate_effective_context_window(config: &config::Config) {
             model = &config.llm.model,
             "⚠ max_tokens {} exceeds conservative limit {}. \
              High risk of API rejection. Consider reducing max_tokens.",
-            configured_max_tokens, conservative_limit
+            configured_max_tokens,
+            conservative_limit
         );
     }
 
@@ -341,7 +345,8 @@ fn validate_config_for_tui(
     let max_tokens = config.llm.max_tokens;
 
     let max_reasonable_output_ratio = 0.5;
-    let max_reasonable_output_tokens = (resolved_context_window as f64 * max_reasonable_output_ratio) as usize;
+    let max_reasonable_output_tokens =
+        (resolved_context_window as f64 * max_reasonable_output_ratio) as usize;
 
     if max_tokens as usize > max_reasonable_output_tokens {
         warnings.push(format!(

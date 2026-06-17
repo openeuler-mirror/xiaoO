@@ -10,4 +10,6 @@ pub struct SpawnSubagentInput {
     pub output_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub subagent_role_id: Option<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
