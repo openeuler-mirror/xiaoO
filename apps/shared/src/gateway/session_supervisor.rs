@@ -317,7 +317,7 @@ impl SessionSupervisor {
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
         let result = self
             .run_lane_until_terminal(LaneRunInput {
-                agent_id: root_agent_id,
+                agent_id: root_agent_id.clone(),
                 runtime_input,
                 resolved_runtime: Some(resolved_runtime),
                 user_message: request.text,
@@ -335,6 +335,32 @@ impl SessionSupervisor {
                 self.set_session_status(SessionLifecycleStatus::Idle, None)
                     .await;
                 Ok(terminal.result)
+            }
+            Err(SessionServiceError::CoreRunWithState {
+                message,
+                partial_loop_state,
+                partial_memory_snapshot,
+                tool_manifest,
+            }) => {
+                tracing::info!(
+                    session_id = %request.session_id,
+                    agent_id = %root_agent_id,
+                    messages_count = partial_loop_state.messages.len(),
+                    "persisting partial state after core error"
+                );
+
+                self.persist_lane_state(
+                    &root_agent_id,
+                    Some(partial_loop_state),
+                    Some(partial_memory_snapshot),
+                    Some(tool_manifest),
+                    None,
+                )
+                .await?;
+
+                self.set_session_status(SessionLifecycleStatus::Failed, Some(message.clone()))
+                    .await;
+                Err(SessionServiceError::CoreRun { message })
             }
             Err(error) => {
                 self.set_session_status(SessionLifecycleStatus::Failed, Some(error.to_string()))

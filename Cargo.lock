@@ -2156,10 +2156,12 @@ dependencies = [
  "agent-contracts",
  "async-trait",
  "glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

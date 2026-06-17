@@ -8,8 +8,11 @@ use crate::{
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
+use memory::MemorySnapshot;
 use std::sync::Arc;
 use thiserror::Error;
+use tool::ToolSpecSnapshot;
+use xiaoo_core::LoopStateSnapshot;
 
 #[derive(Debug, Error)]
 pub enum SessionServiceError {
@@ -23,6 +26,13 @@ pub enum SessionServiceError {
     RuntimeShutdown { message: String },
     #[error("core runtime execution failed: {message}")]
     CoreRun { message: String },
+    #[error("core runtime execution failed with partial state: {message}")]
+    CoreRunWithState {
+        message: String,
+        partial_loop_state: LoopStateSnapshot,
+        partial_memory_snapshot: MemorySnapshot,
+        tool_manifest: Vec<ToolSpecSnapshot>,
+    },
     #[error("memory handling failed: {message}")]
     Memory { message: String },
     #[error("unsupported capability: {capability}")]
