@@ -282,6 +282,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `rm -r/-f <关键系统目录>` | script_execution | 删除 /etc、/var、/home 等关键系统目录 | ✓ Deny |
 | `chmod 777` | script_execution | 全权限设置 | ✓ Deny |
 | `/etc/shadow` | file_access | 访问系统密码文件 | ✓ Deny |
+| `/etc/gshadow` | file_access | 访问系统组密码文件 | ✓ Deny |
 | `.ssh/id_rsa` | file_access | 访问 SSH 私钥 | ✓ Deny |
 | `dd if=/dev/zero` | script_execution | 磁盘清零操作 | ✓ Deny |
 | `mkfs` | script_execution | 格式化文件系统 | ✓ Deny (mkfs /tmp/file) |
@@ -438,14 +439,18 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `\| passwd` | script_execution | 管道方式非交互式密码修改 | ✓ Deny |
 | `passwd --stdin` | script_execution | passwd --stdin 非交互式密码输入 | ✓ Deny |
 | `chpasswd` | script_execution | 批量密码修改命令 | ✓ Deny |
+| `chgpasswd` | script_execution | 批量修改组密码命令 | ✓ Deny |
 | `newusers` | script_execution | 批量用户添加命令 | ✓ Deny |
 | `passwd -d` | script_execution | 删除用户密码操作 | ✓ Deny |
 | `passwd -l` | script_execution | 锁定用户账户操作 | ✓ Deny |
 | `userdel` | script_execution | 删除系统用户 | ✓ Deny |
 | `deluser` | script_execution | 删除系统用户（Debian） | ✓ Deny |
+| `luserdel` | script_execution | 删除系统用户（libuser） | ✓ Deny |
+| `groupdel` | script_execution | 删除用户组 | ✓ Deny |
+| `lgroupdel` | script_execution | 删除用户组（libuser） | ✓ Deny |
 | `lpasswd` | script_execution | 非交互式密码修改（libuser） | ✓ Deny |
 | `gpasswd`（非 -a/-d/-A） | script_execution | 组密码管理 | ✓ Deny |
-| `useradd/usermod/groupmod -p` | script_execution | 通过 -p 参数设置或修改密码 | ✓ Deny |
+| `useradd/usermod/groupadd/groupmod -p` | script_execution | 通过 -p 参数设置或修改密码 | ✓ Deny |
 
 **示例 1：`rm -r /tmp/test.sh`**
 
@@ -937,6 +942,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | 路径 | 说明 |
 |-----|------|
 | `/etc/shadow` | 系统密码文件 |
+| `/etc/gshadow` | 系统组密码文件 |
 | `/etc/sudoers` | sudo 配置 |
 | `.ssh/id_rsa` | SSH 私钥 |
 | `.ssh/id_ed25519` | SSH 私钥 (ed25519) |
@@ -1141,12 +1147,13 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | 管道 passwd | `\| passwd` | 管道方式调用 passwd |
 | passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
 | 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `chgpasswd` | 批量修改组密码 |
 | 批量命令 | `newusers` | 批量用户添加 |
 | passwd 参数 | `passwd -d` | 删除密码 |
 | passwd 参数 | `passwd -l` | 锁定账户 |
 | libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
 | 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
-| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
+| 通用命令 -p | `useradd/usermod/groupadd/groupmod -p` | 通过 -p 参数设置密码 |
 
 **豁免条件**：
 - `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已返回密码）
@@ -1202,11 +1209,14 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 ### 2.6 用户删除授权检测
 
-**规则**：删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作。
+**规则**：删除系统用户/组的命令（`userdel`/`deluser`/`luserdel`/`groupdel`/`lgroupdel`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作。
 
 **检测范围**：
 - `userdel` — 删除系统用户
 - `deluser` — 删除系统用户（Debian/Ubuntu）
+- `luserdel` — 删除系统用户（libuser）
+- `groupdel` — 删除用户组
+- `lgroupdel` — 删除用户组（libuser）
 
 **豁免条件**：
 - `action_history` 中存在 `ask_user_question` 且 `output` 非空（用户已确认）

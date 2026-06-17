@@ -242,6 +242,25 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "script_execution",
         "reason": "检测到删除系统用户操作 (deluser)",
     },
+    {
+        "pattern": r"\bluserdel\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除系统用户操作 (luserdel)",
+    },
+    # ---- 删除用户组操作 — 破坏权限结构，不可逆 ----
+    {
+        "pattern": r"\bgroupdel\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除用户组操作 (groupdel)",
+    },
+    {
+        "pattern": r"\blgroupdel\s",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到删除用户组操作 (lgroupdel)",
+    },
     # ---- 用户/组密码修改操作 — 同 passwd 类高危 ----
     {
         "pattern": r"\blpasswd\s",
@@ -256,7 +275,13 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "reason": "检测到组密码管理操作 (gpasswd)",
     },
     {
-        "pattern": r"\b(useradd|luseradd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",
+        "pattern": r"\bchgpasswd\b",
+        "risk_level": "high",
+        "risk_type": "script_execution",
+        "reason": "检测到批量修改组密码操作 (chgpasswd)",
+    },
+    {
+        "pattern": r"\b(useradd|luseradd|groupadd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",
         "risk_level": "high",
         "risk_type": "script_execution",
         "reason": "检测到通过 -p 参数设置或修改密码 (useradd/usermod/groupmod)",
