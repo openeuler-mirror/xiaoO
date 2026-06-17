@@ -24,6 +24,7 @@ dirs = "6"
 futures-util.workspace = true
 llm-client = { path = "../../crates/llm-client" }
 lsp = { path = "../../crates/lsp" }
+operation_backend = { path = "../../crates/operation_backend" }
 ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
