@@ -601,7 +601,7 @@ impl App {
         // NOTE: /create-skill is not yet implemented; disabled until ready.
         // if user_input.trim().starts_with("/create-skill") { ... }
 
-        // External commands from ~/.xiaoo/command/
+        // External commands from ~/.xiaoo/commands/
         if let Some(body) = self.external_command_body(trimmed) {
             self.state.chat_state.input.reset();
             if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
