@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub const DEFAULT_MAX_ACTIVE_E2B_SANDBOXES: usize = 20;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBackendConfig {
     pub kind: String,
@@ -20,6 +22,19 @@ impl GatewayBackendConfig {
         Self {
             kind: kind.into(),
             options,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendManagerLimits {
+    pub max_active_e2b_sandboxes: Option<usize>,
+}
+
+impl Default for BackendManagerLimits {
+    fn default() -> Self {
+        Self {
+            max_active_e2b_sandboxes: Some(DEFAULT_MAX_ACTIVE_E2B_SANDBOXES),
         }
     }
 }
@@ -221,6 +236,8 @@ pub enum BackendError {
     NotFound { backend_id: String },
     #[error("unsupported backend kind: {kind}")]
     UnsupportedBackend { kind: String },
+    #[error("managed backend resource limit exceeded: {message}")]
+    ResourceLimitExceeded { message: String },
     #[error("managed backend build failed: {message}")]
     BuildFailed { message: String },
     #[error("managed backend operation failed: {message}")]
@@ -235,6 +252,9 @@ impl BackendError {
             }
             OperationBackendBuildError::UnsupportedBackend { kind } => {
                 Self::UnsupportedBackend { kind }
+            }
+            OperationBackendBuildError::ResourceLimitExceeded { message } => {
+                Self::ResourceLimitExceeded { message }
             }
             OperationBackendBuildError::Unsupported { message }
             | OperationBackendBuildError::BuildFailed { message } => Self::BuildFailed { message },
@@ -276,6 +296,9 @@ impl BackendError {
             }
             Self::UnsupportedBackend { kind } => {
                 OperationBackendBuildError::UnsupportedBackend { kind }
+            }
+            Self::ResourceLimitExceeded { message } => {
+                OperationBackendBuildError::ResourceLimitExceeded { message }
             }
             Self::NotFound { backend_id } => OperationBackendBuildError::BuildFailed {
                 message: format!("managed backend not found: {backend_id}"),

@@ -22,7 +22,8 @@ pub use base::{
     BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
     BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
-    BackendLease, BackendLineageInfo, BackendListFilter, BackendTreeNode, GatewayBackendConfig,
+    BackendLease, BackendLineageInfo, BackendListFilter, BackendManagerLimits, BackendTreeNode,
+    GatewayBackendConfig, DEFAULT_MAX_ACTIVE_E2B_SANDBOXES,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
 
@@ -415,6 +416,90 @@ mod tests {
 
     fn temp_options(workspace: &TempDir) -> Value {
         json!({"temp_root": workspace.path().to_string_lossy().to_string()})
+    }
+
+    #[test]
+    fn backend_manager_defaults_to_e2b_limit() {
+        assert_eq!(
+            BackendManager::new().limits().max_active_e2b_sandboxes,
+            Some(DEFAULT_MAX_ACTIVE_E2B_SANDBOXES)
+        );
+    }
+
+    #[tokio::test]
+    async fn e2b_limit_rejects_before_provider_build() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new_with_limits(BackendManagerLimits {
+            max_active_e2b_sandboxes: Some(0),
+        });
+
+        let result = manager
+            .create_backend(BackendCreateRequest {
+                workspace_root: workspace.path().to_path_buf(),
+                backend_id: Some("e2b-blocked".to_string()),
+                provider: Some("e2b".to_string()),
+                session_id: None,
+                timeout: None,
+                metadata: Value::Null,
+                resource_limits: BackendResourceLimits::default(),
+                options: None,
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(BackendError::ResourceLimitExceeded { message })
+                if message.contains("active E2B sandbox limit exceeded")
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_e2b_count_ignores_local_paused_and_deleted_backends() {
+        let workspace = TempDir::new().expect("workspace");
+        let manager = BackendManager::new();
+
+        manager
+            .ensure_session_backend(local_request(
+                "local",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("local backend");
+        assert_eq!(manager.active_e2b_sandbox_count().await, 0);
+
+        let paused = manager
+            .ensure_session_backend(local_request(
+                "paused",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("paused backend")
+            .instance()
+            .backend_id;
+        let deleted = manager
+            .ensure_session_backend(local_request(
+                "deleted",
+                workspace.path().to_path_buf(),
+                temp_options(&workspace),
+            ))
+            .await
+            .expect("deleted backend")
+            .instance()
+            .backend_id;
+        {
+            let mut state = manager.state.lock().await;
+            let paused_entry = state.backends.get_mut(&paused).expect("paused entry");
+            paused_entry.config.kind = "e2b".to_string();
+            paused_entry.instance.state = BackendLifecycleState::Paused;
+
+            let deleted_entry = state.backends.get_mut(&deleted).expect("deleted entry");
+            deleted_entry.config.kind = "e2b".to_string();
+            deleted_entry.instance.state = BackendLifecycleState::Deleted;
+        }
+
+        assert_eq!(manager.active_e2b_sandbox_count().await, 0);
     }
 
     #[test]

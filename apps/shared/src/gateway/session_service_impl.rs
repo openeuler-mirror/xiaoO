@@ -7,7 +7,8 @@ use crate::gateway::{
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimeRecord,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimePauseRequest, RuntimePauseResult, RuntimeRecord,
+    RuntimeResumeRequest, RuntimeResumeResult,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
@@ -50,6 +51,14 @@ struct RuntimeCheckoutInternal {
     result: RuntimeCheckoutResult,
     // session: SessionRecord,
     // backend_checkout: Option<BackendCheckoutResult>,
+}
+
+struct RuntimePauseInternal {
+    result: RuntimePauseResult,
+}
+
+struct RuntimeResumeInternal {
+    result: RuntimeResumeResult,
 }
 
 struct RuntimeCheckpointSnapshotDeleteInternal {
@@ -129,6 +138,9 @@ impl CoreBackedSessionService {
         }
 
         let session = self.session_store.load(session_id).await?;
+        if session.status == SessionLifecycleStatus::Paused {
+            return None;
+        }
         Some(self.get_or_create_session_handle(session).await)
     }
 
@@ -159,6 +171,22 @@ impl CoreBackedSessionService {
             });
         }
         Ok(session)
+    }
+
+    fn map_backend_error(
+        context: &str,
+        session_id: &str,
+        error: BackendError,
+    ) -> SessionServiceError {
+        match error {
+            BackendError::ResourceLimitExceeded { message } => SessionServiceError::SessionBusy {
+                session_id: session_id.to_string(),
+                message,
+            },
+            error => SessionServiceError::RuntimeBuild {
+                message: format!("{context}: {error}"),
+            },
+        }
     }
 
     async fn checkpoint_runtime_internal(
@@ -257,8 +285,12 @@ impl CoreBackedSessionService {
                             options: None,
                         })
                         .await
-                        .map_err(|error| SessionServiceError::RuntimeBuild {
-                            message: format!("failed to checkout runtime backend: {error}"),
+                        .map_err(|error| {
+                            Self::map_backend_error(
+                                "failed to checkout runtime backend",
+                                &child_runtime_id,
+                                error,
+                            )
                         })?,
                 )
             } else {
@@ -322,6 +354,191 @@ impl CoreBackedSessionService {
             },
             // session: child,
             // backend_checkout,
+        })
+    }
+
+    async fn pause_runtime_internal(
+        &self,
+        request: RuntimePauseRequest,
+    ) -> Result<RuntimePauseInternal, SessionServiceError> {
+        let session = self.idle_session_snapshot(&request.runtime_id).await?;
+        if session.status == SessionLifecycleStatus::Closed {
+            return Err(SessionServiceError::SessionClosed {
+                session_id: request.runtime_id,
+            });
+        }
+        if session.status == SessionLifecycleStatus::Paused {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: request.runtime_id,
+                message: "runtime is already paused".to_string(),
+            });
+        }
+
+        let backend_checkpoint = if let Some(parent_backend) = session.backend_instance.as_ref() {
+            Some(
+                self.backend_manager
+                    .checkpoint_backend(BackendCheckpointRequest {
+                        backend_id: Some(parent_backend.backend_id.0.clone()),
+                        session_id: Some(request.runtime_id.clone()),
+                        name: request.name.clone(),
+                        metadata: request.metadata.clone(),
+                    })
+                    .await
+                    .map_err(|error| SessionServiceError::RuntimeBuild {
+                        message: format!(
+                            "failed to checkpoint runtime backend before pause: {error}"
+                        ),
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        self.backend_manager
+            .release_session(&request.runtime_id)
+            .await
+            .map_err(|error| SessionServiceError::RuntimeShutdown {
+                message: format!("failed to release runtime backend during pause: {error}"),
+            })?;
+
+        let parent_checkpoint_id = self
+            .runtime_checkpoints
+            .latest_for_runtime(&request.runtime_id)
+            .await;
+        let checkpoint_id = format!("rtcp_{}", uuid::Uuid::new_v4().simple());
+        let created_at_ms = current_time_ms();
+        let mut paused = session.clone();
+        paused.status = SessionLifecycleStatus::Paused;
+        paused.backend_instance = None;
+        paused.last_error = None;
+        paused.updated_at_ms = created_at_ms;
+
+        let checkpoint = RuntimeCheckpoint {
+            checkpoint_id: checkpoint_id.clone(),
+            runtime_id: request.runtime_id.clone(),
+            parent_checkpoint_id,
+            session: paused.clone(),
+            backend_checkpoint: backend_checkpoint
+                .as_ref()
+                .map(|result| result.checkpoint.clone()),
+            created_at_ms,
+            metadata: request.metadata.clone(),
+            name: request.name.clone(),
+        };
+        self.runtime_checkpoints.save(checkpoint).await;
+        self.runtime_checkpoints
+            .register_paused_runtime(request.runtime_id.clone(), checkpoint_id.clone())
+            .await;
+        self.session_store.save(paused.clone()).await;
+        self.sessions_handler
+            .lock()
+            .await
+            .remove(&request.runtime_id);
+
+        Ok(RuntimePauseInternal {
+            result: RuntimePauseResult {
+                runtime: RuntimeRecord::from_session(&paused),
+                checkpoint_id,
+                created_at_ms,
+                metadata: request.metadata,
+                name: request.name,
+            },
+        })
+    }
+
+    async fn resume_runtime_internal(
+        &self,
+        request: RuntimeResumeRequest,
+    ) -> Result<RuntimeResumeInternal, SessionServiceError> {
+        let mut session = self
+            .session_store
+            .load(&request.runtime_id)
+            .await
+            .ok_or_else(|| SessionServiceError::SessionNotFound {
+                session_id: request.runtime_id.clone(),
+            })?;
+        if session.status == SessionLifecycleStatus::Closed {
+            return Err(SessionServiceError::SessionClosed {
+                session_id: request.runtime_id,
+            });
+        }
+        if session.status != SessionLifecycleStatus::Paused {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: request.runtime_id,
+                message: "runtime is not paused".to_string(),
+            });
+        }
+
+        let checkpoint_id = self
+            .runtime_checkpoints
+            .paused_checkpoint_for_runtime(&request.runtime_id)
+            .await
+            .ok_or_else(|| SessionServiceError::RuntimeBuild {
+                message: format!("paused runtime {} has no checkpoint", request.runtime_id),
+            })?;
+        let checkpoint = self
+            .runtime_checkpoints
+            .load(&checkpoint_id)
+            .await
+            .ok_or_else(|| SessionServiceError::RuntimeBuild {
+                message: format!("paused runtime checkpoint not found: {checkpoint_id}"),
+            })?;
+
+        let backend_checkout =
+            if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone() {
+                Some(
+                    self.backend_manager
+                        .checkout_backend(BackendCheckoutRequest {
+                            checkpoint: backend_checkpoint,
+                            backend_id: None,
+                            session_id: Some(request.runtime_id.clone()),
+                            timeout: None,
+                            metadata: request.metadata,
+                            resource_limits: Default::default(),
+                            options: None,
+                        })
+                        .await
+                        .map_err(|error| {
+                            Self::map_backend_error(
+                                "failed to resume runtime backend",
+                                &request.runtime_id,
+                                error,
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
+        let backend_lease = if backend_checkout.is_some() {
+            Some(
+                self.backend_manager
+                    .lease_bound_session(&request.runtime_id)
+                    .await
+                    .map_err(|error| SessionServiceError::RuntimeBuild {
+                        message: format!("failed to lease resumed backend: {error}"),
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        session.status = SessionLifecycleStatus::Idle;
+        session.backend_instance = backend_lease.map(|lease| lease.instance());
+        session.last_error = None;
+        session.updated_at_ms = current_time_ms();
+        self.session_store.save(session.clone()).await;
+        self.runtime_checkpoints
+            .clear_paused_runtime(&request.runtime_id)
+            .await;
+        self.runtime_checkpoints
+            .register_runtime_head(session.session_id.clone(), checkpoint_id)
+            .await;
+        self.get_or_create_session_handle(session.clone()).await;
+
+        Ok(RuntimeResumeInternal {
+            result: RuntimeResumeResult {
+                runtime: RuntimeRecord::from_session(&session),
+            },
         })
     }
 
@@ -469,6 +686,15 @@ impl CoreBackedSessionService {
     ) -> Result<AppTurnResult, SessionServiceError> {
         let existing = self.session_store.load(&request.session_id).await;
         let is_new_session = existing.is_none();
+        if existing
+            .as_ref()
+            .is_some_and(|session| session.status == SessionLifecycleStatus::Paused)
+        {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: request.session_id,
+                message: "runtime is paused; resume it before running a turn".to_string(),
+            });
+        }
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
         let resolved = self
             .runtime_resolver
@@ -553,6 +779,11 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
+        if let Some(existing) = self.session_store.load(&request.session_id).await {
+            if existing.status == SessionLifecycleStatus::Paused {
+                return Ok(existing);
+            }
+        }
         if let Some(handle) = self.handle_for_session(&request.session_id).await {
             return handle.snapshot().await;
         }
@@ -666,6 +897,24 @@ impl SessionControlPlane for CoreBackedSessionService {
         request: RuntimeCheckoutRequest,
     ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
         self.checkout_runtime_internal(request)
+            .await
+            .map(|internal| internal.result)
+    }
+
+    async fn pause_runtime(
+        &self,
+        request: RuntimePauseRequest,
+    ) -> Result<RuntimePauseResult, SessionServiceError> {
+        self.pause_runtime_internal(request)
+            .await
+            .map(|internal| internal.result)
+    }
+
+    async fn resume_runtime(
+        &self,
+        request: RuntimeResumeRequest,
+    ) -> Result<RuntimeResumeResult, SessionServiceError> {
+        self.resume_runtime_internal(request)
             .await
             .map(|internal| internal.result)
     }
@@ -1023,6 +1272,170 @@ mod tests {
             .await
             .expect("resume closed session");
         assert!(resumed.is_none());
+    }
+
+    #[tokio::test]
+    async fn pause_runtime_releases_backend_and_marks_runtime_paused() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let backend_manager = Arc::new(BackendManager::new());
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            backend_manager.clone(),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(test_open_request("runtime-pause"))
+            .await
+            .expect("open session");
+
+        let paused = dependencies
+            .session_control_plane
+            .pause_runtime(RuntimePauseRequest {
+                runtime_id: "runtime-pause".to_string(),
+                metadata: Value::Null,
+                name: Some("pause".to_string()),
+            })
+            .await
+            .expect("pause runtime");
+
+        assert_eq!(paused.runtime.runtime_id, "runtime-pause");
+        assert_eq!(paused.runtime.status, SessionLifecycleStatus::Paused);
+        let saved = store.load("runtime-pause").await.expect("saved runtime");
+        assert_eq!(saved.status, SessionLifecycleStatus::Paused);
+        assert!(saved.backend_instance.is_none());
+        assert!(matches!(
+            backend_manager.lease_bound_session("runtime-pause").await,
+            Err(BackendError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn resume_runtime_reuses_same_runtime_id_for_paused_runtime_without_backend() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-resume",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .pause_runtime(RuntimePauseRequest {
+                runtime_id: "runtime-resume".to_string(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await
+            .expect("pause runtime");
+        let resumed = dependencies
+            .session_control_plane
+            .resume_runtime(RuntimeResumeRequest {
+                runtime_id: "runtime-resume".to_string(),
+                metadata: Value::Null,
+            })
+            .await
+            .expect("resume runtime");
+
+        assert_eq!(resumed.runtime.runtime_id, "runtime-resume");
+        assert_eq!(resumed.runtime.status, SessionLifecycleStatus::Idle);
+        let saved = store.load("runtime-resume").await.expect("saved runtime");
+        assert_eq!(saved.status, SessionLifecycleStatus::Idle);
+        assert!(saved.backend_instance.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_paused_runtime_removes_session_record() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-close-paused",
+            SessionLifecycleStatus::Paused,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let closed = dependencies
+            .session_control_plane
+            .force_close_session("runtime-close-paused")
+            .await
+            .expect("close paused runtime");
+
+        assert_eq!(closed.status, SessionLifecycleStatus::Closed);
+        assert!(store.load("runtime-close-paused").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_turn_rejects_paused_runtime() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        save_session_without_backend(
+            &store,
+            &resolver,
+            "runtime-paused-turn",
+            SessionLifecycleStatus::Paused,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let result = dependencies
+            .session_service
+            .run_turn(test_open_request("runtime-paused-turn").into_turn_request("hi".to_string()))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(SessionServiceError::SessionBusy { message, .. })
+                if message.contains("runtime is paused")
+        ));
     }
 
     #[tokio::test]

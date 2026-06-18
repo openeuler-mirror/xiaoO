@@ -14,7 +14,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xiaoo_shared::backend::GatewayBackendConfig;
+use xiaoo_shared::backend::{BackendManagerLimits, GatewayBackendConfig};
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
@@ -190,6 +190,14 @@ pub struct PathsConfig {
 pub struct ServerConfig {
     #[serde(default)]
     pub operation_backend: Option<GatewayBackendConfig>,
+    #[serde(default)]
+    pub resource_limits: ServerResourceLimitsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ServerResourceLimitsConfig {
+    #[serde(default)]
+    pub max_active_e2b_sandboxes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -368,6 +376,17 @@ impl DaemonConfig {
 
     pub fn server_operation_backend(&self) -> Option<GatewayBackendConfig> {
         self.app.server.operation_backend.clone()
+    }
+
+    pub fn server_backend_manager_limits(&self) -> BackendManagerLimits {
+        BackendManagerLimits {
+            max_active_e2b_sandboxes: self
+                .app
+                .server
+                .resource_limits
+                .max_active_e2b_sandboxes
+                .or(BackendManagerLimits::default().max_active_e2b_sandboxes),
+        }
     }
 
     pub fn http_bearer_token(&self) -> Result<Option<String>> {
@@ -839,6 +858,53 @@ mod tests {
         assert_eq!(backend.kind, "e2b");
         assert_eq!(backend.options["api_key"].as_str(), Some("test-key"));
         assert_eq!(backend.options["template_id"].as_str(), Some("base"));
+    }
+
+    #[test]
+    fn parses_server_resource_limits() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [server.resource_limits]
+            max_active_e2b_sandboxes = 7
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+
+        assert_eq!(
+            daemon
+                .server_backend_manager_limits()
+                .max_active_e2b_sandboxes,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn server_resource_limits_default_to_e2b_default() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+        "#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app: config,
+            config_path: "config.toml".into(),
+        };
+
+        assert_eq!(
+            daemon
+                .server_backend_manager_limits()
+                .max_active_e2b_sandboxes,
+            Some(xiaoo_shared::backend::DEFAULT_MAX_ACTIVE_E2B_SANDBOXES)
+        );
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub enum OperationBackendBuildError {
     #[error("unsupported backend option: {message}")]
     Unsupported { message: String },
 
+    #[error("backend resource limit exceeded: {message}")]
+    ResourceLimitExceeded { message: String },
+
     #[error("backend build failed: {message}")]
     BuildFailed { message: String },
 }

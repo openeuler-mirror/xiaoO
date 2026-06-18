@@ -4,7 +4,8 @@ use crate::gateway::{
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimePauseRequest, RuntimePauseResult,
+    RuntimeResumeRequest, RuntimeResumeResult,
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
@@ -113,6 +114,24 @@ pub trait SessionControlPlane: Send + Sync {
     ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
             capability: "checkout_runtime".to_string(),
+        })
+    }
+
+    async fn pause_runtime(
+        &self,
+        _request: RuntimePauseRequest,
+    ) -> Result<RuntimePauseResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "pause_runtime".to_string(),
+        })
+    }
+
+    async fn resume_runtime(
+        &self,
+        _request: RuntimeResumeRequest,
+    ) -> Result<RuntimeResumeResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "resume_runtime".to_string(),
         })
     }
 
