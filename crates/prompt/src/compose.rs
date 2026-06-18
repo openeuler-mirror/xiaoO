@@ -6,7 +6,7 @@ pub struct ChannelPromptSections<'a> {
     pub group_session_context: Option<&'a str>,
 }
 
-// Keep these markers in sync with apps/xiaoo-app/src/gateway/workspace_prompt.rs.
+// Keep these markers in sync with apps/shared/src/gateway/workspace_prompt.rs.
 const WORKSPACE_PROMPT_MARKER_BEGIN: &str = "<xiaoo_workspace_prompt>";
 const WORKSPACE_PROMPT_MARKER_END: &str = "</xiaoo_workspace_prompt>";
 

@@ -112,6 +112,41 @@ data_dir = "~/.xiaoo"                # Optional, root directory for data storage
 
 ---
 
+### [server.operation_backend] - Daemon Operation Backend
+
+The daemon reads operation backend configuration only from the `server`
+namespace. Top-level `[operation_backend]` is reserved for CLI/TUI-side
+configuration and is ignored by the daemon.
+
+```toml
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"          # Or api_key = "..."
+template_id = "base"
+timeout_secs = 3600
+secure = true
+workspace_root = "/home/user/workspace"
+home_dir = "/home/user"
+temp_root = "/tmp"
+default_shell = "/bin/sh"
+```
+
+Use the local backend in daemon mode by setting `kind = "local"` under the same
+`[server.operation_backend]` namespace.
+
+```toml
+[server.operation_backend]
+kind = "local"
+
+[server.operation_backend.options.isolation]
+kind = "linux_bubblewrap"
+allow_network = false
+```
+
+---
+
 > **Note**: Common configuration items (llm, subagent, trace, compact, etc.) are shown in the "Complete Daemon Configuration Example" below. For detailed descriptions, please refer to [Configuration File Guide](./config_file_guide.md).
 
 ## Complete Daemon Configuration Example
@@ -190,6 +225,15 @@ webhook_secret_token = "your-token"
 # Data storage path (Daemon-specific)
 [paths]
 data_dir = "~/.xiaoo"
+
+# Operation backend (Daemon-specific)
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"
+template_id = "base"
+timeout_secs = 3600
 ```
 
 ### API Endpoints
@@ -209,147 +253,323 @@ Health check endpoint for liveness probes and load balancing.
 
 ---
 
-#### `POST /api/v1/chat`
+#### Session And Runtime Control Plane
 
-Chat endpoint. Send messages to the Gateway and receive responses.
+The daemon exposes runtime APIs for remote TUI and other first-class clients,
+plus checkpoint APIs for callers that need branching execution state.
+These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
+LLM provider settings are resolved per runtime/turn: request payloads may pass an
+optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
+config. The daemon does not require the LLM API key at process startup.
 
-**Request Body:**
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/v1/runtimes/open` | Open or resume a runtime using `RuntimeOpenRequest` |
+| `POST /api/v1/runtimes/input` | Submit one user input and stream SSE events |
+| `POST /api/v1/runtimes/interaction` | Send a user interaction response back to the daemon |
+| `POST /api/v1/runtimes/cancel` | Request cancellation of the current turn |
+| `POST /api/v1/runtimes/close` | Close the runtime, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint using `RuntimeCheckpointRequest` |
+| `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot/template referenced by a checkpoint |
+| `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint using `RuntimeCheckoutRequest` |
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `text` | string | ✅ | Message text (must not be empty) |
-| `channel` | string | *Either `channel` or `channel_instance_id`* | Channel identifier (e.g., `feishu`, `telegram`) |
-| `channel_instance_id` | string | *Either `channel` or `channel_instance_id`* | Channel instance ID (for multi-instance session isolation) |
-| `sender_id` | string | ✅ | Sender ID |
-| `conversation_id` | string | ✅ | Conversation/group ID (same value reuses the same session) |
-| `message_id` | string | — | Unique message ID (auto-generated if not specified) |
-| `reply_to_message_id` | string | — | Target message ID being replied to |
-| `root_message_id` | string | — | Root message ID of the thread |
-| `mentions` | array | — | List of @mentions |
+Runtime APIs use `runtime_id` and `checkpoint_id` as the public vocabulary. In
+the current v1 implementation, `runtime_id` is backed by the same value as the
+internal `session_id`; backend ids remain internal and are not returned in
+`RuntimeRecord`. See [Runtime Checkpoint Control](./runtime_checkpoint.md)
+for the current layering and checkpoint semantics.
 
-`mentions` element structure:
-
-```json
-{
-  "id": "user-or-bot-id",
-  "display_name": "Display name (optional)"
-}
-```
-
-**Example Request:**
+**Open runtime example:**
 
 ```bash
-curl -X POST http://localhost:18080/api/v1/chat \
+curl -X POST http://localhost:18080/api/v1/runtimes/open \
   -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "text": "Hello",
-    "channel": "test",
-    "sender_id": "user-1",
+    "runtime_id": "tui-demo",
     "conversation_id": "conv-demo",
-    "mentions": [{"id": "bot", "display_name": "XiaoO"}]
+    "sender_id": "user-1",
+    "entry": { "kind": "tui" },
+    "channel": "tui",
+    "llm": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
   }'
 ```
 
-**Response `200 OK`:**
+**Close runtime example:**
 
-```json
-{
-  "reply": "Hello! How can I help you?",
-  "raw_reply": "Hello! How can I help you?",
-  "conversation_id": "conv-demo",
-  "session_id": "test:conv-demo"
-}
+```bash
+curl -X POST http://localhost:18080/api/v1/runtimes/close \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runtime_id": "tui-demo"
+  }'
 ```
 
-| Field | Description |
-|-------|-------------|
-| `reply` | Final visible reply text (after post-processing) |
-| `raw_reply` | Raw reply text |
-| `conversation_id` | Conversation ID (same as request) |
-| `session_id` | Internal session identifier (format: `{channel_or_instance}:{conversation_id}`) |
+**Submit input stream example:**
 
-**Error Responses:**
+```bash
+curl -N -X POST http://localhost:18080/api/v1/runtimes/input \
+  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "runtime_id": "tui-demo",
+    "entry": { "kind": "tui" },
+    "channel": "tui",
+    "conversation_id": "conv-demo",
+    "sender_id": "user-1",
+    "text": "Hello",
+    "mentions": [],
+    "llm": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "api_key_env": "OPENAI_API_KEY"
+    }
+  }'
+```
 
-- `400 Bad Request` — Missing required fields or validation failure:
-  ```json
-  { "error": "channel or channel_instance_id is required" }
-  ```
-  ```json
-  { "error": "text must not be empty" }
-  ```
-- `500 Internal Server Error` — Session service internal error
-- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
-- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
+**Runtime checkpoint / checkout example with timing:**
 
-> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/chat`, `/api/v1/chat/stream`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
+The runtime checkpoint APIs require the source runtime to be idle. In the
+current v1 implementation, the `runtime_id` is the same value as the runtime id
+returned by `/api/v1/runtimes/open`. The following flow creates a runtime, runs
+one turn to make the backend dirty, captures a checkpoint, checks out a child
+runtime, runs both branches, and closes both runtimes.
 
----
+The example requires Bash, `curl`, and `jq`. It only adds the `Authorization`
+header when `XIAOO_HTTP_BEARER_TOKEN` is present. It uses
+`curl -w '%{time_total}'` to capture end-to-end HTTP request latency for the
+checkpoint and checkout control-plane calls.
 
-#### `POST /api/v1/chat/stream`
+```bash
+BASE_URL="http://localhost:18080"
+RUNTIME="checkpoint-demo-$(date +%Y%m%d%H%M%S)"
+CONV="conv-${RUNTIME}"
+SENDER="checkpoint-demo-user"
 
-Streaming chat endpoint. Same request format as `/api/v1/chat`, but returns a **Server-Sent Events (SSE)** stream with real-time updates for LLM text generation and tool execution.
+AUTH_HEADER=()
+if [ -n "${XIAOO_HTTP_BEARER_TOKEN:-}" ]; then
+  AUTH_HEADER=(-H "Authorization: Bearer ${XIAOO_HTTP_BEARER_TOKEN}")
+fi
 
-**Request Body:** Same as `/api/v1/chat`.
+jq -n --arg runtime "$RUNTIME" --arg conv "$CONV" --arg sender "$SENDER" \
+  '{
+    runtime_id: $runtime,
+    conversation_id: $conv,
+    sender_id: $sender,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" }
+  }' > /tmp/xiaoo_open.json
 
-**Response:** `200 OK`, Content-Type `text/event-stream`
+curl -sS -X POST "$BASE_URL/api/v1/runtimes/open" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_open.json \
+  > /tmp/xiaoo_open.out
+```
+
+```bash
+INIT_TEXT="请在当前 agent runtime 的工作区创建文件 /home/user/workspace/checkpoint_demo.txt，内容为两行：第一行 checkpoint base，第二行 runtime parent initialized。完成后读取该文件并回复其完整内容。"
+
+jq -n \
+  --arg runtime "$RUNTIME" \
+  --arg conv "$CONV" \
+  --arg sender "$SENDER" \
+  --arg text "$INIT_TEXT" \
+  '{
+    runtime_id: $runtime,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" },
+    channel: null,
+    message_id: null,
+    conversation_id: $conv,
+    sender_id: $sender,
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_initial_turn.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_initial_turn.json \
+  > /tmp/xiaoo_initial_turn.sse
+```
+
+```bash
+jq -n --arg runtime "$RUNTIME" \
+  '{
+    runtime_id: $runtime,
+    name: "fork-test-base",
+    metadata: {
+      purpose: "checkpoint checkout smoke test",
+      requested_line: "测试fork"
+    }
+  }' > /tmp/xiaoo_checkpoint.json
+
+curl -sS \
+  -o /tmp/xiaoo_checkpoint.out \
+  -w "%{time_total}\n" \
+  -X POST "$BASE_URL/api/v1/runtimes/checkpoint" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_checkpoint.json \
+  > /tmp/xiaoo_checkpoint.time
+
+CHECKPOINT_ID="$(jq -r '.checkpoint_id' /tmp/xiaoo_checkpoint.out)"
+printf "checkpoint_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkpoint.time)"
+```
+
+```bash
+jq -n \
+  --arg checkpoint "$CHECKPOINT_ID" \
+  --arg child_conv "conv-${RUNTIME}-child" \
+  '{
+    checkpoint_id: $checkpoint,
+    conversation_id: $child_conv,
+    sender_id: "checkpoint-demo-child",
+    metadata: {
+      branch: "child",
+      requested_line: "测试fork"
+    }
+  }' > /tmp/xiaoo_checkout.json
+
+curl -sS \
+  -o /tmp/xiaoo_checkout.out \
+  -w "%{time_total}\n" \
+  -X POST "$BASE_URL/api/v1/runtimes/checkout" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_checkout.json \
+  > /tmp/xiaoo_checkout.time
+
+CHILD_RUNTIME="$(jq -r '.runtime.runtime_id' /tmp/xiaoo_checkout.out)"
+printf "checkout_time_total_seconds=%s\n" "$(cat /tmp/xiaoo_checkout.time)"
+```
+
+If a checkpoint's provider snapshot is no longer needed for future checkout,
+delete it explicitly. The checkpoint record remains in daemon memory for lineage
+metadata, but after this call it no longer has an E2B provider snapshot and
+cannot be used to create another checkout branch.
+
+```bash
+jq -n --arg checkpoint "$CHECKPOINT_ID" \
+  '{ checkpoint_id: $checkpoint }' \
+  > /tmp/xiaoo_delete_snapshot.json
+
+curl -sS -X POST "$BASE_URL/api/v1/runtimes/checkpoint/delete-snapshot" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_delete_snapshot.json
+```
+
+```bash
+PARENT_TEXT="你是父 runtime。请不要写入“测试fork”。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：parent runtime complete。完成后读取该文件并回复完整内容。"
+CHILD_TEXT="你是 checkpoint checkout 出来的子 runtime。请在 /home/user/workspace/checkpoint_demo.txt 末尾追加一行：测试fork。完成后读取该文件并回复完整内容。"
+
+jq -n --arg runtime "$RUNTIME" --arg conv "$CONV" --arg text "$PARENT_TEXT" \
+  '{
+    runtime_id: $runtime,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo" },
+    channel: null,
+    message_id: null,
+    conversation_id: $conv,
+    sender_id: "checkpoint-demo-user",
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_parent_final.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_parent_final.json \
+  > /tmp/xiaoo_parent_final.sse
+
+jq -n --arg runtime "$CHILD_RUNTIME" --arg text "$CHILD_TEXT" \
+  '{
+    runtime_id: $runtime,
+    entry: { kind: "http_api", instance_id: "checkpoint-demo-child" },
+    channel: null,
+    message_id: null,
+    conversation_id: "conv-checkpoint-demo-child",
+    sender_id: "checkpoint-demo-child",
+    text: $text,
+    channel_instance_id: null,
+    channel_identity_prompt: null,
+    reply_to_message_id: null,
+    root_message_id: null,
+    mentions: [],
+    reasoning_effort: "off",
+    llm: null
+  }' > /tmp/xiaoo_child_final.json
+
+curl -sS -N -X POST "$BASE_URL/api/v1/runtimes/input" \
+  "${AUTH_HEADER[@]}" \
+  -H "Content-Type: application/json" \
+  --data @/tmp/xiaoo_child_final.json \
+  > /tmp/xiaoo_child_final.sse
+```
+
+```bash
+for id in "$RUNTIME" "$CHILD_RUNTIME"; do
+  jq -n --arg runtime "$id" '{ runtime_id: $runtime }' \
+    > "/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
+  curl -sS -X POST "$BASE_URL/api/v1/runtimes/close" \
+    "${AUTH_HEADER[@]}" \
+    -H "Content-Type: application/json" \
+    --data @"/tmp/xiaoo_close_${id//[^A-Za-z0-9_]/_}.json"
+done
+```
+
+With E2B as `[server.operation_backend]`, a local smoke run on 2026-06-13
+measured:
+
+| Operation | Measured `curl` `time_total` | E2B work included |
+|-----------|-------------------------------|-------------------|
+| Runtime checkpoint | `1.516061s` | Create an E2B provider snapshot for the dirty parent sandbox |
+| Runtime checkout | `2.335461s` | Start a new E2B sandbox from the provider snapshot and bind it to the child runtime |
+
+These values are examples, not guarantees. They vary with E2B provider latency,
+network path, snapshot size, template cold/warm state, and daemon host load. The
+numbers above do not include the LLM turns before or after the checkpoint, and
+they do not include closing the runtimes. Closing an E2B-backed runtime calls
+backend release, which deletes the corresponding E2B sandbox.
 
 **SSE Event Types:**
 
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `turn_start` | `agent_id`, `turn` | Emitted at the start of each agent loop turn |
-| `text_delta` | `delta`, `snapshot` | Emitted for each LLM text chunk. `delta` is the incremental text, `snapshot` is the cumulative text so far |
+| `text_delta` | `delta`, `snapshot` | Emitted for assistant text updates |
+| `thinking_delta` | `delta`, `snapshot` | Emitted for assistant reasoning updates |
 | `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
-| `done` | `reply`, `raw_reply`, `conversation_id`, `session_id`, `turn_count`, `total_tokens`, `stop_reason` | Emitted when the agent loop finishes. Stream closes after this event |
-| `error` | `error` | Emitted on failure. Stream closes after this event |
+| `interaction_requested` | `request` | Emitted when the daemon needs a user confirmation/input/choice |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
+| `error` | `error` | Emitted on failure |
+| `cancelled` | `runtime_id` | Emitted as cancellation acknowledgement |
 
-**Example Request:**
+**Common Error Responses:**
 
-```bash
-curl -N -X POST http://localhost:18080/api/v1/chat/stream \
-  -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hello",
-    "channel": "test",
-    "sender_id": "user-1",
-    "conversation_id": "conv-demo"
-  }'
-```
+- `400 Bad Request` — malformed request or path/runtime mismatch
+- `401 Unauthorized` — missing or invalid Bearer token when `[http]` auth is configured
+- `404 Not Found` — runtime not found
+- `429 Too Many Requests` — rate limit exceeded when `[http.rate_limit]` is enabled
+- `500 Internal Server Error` — runtime service internal error
 
-**Example SSE Output:**
-
-```
-event: turn_start
-data: {"type":"turn_start","agent_id":"main","turn":1}
-
-event: text_delta
-data: {"type":"text_delta","delta":"Hello","snapshot":"Hello"}
-
-event: text_delta
-data: {"type":"text_delta","delta":"! How can I help you?","snapshot":"Hello! How can I help you?"}
-
-event: done
-data: {"type":"done","reply":"Hello! How can I help you?","raw_reply":"Hello! How can I help you?","conversation_id":"conv-demo","session_id":"test:conv-demo","turn_count":1,"total_tokens":150,"stop_reason":"complete"}
-```
-
-**Error Responses:**
-
-- `400 Bad Request` — Same validation errors as `/api/v1/chat`
-- `401 Unauthorized` — Missing or invalid Bearer token when `[http]` auth is configured
-- `429 Too Many Requests` — Rate limit exceeded when `[http.rate_limit]` is enabled
-
-**429 Response:**
-
-```json
-{ "error": "rate limit exceeded; retry after 1s" }
-```
-
-| Header | Description |
-|--------|-------------|
-| `Retry-After` | Seconds until quota resets |
-| `X-RateLimit-Remaining` | Remaining requests (always `0` when 429) |
+> **Rate limiting applies globally** to all endpoints (`/api/v1/health`, `/api/v1/runtimes/*`, `/api/v1/channels/{channel_id}/events`). Client identity is extracted from the `X-Forwarded-For` header (first IP) or `X-Real-Ip`, falling back to a shared `"unknown"` bucket. Ensure your reverse proxy (nginx / Caddy) forwards these headers.
 
 ---
 

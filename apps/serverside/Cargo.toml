@@ -1,0 +1,55 @@
+[package]
+name = "xiaoo-serverside"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+tee_sdf = ["xiaoo-shared/tee_sdf"]
+
+[[bin]]
+name = "xiaoo-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum = "0.7"
+chrono.workspace = true
+compact = { path = "../../crates/compact" }
+dirs = "6"
+futures-util.workspace = true
+governor = "0.6"
+llm-client = { path = "../../crates/llm-client" }
+lsp = { path = "../../crates/lsp" }
+mime_guess.workspace = true
+operation_backend = { path = "../../crates/operation_backend" }
+prompt = { path = "../../crates/prompt" }
+prost = "0.13"
+regex = "1.11"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+skill = { path = "../../crates/skill" }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-stream.workspace = true
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-util.workspace = true
+toml.workspace = true
+tower = { workspace = true }
+tower_governor = "0.4"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror.workspace = true
+url = "2.5"
+uuid.workspace = true
+
+agent-contracts = { path = "../../crates/agent-contracts" }
+agent-types = { path = "../../crates/agent-types" }
+tool = { path = "../../crates/tool" }
+xiaoo-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

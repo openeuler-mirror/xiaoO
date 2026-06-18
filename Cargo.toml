@@ -1,6 +1,8 @@
 [workspace]
 members = [
-    "apps/xiaoo-app",
+    "apps/shared",
+    "apps/endside",
+    "apps/serverside",
     "apps/vault",
     "crates/llm-client",
     "crates/llm-client-cli",

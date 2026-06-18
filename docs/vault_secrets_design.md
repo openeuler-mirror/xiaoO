@@ -295,12 +295,12 @@ apps/vault/src/
 └── hsm.rs                          # HSM PKCS#11 接口（预留）
 ```
 
-### 4.2 apps/xiaoo-app
+### 4.2 apps/endside
 
 Secrets 存储和加载逻辑。
 
 ```
-apps/xiaoo-app/src/
+apps/endside/src/
 ├── llm_secrets.rs                 # 本地加密存储管理
 │                                 # - auto_save_from_env()
 │                                 # - load_llm_secrets_to_memory()
@@ -339,7 +339,7 @@ apps/xiaoo-app/src/
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │                      xiaoo 进程                              │    │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  │    │
-│  │  │  xiaoo-tui   │  │  xiaoo       │  │ xiaoo-app    │  │    │
+│  │  │    xiaoo     │  │ xiaoo --cli  │  │ xiaoo-daemon │  │    │
 │  │  └───────────────┘  └───────────────┘  └───────────────┘  │    │
 │  │           │                │                  │          │    │
 │  │           └────────────────┼──────────────────┘          │    │
@@ -448,17 +448,17 @@ api_key_env = "OPENROUTER_API_KEY"
 
 ```bash
 # 默认编译 (WhiteBox + AES-GCM，仅测试环境)
-cargo build --release --bin xiaoo-tui
+cargo build --release -p xiaoo-endside --bin xiaoo
 
 # 启用 SDF 国密 (仅鲲鹏服务器)
-cargo build --release --bin xiaoo-tui --features tee_sdf
+cargo build --release -p xiaoo-endside --bin xiaoo --features tee_sdf
 ```
 
 #### 单元测试
 
 ```bash
 cargo test --package vault
-cargo test --package xiaoo-app
+cargo test --package xiaoo-shared
 ```
 
 #### 功能验证
@@ -469,7 +469,7 @@ export OPENROUTER_API_KEY='sk-or-v1-xxx'
 export USE_SDF=false
 
 # 运行 TUI (vault.enabled=true 时自动保存)
-./target/release/xiaoo-tui --config config.toml
+./target/release/xiaoo --config config.toml
 
 # 检查加密文件
 hexdump -C ~/.xiaoo/config/llm_secrets.json | head

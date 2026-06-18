@@ -1,8 +1,8 @@
 # Backend Lifecycle Contract
 
-Status: design fixed. Shared lifecycle interfaces and the lifecycle state
-machine are implemented in `src/backend/lifecycle.rs`; provider integrations are
-not implemented yet.
+Status: partially implemented. Shared lifecycle interfaces and the lifecycle
+state machine live in `src/backend/lifecycle.rs`; the current manager-side
+runtime/backend control implementation lives in `apps/shared/src/backend`.
 
 This document defines the unified lifecycle control contract for xiaoO
 operation backends. It intentionally lives next to `agent-contracts` because it
@@ -12,8 +12,8 @@ runtime tools can use the backend's operation plane.
 ## Goals
 
 - Make backend lifecycle management provider-neutral.
-- Move provider-specific actions such as Conch `create_sandbox` and
-  `delete_sandbox` behind a shared lifecycle contract.
+- Move provider-specific actions such as Conch/E2B sandbox create and delete
+  behind a shared backend lifecycle contract.
 - Keep lifecycle control separate from active operation execution.
 - Provide enough state, identity, capability, and error information for session
   resume, pause, cleanup, and diagnostics.
@@ -81,13 +81,17 @@ truth after process crashes, network failures, or partial lifecycle operations.
 
 ## Naming
 
-The public lifecycle method is named `create_sandbox` for now because the
-current product language and Conch implementation are sandbox-oriented. The
-request and response types are intentionally backend-neutral:
-`BackendCreateRequest`, `BackendInstance`, `BackendSnapshot`.
+The low-level `agent-contracts` lifecycle trait still exposes the historical
+method name `create_sandbox`. At the manager-facing layer, the current xiaoO API
+uses backend names such as `create_backend`, `checkpoint_backend`,
+`checkout_backend`, `delete_backend`, `BackendInfo`, and
+`BackendCheckpointRef`.
 
-Future cleanup can rename `create_sandbox` to `create` if providers that are not
-sandbox-like become first-class.
+Treat `create_sandbox` here as a provider-lifecycle boundary name, not as the
+runtime control-plane vocabulary. Provider adapters may also use sandbox
+terminology internally when the provider API itself is sandbox-shaped, such as
+E2B snapshots or Conch sandbox handles. That provider-native vocabulary should
+not leak into runtime checkpoint request/response shapes.
 
 ## Lifecycle State
 
@@ -484,6 +488,7 @@ pub struct BackendManagerRecord {
 | --- | --- | --- | --- | --- | --- |
 | `local` | Return an active local instance record | Return active local instance if workspace is valid | Return `UnsupportedCapability` | No-op successful delete | Check workspace path and report active/failed |
 | `conch` | Call `/api/sandbox/create`, then health check agent | Restore from `snapshot_id`, `sandbox_id`, or serialized handle | Create snapshot/freeze sandbox when supported | Call `/api/sandbox/delete` | Query sandbox status from Conch control plane |
+| `e2b` | Create or connect an E2B sandbox-backed backend | Checkout from a provider snapshot id where supported | Create provider snapshot via the E2B snapshot API | Delete provider sandbox resources where supported | Query provider status where supported |
 | `docker` future | Create container | Start container or restore named container | Stop or commit container | Remove container | Inspect container |
 | `ssh` future | Establish session record | Reattach to host/session | Usually unsupported | No-op or close session lease | Probe host/session |
 
@@ -553,7 +558,7 @@ These are intentionally left for implementation planning.
 
 | Decision | Options |
 | --- | --- |
-| Method name | Keep `create_sandbox` now, or rename to provider-neutral `create` before implementation |
+| Method name | Keep `create_sandbox` at the low-level provider lifecycle boundary, or rename it to provider-neutral `create` in a later code cleanup |
 | Local pause | Fixed as `UnsupportedCapability` |
 | Snapshot storage | Provider-owned, manager-owned metadata, or mixed |
 | Manager persistence | In-memory only, session store extension, or dedicated backend store |

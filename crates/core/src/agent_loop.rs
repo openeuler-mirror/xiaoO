@@ -3380,10 +3380,10 @@ mod tests {
                             },
                         ],
                         usage: Usage {
+                            cached_tokens: 0,
                             prompt_tokens: 5,
                             completion_tokens: 3,
                             total_tokens: 8,
-                            cached_tokens:0,
                         },
                         stop_reason: StopReason::ToolUse,
                     },
@@ -3397,10 +3397,10 @@ mod tests {
                     reasoning_content: None,
                     tool_calls: Vec::new(),
                     usage: Usage {
+                        cached_tokens: 0,
                         prompt_tokens: 5,
                         completion_tokens: 1,
                         total_tokens: 6,
-                        cached_tokens:0,
                     },
                     stop_reason: StopReason::EndTurn,
                 },
