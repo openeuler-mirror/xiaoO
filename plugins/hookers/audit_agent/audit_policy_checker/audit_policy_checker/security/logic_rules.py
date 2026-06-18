@@ -18,6 +18,7 @@ from .types import LogicRuleResult
 SENSITIVE_PATHS: list[dict] = [
     # 认证与密钥
     {"path": "/etc/shadow", "risk_level": "critical", "desc": "系统密码文件"},
+    {"path": "/etc/gshadow", "risk_level": "critical", "desc": "系统组密码文件"},
     {"path": "/etc/passwd", "risk_level": "high", "desc": "系统用户文件"},
     {"path": "/etc/sudoers", "risk_level": "critical", "desc": "sudo 配置"},
     {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥"},
@@ -71,18 +72,22 @@ PASSWORD_MODIFY_PATTERNS: list[str] = [
     r"\|\s*passwd\b",              # echo pass | passwd
     r"\bpasswd\s+--stdin\b",       # passwd --stdin
     r"\bchpasswd\b",               # 批量改密码
+    r"\bchgpasswd\b",              # 批量修改组密码
     r"\bnewusers\b",               # 批量添加用户
     r"\bpasswd\s+-[a-zA-Z]*d\b",   # 删除密码 (passwd -d)
     r"\bpasswd\s+-[a-zA-Z]*l\b",   # 锁定账户 (passwd -l)
     r"\blpasswd\s",                # lpasswd（libuser 版 passwd）
     r"\bgpasswd\s+(?!-[adA])",     # 组密码管理（排除 -a/-d/-A 成员管理）
-    r"\b(useradd|luseradd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",  # 通用命令 + -p 参数
+    r"\b(useradd|luseradd|groupadd|usermod|lusermod|groupmod|lgroupmod)\b[^&|;]*?\s-p\b",  # 通用命令 + -p 参数
 ]
 
 # ==================== 用户删除命令模式 ====================
 USER_DELETION_PATTERNS: list[str] = [
     r"\buserdel\s",
     r"\bdeluser\s",
+    r"\bluserdel\s",       # libuser 版删除用户
+    r"\bgroupdel\s",       # 删除用户组
+    r"\blgroupdel\s",      # libuser 版删除组
 ]
 
 # ==================== 意图偏离关键词对 ====================
