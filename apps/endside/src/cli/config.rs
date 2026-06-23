@@ -39,7 +39,6 @@ pub struct LlmSection {
     pub api_base: Option<String>,
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
-    pub disable_completion_nudge: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]

@@ -116,8 +116,6 @@ pub struct LlmConfig {
     pub kvcache_enabled: bool,
     #[serde(default = "default_false")]
     pub kvcache_debug_enabled: bool,
-    #[serde(default)]
-    pub disable_completion_nudge: Option<bool>,
 }
 
 fn default_false() -> bool {
@@ -135,7 +133,6 @@ impl Default for LlmConfig {
             reasoning_effort: ReasoningEffort::Off,
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
-            disable_completion_nudge: None,
         }
     }
 }

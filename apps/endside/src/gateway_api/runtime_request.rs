@@ -184,11 +184,6 @@ impl GatewayRuntime {
                     let mut flags = FeatureFlags::default();
                     flags.kvcache_enabled = state.agent_config.llm.kvcache_enabled;
                     flags.kvcache_debug_enabled = state.agent_config.llm.kvcache_debug_enabled;
-                    flags.disable_completion_nudge = state
-                        .agent_config
-                        .llm
-                        .disable_completion_nudge
-                        .unwrap_or(false);
                     flags
                 },
                 token_budget: TokenBudgetConfig {
