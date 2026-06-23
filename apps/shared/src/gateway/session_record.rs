@@ -15,6 +15,7 @@ use xiaoo_core::LoopStateSnapshot;
 pub enum SessionLifecycleStatus {
     Idle,
     Running,
+    Paused,
     Failed,
     Closed,
 }

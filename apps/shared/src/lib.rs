@@ -9,5 +9,6 @@ pub mod runtime_checkpoint;
 pub use runtime_checkpoint::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimeRecord,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimePauseRequest, RuntimePauseResult, RuntimeRecord,
+    RuntimeResumeRequest, RuntimeResumeResult,
 };

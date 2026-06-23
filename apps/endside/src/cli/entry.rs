@@ -191,9 +191,6 @@ where
                 reasoning_effort,
                 kvcache_enabled: llm.and_then(|l| l.kvcache_enabled).unwrap_or(false),
                 kvcache_debug_enabled: llm.and_then(|l| l.kvcache_debug_enabled).unwrap_or(false),
-                disable_completion_nudge: llm
-                    .and_then(|l| l.disable_completion_nudge)
-                    .unwrap_or(false),
                 compact: file_cfg.compact.unwrap_or_default(),
                 hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
                     default: HookerDefaultMode::None,
@@ -815,7 +812,6 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
                 tool_execution: config.enable_tools,
                 kvcache_enabled: config.kvcache_enabled,
                 kvcache_debug_enabled: config.kvcache_debug_enabled,
-                disable_completion_nudge: config.disable_completion_nudge,
                 ..FeatureFlags::default()
             },
             token_budget: TokenBudgetConfig {

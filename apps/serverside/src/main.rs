@@ -52,7 +52,9 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
-    let backend_manager = Arc::new(BackendManager::new());
+    let backend_manager = Arc::new(BackendManager::new_with_limits(
+        config.server_backend_manager_limits(),
+    ));
     let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
         session_store,
         resolver,

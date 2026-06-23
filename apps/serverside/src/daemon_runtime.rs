@@ -146,8 +146,6 @@ impl ConfiguredRuntimeResolver {
                 let mut flags = FeatureFlags::default();
                 flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
                 flags.kvcache_debug_enabled = config.app.llm.kvcache_debug_enabled.unwrap_or(false);
-                flags.disable_completion_nudge =
-                    config.app.llm.disable_completion_nudge.unwrap_or(false);
                 flags
             },
             trace,

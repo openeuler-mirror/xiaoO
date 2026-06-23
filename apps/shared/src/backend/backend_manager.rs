@@ -1,6 +1,6 @@
 use agent_contracts::backend::{
-    BackendId, BackendLifecycleReason, BackendResourceLimits, OperationBackendBuildError,
-    OperationError,
+    BackendId, BackendLifecycleReason, BackendLifecycleState, BackendResourceLimits,
+    OperationBackendBuildError, OperationError,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -15,19 +15,20 @@ use super::{
     BackendCheckpointRequest, BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
     BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
-    BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter, BackendTreeNode,
-    BuildBackendInput,
+    BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter,
+    BackendManagerLimits, BackendTreeNode, BuildBackendInput,
 };
 
-#[derive(Default)]
 pub struct BackendManager {
     pub(super) state: Mutex<BackendManagerState>,
+    limits: BackendManagerLimits,
 }
 
 #[derive(Default)]
 pub(super) struct BackendManagerState {
     pub(super) backends: HashMap<BackendId, BackendInstanceEntry>,
     pub(super) session_index: HashMap<String, BackendId>,
+    pub(super) pending_e2b_creations: usize,
 }
 
 fn checkout_metadata(
@@ -132,7 +133,23 @@ fn resolve_checkpoint_backend_id(
 
 impl BackendManager {
     pub fn new() -> Self {
-        Self::default()
+        Self::new_with_limits(BackendManagerLimits::default())
+    }
+
+    pub fn new_with_limits(limits: BackendManagerLimits) -> Self {
+        Self {
+            state: Mutex::new(BackendManagerState::default()),
+            limits,
+        }
+    }
+
+    pub fn limits(&self) -> BackendManagerLimits {
+        self.limits
+    }
+
+    pub async fn active_e2b_sandbox_count(&self) -> usize {
+        let state = self.state.lock().await;
+        active_e2b_sandbox_count(&state)
     }
 
     pub async fn create_backend(
@@ -161,10 +178,11 @@ impl BackendManager {
                 });
             }
         }
+        let reserved_e2b_slot = reserve_active_e2b_slot(&mut state, &self.limits, &config)?;
 
-        let entry = build_backend(BuildBackendInput {
+        let entry = match build_backend(BuildBackendInput {
             backend_id: backend_id.clone(),
-            config,
+            config: config.clone(),
             workspace_root_text: workspace_root,
             config_hash,
             session_id_for_instance: request
@@ -178,13 +196,21 @@ impl BackendManager {
             lineage: BackendLineageEntry::default(),
             backend_checkpoint: None,
         })
-        .await?;
+        .await
+        {
+            Ok(entry) => entry,
+            Err(error) => {
+                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                return Err(error);
+            }
+        };
         let info = entry.info();
         let session_ids = entry.session_ids.keys().cloned().collect::<Vec<_>>();
         for session_id in session_ids {
             state.session_index.insert(session_id, backend_id.clone());
         }
         state.backends.insert(backend_id, entry);
+        release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
         Ok(info)
     }
 
@@ -440,8 +466,15 @@ impl BackendManager {
         let child_backend_id = requested_backend_id(request.backend_id.clone())?;
         let child_session_id = request.session_id.clone();
         let expires_at_ms = request.timeout.map(expires_at_ms_from_timeout);
-        {
-            let state = self.state.lock().await;
+        let mut create_config =
+            super::GatewayBackendConfig::new("e2b", request.checkpoint.provider_options.clone());
+        create_config.options = forked_provider_options(
+            &request.checkpoint.provider_options,
+            request.options.as_ref(),
+            snapshot_id,
+        );
+        let reserved_e2b_slot = {
+            let mut state = self.state.lock().await;
             if state.backends.contains_key(&child_backend_id) {
                 return Err(BackendError::Conflict {
                     message: format!("backend_id {child_backend_id} already exists"),
@@ -456,15 +489,9 @@ impl BackendManager {
                     });
                 }
             }
-        }
+            reserve_active_e2b_slot(&mut state, &self.limits, &create_config)?
+        };
 
-        let mut create_config =
-            super::GatewayBackendConfig::new("e2b", request.checkpoint.provider_options.clone());
-        create_config.options = forked_provider_options(
-            &request.checkpoint.provider_options,
-            request.options.as_ref(),
-            snapshot_id,
-        );
         let create_config_hash = hash_config(&create_config);
         let stored_config =
             super::GatewayBackendConfig::new("e2b", request.checkpoint.provider_options.clone());
@@ -486,9 +513,9 @@ impl BackendManager {
             forked_at_ms: Some(current_time_ms()),
         };
 
-        let mut child_entry = build_backend(BuildBackendInput {
+        let mut child_entry = match build_backend(BuildBackendInput {
             backend_id: child_backend_id.clone(),
-            config: create_config,
+            config: create_config.clone(),
             workspace_root_text: request.checkpoint.workspace_root.clone(),
             config_hash: create_config_hash,
             session_id_for_instance: child_session_id
@@ -501,7 +528,15 @@ impl BackendManager {
             lineage,
             backend_checkpoint: Some(request.checkpoint.clone()),
         })
-        .await?;
+        .await
+        {
+            Ok(entry) => entry,
+            Err(error) => {
+                let mut state = self.state.lock().await;
+                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                return Err(error);
+            }
+        };
         child_entry.config = stored_config;
         child_entry.config_hash = stored_config_hash;
 
@@ -541,12 +576,23 @@ impl BackendManager {
         };
 
         if let Err(error) = insert_result {
-            if let Some(entry) = child_entry {
+            let cleanup_error = if let Some(entry) = child_entry {
                 delete_backend_instance(entry, BackendLifecycleReason::UserRequested)
                     .await
-                    .map_err(BackendError::from_operation_error)?;
+                    .err()
+            } else {
+                None
+            };
+            let mut state = self.state.lock().await;
+            release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+            if let Some(cleanup_error) = cleanup_error {
+                return Err(BackendError::from_operation_error(cleanup_error));
             }
             return Err(error);
+        }
+        {
+            let mut state = self.state.lock().await;
+            release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
         }
 
         Ok(BackendCheckoutResult {
@@ -623,11 +669,13 @@ impl BackendManager {
                 entry.instance.clone(),
             ));
         }
+        let reserved_e2b_slot = reserve_active_e2b_slot(&mut state, &self.limits, &config)
+            .map_err(BackendError::into_build_error)?;
 
         let backend_id = new_backend_id();
-        let entry = build_backend(BuildBackendInput {
+        let entry = match build_backend(BuildBackendInput {
             backend_id: backend_id.clone(),
-            config,
+            config: config.clone(),
             workspace_root_text: workspace_root,
             config_hash,
             session_id_for_instance: request.session_id.clone(),
@@ -639,7 +687,13 @@ impl BackendManager {
             backend_checkpoint: None,
         })
         .await
-        .map_err(BackendError::into_build_error)?;
+        {
+            Ok(entry) => entry,
+            Err(error) => {
+                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                return Err(error.into_build_error());
+            }
+        };
         let backend = Arc::clone(&entry.backend);
         let instance = entry.instance.clone();
 
@@ -647,6 +701,7 @@ impl BackendManager {
             .session_index
             .insert(request.session_id, backend_id.clone());
         state.backends.insert(backend_id, entry);
+        release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
         Ok(BackendLease::new(backend, instance))
     }
 
@@ -716,5 +771,49 @@ impl BackendManager {
             delete_backend_instance(instance, BackendLifecycleReason::DaemonShutdown).await?;
         }
         Ok(())
+    }
+}
+
+fn active_e2b_sandbox_count(state: &BackendManagerState) -> usize {
+    state
+        .backends
+        .values()
+        .filter(|entry| {
+            entry.config.kind == "e2b" && entry.instance.state == BackendLifecycleState::Active
+        })
+        .count()
+}
+
+fn reserve_active_e2b_slot(
+    state: &mut BackendManagerState,
+    limits: &BackendManagerLimits,
+    config: &super::GatewayBackendConfig,
+) -> Result<bool, BackendError> {
+    if config.kind != "e2b" {
+        return Ok(false);
+    }
+    let Some(max) = limits.max_active_e2b_sandboxes else {
+        return Ok(false);
+    };
+    let active = active_e2b_sandbox_count(state);
+    let reserved = state.pending_e2b_creations;
+    if active.saturating_add(reserved) >= max {
+        return Err(BackendError::ResourceLimitExceeded {
+            message: if reserved == 0 {
+                format!("active E2B sandbox limit exceeded: active={active} max={max}")
+            } else {
+                format!(
+                    "active E2B sandbox limit exceeded: active={active} pending={reserved} max={max}"
+                )
+            },
+        });
+    }
+    state.pending_e2b_creations = state.pending_e2b_creations.saturating_add(1);
+    Ok(true)
+}
+
+fn release_e2b_slot_reservation(state: &mut BackendManagerState, reserved: bool) {
+    if reserved {
+        state.pending_e2b_creations = state.pending_e2b_creations.saturating_sub(1);
     }
 }

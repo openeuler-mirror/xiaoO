@@ -1894,28 +1894,6 @@ fn decide(ctx: &mut LoopContext<'_>) {
         }
     }
 
-    // Only nudge agentic runs: the checklist is about verifying a code change, so
-    // it is noise for a tool-less, conversational turn (and would force every such
-    // reply through a wasted extra round-trip). Gate on tools being available.
-    if !ctx.state.completion_nudged
-        && !ctx.snapshot.feature_flags.disable_completion_nudge
-        && ctx.turn.turn_number < ctx.snapshot.max_turns
-        && ctx.state.tool_executed
-    {
-        ctx.state.completion_nudged = true;
-        let checklist = "You are about to finish. Before you stop, re-read the ORIGINAL task and verify, do not assume:\n\
-            1. Every requirement it states is met — including any exact error message, return value, output, or edge case it names; if it specifies a behavior, you have a check that exercises THAT behavior, not a different one that merely passes.\n\
-            2. Your change is robust to changed inputs — different numbers, empty/None/zero, other files or config — not only the one case you tried, and it does not mutate shared state or leave unintended side effects.\n\
-            3. Review the change once from three angles: as the test engineer who will grade it, as a QA reviewer hunting regressions, and as the user who filed the task.\n\
-            If any check fails, fix it now. If all hold, stop again and you are done.";
-        ctx.state
-            .messages
-            .write()
-            .push(ChatMessage::user(checklist.to_string()));
-        ctx.turn.decision = Some(LoopDecision::Continue);
-        return;
-    }
-
     ctx.turn.decision = Some(LoopDecision::ReturnComplete);
 }
 
@@ -2971,12 +2949,18 @@ mod tests {
             outcome,
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
-        // turn 1: synthesize + run the tool; turn 2: model stops and the
-        // completion nudge (tools are visible here) adds one verification turn;
-        // turn 3: model stops again and the loop completes.
-        assert_eq!(loop_state.turn_count, 3);
+        // turn 1: synthesize + run the tool; turn 2: model stops and the loop
+        // completes without injecting a checklist that could replace the answer.
+        assert_eq!(loop_state.turn_count, 2);
 
         let messages = loop_state.messages.read();
+        assert!(
+            messages
+                .iter()
+                .filter_map(ChatMessage::text_content)
+                .all(|text| !text.contains("You are about to finish")),
+            "completion should not inject a checklist as a new user request"
+        );
         let tool_use = messages.iter().find_map(|m| {
             m.blocks.iter().find_map(|b| match b {
                 ContentBlock::ToolUse {
@@ -3222,7 +3206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_nudge_skips_conversational_run_with_visible_tools() {
+    async fn conversational_run_with_visible_tools_completes_in_one_turn() {
         let provider = Arc::new(LlmProviderWrapper::new(
             Arc::new(StreamingTestProvider::new()),
             None,

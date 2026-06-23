@@ -133,6 +133,16 @@ temp_root = "/tmp"
 default_shell = "/bin/sh"
 ```
 
+Limit live E2B sandbox usage with `[server.resource_limits]`. If this section is
+omitted, the daemon defaults to E2B's Hobby concurrency limit of 20 active
+sandboxes. Paused runtimes and checkpoint templates do not count toward this
+limit.
+
+```toml
+[server.resource_limits]
+max_active_e2b_sandboxes = 20
+```
+
 Use the local backend in daemon mode by setting `kind = "local"` under the same
 `[server.operation_backend]` namespace.
 
@@ -234,6 +244,9 @@ kind = "e2b"
 api_key_env = "E2B_API_KEY"
 template_id = "base"
 timeout_secs = 3600
+
+[server.resource_limits]
+max_active_e2b_sandboxes = 20
 ```
 
 ### API Endpoints

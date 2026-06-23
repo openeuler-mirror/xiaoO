@@ -70,6 +70,38 @@ pub struct RuntimeCheckoutResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimePauseRequest {
+    pub runtime_id: String,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimePauseResult {
+    pub runtime: RuntimeRecord,
+    pub checkpoint_id: String,
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub metadata: Value,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeResumeRequest {
+    pub runtime_id: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeResumeResult {
+    pub runtime: RuntimeRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCheckpointSnapshotDeleteRequest {
     pub checkpoint_id: String,
 }
@@ -110,6 +142,7 @@ pub(crate) struct InMemoryRuntimeCheckpointStore {
 struct RuntimeCheckpointStoreState {
     checkpoints: HashMap<String, RuntimeCheckpoint>,
     runtime_heads: HashMap<String, String>,
+    paused_runtime_heads: HashMap<String, String>,
 }
 
 impl InMemoryRuntimeCheckpointStore {
@@ -148,6 +181,31 @@ impl InMemoryRuntimeCheckpointStore {
             .await
             .runtime_heads
             .insert(runtime_id, checkpoint_id);
+    }
+
+    pub(crate) async fn register_paused_runtime(&self, runtime_id: String, checkpoint_id: String) {
+        self.state
+            .write()
+            .await
+            .paused_runtime_heads
+            .insert(runtime_id, checkpoint_id);
+    }
+
+    pub(crate) async fn paused_checkpoint_for_runtime(&self, runtime_id: &str) -> Option<String> {
+        self.state
+            .read()
+            .await
+            .paused_runtime_heads
+            .get(runtime_id)
+            .cloned()
+    }
+
+    pub(crate) async fn clear_paused_runtime(&self, runtime_id: &str) {
+        self.state
+            .write()
+            .await
+            .paused_runtime_heads
+            .remove(runtime_id);
     }
 
     pub(crate) async fn clear_backend_snapshot(

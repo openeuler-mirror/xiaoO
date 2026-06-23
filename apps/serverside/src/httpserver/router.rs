@@ -251,6 +251,8 @@ fn create_router_from_state(
                 "/api/v1/runtimes/checkpoint/delete-snapshot",
                 post(handle_runtime_checkpoint_snapshot_delete),
             )
+            .route("/api/v1/runtimes/pause", post(handle_runtime_pause))
+            .route("/api/v1/runtimes/resume", post(handle_runtime_resume))
             .route("/api/v1/runtimes/checkout", post(handle_runtime_checkout)),
         bearer_auth.clone(),
     );
@@ -539,6 +541,46 @@ async fn handle_runtime_checkout(
     };
 
     match control_plane.checkout_runtime(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_pause(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimePauseRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.pause_runtime(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_resume(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeResumeRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.resume_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
     }
