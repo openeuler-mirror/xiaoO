@@ -1,11 +1,11 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 
-use crate::app_state::{AppState, sandbox_display_name};
+use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{
     GatewayEntryContext, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest,
@@ -682,7 +682,7 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
 
 #[cfg(test)]
 mod tests {
-    use super::{RemoteSseEvent, parse_sse_frame, take_sse_frame};
+    use super::{parse_sse_frame, take_sse_frame, RemoteSseEvent};
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {

@@ -1,6 +1,5 @@
 use crate::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
-use agent_types::ReasoningEffort;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -38,9 +37,9 @@ pub struct LlmSection {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub api_base: Option<String>,
-    pub reasoning_effort: Option<ReasoningEffort>,
     pub kvcache_enabled: Option<bool>,
     pub kvcache_debug_enabled: Option<bool>,
+    pub disable_completion_nudge: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -122,17 +121,6 @@ impl FileConfig {
             },
             Err(_) => Self::default(),
         }
-    }
-
-    /// Resolve API key: read the env var named by `api_key_env`.
-    pub fn resolve_api_key(&self) -> Option<String> {
-        let env_name = self.llm.as_ref()?.api_key_env.as_deref()?.trim();
-        if env_name.is_empty() {
-            return None;
-        }
-        std::env::var(env_name)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
     }
 }
 
