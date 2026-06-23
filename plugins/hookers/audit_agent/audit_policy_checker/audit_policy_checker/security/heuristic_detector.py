@@ -212,10 +212,10 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "reason": "检测到 chpasswd 批量密码修改命令",
     },
     {
-        "pattern": r"\bnewusers\b",
+        "pattern": r"\b(newusers|lnewusers)\b",
         "risk_level": "high",
         "risk_type": "script_execution",
-        "reason": "检测到 newusers 批量用户添加命令",
+        "reason": "检测到 newusers/lnewusers 批量用户添加命令",
     },
     {
         "pattern": r"\bpasswd\s+-[a-zA-Z]*d\b",

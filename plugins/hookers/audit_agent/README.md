@@ -637,6 +637,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `chpasswd` | high | 批量密码修改 |
 | `chgpasswd` | high | 批量修改组密码 |
 | `newusers` | high | 批量用户添加 |
+| `lnewusers` | high | 批量用户添加（libuser） |
 | `passwd -d` | high | 删除用户密码 |
 | `passwd -l` | high | 锁定用户账户 |
 | `groupadd -p` | high | 创建组时设置密码 |
@@ -774,6 +775,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 批量命令 | `chpasswd` | 批量密码修改 |
 | 批量命令 | `chgpasswd` | 批量修改组密码 |
 | 批量命令 | `newusers` | 批量用户添加 |
+| libuser | `lnewusers` | 批量用户添加（libuser） |
 | passwd 参数 | `passwd -d` | 删除密码 |
 | passwd 参数 | `passwd -l` | 锁定账户 |
 | libuser | `lpasswd` | lpasswd（libuser 版 passwd） |

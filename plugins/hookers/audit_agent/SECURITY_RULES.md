@@ -441,6 +441,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `chpasswd` | script_execution | 批量密码修改命令 | ✓ Deny |
 | `chgpasswd` | script_execution | 批量修改组密码命令 | ✓ Deny |
 | `newusers` | script_execution | 批量用户添加命令 | ✓ Deny |
+| `lnewusers` | script_execution | 批量用户添加命令（libuser） | ✓ Deny |
 | `passwd -d` | script_execution | 删除用户密码操作 | ✓ Deny |
 | `passwd -l` | script_execution | 锁定用户账户操作 | ✓ Deny |
 | `userdel` | script_execution | 删除系统用户 | ✓ Deny |
@@ -1149,6 +1150,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | 批量命令 | `chpasswd` | 批量密码修改 |
 | 批量命令 | `chgpasswd` | 批量修改组密码 |
 | 批量命令 | `newusers` | 批量用户添加 |
+| libuser | `lnewusers` | 批量用户添加（libuser） |
 | passwd 参数 | `passwd -d` | 删除密码 |
 | passwd 参数 | `passwd -l` | 锁定账户 |
 | libuser | `lpasswd` | lpasswd（libuser 版 passwd） |

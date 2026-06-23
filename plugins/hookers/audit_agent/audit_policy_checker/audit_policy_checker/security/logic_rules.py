@@ -73,7 +73,7 @@ PASSWORD_MODIFY_PATTERNS: list[str] = [
     r"\bpasswd\s+--stdin\b",       # passwd --stdin
     r"\bchpasswd\b",               # 批量改密码
     r"\bchgpasswd\b",              # 批量修改组密码
-    r"\bnewusers\b",               # 批量添加用户
+    r"\b(newusers|lnewusers)\b",   # 批量添加用户（标准/libuser）
     r"\bpasswd\s+-[a-zA-Z]*d\b",   # 删除密码 (passwd -d)
     r"\bpasswd\s+-[a-zA-Z]*l\b",   # 锁定账户 (passwd -l)
     r"\blpasswd\s",                # lpasswd（libuser 版 passwd）
