@@ -469,10 +469,9 @@ impl SessionSupervisor {
                         resumed_loop_state.messages.push(tool_result_msg);
 
                         if let Some(sink) = loop_event_sink.as_ref() {
-                            let output_preview = serde_json::to_string(
-                                &serde_json::json!({ "terminal": terminal }),
-                            )
-                            .unwrap_or_default();
+                            let output_preview =
+                                serde_json::to_string(&serde_json::json!({ "terminal": terminal }))
+                                    .unwrap_or_default();
                             let is_error =
                                 terminal.status == subagent::SubagentTerminalKind::Failed;
                             sink.on_tool_result(

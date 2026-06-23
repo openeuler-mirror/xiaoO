@@ -382,8 +382,14 @@ mod tests {
         enforce_session_budget(dir.path(), 100, &keep);
 
         assert!(keep.exists(), "kept file must never be evicted");
-        assert!(!a.exists(), "non-kept spill should be evicted to honor budget");
-        assert!(!b.exists(), "non-kept spill should be evicted to honor budget");
+        assert!(
+            !a.exists(),
+            "non-kept spill should be evicted to honor budget"
+        );
+        assert!(
+            !b.exists(),
+            "non-kept spill should be evicted to honor budget"
+        );
     }
 
     #[test]

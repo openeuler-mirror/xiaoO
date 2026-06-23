@@ -1,31 +1,31 @@
 use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
-use crate::httpserver::GatewayServiceError;
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
-use crate::httpserver::sse_sink::{SseLoopEventSink, SseStreamEvent, sse_stream_from_receiver};
+use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
+use crate::httpserver::GatewayServiceError;
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
 use axum::{
-    Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{
-        HeaderMap, Request, StatusCode,
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        HeaderMap, Request, StatusCode,
     },
     middleware::{self, Next},
     response::{
-        IntoResponse, Response,
         sse::{KeepAlive, Sse},
+        IntoResponse, Response,
     },
     routing::{get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
 use xiaoo_shared::gateway::SessionService;
 
@@ -750,8 +750,8 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig, create_router_with_auth,
-        handle_channel_events,
+        create_router_with_auth, handle_channel_events, GatewayAppState, GatewayErrorResponse,
+        HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -760,13 +760,13 @@ mod tests {
     use agent_contracts::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
-        body::{Body, Bytes, to_bytes},
+        body::{to_bytes, Body, Bytes},
         extract::{Path, Query, State},
         http::{HeaderMap, Request, StatusCode},
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use tokio::time::{Duration, sleep, timeout};
+    use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
     use xiaoo_shared::gateway::{
         AppTurnRequest, AppTurnResult, SessionService, SessionServiceError,
@@ -1252,13 +1252,11 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            session_service
-                .requests
-                .lock()
-                .expect("session service mutex poisoned")
-                .is_empty()
-        );
+        assert!(session_service
+            .requests
+            .lock()
+            .expect("session service mutex poisoned")
+            .is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1308,13 +1306,11 @@ mod tests {
         .expect("async webhook route should acknowledge immediately");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            session_service
-                .requests
-                .lock()
-                .expect("session service mutex poisoned")
-                .is_empty()
-        );
+        assert!(session_service
+            .requests
+            .lock()
+            .expect("session service mutex poisoned")
+            .is_empty());
 
         sleep(Duration::from_millis(250)).await;
 

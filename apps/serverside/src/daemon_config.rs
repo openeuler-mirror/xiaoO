@@ -63,6 +63,8 @@ pub struct LlmConfig {
     pub kvcache_enabled: Option<bool>,
     #[serde(default)]
     pub kvcache_debug_enabled: Option<bool>,
+    #[serde(default)]
+    pub disable_completion_nudge: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

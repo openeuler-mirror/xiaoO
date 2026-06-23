@@ -20,7 +20,7 @@ pub mod subagent_interaction;
 pub mod turns;
 pub mod workspace_prompt;
 
-pub use decrypted_api_keys::{SecretProvider, get_decrypted_api_key, init_secret_provider};
+pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use hosted_runtime_resolver::{
@@ -28,10 +28,10 @@ pub use hosted_runtime_resolver::{
 };
 pub use progress_updates::ChannelProgressRelayHandle;
 pub use session_base::{
-    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest, RuntimeOpenRequest,
-    SessionCancelRequest, SessionCloseRequest, SessionForkRequest, SessionForkResult, SessionInput,
-    SessionInputKind, SessionInteractionRequest, SessionOpenRequest, SessionSubmitReceipt,
-    channel_session_id,
+    channel_session_id, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest,
+    RuntimeOpenRequest, SessionCancelRequest, SessionCloseRequest, SessionForkRequest,
+    SessionForkResult, SessionInput, SessionInputKind, SessionInteractionRequest,
+    SessionOpenRequest, SessionSubmitReceipt,
 };
 pub use session_record::{SessionLifecycleStatus, SessionRecord};
 pub use session_runtime::{

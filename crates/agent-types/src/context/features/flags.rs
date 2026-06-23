@@ -12,6 +12,8 @@ pub struct FeatureFlags {
     pub kvcache_enabled: bool,
     #[serde(default = "default_false")]
     pub kvcache_debug_enabled: bool,
+    #[serde(default = "default_false")]
+    pub disable_completion_nudge: bool,
 }
 
 fn default_false() -> bool {
@@ -29,6 +31,7 @@ impl Default for FeatureFlags {
             skill_matching: true,
             kvcache_enabled: false,
             kvcache_debug_enabled: false,
+            disable_completion_nudge: false,
         }
     }
 }

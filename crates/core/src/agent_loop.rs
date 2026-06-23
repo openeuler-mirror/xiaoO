@@ -1898,6 +1898,7 @@ fn decide(ctx: &mut LoopContext<'_>) {
     // it is noise for a tool-less, conversational turn (and would force every such
     // reply through a wasted extra round-trip). Gate on tools being available.
     if !ctx.state.completion_nudged
+        && !ctx.snapshot.feature_flags.disable_completion_nudge
         && ctx.turn.turn_number < ctx.snapshot.max_turns
         && ctx.state.tool_executed
     {
