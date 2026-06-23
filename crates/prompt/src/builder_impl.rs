@@ -31,8 +31,7 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let (stable_system, volatile_system) =
-            compose_system_parts(&input.system_prompt, &context);
+        let (stable_system, volatile_system) = compose_system_parts(&input.system_prompt, &context);
 
         if stable_system.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
@@ -362,7 +361,10 @@ mod tests {
         let system_text = result.request.messages[0].text_content().unwrap();
         assert!(system_text.contains("New system prompt"));
         assert!(system_text.contains("Environment"));
-        assert!(!system_text.contains("Old system prompt"), "Old system messages should be filtered out");
+        assert!(
+            !system_text.contains("Old system prompt"),
+            "Old system messages should be filtered out"
+        );
 
         assert_eq!(
             result.request.messages[1].role,
