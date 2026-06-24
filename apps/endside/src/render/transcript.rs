@@ -15,7 +15,7 @@ use crate::app_state::{
     CachedMessageLayout, CachedMessageRender, ToolToggleRegion, TranscriptRenderCache,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
-use crate::markdown::render_markdown;
+use crate::markdown::{contains_markdown_table, render_markdown};
 use crate::theme::Theme;
 
 use super::utils::{
@@ -648,12 +648,7 @@ fn render_tool_message_lines(
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
-        for line in detail_text.lines() {
-            lines.push(Line::styled(
-                format!("    {}", sanitize_terminal_text(line)),
-                Style::default().fg(theme.foreground),
-            ));
-        }
+        append_tool_output_detail_lines(&mut lines, detail_text, theme, width, theme.foreground);
     }
     lines.push(Line::raw(""));
     lines
@@ -776,12 +771,7 @@ fn render_file_edit_tool_lines(
                     .fg(theme.error)
                     .add_modifier(Modifier::BOLD),
             ));
-            for line in detail_text.lines() {
-                lines.push(Line::styled(
-                    format!("    {}", sanitize_terminal_text(line)),
-                    Style::default().fg(theme.error),
-                ));
-            }
+            append_tool_output_detail_lines(&mut lines, detail_text, theme, width, theme.error);
         }
     }
 
@@ -1565,8 +1555,8 @@ fn render_subagent_tool_lines(
     }
 
     match tool.tool.as_str() {
-        "spawn_subagent" => render_spawn_subagent_detail_lines(tool, theme, &mut lines),
-        "join_subagent" => render_join_subagent_detail_lines(tool, theme, &mut lines),
+        "spawn_subagent" => render_spawn_subagent_detail_lines(tool, theme, width, &mut lines),
+        "join_subagent" => render_join_subagent_detail_lines(tool, theme, width, &mut lines),
         _ => {}
     }
 
@@ -1576,6 +1566,7 @@ fn render_subagent_tool_lines(
 fn render_spawn_subagent_detail_lines(
     tool: &ToolMessageState,
     theme: &Theme,
+    width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
     if let Some(agent_id) = parse_spawn_subagent_agent_id(&tool.detail) {
@@ -1592,12 +1583,13 @@ fn render_spawn_subagent_detail_lines(
         return;
     }
 
-    append_fallback_tool_output(tool, theme, lines);
+    append_fallback_tool_output(tool, theme, width, lines);
 }
 
 fn render_join_subagent_detail_lines(
     tool: &ToolMessageState,
     theme: &Theme,
+    width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
     if let Some(terminal) = parse_join_subagent_terminal(&tool.detail) {
@@ -1627,12 +1619,7 @@ fn render_join_subagent_detail_lines(
                     .fg(theme.muted)
                     .add_modifier(Modifier::BOLD),
             ));
-            for line in reply.lines() {
-                lines.push(Line::styled(
-                    format!("    {}", sanitize_terminal_text(line)),
-                    Style::default().fg(theme.foreground),
-                ));
-            }
+            append_tool_output_detail_lines(lines, &reply, theme, width, theme.foreground);
         }
         if let Some(error) = terminal.error {
             lines.push(Line::styled(
@@ -1641,22 +1628,18 @@ fn render_join_subagent_detail_lines(
                     .fg(theme.error)
                     .add_modifier(Modifier::BOLD),
             ));
-            for line in error.lines() {
-                lines.push(Line::styled(
-                    format!("    {}", sanitize_terminal_text(line)),
-                    Style::default().fg(theme.error),
-                ));
-            }
+            append_tool_output_detail_lines(lines, &error, theme, width, theme.error);
         }
         return;
     }
 
-    append_fallback_tool_output(tool, theme, lines);
+    append_fallback_tool_output(tool, theme, width, lines);
 }
 
 fn append_fallback_tool_output(
     tool: &ToolMessageState,
     theme: &Theme,
+    width: u16,
     lines: &mut Vec<Line<'static>>,
 ) {
     let detail_text = render_tool_detail_text(&tool.detail);
@@ -1677,12 +1660,46 @@ fn append_fallback_tool_output(
             .fg(theme.muted)
             .add_modifier(Modifier::BOLD),
     ));
+    append_tool_output_detail_lines(lines, detail_text, theme, width, theme.foreground);
+}
+
+fn append_tool_output_detail_lines(
+    lines: &mut Vec<Line<'static>>,
+    detail_text: &str,
+    theme: &Theme,
+    width: u16,
+    fallback_color: Color,
+) {
+    const OUTPUT_INDENT: &str = "    ";
+
+    if contains_markdown_table(detail_text) {
+        let content_width = width.saturating_sub(OUTPUT_INDENT.len() as u16).max(1);
+        for line in render_markdown(detail_text, theme, content_width) {
+            lines.push(prefix_line(
+                line,
+                OUTPUT_INDENT,
+                Style::default().fg(theme.muted),
+            ));
+        }
+        return;
+    }
+
     for line in detail_text.lines() {
         lines.push(Line::styled(
-            format!("    {}", sanitize_terminal_text(line)),
-            Style::default().fg(theme.foreground),
+            format!("{}{}", OUTPUT_INDENT, sanitize_terminal_text(line)),
+            Style::default().fg(fallback_color),
         ));
     }
+}
+
+fn prefix_line(line: Line<'static>, prefix: &str, prefix_style: Style) -> Line<'static> {
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::styled(prefix.to_string(), prefix_style));
+    spans.extend(line.spans);
+    let mut prefixed = Line::from(spans);
+    prefixed.style = line.style;
+    prefixed.alignment = line.alignment;
+    prefixed
 }
 
 fn parse_spawn_subagent_agent_id(detail: &str) -> Option<String> {
@@ -1730,7 +1747,7 @@ mod tests {
     use super::{
         build_side_by_side_diff_rows, diff_change_counts, highlight_line_selection,
         parse_file_edit_args, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
-        render_file_edit_tool_lines, wrap_line_to_visual_lines,
+        render_file_edit_tool_lines, render_tool_message_lines, wrap_line_to_visual_lines,
     };
 
     #[test]
@@ -1799,6 +1816,44 @@ mod tests {
         assert_eq!(parsed.old_string, "before\n");
         assert_eq!(parsed.new_string, "after\n");
         assert!(parsed.replace_all);
+    }
+
+    #[test]
+    fn tool_output_renders_markdown_tables_when_expanded() {
+        let theme = Theme::detect();
+        let message = Message::tool_event(ToolExecutionUpdate {
+            call_id: "call-1".to_string(),
+            tool: "bash".to_string(),
+            summary: String::new(),
+            args_preview: String::new(),
+            command_preview: None,
+            command: None,
+            detail: "| Name | Status |\n| --- | --- |\n| xiaoO | ready |".to_string(),
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            duration_ms: Some(10),
+            file_change: None,
+        });
+        let mut tool = message
+            .tool_state
+            .clone()
+            .expect("tool message should carry tool state");
+        tool.expanded = true;
+
+        let lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(text.iter().any(|line| line.contains("┌")));
+        assert!(text.iter().any(|line| line.contains("xiaoO")));
+        assert!(!text.iter().any(|line| line.contains("| --- | --- |")));
     }
 
     #[test]
