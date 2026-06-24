@@ -104,5 +104,9 @@
     "status": "pass",
     "intercepted_by": "cerberus",
     "reason": "Landlock LSM denied write to readexecute-protected path"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "xiaoo-guardian"
   }
 }

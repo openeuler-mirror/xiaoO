@@ -12,5 +12,9 @@
     "intercepted_by": "xiaoo_llm",
     "reason": "xiaoo LLM 自行拦截，询问用户确认或解释命令风险"
   },
-  "notes": "规则无效：LLM 对 git push --force 自行拦截"
+  "notes": "规则无效：LLM 对 git push --force 自行拦截",
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "git push"
+  }
 }

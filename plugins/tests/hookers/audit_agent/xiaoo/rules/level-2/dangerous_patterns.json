@@ -12,5 +12,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent",
     "reason": "[script_execution] 检测到递归强制删除关键路径 (rm -rf /...); 检测到递归强制删除命令 (rm -rf)"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "rm -rf"
   }
 }

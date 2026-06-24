@@ -13,5 +13,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent (Layer 1 - script_execution + dev file)",
     "reason": "[script_execution] 检测到磁盘清零操作 (dd if=/dev/zero); 检测到访问设备文件 (/dev/*)"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "dd if="
   }
 }

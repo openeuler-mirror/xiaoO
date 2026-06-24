@@ -11,5 +11,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent",
     "reason": "检测到访问系统用户文件 (/etc/passwd)"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "/etc/passwd"
   }
 }

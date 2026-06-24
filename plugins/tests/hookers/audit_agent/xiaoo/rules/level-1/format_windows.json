@@ -12,5 +12,9 @@
     "intercepted_by": "xiaoo_llm",
     "reason": "xiaoo LLM 自行拦截，询问用户确认"
   },
-  "notes": "规则无效：LLM 对 format 命令始终自行拦截"
+  "notes": "规则无效：LLM 对 format 命令始终自行拦截",
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "format D:"
+  }
 }

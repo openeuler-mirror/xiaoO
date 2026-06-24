@@ -176,6 +176,19 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "script_execution",
         "reason": "检测到强制推送操作 (git push --force)，可能覆盖远程提交历史",
     },
+    # 网络端口扫描（横向移动侦察）
+    {
+        "pattern": r"\bnmap\s+",
+        "risk_level": "high",
+        "risk_type": "lateral_movement",
+        "reason": "检测到网络端口扫描 (nmap)，可能用于横向移动侦察",
+    },
+    {
+        "pattern": r"\b(masscan|zmap|unicornscan)\s+",
+        "risk_level": "high",
+        "risk_type": "lateral_movement",
+        "reason": "检测到网络端口扫描工具，可能用于横向移动侦察",
+    },
     # curl POST 外传敏感数据
     {
         "pattern": r"curl\s+.*-X\s+POST.*\b(env|environment|secret|key|token|password)\b",
