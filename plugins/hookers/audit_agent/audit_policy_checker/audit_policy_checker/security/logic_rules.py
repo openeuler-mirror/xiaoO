@@ -350,8 +350,11 @@ class LogicRulesChecker:
         if action_type in ("file_write", "file_edit"):
             return LogicRuleResult(hit=False)
 
-        # 通配符 + 删除/修改
-        if ("*" in action_detail or "?" in action_detail) and any(
+        # 通配符 + 删除/修改 — 排除 /tmp 等临时目录的清理操作
+        _TEMP_DIRS = ("/tmp/", "/var/tmp/", "/run/", "/dev/shm/")
+        is_temp_path = any(td in action_detail for td in _TEMP_DIRS)
+
+        if not is_temp_path and ("*" in action_detail or "?" in action_detail) and any(
             kw in action_detail for kw in ["rm ", "rm\t", "del ", "del\t", "delete", "remove ", "remove\t", "删除", "移除"]
         ):
             return LogicRuleResult(
