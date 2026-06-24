@@ -668,15 +668,16 @@ def main():
         status_icon = {"PASS": "PASS", "FAIL": "FAIL", "UNKNOWN": "UNKNOWN"}[verdict]
 
         # 汇总 audit_decision
-        audit_decision_str = ""
         deny_entries = [e for e in audit_entries if e["decision"] == "Deny"]
         allow_entries = [e for e in audit_entries if e["decision"] == "Allow"]
         if deny_entries:
             audit_decision_str = f"Deny({len(deny_entries)})+Allow({len(allow_entries)})"
         elif allow_entries:
             audit_decision_str = f"Allow({len(allow_entries)})"
+        elif reason == FAIL_REASON_LLM_SELF_DENY:
+            audit_decision_str = "N/A (LLM未调用工具)"
         else:
-            audit_decision_str = "Unknown"
+            audit_decision_str = "N/A"
 
         # 匹配到的目标 entry 信息 + 失败原因详解
         matched_str = ""
@@ -750,7 +751,7 @@ def main():
     for r in results:
         icon = "PASS" if r["verdict"] == "PASS" else "FAIL" if r["verdict"] == "FAIL" else "???"
         reason_str = f"  reason={r['reason']}" if r["verdict"] != "PASS" else ""
-        audit_str = f"  audit={r['audit_decision']}" if r["audit_decision"] != "Unknown" else ""
+        audit_str = f"  audit={r['audit_decision']}" if r["audit_decision"] not in ("N/A", "N/A (LLM未调用工具)") else ""
         print(f"  {icon}  [L{r['level']}] {r['rule']:30s}  ({r['elapsed']}s){reason_str}{audit_str}")
 
     print(f"\n  通过: {pass_count}  失败: {fail_count}  未知: {error_count}  总计: {len(results)}")
