@@ -46,6 +46,16 @@ impl App {
         let mut last_cursor_blink_toggle = Instant::now();
         let mut needs_redraw = true;
 
+        #[cfg(unix)]
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        #[cfg(unix)]
+        if sigterm.is_none() {
+            tracing::warn!(
+                "Failed to register SIGTERM handler, graceful shutdown on SIGTERM unavailable"
+            );
+        }
+
         loop {
             if needs_redraw {
                 terminal.draw(|frame| self.ui(frame))?;
@@ -75,28 +85,75 @@ impl App {
                 needs_redraw = true;
                 handled_event = Some(event);
             } else {
-                tokio::select! {
-                    _ = sleep(tick_duration) => {
-                        if self.state.chat_state.is_loading {
-                            self.state.loading_tick = (self.state.loading_tick + 1) % 12;
-                            needs_redraw = true;
-                        }
-                    }
-                    maybe_event = event_stream.next().fuse() => {
-                        if let Some(Ok(event)) = maybe_event {
-                            self.handle_event(event.clone()).await?;
-                            needs_redraw = true;
-                            handled_event = Some(event);
-                        }
-                    }
-                    models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
-                        self.pending_local_model_fetch = None;
-                        if let Some(models) = models {
-                            if let Some(dialog) = self.state.provider_dialog.as_mut() {
-                                dialog.apply_fetched_local_models(models);
+                #[cfg(unix)]
+                {
+                    tokio::select! {
+                        _ = sleep(tick_duration) => {
+                            if self.state.chat_state.is_loading {
+                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+                                needs_redraw = true;
                             }
                         }
-                        needs_redraw = true;
+                        maybe_event = event_stream.next().fuse() => {
+                            if let Some(Ok(event)) = maybe_event {
+                                self.handle_event(event.clone()).await?;
+                                needs_redraw = true;
+                                handled_event = Some(event);
+                            }
+                        }
+                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
+                            self.pending_local_model_fetch = None;
+                            if let Some(models) = models {
+                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
+                                    dialog.apply_fetched_local_models(models);
+                                }
+                            }
+                            needs_redraw = true;
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                            self.state.should_quit = true;
+                        }
+                        _ = async {
+                            match &mut sigterm {
+                                Some(s) => s.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            tracing::info!("Received SIGTERM, initiating graceful shutdown");
+                            self.state.should_quit = true;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    tokio::select! {
+                        _ = sleep(tick_duration) => {
+                            if self.state.chat_state.is_loading {
+                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+                                needs_redraw = true;
+                            }
+                        }
+                        maybe_event = event_stream.next().fuse() => {
+                            if let Some(Ok(event)) = maybe_event {
+                                self.handle_event(event.clone()).await?;
+                                needs_redraw = true;
+                                handled_event = Some(event);
+                            }
+                        }
+                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
+                            self.pending_local_model_fetch = None;
+                            if let Some(models) = models {
+                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
+                                    dialog.apply_fetched_local_models(models);
+                                }
+                            }
+                            needs_redraw = true;
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                            self.state.should_quit = true;
+                        }
                     }
                 }
             }

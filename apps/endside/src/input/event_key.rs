@@ -406,14 +406,54 @@ impl App {
         }
 
         if trimmed.eq_ignore_ascii_case("/new") {
+            let old_session_id = self.state.session_id.clone();
+            let was_remote_mode = self.gateway.is_remote_mode();
+
             self.gateway.reset_for_new_session(&mut self.state);
             self.state.reset_for_new_session();
+
+            if was_remote_mode {
+                tracing::info!(old_session_id = %old_session_id, "Closing old remote session");
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.gateway.close_remote_session(&old_session_id),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(_) => {
+                        tracing::warn!("Remote session close timed out after 5 seconds");
+                    }
+                }
+            } else {
+                tracing::info!(old_session_id = %old_session_id, "Releasing old local session backend");
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.gateway.release_session_backend(&old_session_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "Failed to release local session backend");
+                    }
+                    Err(_) => {
+                        tracing::warn!("Local session backend release timed out after 5 seconds");
+                    }
+                }
+            }
+
             if let Some(base_url) = self.gateway.remote_base_url() {
                 self.state
                     .status_panel
                     .set_backend(format!("Remote: {}", base_url));
                 self.state.status_panel.set_remote_workspace(base_url);
             }
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system("New session started"));
+            self.state.chat_state.stick_to_bottom = true;
             return Ok(());
         }
 
