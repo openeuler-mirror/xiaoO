@@ -94,13 +94,45 @@ impl GatewayRuntime {
         self.session_gateway.session_store.clone()
     }
 
-    /// Closes local active sessions before exit.
-    /// Remote sessions are left on the daemon so they can be reattached later.
+    /// Closes sessions before exit.
+    /// - Remote mode: calls daemon API to delete E2B/Conch sandbox
+    /// - Local mode: shutdown_all() cleans up backends
+    ///   - For local backend: delete is noop (no sandbox to delete)
+    ///   - For E2B/Conch backend: calls delete API to remove sandbox
     pub async fn close_sessions(&mut self, session_id: &str) {
-        let _ = session_id;
         self.session_gateway.close_all_sessions().await;
-        if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {
-            tracing::warn!(error = %error, "failed to shutdown TUI backend manager");
+
+        if self.remote.is_some() && self.remote_session_open {
+            tracing::info!(session_id = %session_id, "Closing remote session on daemon");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.close_remote_session(session_id),
+            )
+            .await;
+            if let Err(_) = result {
+                tracing::warn!("Remote session close timed out after 5 seconds during exit");
+            }
+        } else {
+            tracing::info!("Shutting down local backends");
+            if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {
+                tracing::warn!(error = %error, "failed to shutdown TUI backend manager");
+            }
         }
+    }
+
+    /// Releases the backend for a specific session (used by /new command).
+    /// - For local backend: no-op (just updates state, no sandbox to delete)
+    /// - For E2B/Conch backend: calls delete API if no other sessions share it
+    pub async fn release_session_backend(&self, session_id: &str) -> Result<(), String> {
+        self.session_gateway
+            .backend_manager
+            .release_session(session_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Returns whether remote mode is active
+    pub fn is_remote_mode(&self) -> bool {
+        self.remote.is_some() && self.remote_session_open
     }
 }
