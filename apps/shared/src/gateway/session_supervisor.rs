@@ -10,7 +10,7 @@ use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::outcome::AgentOutcome;
-use agent_types::tool::{RawToolOutcome, ToolExecutionResult};
+use agent_types::tool::{RawToolOutcome, ToolExecutionError, ToolExecutionResult};
 use agent_types::ReasoningEffort;
 use memory::MemorySnapshot;
 use serde_json::json;
@@ -453,27 +453,93 @@ impl SessionSupervisor {
                                 ),
                             })?;
 
-                    for suspended_call in &suspended_calls {
-                        let join_id = suspended_join_id(suspended_call)?;
-                        let receiver = self.take_join_receiver(&join_id).await?;
-                        let terminal =
-                            receiver.await.map_err(|_| SessionServiceError::CoreRun {
-                                message: format!(
-                                    "pending join receiver dropped before wake: {join_id}"
-                                ),
-                            })?;
-                        self.remove_pending_join(&join_id).await;
+                    let join_ids: Vec<String> = suspended_calls
+                        .iter()
+                        .map(|call| suspended_join_id(call))
+                        .collect::<Result<Vec<_>, SessionServiceError>>()?;
 
-                        let tool_result_msg =
-                            build_join_tool_result_message(suspended_call, terminal.clone())?;
+                    let receivers: Vec<oneshot::Receiver<SubagentTerminalSnapshot>> =
+                        futures::future::try_join_all(
+                            join_ids
+                                .iter()
+                                .map(|join_id| self.take_join_receiver(join_id)),
+                        )
+                        .await?;
+
+                    if let Some(sink) = loop_event_sink.as_ref() {
+                        sink.on_assistant_message(
+                            &input.agent_id,
+                            &format!("Waiting for {} subagents to complete...", join_ids.len()),
+                        );
+                    }
+
+                    let total_count = join_ids.len();
+                    let mut futures_stream = futures::stream::FuturesUnordered::new();
+
+                    for (idx, receiver) in receivers.into_iter().enumerate() {
+                        futures_stream.push(async move { (idx, receiver.await) });
+                    }
+
+                    use futures::StreamExt;
+                    let mut completed_results: Vec<(
+                        usize,
+                        Result<SubagentTerminalSnapshot, oneshot::error::RecvError>,
+                    )> = Vec::with_capacity(total_count);
+
+                    while let Some((idx, terminal_result)) = futures_stream.next().await {
+                        completed_results.push((idx, terminal_result));
+
+                        if let Some(sink) = loop_event_sink.as_ref() {
+                            sink.on_assistant_message(
+                                &input.agent_id,
+                                &format!(
+                                    "Progress: {} of {} subagents completed",
+                                    completed_results.len(),
+                                    total_count
+                                ),
+                            );
+                        }
+                    }
+
+                    completed_results.sort_by_key(|(idx, _)| *idx);
+
+                    for (idx, terminal_result) in completed_results {
+                        let suspended_call = &suspended_calls[idx];
+                        let join_id = &join_ids[idx];
+
+                        self.remove_pending_join(join_id).await;
+
+                        let (tool_result_msg, output_preview, is_error) = match terminal_result {
+                            Ok(terminal) => {
+                                let msg = build_join_tool_result_message(
+                                    suspended_call,
+                                    terminal.clone(),
+                                )?;
+                                let preview = serde_json::to_string(
+                                    &serde_json::json!({ "terminal": terminal }),
+                                )
+                                .unwrap_or_default();
+                                let error = terminal.status == SubagentTerminalKind::Failed;
+                                (msg, preview, error)
+                            }
+                            Err(_) => {
+                                let error_msg =
+                                    format!("pending join receiver dropped before wake: {join_id}");
+                                let msg = build_tool_result_message(&ToolExecutionResult::Failed {
+                                    final_call: suspended_call.final_call.clone(),
+                                    pre_hook_results: Vec::new(),
+                                    error_hook_results: Vec::new(),
+                                    execution_error: ToolExecutionError::ExecutionFailed {
+                                        message: error_msg.clone(),
+                                    },
+                                });
+                                (msg, error_msg, true)
+                            }
+                        };
+
                         resumed_loop_state.messages.push(tool_result_msg);
 
                         if let Some(sink) = loop_event_sink.as_ref() {
-                            let output_preview =
-                                serde_json::to_string(&serde_json::json!({ "terminal": terminal }))
-                                    .unwrap_or_default();
-                            let is_error =
-                                terminal.status == subagent::SubagentTerminalKind::Failed;
                             sink.on_tool_result(
                                 &input.agent_id,
                                 &agent_types::events::ToolResultEvent {

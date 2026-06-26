@@ -48,8 +48,6 @@ pub enum SubagentControlError {
     SessionMismatch { expected: String, actual: String },
     #[error("agent cannot join itself: {agent_id}")]
     SelfJoin { agent_id: String },
-    #[error("waiter already waiting on another join: {agent_id}")]
-    WaiterAlreadyWaiting { agent_id: String },
     #[error("target terminal snapshot missing: {agent_id}")]
     MissingTerminalSnapshot { agent_id: String },
     #[error("subagent state invalid: {message}")]

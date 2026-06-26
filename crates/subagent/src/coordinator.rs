@@ -191,14 +191,6 @@ impl SubagentCoordinator {
                 agent_id: request.target_agent_id.to_string(),
             })?;
 
-        if state.joins.values().any(|join| {
-            join.waiter_agent_id == request.waiter_agent_id && join.status == JoinStatus::Pending
-        }) {
-            return Err(SubagentControlError::WaiterAlreadyWaiting {
-                agent_id: request.waiter_agent_id.to_string(),
-            });
-        }
-
         if target.status.is_terminal() {
             let terminal = target.last_terminal.clone().ok_or_else(|| {
                 SubagentControlError::MissingTerminalSnapshot {
@@ -472,5 +464,113 @@ mod tests {
         assert!(prompt.contains("disposable exploration worker"));
         assert!(prompt.contains("Conclude your task by providing a clear, concise summary"));
         assert!(!prompt.contains("JSON schema"));
+    }
+
+    #[test]
+    fn allows_concurrent_pending_joins_from_same_waiter() {
+        let coordinator = SubagentCoordinator::new();
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        // Spawn 3 subagents
+        for i in 0..3 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            coordinator
+                .spawn(&mut state, &request, child_id, 1000)
+                .unwrap();
+        }
+
+        // Parent can register multiple pending joins simultaneously
+        for i in 0..3 {
+            let child_id = AgentId(format!("child-{}", i));
+            let join_request = JoinSubagentRequest {
+                session_id: "test-session".to_string(),
+                waiter_agent_id: parent_id.clone(),
+                target_agent_id: child_id,
+            };
+            let result = coordinator.join(&mut state, &join_request, 2000);
+            assert!(
+                result.is_ok(),
+                "join {} should succeed (allowing concurrent pending joins)",
+                i
+            );
+
+            // All should be Pending since subagents are still running
+            match result.unwrap() {
+                JoinDecision::Pending { .. } => {}
+                JoinDecision::Immediate { .. } => {
+                    panic!("join should be pending while subagent is running")
+                }
+            }
+        }
+
+        // Verify all 3 joins are registered
+        assert_eq!(state.joins.len(), 3);
+        assert!(state
+            .joins
+            .values()
+            .all(|j| j.status == JoinStatus::Pending));
+    }
+
+    #[test]
+    fn multiple_joins_resolved_when_subagent_completes() {
+        let coordinator = SubagentCoordinator::new();
+        let mut state = SubagentSessionState::default();
+        let parent_id = make_parent_agent_id();
+
+        // Spawn 2 subagents
+        for i in 0..2 {
+            let child_id = AgentId(format!("child-{}", i));
+            let request = make_request(&parent_id, &format!("task-{}", i));
+            coordinator
+                .spawn(&mut state, &request, child_id, 1000)
+                .unwrap();
+        }
+
+        // Register joins for both
+        for i in 0..2 {
+            let child_id = AgentId(format!("child-{}", i));
+            let join_request = JoinSubagentRequest {
+                session_id: "test-session".to_string(),
+                waiter_agent_id: parent_id.clone(),
+                target_agent_id: child_id,
+            };
+            coordinator.join(&mut state, &join_request, 2000).unwrap();
+        }
+
+        // Complete first subagent
+        let terminal = SubagentTerminalSnapshot {
+            status: SubagentTerminalKind::Completed,
+            reply: Some("child-0 done".to_string()),
+            error: None,
+            completed_at_ms: 3000,
+        };
+        let actions = coordinator
+            .on_terminal(&mut state, &AgentId("child-0".to_string()), terminal)
+            .unwrap();
+
+        // Should have wake action for first join
+        assert_eq!(actions.len(), 2); // mailbox item + wake waiter
+        let wake_actions = actions
+            .iter()
+            .filter(|a| matches!(a, HostAction::WakeWaiter { .. }))
+            .count();
+        assert_eq!(wake_actions, 1);
+
+        // First join should be satisfied, second still pending
+        let satisfied_joins = state
+            .joins
+            .values()
+            .filter(|j| j.status == JoinStatus::Satisfied)
+            .count();
+        assert_eq!(satisfied_joins, 1);
+
+        let pending_joins = state
+            .joins
+            .values()
+            .filter(|j| j.status == JoinStatus::Pending)
+            .count();
+        assert_eq!(pending_joins, 1);
     }
 }
