@@ -23,7 +23,10 @@ use subagent::{
 use tokio::sync::Mutex;
 use xiaoo_core::NoopRuntimeView;
 
-use super::session_backend::{lease_session_backend, sync_session_backend_instance};
+use super::session_backend::{
+    checkout_backend_with_eviction, lease_session_backend, sync_session_backend_instance,
+    CheckoutEvictionContext,
+};
 use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
 use crate::backend::{
@@ -271,39 +274,18 @@ impl CoreBackedSessionService {
             });
         }
 
-        let backend_checkout =
-            if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone() {
-                Some(
-                    self.backend_manager
-                        .checkout_backend(BackendCheckoutRequest {
-                            checkpoint: backend_checkpoint,
-                            backend_id: None,
-                            session_id: Some(child_runtime_id.clone()),
-                            timeout: None,
-                            metadata: request.metadata.clone(),
-                            resource_limits: Default::default(),
-                            options: None,
-                        })
-                        .await
-                        .map_err(|error| {
-                            Self::map_backend_error(
-                                "failed to checkout runtime backend",
-                                &child_runtime_id,
-                                error,
-                            )
-                        })?,
-                )
-            } else {
-                None
-            };
-        let backend_lease = if backend_checkout.is_some() {
+        let backend_lease = if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone()
+        {
             Some(
-                self.backend_manager
-                    .lease_bound_session(&child_runtime_id)
-                    .await
-                    .map_err(|error| SessionServiceError::RuntimeBuild {
-                        message: format!("failed to lease checked out backend: {error}"),
-                    })?,
+                checkout_backend_with_eviction(
+                    self.backend_manager.as_ref(),
+                    &child_runtime_id,
+                    backend_checkpoint,
+                    self.session_store.clone(),
+                    request.metadata.clone(),
+                    &CheckoutEvictionContext::runtime_checkout(),
+                )
+                .await?,
             )
         } else {
             None
@@ -312,6 +294,8 @@ impl CoreBackedSessionService {
         let now_ms = current_time_ms();
         let mut child = checkpoint.session.clone();
         child.session_id = child_runtime_id.clone();
+        child.parent_runtime_id = Some(checkpoint.runtime_id.clone());
+        child.forked_from_checkpoint_id = Some(checkpoint.checkpoint_id.clone());
         if let Some(conversation_id) = request.conversation_id {
             child.conversation_id = conversation_id;
         }
@@ -631,11 +615,14 @@ impl CoreBackedSessionService {
                 subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
             backend_instance: None,
+            paused_backend_checkpoint: None,
             loop_state: None,
             memory_snapshot: None,
             agents: BTreeMap::new(),
             subagent_state: Default::default(),
             last_error: None,
+            parent_runtime_id: None,
+            forked_from_checkpoint_id: None,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         }
@@ -667,11 +654,14 @@ impl CoreBackedSessionService {
                 subagent_roles: resolved.descriptor.subagent_roles.clone(),
             },
             backend_instance: None,
+            paused_backend_checkpoint: None,
             loop_state: None,
             memory_snapshot: None,
             agents: BTreeMap::new(),
             subagent_state: Default::default(),
             last_error: None,
+            parent_runtime_id: None,
+            forked_from_checkpoint_id: None,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         }
@@ -686,15 +676,6 @@ impl CoreBackedSessionService {
     ) -> Result<AppTurnResult, SessionServiceError> {
         let existing = self.session_store.load(&request.session_id).await;
         let is_new_session = existing.is_none();
-        if existing
-            .as_ref()
-            .is_some_and(|session| session.status == SessionLifecycleStatus::Paused)
-        {
-            return Err(SessionServiceError::SessionBusy {
-                session_id: request.session_id,
-                message: "runtime is paused; resume it before running a turn".to_string(),
-            });
-        }
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
         let resolved = self
             .runtime_resolver
@@ -703,13 +684,24 @@ impl CoreBackedSessionService {
 
         let mut seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
-        let backend_lease =
-            lease_session_backend(self.backend_manager.as_ref(), &seed_session, &resolved).await?;
+        let was_paused = seed_session.paused_backend_checkpoint.is_some();
+        let backend_lease = lease_session_backend(
+            self.backend_manager.as_ref(),
+            &seed_session,
+            &resolved,
+            self.session_store.clone(),
+        )
+        .await?;
         let backend_updated = sync_session_backend_instance(&mut seed_session, &backend_lease);
-        if backend_updated {
+        if was_paused {
+            seed_session.status = SessionLifecycleStatus::Idle;
+            seed_session.paused_backend_checkpoint = None;
+            seed_session.last_error = None;
+        }
+        if backend_updated || was_paused {
             seed_session.updated_at_ms = current_time_ms();
         }
-        if is_new_session || backend_updated {
+        if is_new_session || backend_updated || was_paused {
             self.session_store.save(seed_session.clone()).await;
         }
 
@@ -791,8 +783,13 @@ impl SessionControlPlane for CoreBackedSessionService {
         let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
         let resolved = self.runtime_resolver.resolve(&runtime_input, None).await?;
         let mut session = Self::build_session_for_open(&request, &resolved);
-        let backend_lease =
-            lease_session_backend(self.backend_manager.as_ref(), &session, &resolved).await?;
+        let backend_lease = lease_session_backend(
+            self.backend_manager.as_ref(),
+            &session,
+            &resolved,
+            self.session_store.clone(),
+        )
+        .await?;
         if sync_session_backend_instance(&mut session, &backend_lease) {
             session.updated_at_ms = current_time_ms();
         }
@@ -834,6 +831,30 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         session_id: &str,
     ) -> Result<SessionRecord, SessionServiceError> {
+        // 1. Collect direct children BEFORE deleting this session's store
+        //    entry. Children are sessions forked via `checkout` whose
+        //    `parent_runtime_id` equals this session. We cascade-close them
+        //    so that descendant sandboxes and snapshots are reclaimed
+        //    together with the parent. Without this, forked runtimes would
+        //    leak their backends and e2b sandboxes indefinitely.
+        let children = self.session_store.list_children(session_id).await;
+
+        // 2. Recursively close each child first (bottom-up). A child failure
+        //    does not abort the parent's close; we log and continue so a
+        //    single bad child cannot strand the whole subtree.
+        for child in &children {
+            if let Err(error) = self.force_close_session(&child.session_id).await {
+                tracing::warn!(
+                    session_id = %child.session_id,
+                    parent_session_id = %session_id,
+                    error = %error,
+                    "cascade close of child runtime failed; continuing with parent close"
+                );
+            }
+        }
+
+        // 3. Close this session's handle (mark Closed) or fall back to the
+        //    store-only path when no live handle exists.
         let (closed, was_already_closed) =
             if let Some(handle) = self.handle_for_session(session_id).await {
                 let before = handle.snapshot().await?;
@@ -858,6 +879,38 @@ impl SessionControlPlane for CoreBackedSessionService {
                 "failed to release session backends"
             );
         }
+
+        // 4. Delete provider snapshots (e.g. e2b snapshots) for every
+        //    checkpoint created by this runtime, then drop the in-memory
+        //    checkpoint records. This prevents remote snapshot leaks when a
+        //    runtime is closed without an explicit `delete_checkpoint_snapshot`
+        //    call. Failures are logged but do not abort the close: local
+        //    tracking is still cleared so it does not accumulate.
+        let checkpoints = self
+            .runtime_checkpoints
+            .list_checkpoints_for_runtime(session_id)
+            .await;
+        for checkpoint in &checkpoints {
+            if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.as_ref() {
+                if backend_checkpoint.provider_snapshot_id.is_some() {
+                    if let Err(error) = self
+                        .backend_manager
+                        .delete_checkpoint_snapshot(BackendCheckpointSnapshotDeleteRequest {
+                            checkpoint: backend_checkpoint.clone(),
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            checkpoint_id = %checkpoint.checkpoint_id,
+                            session_id = %session_id,
+                            error = %error,
+                            "failed to delete checkpoint snapshot during close; snapshot may linger remotely"
+                        );
+                    }
+                }
+            }
+        }
+        self.runtime_checkpoints.remove_runtime(session_id).await;
 
         if !was_already_closed {
             let hook_point = HookPointId(format!(
@@ -1403,7 +1456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_turn_rejects_paused_runtime() {
+    async fn run_turn_paused_runtime_without_checkpoint_is_busy() {
         let workspace = TempDir::new().expect("workspace");
         let store = Arc::new(InMemorySessionStore::default());
         let resolver = Arc::new(StubRuntimeResolver {
@@ -1431,10 +1484,12 @@ mod tests {
             .run_turn(test_open_request("runtime-paused-turn").into_turn_request("hi".to_string()))
             .await;
 
+        // A paused session without an eviction checkpoint cannot be resumed
+        // and must be reported as busy rather than silently rejected.
         assert!(matches!(
             result,
             Err(SessionServiceError::SessionBusy { message, .. })
-                if message.contains("runtime is paused")
+                if message.contains("no eviction checkpoint")
         ));
     }
 
@@ -1672,5 +1727,104 @@ mod tests {
             Err(SessionServiceError::SessionBusy { session_id, .. })
                 if session_id == "runtime-source"
         ));
+    }
+
+    #[tokio::test]
+    async fn force_close_session_cascades_to_descendants() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let parent = save_session_without_backend(
+            &store,
+            &resolver,
+            "rt-parent",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver.clone(),
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        // parent -> checkpoint -> child
+        let checkpoint = dependencies
+            .session_control_plane
+            .checkpoint_runtime(RuntimeCheckpointRequest {
+                runtime_id: parent.session_id.clone(),
+                metadata: Value::Null,
+                name: None,
+            })
+            .await
+            .expect("checkpoint runtime");
+        let checkout = dependencies
+            .session_control_plane
+            .checkout_runtime(RuntimeCheckoutRequest {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                conversation_id: Some("child-conversation".to_string()),
+                sender_id: Some("child-user".to_string()),
+                metadata: json!({"branch": "a"}),
+            })
+            .await
+            .expect("checkout runtime");
+        let child_id = checkout.runtime.runtime_id.clone();
+        assert!(store.load(&child_id).await.is_some());
+
+        // Manually register a grandchild whose parent_runtime_id points at
+        // the child, to exercise recursive cascade without a second
+        // checkpoint/checkout round-trip.
+        let mut grandchild = save_session_without_backend(
+            &store,
+            &resolver,
+            "rt-grandchild",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        grandchild.parent_runtime_id = Some(child_id.clone());
+        store.save(grandchild.clone()).await;
+        assert!(store.load("rt-grandchild").await.is_some());
+
+        // Closing the parent must cascade-close child and grandchild.
+        dependencies
+            .session_control_plane
+            .force_close_session(&parent.session_id)
+            .await
+            .expect("force close parent");
+
+        assert!(
+            store.load("rt-parent").await.is_none(),
+            "parent should be deleted"
+        );
+        assert!(
+            store.load(&child_id).await.is_none(),
+            "child should be cascade-deleted"
+        );
+        assert!(
+            store.load("rt-grandchild").await.is_none(),
+            "grandchild should be cascade-deleted"
+        );
+
+        // The checkpoint record for the parent must also be gone, so a
+        // subsequent checkout from it fails with SessionNotFound.
+        let result = dependencies
+            .session_control_plane
+            .checkout_runtime(RuntimeCheckoutRequest {
+                checkpoint_id: checkpoint.checkpoint_id.clone(),
+                conversation_id: None,
+                sender_id: None,
+                metadata: Value::Null,
+            })
+            .await;
+        assert!(
+            matches!(result, Err(SessionServiceError::SessionNotFound { .. })),
+            "checkpoint should have been removed during close, got: {:?}",
+            result
+        );
     }
 }

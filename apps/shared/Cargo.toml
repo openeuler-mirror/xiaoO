@@ -49,6 +49,11 @@ operation_backend = { path = "../../crates/operation_backend" }
 vault = { path = "../vault" }
 aes-gcm.workspace = true
 rand.workspace = true
+libc = "0.2"
+dirs = "5"
+once_cell = "1"
+pbkdf2 = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile.workspace = true

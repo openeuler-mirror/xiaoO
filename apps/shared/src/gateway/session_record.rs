@@ -1,3 +1,4 @@
+use crate::backend::BackendCheckpointRef;
 use crate::gateway::{GatewayEntryContext, LlmRuntimeConfig};
 use agent_contracts::backend::BackendInstance;
 use agent_types::common::ids::AgentId;
@@ -63,13 +64,28 @@ pub struct SessionRecord {
     pub runtime: SessionRuntimeSnapshot,
     #[serde(default)]
     pub backend_instance: Option<BackendInstance>,
+    /// Checkpoint captured when the session's sandbox was evicted to free a
+    /// sandbox slot. When set, the session is paused and can be resumed by
+    /// checking out a new sandbox from this checkpoint on the next turn.
+    #[serde(default)]
+    pub paused_backend_checkpoint: Option<BackendCheckpointRef>,
     pub loop_state: Option<LoopStateSnapshot>,
     pub memory_snapshot: Option<MemorySnapshot>,
     #[serde(default)]
     pub agents: BTreeMap<String, SessionAgentRecord>,
     #[serde(default)]
     pub subagent_state: SubagentSessionState,
+    #[serde(default)]
     pub last_error: Option<String>,
+    /// Runtime that this runtime was forked from via `checkout`. `None` for
+    /// sessions created directly via `open`. Used by `force_close_session` to
+    /// cascade-close descendants.
+    #[serde(default)]
+    pub parent_runtime_id: Option<String>,
+    /// Checkpoint from which this runtime was forked via `checkout`. `None`
+    /// for sessions created directly via `open`.
+    #[serde(default)]
+    pub forked_from_checkpoint_id: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }

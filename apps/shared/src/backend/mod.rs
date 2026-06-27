@@ -11,21 +11,32 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod backend_manager;
+mod backend_registry;
 mod base;
 mod dirty_write;
 mod e2b;
+mod sandbox_counter;
 
 pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
+pub use backend_registry::{
+    BackendRegistry, BackendRegistryData, BackendRegistryEntry, BackendRegistryError,
+    SessionStatusSnapshot,
+};
 pub use base::{
     BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
     BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
     BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
     BackendLease, BackendLineageInfo, BackendListFilter, BackendManagerLimits, BackendTreeNode,
-    GatewayBackendConfig, DEFAULT_MAX_ACTIVE_E2B_SANDBOXES,
+    GatewayBackendConfig, STALE_OWNER_THRESHOLD_MS,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
+pub use sandbox_counter::{
+    global_sandbox_config_path, load_global_max_sandbox_cnt, load_max_sandbox_cnt_from_path,
+    PendingReservation, SandboxCounter, SandboxCounterData, SandboxCounterError, SandboxCounterKey,
+    MAX_ACTIVE_SANDBOXES_PER_KEY, PENDING_RESERVATION_TTL_MS,
+};
 
 struct BackendInstanceEntry {
     backend: Arc<dyn OperationBackend>,
@@ -193,6 +204,16 @@ fn detach_from_parent(
     };
     if let Some(parent) = state.backends.get_mut(parent_backend_id) {
         parent.lineage.children_backend_ids.remove(&backend_id.0);
+    } else {
+        // Parent backend was already removed (evicted or released). The
+        // child's `parent_backend_id` is now a dangling reference, but since
+        // the child entry itself is being removed by the caller right after
+        // this call, the dangling ref does not persist. Log for observability.
+        tracing::debug!(
+            backend_id = %backend_id.0,
+            parent_backend_id = %parent_backend_id.0,
+            "parent backend already removed during detach; child entry is being deleted"
+        );
     }
 }
 
@@ -391,6 +412,7 @@ impl BackendInstanceEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::{InMemorySessionStore, SessionStore};
     use agent_contracts::backend::{
         capability::{
             exec::ExecRequest,
@@ -418,20 +440,47 @@ mod tests {
         json!({"temp_root": workspace.path().to_string_lossy().to_string()})
     }
 
-    #[test]
-    fn backend_manager_defaults_to_e2b_limit() {
-        assert_eq!(
-            BackendManager::new().limits().max_active_e2b_sandboxes,
-            Some(DEFAULT_MAX_ACTIVE_E2B_SANDBOXES)
-        );
-    }
-
     #[tokio::test]
     async fn e2b_limit_rejects_before_provider_build() {
         let workspace = TempDir::new().expect("workspace");
+        // Use an explicit limit so the test does not depend on the global
+        // `~/.config/xiaoo/sandbox.toml` config file that `BackendManager::new`
+        // would otherwise read.
         let manager = BackendManager::new_with_limits(BackendManagerLimits {
-            max_active_e2b_sandboxes: Some(0),
+            max_active_sandboxes_per_key: Some(MAX_ACTIVE_SANDBOXES_PER_KEY),
+            ..Default::default()
         });
+
+        // Compute the sandbox key the same way `create_backend` does so the
+        // pre-filled counter matches what the manager will check, regardless
+        // of whether E2B_API_KEY is set in the test environment.
+        let config = resolve_backend_config(Some("e2b".to_string()), None).expect("config");
+        let key = BackendManager::sandbox_key_from_config(&config);
+
+        // The sandbox counter is persisted in a shared file, so drain any
+        // leftover count for this key from prior (possibly crashed) runs
+        // before the test begins.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager.sandbox_counter().release(&key).await.ok();
+        }
+
+        // Pre-fill the sandbox pool to the hard limit via the counter directly,
+        // without building real e2b sandboxes (which need provider
+        // credentials). This isolates the limit-check path from the provider
+        // build path, mirroring the pre-scheduling behaviour where the limit
+        // was enforced before build_backend was ever called.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager
+                .sandbox_counter()
+                .check_and_reserve(&key)
+                .await
+                .expect("reserve");
+            manager
+                .sandbox_counter()
+                .confirm_creation(&key)
+                .await
+                .expect("confirm");
+        }
 
         let result = manager
             .create_backend(BackendCreateRequest {
@@ -446,60 +495,129 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(
-            result,
-            Err(BackendError::ResourceLimitExceeded { message })
-                if message.contains("active E2B sandbox limit exceeded")
-        ));
+        // The pool is full, so create_backend must short-circuit with
+        // NeedsEviction before attempting to build the e2b sandbox.
+        assert!(matches!(result, Err(BackendError::NeedsEviction)));
+
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager
+                .sandbox_counter()
+                .release(&key)
+                .await
+                .expect("release");
+        }
     }
 
     #[tokio::test]
-    async fn active_e2b_count_ignores_local_paused_and_deleted_backends() {
+    async fn reconcile_counts_includes_stale_owner_entries() {
+        // Regression test for the sandbox-limit bypass: when a previous
+        // daemon process leaves stale-owner entries in the shared registry,
+        // `reconcile_counts_with_registry` must STILL count them so that a
+        // subsequent `reclaim_orphaned_backend` -> `release` decrement
+        // balances correctly. If stale entries were excluded from the
+        // reconciled count, the orphan-reclaim path would decrement a slot
+        // that belongs to a live sandbox, letting
+        // `MAX_ACTIVE_SANDBOXES_PER_KEY + N_stale` sandboxes coexist before
+        // the limit truly bites.
+        let manager = BackendManager::new();
+        let key = SandboxCounterKey::new("e2b", "e2b_reconcile_stale_unique");
+
+        // Clean slate for this test key in both shared stores.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager.sandbox_counter().release(&key).await.ok();
+        }
+        manager
+            .registry()
+            .unregister("backend-reconcile-stale-unique")
+            .await
+            .ok();
+
+        // Seed a stale-owner entry directly: owner heartbeat is far in the
+        // past so `is_owner_stale` returns true.
+        let mut entry = BackendRegistryEntry::new(
+            "backend-reconcile-stale-unique".to_string(),
+            key.clone(),
+            vec!["session-stale".to_string()],
+            "dead_process".to_string(),
+            "e2b-sandbox-stale".to_string(),
+        );
+        entry.owner_heartbeat_ms =
+            current_time_ms().saturating_sub(STALE_OWNER_THRESHOLD_MS + 60_000);
+
+        manager
+            .registry()
+            .register(entry)
+            .await
+            .expect("should register stale entry");
+
+        // Reconcile: the stale entry must be counted.
+        manager
+            .reconcile_counts_with_registry()
+            .await
+            .expect("reconcile");
+
+        let count = manager
+            .sandbox_counter()
+            .get_count(&key)
+            .await
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "stale-owner registry entries must be counted so the later \
+             orphan-reclaim `release` decrement balances"
+        );
+
+        // Simulate the orphan-reclaim path: release + unregister. The count
+        // must drop back to 0 (not go negative, not stay at 1).
+        manager.sandbox_counter().release(&key).await.ok();
+        manager
+            .registry()
+            .unregister("backend-reconcile-stale-unique")
+            .await
+            .ok();
+
+        let count = manager
+            .sandbox_counter()
+            .get_count(&key)
+            .await
+            .expect("count after reclaim");
+        assert_eq!(count, 0);
+    }
+
+    fn test_session_store() -> Arc<dyn SessionStore> {
+        Arc::new(InMemorySessionStore::default())
+    }
+
+    #[tokio::test]
+    async fn local_backends_do_not_consume_sandbox_counter() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
 
-        manager
-            .ensure_session_backend(local_request(
-                "local",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
-            .await
-            .expect("local backend");
-        assert_eq!(manager.active_e2b_sandbox_count().await, 0);
-
-        let paused = manager
-            .ensure_session_backend(local_request(
-                "paused",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
-            .await
-            .expect("paused backend")
-            .instance()
-            .backend_id;
-        let deleted = manager
-            .ensure_session_backend(local_request(
-                "deleted",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
-            .await
-            .expect("deleted backend")
-            .instance()
-            .backend_id;
-        {
-            let mut state = manager.state.lock().await;
-            let paused_entry = state.backends.get_mut(&paused).expect("paused entry");
-            paused_entry.config.kind = "e2b".to_string();
-            paused_entry.instance.state = BackendLifecycleState::Paused;
-
-            let deleted_entry = state.backends.get_mut(&deleted).expect("deleted entry");
-            deleted_entry.config.kind = "e2b".to_string();
-            deleted_entry.instance.state = BackendLifecycleState::Deleted;
+        for name in ["local-a", "local-b", "local-c"] {
+            manager
+                .ensure_session_backend(
+                    local_request(
+                        name,
+                        workspace.path().to_path_buf(),
+                        temp_options(&workspace),
+                    ),
+                    test_session_store(),
+                )
+                .await
+                .expect("local backend");
         }
 
-        assert_eq!(manager.active_e2b_sandbox_count().await, 0);
+        // local backends are not subject to the e2b/conch sandbox pool, so the
+        // counter for any e2b key must remain untouched. Use a key no other
+        // test touches to avoid cross-test interference from the shared
+        // persisted counter file.
+        let key = SandboxCounterKey::new("e2b", "e2b_local_test_unique");
+        let count = manager
+            .sandbox_counter()
+            .get_total_count(&key)
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -538,11 +656,11 @@ mod tests {
         );
 
         let first = manager
-            .ensure_session_backend(request.clone())
+            .ensure_session_backend(request.clone(), test_session_store())
             .await
             .expect("first lease");
         let second = manager
-            .ensure_session_backend(request)
+            .ensure_session_backend(request, test_session_store())
             .await
             .expect("second lease");
 
@@ -571,16 +689,18 @@ mod tests {
         );
 
         let base_backend = manager
-            .ensure_session_backend(base)
+            .ensure_session_backend(base, test_session_store())
             .await
             .expect("base lease")
             .backend();
         let other_session_backend = manager
-            .ensure_session_backend(other_session)
+            .ensure_session_backend(other_session, test_session_store())
             .await
             .expect("other session lease")
             .backend();
-        let other_config = manager.ensure_session_backend(other_config).await;
+        let other_config = manager
+            .ensure_session_backend(other_config, test_session_store())
+            .await;
 
         assert!(!Arc::ptr_eq(&base_backend, &other_session_backend));
         assert!(matches!(
@@ -659,11 +779,14 @@ mod tests {
         assert_eq!(created.session_ids, vec!["session-a".to_string()]);
 
         let lease = manager
-            .ensure_session_backend(local_request(
-                "session-a",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "session-a",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("session lease");
         assert_eq!(lease.instance().backend_id.0, "backend-a");
@@ -675,7 +798,10 @@ mod tests {
         let manager = BackendManager::new();
         let root = workspace.path().to_path_buf();
         let first = manager
-            .ensure_session_backend(local_request("s1", root.clone(), temp_options(&workspace)))
+            .ensure_session_backend(
+                local_request("s1", root.clone(), temp_options(&workspace)),
+                test_session_store(),
+            )
             .await
             .expect("first lease");
         let backend_id = first.instance().backend_id.0;
@@ -696,7 +822,10 @@ mod tests {
         );
 
         let second = manager
-            .ensure_session_backend(local_request("s2", root, temp_options(&workspace)))
+            .ensure_session_backend(
+                local_request("s2", root, temp_options(&workspace)),
+                test_session_store(),
+            )
             .await
             .expect("second lease");
         assert_eq!(first.instance(), second.instance());
@@ -708,11 +837,14 @@ mod tests {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let parent = manager
-            .ensure_session_backend(local_request(
-                "s1",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "s1",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("local backend");
 
@@ -737,11 +869,14 @@ mod tests {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let lease = manager
-            .ensure_session_backend(local_request(
-                "s-checkpoint",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "s-checkpoint",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("local backend");
 
@@ -779,11 +914,14 @@ mod tests {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         let lease = manager
-            .ensure_session_backend(local_request(
-                "s-dirty",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "s-dirty",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("local backend");
         let backend_id = lease.instance().backend_id.0.clone();
@@ -864,11 +1002,14 @@ mod tests {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
         manager
-            .ensure_session_backend(local_request(
-                "s-local-checkout",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "s-local-checkout",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("local backend");
         let checkpoint = manager
@@ -905,17 +1046,19 @@ mod tests {
         let manager = BackendManager::new();
         let root = workspace.path().to_path_buf();
         let parent = manager
-            .ensure_session_backend(local_request(
-                "parent",
-                root.clone(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request("parent", root.clone(), temp_options(&workspace)),
+                test_session_store(),
+            )
             .await
             .expect("parent backend")
             .instance()
             .backend_id;
         let child = manager
-            .ensure_session_backend(local_request("child", root, temp_options(&workspace)))
+            .ensure_session_backend(
+                local_request("child", root, temp_options(&workspace)),
+                test_session_store(),
+            )
             .await
             .expect("child backend")
             .instance()
@@ -961,13 +1104,13 @@ mod tests {
         );
 
         let first_backend: Arc<_> = manager
-            .ensure_session_backend(request.clone())
+            .ensure_session_backend(request.clone(), test_session_store())
             .await
             .expect("first lease")
             .backend();
         manager.release_session("s1").await.expect("release");
         let second_backend = manager
-            .ensure_session_backend(request)
+            .ensure_session_backend(request, test_session_store())
             .await
             .expect("second lease")
             .backend();
@@ -980,11 +1123,14 @@ mod tests {
         let workspace = TempDir::new().expect("workspace");
         let provider = operation_backend::local_backend_provider();
         let lease = BackendManager::new()
-            .ensure_session_backend(local_request(
-                "s1",
-                workspace.path().to_path_buf(),
-                temp_options(&workspace),
-            ))
+            .ensure_session_backend(
+                local_request(
+                    "s1",
+                    workspace.path().to_path_buf(),
+                    temp_options(&workspace),
+                ),
+                test_session_store(),
+            )
             .await
             .expect("local backend");
         let instance = lease.instance();

@@ -6,7 +6,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::backend::BackendManager;
 use crate::chat::ToolExecutionUpdate;
-use crate::gateway::{InMemorySessionStore, SessionControlPlane};
+use crate::gateway::{InMemorySessionStore, SessionControlPlane, SessionStore};
 use crate::interaction_prompt::PromptRequest;
 
 use agent_types::common::ids::AgentId;
@@ -53,11 +53,23 @@ pub struct SessionGateway {
 
 impl Default for SessionGateway {
     fn default() -> Self {
+        let session_store = Arc::new(InMemorySessionStore::default());
+        let backend_manager = Arc::new(BackendManager::new());
+
+        // Start the cross-process signal handler so backends owned by this
+        // process that another process has marked for eviction get evicted
+        // immediately upon receiving SIGUSR1.
+        let handler_store: Arc<dyn SessionStore> = session_store.clone();
+        let handler_handle = backend_manager.clone().start_signal_handler(handler_store);
+        tokio::spawn(async move {
+            handler_handle.await.ok();
+        });
+
         Self {
-            session_store: Arc::new(InMemorySessionStore::default()),
+            session_store,
             lifecycle_control_plane: Arc::new(tokio::sync::Mutex::new(None)),
             active_session_ids: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            backend_manager: Arc::new(BackendManager::new()),
+            backend_manager,
         }
     }
 }
