@@ -250,13 +250,7 @@ impl App {
             }
         }
 
-        self.state.chat_state.scrollbar_state = self
-            .state
-            .chat_state
-            .scrollbar_state
-            .content_length(transcript_cache.total_lines)
-            .viewport_content_length(inner_height)
-            .position(scroll_offset);
+        self.state.chat_state.sync_scrollbar_state();
 
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
