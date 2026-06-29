@@ -125,6 +125,7 @@ pub struct CachedMessageLayout {
 pub struct TranscriptRenderCache {
     pub all_lines: Vec<Line<'static>>,
     pub visual_lines: Vec<Line<'static>>,
+    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
     pub line_texts: Vec<String>,
     pub line_is_header: Vec<bool>,
     pub logical_line_visual_starts: Vec<usize>,

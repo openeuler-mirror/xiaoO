@@ -134,6 +134,7 @@ impl App {
         }
         let scroll_offset = self.state.chat_state.scroll_offset;
         let scroll_end = scroll_offset.saturating_add(inner_height);
+        paint_visible_line_backgrounds(frame, inner_area, transcript_cache, scroll_offset);
         if let Some(sel) = &self.state.transcript_selection {
             let start_line_index = transcript_cache
                 .logical_line_visual_starts
@@ -315,6 +316,7 @@ fn render_message_entry(
 fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> TranscriptRenderCache {
     let mut all_lines = Vec::new();
     let mut visual_lines = Vec::new();
+    let mut visual_line_backgrounds = Vec::new();
     let mut line_texts = Vec::new();
     let mut line_is_header = Vec::new();
     let mut logical_line_visual_starts = Vec::new();
@@ -332,7 +334,9 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
             let visual_count = rendered_line_count(std::slice::from_ref(line), render.width);
             logical_line_visual_starts.push(absolute_visual_row);
             absolute_visual_row += visual_count;
-            visual_lines.extend(wrap_line_to_visual_lines(line, render.width));
+            let wrapped = wrap_line_to_visual_lines(line, render.width);
+            visual_line_backgrounds.extend(wrapped.iter().map(|line| line.style.bg));
+            visual_lines.extend(wrapped);
 
             line_texts.push(
                 line.spans
@@ -348,11 +352,36 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
     TranscriptRenderCache {
         all_lines,
         visual_lines,
+        visual_line_backgrounds,
         line_texts,
         line_is_header,
         logical_line_visual_starts,
         message_layouts,
         total_lines: absolute_visual_row,
+    }
+}
+
+fn paint_visible_line_backgrounds(
+    frame: &mut Frame,
+    area: Rect,
+    transcript_cache: &TranscriptRenderCache,
+    scroll_offset: usize,
+) {
+    let height = area.height as usize;
+    for visible_row in 0..height {
+        let visual_row = scroll_offset.saturating_add(visible_row);
+        let Some(Some(bg)) = transcript_cache.visual_line_backgrounds.get(visual_row) else {
+            continue;
+        };
+        frame.buffer_mut().set_style(
+            Rect {
+                x: area.x,
+                y: area.y + visible_row as u16,
+                width: area.width,
+                height: 1,
+            },
+            Style::default().bg(*bg),
+        );
     }
 }
 
@@ -562,7 +591,8 @@ fn render_tool_message_lines(
         ToolExecutionStatus::Completed => "done",
         ToolExecutionStatus::Failed => "failed",
     };
-    let mut header = format!("{toggle} {}  {status}", tool.tool);
+    let display_name = tool_display_name(tool);
+    let mut header = format!("{toggle} {display_name}  {status}");
     if let Some(exit_code) = tool.exit_code {
         header.push_str(&format!("  exit={exit_code}"));
     }
@@ -590,42 +620,58 @@ fn render_tool_message_lines(
         Line::styled(header, Style::default().fg(tool_color)),
     ];
 
-    let command_text = if tool.expanded {
-        tool.command.as_deref()
-    } else {
-        tool.command_preview.as_deref()
-    };
-    if let Some(command_text) = command_text.filter(|text| !text.trim().is_empty()) {
+    if !tool.expanded {
+        lines.push(Line::raw(""));
+        return lines;
+    }
+
+    if let Some(command_text) = expanded_tool_command(tool) {
         lines.push(Line::styled(
             "  Command",
             Style::default()
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
-        for line in command_text.lines() {
+        for line in render_tool_detail_text(&command_text).lines() {
             lines.push(Line::styled(
                 format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
             ));
         }
-        if !tool.expanded && tool.command_preview != tool.command {
-            lines.push(Line::styled(
-                "    ... click to expand full command",
-                Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::ITALIC),
-            ));
-        }
     }
 
-    if tool.expanded && tool.command.is_none() && !tool.args_preview.trim().is_empty() {
+    if tool.command.is_none() && !tool.args_preview.trim().is_empty() {
+        let args_preview = display_tool_args_preview(tool);
+        let args_preview = args_preview.trim();
+        if args_preview.is_empty() {
+            let detail_text = render_tool_detail_text(&tool.detail);
+            let detail_text = detail_text.trim();
+            if !detail_text.is_empty() {
+                lines.push(Line::styled(
+                    "  Output",
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                append_tool_output_detail_lines(
+                    &mut lines,
+                    detail_text,
+                    theme,
+                    width,
+                    theme.foreground,
+                );
+            }
+            apply_expanded_tool_panel(&mut lines, theme, width);
+            lines.push(Line::raw(""));
+            return lines;
+        }
         lines.push(Line::styled(
             "  Arguments",
             Style::default()
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
-        for line in tool.args_preview.lines() {
+        for line in args_preview.lines() {
             lines.push(Line::styled(
                 format!("    {}", sanitize_terminal_text(line)),
                 Style::default().fg(theme.foreground),
@@ -644,8 +690,121 @@ fn render_tool_message_lines(
         ));
         append_tool_output_detail_lines(&mut lines, detail_text, theme, width, theme.foreground);
     }
+    if tool.expanded {
+        apply_expanded_tool_panel(&mut lines, theme, width);
+    }
     lines.push(Line::raw(""));
     lines
+}
+
+fn apply_expanded_tool_panel(lines: &mut Vec<Line<'static>>, theme: &Theme, width: u16) {
+    let bg = expanded_tool_background(theme);
+
+    for line in lines.iter_mut() {
+        line.style = style_with_default_bg(line.style, bg);
+        for span in &mut line.spans {
+            span.style = style_with_default_bg(span.style, bg);
+        }
+    }
+
+    let panel_width = width.max(1) as usize;
+    let spacer = || Line::styled(" ".repeat(panel_width), Style::default().bg(bg));
+    lines.insert(0, spacer());
+    lines.push(spacer());
+}
+
+fn line_display_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
+}
+
+fn style_with_default_bg(style: Style, bg: Color) -> Style {
+    if style.bg.is_some() {
+        style
+    } else {
+        style.bg(bg)
+    }
+}
+
+fn expanded_tool_background(theme: &Theme) -> Color {
+    match theme.background {
+        Color::Rgb(_, _, _) if theme.is_light() => Color::Rgb(232, 248, 238),
+        Color::Rgb(_, _, _) => Color::Rgb(18, 34, 28),
+        Color::Indexed(_) if theme.is_light() => Color::Indexed(194),
+        Color::Indexed(_) => Color::Indexed(22),
+        Color::White => Color::LightGreen,
+        Color::Black => Color::DarkGray,
+        _ if theme.is_light() => Color::LightGreen,
+        _ => Color::DarkGray,
+    }
+}
+
+fn tool_display_name(tool: &ToolMessageState) -> String {
+    if tool.tool == "bash" {
+        if let Some(command) = collapsed_tool_command(tool) {
+            return format!("bash: {command}");
+        }
+    }
+    if let Some(command) = collapsed_tool_command(tool) {
+        return format!("{}: {command}", tool.tool);
+    }
+    tool.tool.clone()
+}
+
+fn expanded_tool_command(tool: &ToolMessageState) -> Option<String> {
+    tool.command
+        .as_ref()
+        .or(tool.command_preview.as_ref())
+        .cloned()
+        .or_else(|| command_from_args_preview(&tool.args_preview))
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())
+}
+
+fn collapsed_tool_command(tool: &ToolMessageState) -> Option<String> {
+    expanded_tool_command(tool)
+        .map(|command| collapse_single_line(&render_tool_detail_text(&command)))
+}
+
+fn collapse_single_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ; ")
+}
+
+fn command_from_args_preview(args_preview: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(args_preview.trim()).ok()?;
+    value
+        .get("command")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn display_tool_args_preview(tool: &ToolMessageState) -> String {
+    if tool.tool != "bash" {
+        return render_tool_detail_text(&tool.args_preview);
+    }
+
+    let Ok(mut value) = serde_json::from_str::<Value>(tool.args_preview.trim()) else {
+        return render_tool_detail_text(&tool.args_preview);
+    };
+    if let Value::Object(map) = &mut value {
+        map.remove("timeout");
+        if expanded_tool_command(tool).is_some() {
+            map.remove("command");
+        }
+        if map.is_empty() {
+            return String::new();
+        }
+    }
+
+    serde_json::to_string_pretty(&value)
+        .unwrap_or_else(|_| render_tool_detail_text(&tool.args_preview))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -769,6 +928,9 @@ fn render_file_edit_tool_lines(
         }
     }
 
+    if tool.expanded {
+        apply_expanded_tool_panel(&mut lines, theme, width);
+    }
     lines.push(Line::raw(""));
     lines
 }
@@ -1554,6 +1716,7 @@ fn render_subagent_tool_lines(
         _ => {}
     }
 
+    apply_expanded_tool_panel(&mut lines, theme, width);
     lines
 }
 
@@ -1739,9 +1902,10 @@ mod tests {
     use crate::theme::Theme;
 
     use super::{
-        build_side_by_side_diff_rows, diff_change_counts, highlight_line_selection,
-        parse_file_edit_args, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
-        render_file_edit_tool_lines, render_tool_message_lines, wrap_line_to_visual_lines,
+        build_side_by_side_diff_rows, diff_change_counts, expanded_tool_background,
+        highlight_line_selection, line_display_width, parse_file_edit_args,
+        parse_join_subagent_terminal, parse_spawn_subagent_agent_id, render_file_edit_tool_lines,
+        render_tool_message_lines, wrap_line_to_visual_lines,
     };
 
     #[test]
@@ -1851,6 +2015,125 @@ mod tests {
     }
 
     #[test]
+    fn bash_tool_header_includes_command_when_collapsed() {
+        let theme = Theme::detect();
+        let message = Message::tool_event(ToolExecutionUpdate {
+            call_id: "call-1".to_string(),
+            tool: "bash".to_string(),
+            summary: String::new(),
+            args_preview: serde_json::json!({
+                "command": "cargo test -p xiaoo-endside",
+                "timeout": 120000
+            })
+            .to_string(),
+            command_preview: None,
+            command: None,
+            detail: "full output".to_string(),
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            duration_ms: Some(10),
+            file_change: None,
+        });
+        let tool = message
+            .tool_state
+            .as_ref()
+            .expect("tool message should carry tool state");
+
+        let lines = render_tool_message_lines(&message, tool, Color::Green, &theme, 80);
+        let rendered_text = rendered_lines_text(&lines);
+
+        assert!(rendered_text.contains("bash: cargo test -p xiaoo-endside  done"));
+        assert!(!rendered_text.contains("Command"));
+        assert!(!rendered_text.contains("full output"));
+        assert!(!rendered_text.contains("timeout"));
+    }
+
+    #[test]
+    fn expanded_bash_tool_filters_timeout_and_decodes_escaped_output() {
+        let theme = Theme::detect();
+        let message = Message::tool_event(ToolExecutionUpdate {
+            call_id: "call-1".to_string(),
+            tool: "bash".to_string(),
+            summary: String::new(),
+            args_preview: serde_json::json!({
+                "command": "printf 'a\\nb'",
+                "cwd": "/tmp/work",
+                "timeout": 120000
+            })
+            .to_string(),
+            command_preview: None,
+            command: None,
+            detail: "line1\\nline2\\tindented".to_string(),
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            duration_ms: Some(10),
+            file_change: None,
+        });
+        let mut tool = message
+            .tool_state
+            .clone()
+            .expect("tool message should carry tool state");
+        tool.expanded = true;
+
+        let lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let rendered_text = rendered_lines_text(&lines);
+
+        assert!(rendered_text.contains("Command"));
+        assert!(rendered_text.contains("printf 'a"));
+        assert!(rendered_text.contains("Arguments"));
+        assert!(rendered_text.contains("\"cwd\": \"/tmp/work\""));
+        assert!(!rendered_text.contains("\"timeout\""));
+        assert!(rendered_text.contains("line1"));
+        assert!(rendered_text.contains("line2\tindented"));
+    }
+
+    #[test]
+    fn expanded_tool_lines_use_subtle_background() {
+        let theme = Theme::detect();
+        let message = Message::tool_event(ToolExecutionUpdate {
+            call_id: "call-1".to_string(),
+            tool: "bash".to_string(),
+            summary: String::new(),
+            args_preview: serde_json::json!({
+                "command": "date"
+            })
+            .to_string(),
+            command_preview: None,
+            command: None,
+            detail: "Mon Jun 29".to_string(),
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            duration_ms: None,
+            file_change: None,
+        });
+        let mut tool = message
+            .tool_state
+            .clone()
+            .expect("tool message should carry tool state");
+
+        let collapsed_lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        assert!(collapsed_lines.iter().all(|line| line.style.bg.is_none()));
+
+        tool.expanded = true;
+        let expanded_lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let bg = Some(expanded_tool_background(&theme));
+        assert_ne!(bg, Some(theme.background));
+        assert_ne!(bg, Some(theme.assistant_message_bg));
+        let panel_lines = expanded_lines
+            .iter()
+            .take_while(|line| line_display_width(line) > 0)
+            .collect::<Vec<_>>();
+        assert!(panel_lines.len() >= 4);
+        assert!(panel_lines.iter().all(|line| line.style.bg == bg));
+        assert!(line_display_width(panel_lines[0]) >= 80);
+        assert!(line_display_width(panel_lines[panel_lines.len() - 1]) >= 80);
+        assert!(rendered_line_text(panel_lines[0]).trim().is_empty());
+        assert!(rendered_line_text(panel_lines[panel_lines.len() - 1])
+            .trim()
+            .is_empty());
+    }
+
+    #[test]
     fn side_by_side_diff_pairs_replacement_lines() {
         let rows = build_side_by_side_diff_rows("one\ntwo\nthree\n", "one\ndeux\nthree\n");
         let (additions, deletions) = diff_change_counts(&rows);
@@ -1910,5 +2193,20 @@ mod tests {
         assert!(rendered_text.contains("+1 -1"));
         assert!(rendered_text.contains("Original"));
         assert!(rendered_text.contains("Updated"));
+    }
+
+    fn rendered_lines_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn rendered_line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 }
