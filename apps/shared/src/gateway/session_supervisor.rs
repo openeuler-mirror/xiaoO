@@ -127,12 +127,21 @@ impl SessionSupervisor {
     }
 
     pub async fn force_close(&self) -> SessionRecord {
-        let mut session = self.session.lock().await;
-        session.status = SessionLifecycleStatus::Closed;
-        session.updated_at_ms = current_time_ms();
-        let snapshot = session.clone();
-        drop(session);
-        self.session_store.save(snapshot.clone()).await;
+        let session_id;
+        let snapshot = {
+            let mut session = self.session.lock().await;
+            session.status = SessionLifecycleStatus::Closed;
+            session.updated_at_ms = current_time_ms();
+            session_id = session.session_id.clone();
+            let snapshot = session.clone();
+            drop(session);
+            self.session_store.save(snapshot.clone()).await;
+            snapshot
+        };
+        // Report the closed status to the shared registry so the backend
+        // can be evicted promptly instead of staying stuck as "running".
+        self.report_session_status(&session_id, &SessionLifecycleStatus::Closed)
+            .await;
         snapshot
     }
 
@@ -580,10 +589,35 @@ impl SessionSupervisor {
         &self,
         resolved: &ResolvedSessionRuntime,
     ) -> Result<Arc<dyn OperationBackend>, SessionServiceError> {
-        let session_snapshot = self.snapshot().await;
-        let lease =
-            lease_session_backend(self.backend_manager.as_ref(), &session_snapshot, resolved)
-                .await?;
+        let mut session_snapshot = self.snapshot().await;
+
+        // If the in-memory snapshot thinks the session has a backend but the
+        // backend was evicted (by this process's eviction path or by another
+        // process), the snapshot may not reflect the Paused status that
+        // batch_mark_paused_due_to_eviction wrote to the session-store.
+        // Reload from the store so lease_session_backend takes the resume-
+        // from-checkpoint path instead of creating a fresh (stateless)
+        // backend.
+        if session_snapshot.backend_instance.is_some()
+            && self
+                .backend_manager
+                .lease_bound_session(&session_snapshot.session_id)
+                .await
+                .is_err()
+        {
+            if let Some(store_session) = self.session_store.load(&session_snapshot.session_id).await
+            {
+                session_snapshot = store_session;
+            }
+        }
+
+        let lease = lease_session_backend(
+            self.backend_manager.as_ref(),
+            &session_snapshot,
+            resolved,
+            self.session_store.clone(),
+        )
+        .await?;
 
         let operation_backend = lease.backend();
         let mut session = self.session.lock().await;
@@ -844,13 +878,46 @@ impl SessionSupervisor {
     }
 
     async fn set_session_status(&self, status: SessionLifecycleStatus, last_error: Option<String>) {
-        let mut session = self.session.lock().await;
-        session.status = status;
-        session.last_error = last_error;
-        session.updated_at_ms = current_time_ms();
-        let snapshot = session.clone();
-        drop(session);
-        self.session_store.save(snapshot).await;
+        let session_id = {
+            let mut session = self.session.lock().await;
+            session.status = status.clone();
+            session.last_error = last_error;
+            session.updated_at_ms = current_time_ms();
+            let session_id = session.session_id.clone();
+            let snapshot = session.clone();
+            drop(session);
+            self.session_store.save(snapshot).await;
+            session_id
+        };
+
+        // Report every status transition so the shared registry stays
+        // accurate. Failed/Closed map to "idle" (queue_depth=0) since they
+        // are no longer processing; without this the registry would keep
+        // a stale "running" status forever, blocking eviction.
+        self.report_session_status(&session_id, &status).await;
+    }
+
+    async fn report_session_status(&self, session_id: &str, status: &SessionLifecycleStatus) {
+        let lease = match self.backend_manager.lease_bound_session(session_id).await {
+            Ok(lease) => lease,
+            Err(_) => return,
+        };
+
+        let backend_id = &lease.instance().backend_id.0;
+
+        let (status_str, queue_depth) = match status {
+            SessionLifecycleStatus::Idle => ("idle", 0),
+            SessionLifecycleStatus::Running => ("running", 1),
+            // Failed, Closed, and Paused sessions are done processing.
+            // Report them as idle so the backend can be evicted promptly.
+            _ => ("idle", 0),
+        };
+
+        self.backend_manager
+            .registry()
+            .update_session_status(backend_id, session_id, status_str, queue_depth)
+            .await
+            .ok();
     }
 
     async fn ensure_session_match(&self, session_id: &str) -> Result<(), SubagentControlError> {

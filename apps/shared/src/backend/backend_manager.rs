@@ -1,6 +1,6 @@
 use agent_contracts::backend::{
-    BackendId, BackendLifecycleReason, BackendLifecycleState, BackendResourceLimits,
-    OperationBackendBuildError, OperationError,
+    BackendId, BackendLifecycleReason, BackendResourceLimits, OperationBackendBuildError,
+    OperationError,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -16,19 +16,23 @@ use super::{
     BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
     BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter,
-    BackendManagerLimits, BackendTreeNode, BuildBackendInput,
+    BackendManagerLimits, BackendRegistry, BackendRegistryEntry, BackendTreeNode,
+    BuildBackendInput, SandboxCounter, SandboxCounterKey, STALE_OWNER_THRESHOLD_MS,
 };
+use crate::gateway::SessionStore;
 
 pub struct BackendManager {
     pub(super) state: Mutex<BackendManagerState>,
     limits: BackendManagerLimits,
+    registry: BackendRegistry,
+    sandbox_counter: SandboxCounter,
+    process_id: String,
 }
 
 #[derive(Default)]
 pub(super) struct BackendManagerState {
     pub(super) backends: HashMap<BackendId, BackendInstanceEntry>,
     pub(super) session_index: HashMap<String, BackendId>,
-    pub(super) pending_e2b_creations: usize,
 }
 
 fn checkout_metadata(
@@ -137,19 +141,57 @@ impl BackendManager {
     }
 
     pub fn new_with_limits(limits: BackendManagerLimits) -> Self {
+        let process_id = Self::generate_process_id();
+        let sandbox_counter = match limits.max_active_sandboxes_per_key {
+            Some(max_per_key) => SandboxCounter::new_with_limit(max_per_key),
+            None => SandboxCounter::new(),
+        };
         Self {
             state: Mutex::new(BackendManagerState::default()),
             limits,
+            registry: BackendRegistry::new(),
+            sandbox_counter,
+            process_id,
         }
+    }
+
+    fn generate_process_id() -> String {
+        let pid = std::process::id();
+        let timestamp = current_time_ms();
+        format!("{}_{}", pid, timestamp)
     }
 
     pub fn limits(&self) -> BackendManagerLimits {
         self.limits
     }
 
-    pub async fn active_e2b_sandbox_count(&self) -> usize {
-        let state = self.state.lock().await;
-        active_e2b_sandbox_count(&state)
+    pub fn registry(&self) -> &BackendRegistry {
+        &self.registry
+    }
+
+    pub fn sandbox_counter(&self) -> &SandboxCounter {
+        &self.sandbox_counter
+    }
+
+    pub fn process_id(&self) -> &str {
+        &self.process_id
+    }
+
+    pub fn sandbox_key_from_config(config: &super::GatewayBackendConfig) -> SandboxCounterKey {
+        if config.kind == "e2b" {
+            // Use the same resolution path as the e2b provider so the
+            // counter key matches the actual key used to authorise sandbox
+            // creation (direct `api_key` field, then `api_key_env`, then
+            // `E2B_API_KEY`). Falls back to a stable default only when no
+            // key is configured at all.
+            let key_identifier = e2b::resolve_api_key_from_options(&config.options)
+                .unwrap_or_else(|| "e2b_default".to_string());
+            SandboxCounterKey::new("e2b", key_identifier)
+        } else if config.kind == "conch" {
+            SandboxCounterKey::new("conch", "conch_default")
+        } else {
+            SandboxCounterKey::new("local", "local_default")
+        }
     }
 
     pub async fn create_backend(
@@ -162,6 +204,7 @@ impl BackendManager {
             .map_err(BackendError::from_build_error)?;
         let config_hash = hash_config(&config);
         let expires_at_ms = request.timeout.map(expires_at_ms_from_timeout);
+        let sandbox_key = Self::sandbox_key_from_config(&config);
 
         let mut state = self.state.lock().await;
         if state.backends.contains_key(&backend_id) {
@@ -178,7 +221,15 @@ impl BackendManager {
                 });
             }
         }
-        let reserved_e2b_slot = reserve_active_e2b_slot(&mut state, &self.limits, &config)?;
+
+        let reserved_slot = if config.kind == "e2b" || config.kind == "conch" {
+            match self.sandbox_counter.check_and_reserve(&sandbox_key).await {
+                Ok(_) => true,
+                Err(_) => return Err(BackendError::NeedsEviction),
+            }
+        } else {
+            false
+        };
 
         let entry = match build_backend(BuildBackendInput {
             backend_id: backend_id.clone(),
@@ -200,17 +251,41 @@ impl BackendManager {
         {
             Ok(entry) => entry,
             Err(error) => {
-                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                if reserved_slot {
+                    self.sandbox_counter
+                        .cancel_reservation(&sandbox_key)
+                        .await
+                        .ok();
+                }
                 return Err(error);
             }
         };
         let info = entry.info();
         let session_ids = entry.session_ids.keys().cloned().collect::<Vec<_>>();
-        for session_id in session_ids {
-            state.session_index.insert(session_id, backend_id.clone());
+        for session_id in &session_ids {
+            state
+                .session_index
+                .insert(session_id.clone(), backend_id.clone());
         }
-        state.backends.insert(backend_id, entry);
-        release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+        state.backends.insert(backend_id.clone(), entry);
+
+        if config.kind == "e2b" || config.kind == "conch" {
+            if reserved_slot {
+                self.sandbox_counter
+                    .confirm_creation(&sandbox_key)
+                    .await
+                    .ok();
+            }
+            let registry_entry = BackendRegistryEntry::new(
+                backend_id.0.clone(),
+                sandbox_key,
+                session_ids.clone(),
+                self.process_id.clone(),
+                info.instance_id.clone(),
+            );
+            self.registry.register(registry_entry).await.ok();
+        }
+
         Ok(info)
     }
 
@@ -312,8 +387,21 @@ impl BackendManager {
                 state.session_index.remove(session_id);
             }
             detach_from_parent(&mut state, &backend_id, &entry);
+
+            // Keep the shared counter and registry in sync with the local
+            // state removal so that the sandbox slot is freed promptly for
+            // other processes/threads.
+            let sandbox_key = Self::sandbox_key_from_config(&entry.config);
+            if entry.config.kind == "e2b" || entry.config.kind == "conch" {
+                self.sandbox_counter.release(&sandbox_key).await.ok();
+            }
             entry
         };
+
+        // Unregister from the shared registry before the (potentially slow)
+        // provider delete call so other processes see the slot freed ASAP.
+        self.registry.unregister(backend_id).await.ok();
+
         delete_backend_instance(removed, BackendLifecycleReason::UserRequested)
             .await
             .map_err(BackendError::from_operation_error)
@@ -473,8 +561,11 @@ impl BackendManager {
             request.options.as_ref(),
             snapshot_id,
         );
-        let reserved_e2b_slot = {
-            let mut state = self.state.lock().await;
+
+        let sandbox_key = Self::sandbox_key_from_config(&create_config);
+
+        let reserved_slot = {
+            let state = self.state.lock().await;
             if state.backends.contains_key(&child_backend_id) {
                 return Err(BackendError::Conflict {
                     message: format!("backend_id {child_backend_id} already exists"),
@@ -489,7 +580,11 @@ impl BackendManager {
                     });
                 }
             }
-            reserve_active_e2b_slot(&mut state, &self.limits, &create_config)?
+
+            match self.sandbox_counter.check_and_reserve(&sandbox_key).await {
+                Ok(_) => true,
+                Err(_) => return Err(BackendError::NeedsEviction),
+            }
         };
 
         let create_config_hash = hash_config(&create_config);
@@ -532,8 +627,12 @@ impl BackendManager {
         {
             Ok(entry) => entry,
             Err(error) => {
-                let mut state = self.state.lock().await;
-                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                if reserved_slot {
+                    self.sandbox_counter
+                        .cancel_reservation(&sandbox_key)
+                        .await
+                        .ok();
+                }
                 return Err(error);
             }
         };
@@ -583,17 +682,33 @@ impl BackendManager {
             } else {
                 None
             };
-            let mut state = self.state.lock().await;
-            release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+            if reserved_slot {
+                self.sandbox_counter
+                    .cancel_reservation(&sandbox_key)
+                    .await
+                    .ok();
+            }
             if let Some(cleanup_error) = cleanup_error {
                 return Err(BackendError::from_operation_error(cleanup_error));
             }
             return Err(error);
         }
-        {
-            let mut state = self.state.lock().await;
-            release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+
+        if reserved_slot {
+            self.sandbox_counter
+                .confirm_creation(&sandbox_key)
+                .await
+                .ok();
         }
+
+        let registry_entry = BackendRegistryEntry::new(
+            child_backend_id.0.clone(),
+            sandbox_key,
+            child_session_id.iter().cloned().collect(),
+            self.process_id.clone(),
+            child_info.instance_id.clone(),
+        );
+        self.registry.register(registry_entry).await.ok();
 
         Ok(BackendCheckoutResult {
             backend: child_info,
@@ -641,22 +756,84 @@ impl BackendManager {
     pub async fn ensure_session_backend(
         &self,
         request: BackendEnsureSessionRequest,
+        session_store: Arc<dyn SessionStore>,
     ) -> Result<BackendLease, OperationBackendBuildError> {
         let config = resolve_session_backend_config(request.config.clone())?;
         let workspace_root = workspace_root_string(&request.workspace_root)?;
         let config_hash = hash_config(&config);
+        let sandbox_key = Self::sandbox_key_from_config(&config);
+        let needs_counting = config.kind == "e2b" || config.kind == "conch";
+
+        // Fast path: if the session already has a live backend in the
+        // in-memory state, return it without reserving a sandbox slot.
+        // This is critical because `reserve_with_eviction` checks the
+        // shared counter BEFORE the existing-binding check inside the state
+        // lock — so without this fast path, a session that already owns one
+        // of the MAX_ACTIVE_SANDBOXES_PER_KEY slots would fail with "limit
+        // reached" on its second turn instead of reusing its backend.
+        {
+            let state = self.state.lock().await;
+            if let Some(existing_backend_id) = state.session_index.get(&request.session_id) {
+                if let Some(entry) = state.backends.get(existing_backend_id) {
+                    if entry.workspace_root == workspace_root && entry.config_hash == config_hash {
+                        self.registry
+                            .update_activity(&existing_backend_id.0)
+                            .await
+                            .ok();
+                        return Ok(BackendLease::new(
+                            Arc::clone(&entry.backend),
+                            entry.instance.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Reserve a sandbox slot with eviction-driven retry. This must happen
+        // WITHOUT holding the in-memory `state` lock, because evicting an idle
+        // backend needs to acquire that same lock.
+        if needs_counting {
+            self.reserve_with_eviction(&sandbox_key, &config.options, session_store.clone())
+                .await
+                .map_err(BackendError::into_build_error)?;
+        }
+
         let mut state = self.state.lock().await;
 
+        // Re-check for an existing binding once we hold the lock; a concurrent
+        // ensure_session_backend may have created one while we were reserving.
         if let Some(existing_backend_id) = state.session_index.get(&request.session_id) {
-            let entry = state.backends.get(existing_backend_id).ok_or_else(|| {
-                OperationBackendBuildError::BuildFailed {
-                    message: format!(
-                        "session {} is bound to missing backend {}",
-                        request.session_id, existing_backend_id
-                    ),
+            let entry = match state.backends.get(existing_backend_id) {
+                Some(entry) => entry,
+                None => {
+                    // The session was bound to a backend that has since been
+                    // evicted/removed but the session_index mapping was not
+                    // cleaned up. Cancel the reservation we just made so the
+                    // sandbox slot is not leaked; the caller will surface the
+                    // error and the session can be retried/resumed.
+                    let missing_backend_id = existing_backend_id.0.clone();
+                    drop(state);
+                    if needs_counting {
+                        self.sandbox_counter
+                            .cancel_reservation(&sandbox_key)
+                            .await
+                            .ok();
+                    }
+                    return Err(OperationBackendBuildError::BuildFailed {
+                        message: format!(
+                            "session {} is bound to missing backend {}",
+                            request.session_id, missing_backend_id
+                        ),
+                    });
                 }
-            })?;
+            };
             if entry.workspace_root != workspace_root || entry.config_hash != config_hash {
+                if needs_counting {
+                    self.sandbox_counter
+                        .cancel_reservation(&sandbox_key)
+                        .await
+                        .ok();
+                }
                 return Err(OperationBackendBuildError::BuildFailed {
                     message: format!(
                         "session {} is already bound to backend {} with different workspace or config",
@@ -664,13 +841,21 @@ impl BackendManager {
                     ),
                 });
             }
+            if needs_counting {
+                self.sandbox_counter
+                    .cancel_reservation(&sandbox_key)
+                    .await
+                    .ok();
+            }
+            self.registry
+                .update_activity(&existing_backend_id.0)
+                .await
+                .ok();
             return Ok(BackendLease::new(
                 Arc::clone(&entry.backend),
                 entry.instance.clone(),
             ));
         }
-        let reserved_e2b_slot = reserve_active_e2b_slot(&mut state, &self.limits, &config)
-            .map_err(BackendError::into_build_error)?;
 
         let backend_id = new_backend_id();
         let entry = match build_backend(BuildBackendInput {
@@ -690,7 +875,12 @@ impl BackendManager {
         {
             Ok(entry) => entry,
             Err(error) => {
-                release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+                if needs_counting {
+                    self.sandbox_counter
+                        .cancel_reservation(&sandbox_key)
+                        .await
+                        .ok();
+                }
                 return Err(error.into_build_error());
             }
         };
@@ -699,10 +889,517 @@ impl BackendManager {
 
         state
             .session_index
-            .insert(request.session_id, backend_id.clone());
-        state.backends.insert(backend_id, entry);
-        release_e2b_slot_reservation(&mut state, reserved_e2b_slot);
+            .insert(request.session_id.clone(), backend_id.clone());
+        state.backends.insert(backend_id.clone(), entry);
+
+        if needs_counting {
+            self.sandbox_counter
+                .confirm_creation(&sandbox_key)
+                .await
+                .ok();
+            let registry_entry = BackendRegistryEntry::new(
+                backend_id.0.clone(),
+                sandbox_key,
+                vec![request.session_id.clone()],
+                self.process_id.clone(),
+                instance.instance_id.0.clone(),
+            );
+            self.registry.register(registry_entry).await.ok();
+        }
+
         Ok(BackendLease::new(backend, instance))
+    }
+
+    /// Reserve a sandbox slot for `sandbox_key`, evicting idle sandboxes (and
+    /// briefly waiting for cross-process evictions) when the pool is full.
+    /// `provider_options` is the requesting process's own options for this
+    /// sandbox key; it is used to authorise remote deletion of orphaned e2b
+    /// sandboxes (same api_key, since the sandbox_key matches).
+    async fn reserve_with_eviction(
+        &self,
+        sandbox_key: &SandboxCounterKey,
+        provider_options: &serde_json::Value,
+        session_store: Arc<dyn SessionStore>,
+    ) -> Result<(), BackendError> {
+        let max_attempts = self.limits.max_eviction_attempts.max(1);
+        // Track the remote backend (if any) that *this* call marked for
+        // eviction. If we exhaust the retry budget without securing a slot,
+        // we clear the mark so the next attempt starts from a clean slate
+        // and re-targets the earliest idle sandbox — rather than leaving a
+        // lingering mark that would make the next attempt skip it and mark a
+        // different (later) sandbox.
+        let mut marked_backend_id: Option<String> = None;
+        for _ in 0..max_attempts {
+            match self.sandbox_counter.check_and_reserve(sandbox_key).await {
+                Ok(_) => {
+                    // Success: a previously-set mark (if any) is no longer
+                    // our concern — the marked backend's owner may still
+                    // evict it, but that is the normal "one extra slot
+                    // freed" case and the owner will skip eviction if the
+                    // sandbox became active again.
+                    return Ok(());
+                }
+                Err(super::SandboxCounterError::LimitExceeded { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+            // Pool full: try to free a slot by evicting an idle sandbox owned
+            // by this process, reclaiming an orphaned sandbox whose owner died,
+            // or by asking another (live) process to evict its idle sandbox.
+            match self
+                .try_evict_if_needed(sandbox_key, provider_options, session_store.clone())
+                .await
+            {
+                Ok(None) => {
+                    // A sandbox was evicted directly (own or orphan). Clear
+                    // any mark we previously set: we no longer need a remote
+                    // eviction, and leaving the mark would cause an
+                    // unnecessary eviction of an idle sandbox.
+                    if let Some(id) = marked_backend_id.take() {
+                        self.registry.set_pending_eviction(&id, false).await.ok();
+                    }
+                    continue;
+                }
+                Ok(Some(id)) => {
+                    // A remote sandbox was marked for eviction. Record it so
+                    // we can roll back on give-up, then wait for its owner to
+                    // evict it before retrying.
+                    marked_backend_id = Some(id);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+                Err(BackendError::NeedsEviction) => {
+                    // Either no evictable sandbox was found, or another
+                    // backend is already marked for eviction (by us or
+                    // another process). Wait briefly for the mark to be
+                    // resolved and retry.
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Retry budget exhausted. Roll back any mark this call set so the
+        // final state is equivalent to "no deletable sandbox found, just an
+        // error" — leaving `pending_eviction` set would make the next attempt
+        // skip the earliest idle sandbox and target a later one instead.
+        if let Some(id) = marked_backend_id.take() {
+            self.registry.set_pending_eviction(&id, false).await.ok();
+        }
+        match self.sandbox_counter.check_and_reserve(sandbox_key).await {
+            Ok(_) => Ok(()),
+            Err(super::SandboxCounterError::LimitExceeded { .. }) => {
+                Err(BackendError::ResourceLimitExceeded {
+                    message: "sandbox limit reached; no idle sandbox available to evict"
+                        .to_string(),
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Attempt to free a sandbox slot by evicting an idle sandbox.
+    ///
+    /// Returns:
+    /// - `Ok(None)` when a sandbox owned by this process (or an orphaned
+    ///   sandbox whose owner died) was evicted directly — a slot is freed
+    ///   and the caller should retry `check_and_reserve` immediately.
+    /// - `Ok(Some(backend_id))` when a *remote* (other-process, live owner)
+    ///   sandbox was marked for eviction (`pending_eviction=true`) and
+    ///   signalled via SIGUSR1. The caller should wait briefly for its owner
+    ///   to perform the eviction and then retry. The returned id lets the
+    ///   caller roll back the mark if it ultimately gives up.
+    /// - `Err(NeedsEviction)` when no sandbox was evicted or marked — either
+    ///   because nothing is evictable, or because another backend for this
+    ///   key is *already* marked for eviction (by this process or another).
+    ///   In the latter case we deliberately do not mark a second one: a
+    ///   single pending mark is enough to free one slot, and marking more
+    ///   would cause every signalled owner to evict its sandbox in parallel,
+    ///   freeing multiple slots when only one is needed.
+    pub async fn try_evict_if_needed(
+        &self,
+        sandbox_key: &SandboxCounterKey,
+        provider_options: &serde_json::Value,
+        session_store: Arc<dyn SessionStore>,
+    ) -> Result<Option<String>, BackendError> {
+        let total_count = self.sandbox_counter.get_total_count(sandbox_key).await?;
+        if total_count < self.sandbox_counter.max_per_key() {
+            return Ok(None);
+        }
+
+        let mut entries = self.registry.get_entries_by_key(sandbox_key).await?;
+        // Evict the earliest-created evictable sandbox first.
+        entries.sort_by_key(|entry| entry.created_at_ms);
+
+        // If any backend for this key is already marked for eviction
+        // (`pending_eviction=true`), do not mark a second one. The marked
+        // backend's owner will evict it, freeing exactly one slot; marking
+        // additional backends would cause multiple idle sandboxes to be
+        // evicted when only one slot is needed. The caller should wait for
+        // the existing mark to be resolved (or roll back its own previously
+        // set mark on give-up) and retry.
+        let already_marked = entries.iter().any(|entry| entry.pending_eviction);
+        if already_marked {
+            return Err(BackendError::NeedsEviction);
+        }
+
+        for entry in entries {
+            // Eviction eligibility is based on the shared BackendRegistry
+            // session-status snapshot (written by every process on idle
+            // transitions) plus the owner heartbeat (for detecting dead
+            // processes), so it works uniformly for own- and other-process
+            // backends.
+            if !entry.is_evictable(STALE_OWNER_THRESHOLD_MS) {
+                continue;
+            }
+
+            if entry.owner_process_id == self.process_id {
+                let checkpoint = if self.limits.checkpoint_before_eviction {
+                    self.create_checkpoint_for_eviction(&entry.backend_id).await
+                } else {
+                    None
+                };
+
+                match self.evict_backend_by_id(&entry.backend_id).await {
+                    Ok(()) => {}
+                    Err(BackendError::NotFound { .. }) => {
+                        // Another thread in this process already evicted
+                        // this backend. Skip to the next entry.
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+
+                let session_ids = entry.session_ids.clone();
+                session_store
+                    .batch_mark_paused_due_to_eviction(&session_ids, checkpoint)
+                    .await;
+
+                return Ok(None);
+            } else if entry.is_owner_stale(STALE_OWNER_THRESHOLD_MS) {
+                // The owner process is presumed dead. Reclaim the sandbox
+                // directly: release the counter, unregister, and best-effort
+                // delete the remote e2b sandbox. We cannot checkpoint a dead
+                // owner's sandbox through the normal path, so the bound
+                // sessions (which lived in the dead process's memory) are
+                // lost — but the sandbox slot is freed for the new task.
+                self.reclaim_orphaned_backend(&entry, provider_options)
+                    .await?;
+                return Ok(None);
+            } else {
+                // Ask the live owner process to evict its idle sandbox.
+                // Set the pending flag in the shared registry and send
+                // SIGUSR1 so the owner wakes up immediately and performs
+                // the eviction in its signal handler.
+                //
+                // Because of the `already_marked` guard above, at most one
+                // backend per key is ever marked at a time. The caller must
+                // roll back this mark (clear `pending_eviction`) if it gives
+                // up waiting, so the next attempt can re-mark the earliest
+                // idle sandbox and re-signal the owner.
+                self.registry
+                    .set_pending_eviction(&entry.backend_id, true)
+                    .await
+                    .ok();
+                if entry.owner_pid != 0 && entry.owner_pid != std::process::id() {
+                    // Ignore errors — the owner may have died between our
+                    // heartbeat check and the signal send; the orphan-
+                    // reclaim path handles that on the next retry.
+                    unsafe { libc::kill(entry.owner_pid as i32, libc::SIGUSR1) };
+                }
+                return Ok(Some(entry.backend_id.clone()));
+            }
+        }
+
+        // No own idle sandbox was evicted, no orphaned sandbox was reclaimed,
+        // and no remote sandbox was marked — nothing was evictable at all.
+        Err(BackendError::NeedsEviction)
+    }
+
+    /// Reclaim a backend whose owner process has died. Any process can
+    /// perform this: release the shared counter, remove the registry entry,
+    /// and best-effort delete the remote sandbox.
+    async fn reclaim_orphaned_backend(
+        &self,
+        entry: &BackendRegistryEntry,
+        provider_options: &serde_json::Value,
+    ) -> Result<(), BackendError> {
+        tracing::info!(
+            backend_id = %entry.backend_id,
+            instance_id = %entry.instance_id,
+            owner = %entry.owner_process_id,
+            "Reclaiming orphaned backend (owner process presumed dead)"
+        );
+
+        self.sandbox_counter.release(&entry.sandbox_key).await.ok();
+        self.registry.unregister(&entry.backend_id).await.ok();
+
+        if entry.sandbox_key.sandbox_type == "e2b" && !entry.instance_id.is_empty() {
+            if let Err(error) = e2b::delete_sandbox_by_id(e2b::E2bDeleteSandboxInput {
+                provider_options: provider_options.clone(),
+                sandbox_id: entry.instance_id.clone(),
+            })
+            .await
+            {
+                tracing::warn!(
+                    backend_id = %entry.backend_id,
+                    instance_id = %entry.instance_id,
+                    error = %error,
+                    "Failed to delete orphaned e2b sandbox; slot is freed but sandbox may linger"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn create_checkpoint_for_eviction(
+        &self,
+        backend_id: &str,
+    ) -> Option<super::BackendCheckpointRef> {
+        let result = self
+            .checkpoint_backend(BackendCheckpointRequest {
+                backend_id: Some(backend_id.to_string()),
+                session_id: None,
+                name: Some(format!("eviction-{}", backend_id)),
+                metadata: serde_json::json!({"reason": "eviction"}),
+            })
+            .await;
+
+        match result {
+            Ok(checkpoint_result) => {
+                let checkpoint = checkpoint_result.checkpoint.clone();
+                if let Some(snapshot_id) = checkpoint.provider_snapshot_id.as_ref() {
+                    tracing::info!(
+                        backend_id = backend_id,
+                        checkpoint_id = %checkpoint.checkpoint_id,
+                        snapshot_id = %snapshot_id,
+                        "Created checkpoint for eviction"
+                    );
+                }
+                Some(checkpoint)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    backend_id = backend_id,
+                    error = %e,
+                    "Failed to create checkpoint for eviction"
+                );
+                None
+            }
+        }
+    }
+
+    pub async fn evict_backend_by_id(&self, backend_id: &str) -> Result<(), BackendError> {
+        let removed =
+            {
+                let mut state = self.state.lock().await;
+                let backend_id_obj = BackendId(backend_id.to_string());
+                let entry = state.backends.remove(&backend_id_obj).ok_or_else(|| {
+                    BackendError::NotFound {
+                        backend_id: backend_id.to_string(),
+                    }
+                })?;
+
+                for session_id in entry.session_ids.keys() {
+                    state.session_index.remove(session_id);
+                }
+                detach_from_parent(&mut state, &backend_id_obj, &entry);
+
+                let sandbox_key = Self::sandbox_key_from_config(&entry.config);
+                if entry.config.kind == "e2b" || entry.config.kind == "conch" {
+                    self.sandbox_counter.release(&sandbox_key).await.ok();
+                }
+
+                entry
+            };
+
+        self.registry.unregister(backend_id).await.ok();
+
+        delete_backend_instance(removed, BackendLifecycleReason::ManagerReconcile)
+            .await
+            .map_err(BackendError::from_operation_error)?;
+
+        tracing::info!(backend_id = backend_id, "Backend evicted successfully");
+        Ok(())
+    }
+
+    /// Clear the `pending_eviction` mark on a backend in the shared registry.
+    ///
+    /// Used by callers of [`try_evict_if_needed`] that received
+    /// `Ok(Some(backend_id))` (a remote sandbox was marked for eviction) but
+    /// later gave up waiting for the eviction to complete. Rolling back the
+    /// mark restores the backend to the evictable pool so the next attempt
+    /// re-targets the earliest idle sandbox instead of skipping it.
+    ///
+    /// This is best-effort: if the backend was already evicted (or never
+    /// existed) the call silently does nothing.
+    pub async fn clear_pending_eviction(&self, backend_id: &str) {
+        self.registry
+            .set_pending_eviction(backend_id, false)
+            .await
+            .ok();
+    }
+
+    /// Evict this process's own backends that another process has marked for
+    /// eviction (and are idle according to the shared registry snapshot).
+    pub async fn check_and_evict_marked_backends(
+        &self,
+        session_store: Arc<dyn SessionStore>,
+    ) -> Result<(), BackendError> {
+        // Refresh heartbeats for our own backends first, so other processes
+        // know we are alive and don't try to reclaim them as orphans.
+        self.registry
+            .refresh_heartbeats_for_process(&self.process_id)
+            .await?;
+
+        let entries = self
+            .registry
+            .get_entries_for_process(&self.process_id)
+            .await?;
+
+        for entry in entries {
+            if !entry.pending_eviction {
+                continue;
+            }
+            // The entry is already marked for eviction; only confirm the
+            // backend is still in a safe state (idle or owner stale) to
+            // delete. Using `is_evictable` here would always return false
+            // because `pending_eviction` is true, causing the handler to
+            // clear the mark and skip — and the requesting process would
+            // never see the slot freed.
+            if !entry.is_eviction_safe(STALE_OWNER_THRESHOLD_MS) {
+                // The backend became active again; clear the stale mark.
+                self.registry
+                    .set_pending_eviction(&entry.backend_id, false)
+                    .await
+                    .ok();
+                continue;
+            }
+
+            tracing::info!(
+                backend_id = %entry.backend_id,
+                "Evicting backend marked for eviction by another process"
+            );
+            let checkpoint = if self.limits.checkpoint_before_eviction {
+                self.create_checkpoint_for_eviction(&entry.backend_id).await
+            } else {
+                None
+            };
+            self.evict_backend_by_id(&entry.backend_id).await?;
+            session_store
+                .batch_mark_paused_due_to_eviction(&entry.session_ids, checkpoint)
+                .await;
+        }
+
+        Ok(())
+    }
+
+    /// Reconcile the persisted sandbox counter with the shared registry.
+    ///
+    /// The counter file (`~/.xiaoo/sandbox_counts.json`) is persisted across
+    /// process restarts, so a previous process that exited or crashed without
+    /// releasing its sandboxes leaves "zombie" counts behind. This method
+    /// recomputes the count per sandbox key from ALL registry entries (both
+    /// live and stale-owner) and resets the counter to match.
+    ///
+    /// Counting stale-owner entries too is essential: the orphan-reclaim
+    /// path in `reclaim_orphaned_backend` calls `release` on the counter when
+    /// it deletes a stale entry, so the counter must include that entry for
+    /// the decrement to be correct. If stale entries were excluded here, the
+    /// counter would under-count, and each orphan reclaim would decrement a
+    /// slot that belongs to a different (live) sandbox — effectively letting
+    /// `MAX_ACTIVE_SANDBOXES_PER_KEY + N_stale` sandboxes coexist before the
+    /// limit truly bites.
+    ///
+    /// Should be called once on startup before any new sandbox is created.
+    pub async fn reconcile_counts_with_registry(&self) -> Result<(), BackendError> {
+        let entries = self.registry.get_all_entries().await?;
+        let mut live_counts: HashMap<String, usize> = HashMap::new();
+        for entry in entries {
+            // Count every registry entry, including those whose owner
+            // heartbeat is stale. A stale-owner backend still occupies a
+            // remote sandbox slot until it is reclaimed via
+            // `reclaim_orphaned_backend`, which will `release` the counter
+            // at that point — so it must be counted here for the eventual
+            // decrement to balance correctly.
+            *live_counts
+                .entry(entry.sandbox_key.to_string_key())
+                .or_default() += 1;
+        }
+        self.sandbox_counter.reconcile_counts(live_counts).await?;
+        Ok(())
+    }
+
+    /// Start a background task that refreshes this process's owner heartbeats
+    /// every few seconds (so other processes know we are alive) and listens on
+    /// SIGUSR1 for cross-process eviction requests from other xiaoo-daemon /
+    /// xiaoo processes. When SIGUSR1 arrives the task evicts any of our
+    /// backends that another process has marked with `pending_eviction=true`.
+    ///
+    /// Falls back to a 3-second polling loop on platforms where SIGUSR1
+    /// registration fails.
+    pub fn start_signal_handler(
+        self: Arc<Self>,
+        session_store: Arc<dyn SessionStore>,
+    ) -> tokio::task::JoinHandle<()> {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        tokio::spawn(async move {
+            // Reconcile the persisted sandbox counter with the registry on
+            // startup, purging zombie counts left by previous processes that
+            // exited without releasing their sandboxes.
+            if let Err(error) = self.reconcile_counts_with_registry().await {
+                tracing::warn!(error = %error, "startup sandbox counter reconciliation failed");
+            }
+
+            let mut sigusr1 = match signal(SignalKind::user_defined1()) {
+                Ok(sig) => Some(sig),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "SIGUSR1 unavailable; falling back to 3s polling for cross-process eviction"
+                    );
+                    None
+                }
+            };
+
+            let mut heartbeat_tick = tokio::time::interval(tokio::time::Duration::from_secs(3));
+            // Skip the first immediate tick; we just registered a fresh
+            // heartbeat during backend creation.
+            heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                tokio::select! {
+                    _ = heartbeat_tick.tick() => {
+                        if let Err(error) = self
+                            .registry()
+                            .refresh_heartbeats_for_process(&self.process_id)
+                            .await
+                        {
+                            tracing::warn!(error = %error, "heartbeat refresh failed");
+                        }
+                    }
+                    _ = async {
+                        match sigusr1.as_mut() {
+                            Some(sig) => sig.recv().await,
+                            // No SIGUSR1 → fall back to a 3s poll for
+                            // pending evictions.
+                            None => {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                Some(())
+                            }
+                        }
+                    } => {
+                        if let Err(error) = self
+                            .check_and_evict_marked_backends(session_store.clone())
+                            .await
+                        {
+                            tracing::warn!(error = %error, "eviction handler failed");
+                        }
+                    }
+                }
+            }
+        })
     }
 
     pub async fn lease_bound_session(
@@ -743,6 +1440,12 @@ impl BackendManager {
                 let removed = state.backends.remove(&backend_id);
                 if let Some(entry) = removed.as_ref() {
                     detach_from_parent(&mut state, &backend_id, entry);
+
+                    let sandbox_key = Self::sandbox_key_from_config(&entry.config);
+                    if entry.config.kind == "e2b" || entry.config.kind == "conch" {
+                        self.sandbox_counter.release(&sandbox_key).await.ok();
+                        self.registry.unregister(&backend_id.0).await.ok();
+                    }
                 }
                 removed
             } else {
@@ -768,52 +1471,16 @@ impl BackendManager {
         };
 
         for instance in removed {
+            let sandbox_key = Self::sandbox_key_from_config(&instance.config);
+            if instance.config.kind == "e2b" || instance.config.kind == "conch" {
+                self.sandbox_counter.release(&sandbox_key).await.ok();
+                self.registry
+                    .unregister(&instance.instance.backend_id.0)
+                    .await
+                    .ok();
+            }
             delete_backend_instance(instance, BackendLifecycleReason::DaemonShutdown).await?;
         }
         Ok(())
-    }
-}
-
-fn active_e2b_sandbox_count(state: &BackendManagerState) -> usize {
-    state
-        .backends
-        .values()
-        .filter(|entry| {
-            entry.config.kind == "e2b" && entry.instance.state == BackendLifecycleState::Active
-        })
-        .count()
-}
-
-fn reserve_active_e2b_slot(
-    state: &mut BackendManagerState,
-    limits: &BackendManagerLimits,
-    config: &super::GatewayBackendConfig,
-) -> Result<bool, BackendError> {
-    if config.kind != "e2b" {
-        return Ok(false);
-    }
-    let Some(max) = limits.max_active_e2b_sandboxes else {
-        return Ok(false);
-    };
-    let active = active_e2b_sandbox_count(state);
-    let reserved = state.pending_e2b_creations;
-    if active.saturating_add(reserved) >= max {
-        return Err(BackendError::ResourceLimitExceeded {
-            message: if reserved == 0 {
-                format!("active E2B sandbox limit exceeded: active={active} max={max}")
-            } else {
-                format!(
-                    "active E2B sandbox limit exceeded: active={active} pending={reserved} max={max}"
-                )
-            },
-        });
-    }
-    state.pending_e2b_creations = state.pending_e2b_creations.saturating_add(1);
-    Ok(true)
-}
-
-fn release_e2b_slot_reservation(state: &mut BackendManagerState, reserved: bool) {
-    if reserved {
-        state.pending_e2b_creations = state.pending_e2b_creations.saturating_sub(1);
     }
 }

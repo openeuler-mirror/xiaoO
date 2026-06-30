@@ -41,6 +41,11 @@ pub(crate) struct E2bDeleteSnapshotInput {
     pub(crate) snapshot_id: String,
 }
 
+pub(crate) struct E2bDeleteSandboxInput {
+    pub(crate) provider_options: Value,
+    pub(crate) sandbox_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct E2bSnapshotResult {
     pub(crate) snapshot_id: String,
@@ -330,6 +335,54 @@ pub(crate) async fn delete_snapshot(input: E2bDeleteSnapshotInput) -> Result<boo
     })
 }
 
+/// Delete an e2b sandbox by its id. This is used to reclaim sandboxes whose
+/// owner process has died (the owner's in-memory `E2bBackendState` is gone,
+/// so we can't call `backend.shutdown()` on it). Any process that has the
+/// same api_key can call this directly against the e2b API.
+pub(crate) async fn delete_sandbox_by_id(input: E2bDeleteSandboxInput) -> Result<(), BackendError> {
+    let sandbox_id = input.sandbox_id.trim();
+    if sandbox_id.is_empty() {
+        return Err(BackendError::InvalidRequest {
+            message: "e2b sandbox id cannot be empty".to_string(),
+        });
+    }
+
+    let options = parse_options(&input.provider_options)?;
+    let api_key = resolve_api_key(&options)?;
+    let api_base = options
+        .api_base
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(DEFAULT_API_BASE)
+        .to_string();
+    let http = reqwest::Client::new();
+
+    let response = http
+        .delete(join_url(
+            api_base.as_str(),
+            format!("/sandboxes/{}", encode_path_segment(sandbox_id)).as_str(),
+        ))
+        .header("X-API-Key", api_key)
+        .send()
+        .await
+        .map_err(|error| BackendError::BuildFailed {
+            message: format!("failed to delete e2b sandbox: {error}"),
+        })?;
+
+    if response.status() == reqwest::StatusCode::NO_CONTENT
+        || response.status() == reqwest::StatusCode::NOT_FOUND
+    {
+        return Ok(());
+    }
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
+    Err(BackendError::BuildFailed {
+        message: format!("e2b delete sandbox failed with HTTP {status}: {message}"),
+    })
+}
+
 fn parse_options(value: &Value) -> Result<E2bProviderOptions, BackendError> {
     let value = if value.is_null() {
         Value::Object(Map::new())
@@ -361,6 +414,15 @@ fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, BackendError>
         .ok_or_else(|| BackendError::InvalidRequest {
             message: format!("e2b backend requires api_key or non-empty env var {env_name}"),
         })
+}
+
+/// Resolve the effective e2b api key from raw provider options, using the
+/// same logic as `resolve_api_key` (direct `api_key` field, then the env var
+/// named by `api_key_env`, defaulting to `E2B_API_KEY`). Returns `None` when
+/// no key is configured — callers fall back to a stable default identifier.
+pub(crate) fn resolve_api_key_from_options(options: &Value) -> Option<String> {
+    let parsed = parse_options(options).ok()?;
+    resolve_api_key(&parsed).ok()
 }
 
 fn backend_path(value: &str) -> Result<BackendPath, BackendError> {

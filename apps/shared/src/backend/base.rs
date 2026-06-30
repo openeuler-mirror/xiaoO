@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub const DEFAULT_MAX_ACTIVE_E2B_SANDBOXES: usize = 20;
+/// A backend whose owner heartbeat is older than this threshold is considered
+/// orphaned (the owner process is presumed dead) and may be reclaimed by any
+/// process to free a sandbox slot.
+pub const STALE_OWNER_THRESHOLD_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBackendConfig {
@@ -28,13 +31,25 @@ impl GatewayBackendConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackendManagerLimits {
-    pub max_active_e2b_sandboxes: Option<usize>,
+    pub checkpoint_before_eviction: bool,
+    pub max_eviction_attempts: usize,
+    pub max_active_sandboxes_per_key: Option<usize>,
 }
 
 impl Default for BackendManagerLimits {
     fn default() -> Self {
         Self {
-            max_active_e2b_sandboxes: Some(DEFAULT_MAX_ACTIVE_E2B_SANDBOXES),
+            checkpoint_before_eviction: true,
+            // With SIGUSR1-based eviction signalling the remote owner
+            // processes its pending eviction almost immediately, so a few
+            // retries with a short back-off are sufficient.
+            max_eviction_attempts: 5,
+            // `None` means: read `max_sandbox_cnt` from the global
+            // `~/.config/xiaoo/sandbox.toml` config file, falling back to
+            // `MAX_ACTIVE_SANDBOXES_PER_KEY` when the file or field is
+            // absent. `Some(n)` overrides the file (used by tests and
+            // programmatic construction).
+            max_active_sandboxes_per_key: None,
         }
     }
 }
@@ -238,6 +253,8 @@ pub enum BackendError {
     UnsupportedBackend { kind: String },
     #[error("managed backend resource limit exceeded: {message}")]
     ResourceLimitExceeded { message: String },
+    #[error("managed backend needs eviction before creation")]
+    NeedsEviction,
     #[error("managed backend build failed: {message}")]
     BuildFailed { message: String },
     #[error("managed backend operation failed: {message}")]
@@ -300,6 +317,9 @@ impl BackendError {
             Self::ResourceLimitExceeded { message } => {
                 OperationBackendBuildError::ResourceLimitExceeded { message }
             }
+            Self::NeedsEviction => OperationBackendBuildError::ResourceLimitExceeded {
+                message: "needs eviction before creation".to_string(),
+            },
             Self::NotFound { backend_id } => OperationBackendBuildError::BuildFailed {
                 message: format!("managed backend not found: {backend_id}"),
             },
@@ -312,6 +332,22 @@ impl BackendError {
     pub(super) fn into_operation_error(self) -> OperationError {
         OperationError::Transport {
             message: self.to_string(),
+        }
+    }
+}
+
+impl From<super::SandboxCounterError> for BackendError {
+    fn from(error: super::SandboxCounterError) -> Self {
+        Self::ResourceLimitExceeded {
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<super::BackendRegistryError> for BackendError {
+    fn from(error: super::BackendRegistryError) -> Self {
+        Self::Operation {
+            message: error.to_string(),
         }
     }
 }
