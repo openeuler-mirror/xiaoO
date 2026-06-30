@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::BufReader;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,7 +86,12 @@ impl BackendRegistryEntry {
         }
     }
 
-    pub fn update_session_status(&mut self, session_id: &str, status: &str, queue_depth: usize) {
+    pub(crate) fn update_session_status(
+        &mut self,
+        session_id: &str,
+        status: &str,
+        queue_depth: usize,
+    ) {
         let snapshot = SessionStatusSnapshot {
             status: status.to_string(),
             queue_depth,
@@ -96,11 +101,12 @@ impl BackendRegistryEntry {
             .insert(session_id.to_string(), snapshot);
     }
 
-    pub fn get_session_status(&self, session_id: &str) -> Option<&SessionStatusSnapshot> {
+    #[cfg(test)]
+    pub(crate) fn get_session_status(&self, session_id: &str) -> Option<&SessionStatusSnapshot> {
         self.session_statuses.get(session_id)
     }
 
-    pub fn is_all_sessions_idle(&self) -> bool {
+    pub(crate) fn is_all_sessions_idle(&self) -> bool {
         self.session_statuses
             .values()
             .all(|s| s.status == "idle" && s.queue_depth == 0)
@@ -168,14 +174,15 @@ pub struct BackendRegistry {
 }
 
 impl BackendRegistry {
-    pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let xiaoo_dir = home.join(".xiaoo");
-        std::fs::create_dir_all(&xiaoo_dir).ok();
-
+    /// Construct with an explicit storage directory. The registry and lock
+    /// files are derived from `dir`, so callers (notably tests) can isolate
+    /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
+    /// directory.
+    pub fn new_with_storage_dir(dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&dir).ok();
         Self {
-            storage_path: xiaoo_dir.join("backend_registry.json"),
-            lock_path: xiaoo_dir.join("backend_registry.lock"),
+            storage_path: dir.join("backend_registry.json"),
+            lock_path: dir.join("backend_registry.lock"),
         }
     }
 
@@ -201,7 +208,8 @@ impl BackendRegistry {
         Ok(())
     }
 
-    pub async fn get_entry(
+    #[cfg(test)]
+    pub(crate) async fn get_entry(
         &self,
         backend_id: &str,
     ) -> Result<Option<BackendRegistryEntry>, BackendRegistryError> {
@@ -366,29 +374,12 @@ impl BackendRegistry {
     }
 
     fn save_data(&self, data: &BackendRegistryData) -> Result<(), BackendRegistryError> {
-        let file =
-            File::create(&self.storage_path).map_err(|e| BackendRegistryError::FileError {
-                message: format!("failed to create storage file: {}", e),
-            })?;
-
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, data).map_err(|e| BackendRegistryError::ParseError {
-            message: format!("failed to write storage file: {}", e),
-        })?;
-
-        writer
-            .flush()
-            .map_err(|e| BackendRegistryError::FileError {
-                message: format!("failed to flush storage file: {}", e),
-            })?;
-
-        Ok(())
-    }
-}
-
-impl Default for BackendRegistry {
-    fn default() -> Self {
-        Self::new()
+        super::atomic_save_json(&self.storage_path, data).map_err(|e| match e {
+            super::AtomicSaveError::Io(msg) => BackendRegistryError::FileError { message: msg },
+            super::AtomicSaveError::Serialize(msg) => {
+                BackendRegistryError::ParseError { message: msg }
+            }
+        })
     }
 }
 
@@ -402,10 +393,20 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    /// Build a registry backed by a fresh temporary directory so the test
+    /// never touches the shared `~/.xiaoo/backend_registry.json` used by a
+    /// running daemon. The returned `TempDir` must outlive the registry.
+    fn temp_registry() -> (TempDir, BackendRegistry) {
+        let dir = TempDir::new().expect("tempdir");
+        let registry = BackendRegistry::new_with_storage_dir(dir.path().to_path_buf());
+        (dir, registry)
+    }
 
     #[tokio::test]
     async fn test_register_and_unregister() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-register");
         let entry = BackendRegistryEntry::new(
             "backend-1".to_string(),
@@ -415,10 +416,7 @@ mod tests {
             "e2b-sandbox-1".to_string(),
         );
 
-        registry
-            .register(entry.clone())
-            .await
-            .expect("should register");
+        registry.register(entry).await.expect("should register");
 
         let retrieved = registry
             .get_entry("backend-1")
@@ -441,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_entries_by_key() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-key-multi-v2");
 
         for i in 0..3 {
@@ -460,18 +458,11 @@ mod tests {
             .await
             .expect("should get entries");
         assert_eq!(entries.len(), 3);
-
-        for entry in entries {
-            registry
-                .unregister(&entry.backend_id)
-                .await
-                .expect("should unregister");
-        }
     }
 
     #[tokio::test]
     async fn test_pending_eviction() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-eviction");
         let entry = BackendRegistryEntry::new(
             "backend-eviction-v2".to_string(),
@@ -506,16 +497,11 @@ mod tests {
             .expect("should get entry")
             .expect("should have entry");
         assert!(!retrieved.pending_eviction);
-
-        registry
-            .unregister("backend-eviction-v2")
-            .await
-            .expect("should unregister");
     }
 
     #[tokio::test]
     async fn test_update_activity() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-activity");
         let entry = BackendRegistryEntry::new(
             "backend-activity-v2".to_string(),
@@ -543,16 +529,11 @@ mod tests {
             .expect("should get entry")
             .expect("should have entry");
         assert!(retrieved.last_activity_ms > entry.last_activity_ms);
-
-        registry
-            .unregister("backend-activity-v2")
-            .await
-            .expect("should unregister");
     }
 
     #[tokio::test]
     async fn test_get_entries_for_process() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-process-v2");
 
         let entry1 = BackendRegistryEntry::new(
@@ -592,24 +573,11 @@ mod tests {
             .await
             .expect("should get entries");
         assert_eq!(entries_b.len(), 1);
-
-        registry
-            .unregister("backend-pv2-1")
-            .await
-            .expect("should unregister");
-        registry
-            .unregister("backend-pv2-2")
-            .await
-            .expect("should unregister");
-        registry
-            .unregister("backend-pv2-3")
-            .await
-            .expect("should unregister");
     }
 
     #[tokio::test]
     async fn test_update_session_status() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-status-v2");
         let entry = BackendRegistryEntry::new(
             "backend-status-v2".to_string(),
@@ -650,16 +618,11 @@ mod tests {
             .expect("should have entry");
 
         assert!(retrieved.is_all_sessions_idle());
-
-        registry
-            .unregister("backend-status-v2")
-            .await
-            .expect("should unregister");
     }
 
     #[tokio::test]
     async fn test_is_all_sessions_idle() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-idle-v2");
         let entry = BackendRegistryEntry::new(
             "backend-idle-v2".to_string(),
@@ -698,16 +661,11 @@ mod tests {
             .expect("should get entry")
             .expect("should have entry");
         assert!(!retrieved.is_all_sessions_idle());
-
-        registry
-            .unregister("backend-idle-v2")
-            .await
-            .expect("should unregister");
     }
 
     #[tokio::test]
     async fn test_refresh_heartbeats_for_process() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-heartbeat");
 
         let entry_a = BackendRegistryEntry::new(
@@ -753,14 +711,11 @@ mod tests {
         // A was refreshed, B was not touched.
         assert!(a.owner_heartbeat_ms >= b.owner_heartbeat_ms);
         assert_eq!(b.owner_heartbeat_ms, before_b);
-
-        registry.unregister("backend-hb-a").await.ok();
-        registry.unregister("backend-hb-b").await.ok();
     }
 
     #[tokio::test]
     async fn test_is_evictable_when_owner_stale() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-stale-owner");
         let mut entry = BackendRegistryEntry::new(
             "backend-stale".to_string(),
@@ -783,13 +738,11 @@ mod tests {
         assert!(!retrieved.is_all_sessions_idle());
         assert!(retrieved.is_owner_stale(30_000));
         assert!(retrieved.is_evictable(30_000));
-
-        registry.unregister("backend-stale").await.ok();
     }
 
     #[tokio::test]
     async fn test_is_evictable_when_idle_and_owner_alive() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-alive-owner");
         let mut entry = BackendRegistryEntry::new(
             "backend-alive".to_string(),
@@ -809,13 +762,11 @@ mod tests {
         assert!(retrieved.is_all_sessions_idle());
         assert!(!retrieved.is_owner_stale(30_000));
         assert!(retrieved.is_evictable(30_000));
-
-        registry.unregister("backend-alive").await.ok();
     }
 
     #[tokio::test]
     async fn test_not_evictable_when_running_and_owner_alive() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-busy-owner");
         let mut entry = BackendRegistryEntry::new(
             "backend-busy".to_string(),
@@ -835,8 +786,6 @@ mod tests {
         assert!(!retrieved.is_all_sessions_idle());
         assert!(!retrieved.is_owner_stale(30_000));
         assert!(!retrieved.is_evictable(30_000));
-
-        registry.unregister("backend-busy").await.ok();
     }
 
     /// Regression test for the cross-process eviction bug.
@@ -852,7 +801,7 @@ mod tests {
     /// are available to evict.
     #[tokio::test]
     async fn test_is_eviction_safe_ignores_pending_eviction_for_marked_entry() {
-        let registry = BackendRegistry::new();
+        let (_dir, registry) = temp_registry();
         let key = SandboxCounterKey::new("e2b", "test-marked-eviction");
         let mut entry = BackendRegistryEntry::new(
             "backend-marked".to_string(),
@@ -881,7 +830,5 @@ mod tests {
         // handler actually performs the eviction instead of clearing the
         // mark and skipping.
         assert!(retrieved.is_eviction_safe(30_000));
-
-        registry.unregister("backend-marked").await.ok();
     }
 }

@@ -4,20 +4,23 @@ use agent_contracts::backend::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{
     backend_tree_node, build_backend, current_time_ms, delete_backend_instance, detach_from_parent,
-    e2b, expires_at_ms_from_timeout, forked_provider_options, hash_config, metadata_matches_filter,
-    new_backend_id, requested_backend_id, resolve_backend_config, resolve_session_backend_config,
-    workspace_root_string, BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef,
-    BackendCheckpointRequest, BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
+    e2b, expires_at_ms_from_timeout, forked_provider_options, hash_config,
+    load_global_max_sandbox_cnt, metadata_matches_filter, new_backend_id, requested_backend_id,
+    resolve_backend_config, resolve_session_backend_config, workspace_root_string,
+    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
+    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
     BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
     BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
     BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter,
     BackendManagerLimits, BackendRegistry, BackendRegistryEntry, BackendTreeNode,
-    BuildBackendInput, SandboxCounter, SandboxCounterKey, STALE_OWNER_THRESHOLD_MS,
+    BuildBackendInput, SandboxCounter, SandboxCounterKey, MAX_ACTIVE_SANDBOXES_PER_KEY,
+    STALE_OWNER_THRESHOLD_MS,
 };
 use crate::gateway::SessionStore;
 
@@ -141,15 +144,26 @@ impl BackendManager {
     }
 
     pub fn new_with_limits(limits: BackendManagerLimits) -> Self {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self::new_with_storage_dir(limits, home.join(".xiaoo"))
+    }
+
+    /// Construct with an explicit storage directory for the shared registry
+    /// and sandbox counter. Used by tests to isolate from the `~/.xiaoo/`
+    /// files used by production so test runs never read or mutate a live
+    /// daemon's state.
+    pub fn new_with_storage_dir(limits: BackendManagerLimits, dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&dir).ok();
         let process_id = Self::generate_process_id();
-        let sandbox_counter = match limits.max_active_sandboxes_per_key {
-            Some(max_per_key) => SandboxCounter::new_with_limit(max_per_key),
-            None => SandboxCounter::new(),
-        };
+        let max_per_key = limits.max_active_sandboxes_per_key.unwrap_or_else(|| {
+            load_global_max_sandbox_cnt().unwrap_or(MAX_ACTIVE_SANDBOXES_PER_KEY)
+        });
+        let sandbox_counter = SandboxCounter::new_with_storage_dir(max_per_key, dir.clone());
+        let registry = BackendRegistry::new_with_storage_dir(dir);
         Self {
             state: Mutex::new(BackendManagerState::default()),
             limits,
-            registry: BackendRegistry::new(),
+            registry,
             sandbox_counter,
             process_id,
         }
@@ -173,8 +187,10 @@ impl BackendManager {
         &self.sandbox_counter
     }
 
-    pub fn process_id(&self) -> &str {
-        &self.process_id
+    /// Whether a backend of this `kind` participates in the shared sandbox
+    /// counter / registry. Local backends are never counted.
+    fn is_counted_kind(kind: &str) -> bool {
+        kind == "e2b" || kind == "conch"
     }
 
     pub fn sandbox_key_from_config(config: &super::GatewayBackendConfig) -> SandboxCounterKey {
@@ -222,10 +238,13 @@ impl BackendManager {
             }
         }
 
-        let reserved_slot = if config.kind == "e2b" || config.kind == "conch" {
+        let reserved_slot = if Self::is_counted_kind(&config.kind) {
             match self.sandbox_counter.check_and_reserve(&sandbox_key).await {
                 Ok(_) => true,
-                Err(_) => return Err(BackendError::NeedsEviction),
+                Err(super::SandboxCounterError::LimitExceeded { .. }) => {
+                    return Err(BackendError::NeedsEviction);
+                }
+                Err(error) => return Err(error.into()),
             }
         } else {
             false
@@ -269,7 +288,7 @@ impl BackendManager {
         }
         state.backends.insert(backend_id.clone(), entry);
 
-        if config.kind == "e2b" || config.kind == "conch" {
+        if Self::is_counted_kind(&config.kind) {
             if reserved_slot {
                 self.sandbox_counter
                     .confirm_creation(&sandbox_key)
@@ -372,6 +391,27 @@ impl BackendManager {
             .collect()
     }
 
+    /// Release the shared counter slot, unregister from the shared registry,
+    /// and delete the backend instance via its provider. Called after an
+    /// entry has already been removed from the in-memory `state`. The
+    /// counter release and registry unregister are no-ops for local
+    /// backends (they were never registered).
+    async fn finalize_removal(
+        &self,
+        instance: BackendInstanceEntry,
+        reason: BackendLifecycleReason,
+    ) -> Result<(), OperationError> {
+        if Self::is_counted_kind(&instance.config.kind) {
+            let sandbox_key = Self::sandbox_key_from_config(&instance.config);
+            self.sandbox_counter.release(&sandbox_key).await.ok();
+            self.registry
+                .unregister(&instance.instance.backend_id.0)
+                .await
+                .ok();
+        }
+        delete_backend_instance(instance, reason).await
+    }
+
     pub async fn delete_backend(&self, backend_id: &str) -> Result<(), BackendError> {
         let removed = {
             let mut state = self.state.lock().await;
@@ -387,22 +427,10 @@ impl BackendManager {
                 state.session_index.remove(session_id);
             }
             detach_from_parent(&mut state, &backend_id, &entry);
-
-            // Keep the shared counter and registry in sync with the local
-            // state removal so that the sandbox slot is freed promptly for
-            // other processes/threads.
-            let sandbox_key = Self::sandbox_key_from_config(&entry.config);
-            if entry.config.kind == "e2b" || entry.config.kind == "conch" {
-                self.sandbox_counter.release(&sandbox_key).await.ok();
-            }
             entry
         };
 
-        // Unregister from the shared registry before the (potentially slow)
-        // provider delete call so other processes see the slot freed ASAP.
-        self.registry.unregister(backend_id).await.ok();
-
-        delete_backend_instance(removed, BackendLifecycleReason::UserRequested)
+        self.finalize_removal(removed, BackendLifecycleReason::UserRequested)
             .await
             .map_err(BackendError::from_operation_error)
     }
@@ -583,7 +611,10 @@ impl BackendManager {
 
             match self.sandbox_counter.check_and_reserve(&sandbox_key).await {
                 Ok(_) => true,
-                Err(_) => return Err(BackendError::NeedsEviction),
+                Err(super::SandboxCounterError::LimitExceeded { .. }) => {
+                    return Err(BackendError::NeedsEviction);
+                }
+                Err(error) => return Err(error.into()),
             }
         };
 
@@ -762,7 +793,7 @@ impl BackendManager {
         let workspace_root = workspace_root_string(&request.workspace_root)?;
         let config_hash = hash_config(&config);
         let sandbox_key = Self::sandbox_key_from_config(&config);
-        let needs_counting = config.kind == "e2b" || config.kind == "conch";
+        let needs_counting = Self::is_counted_kind(&config.kind);
 
         // Fast path: if the session already has a live backend in the
         // in-memory state, return it without reserving a sandbox slot.
@@ -1030,13 +1061,8 @@ impl BackendManager {
         // Evict the earliest-created evictable sandbox first.
         entries.sort_by_key(|entry| entry.created_at_ms);
 
-        // If any backend for this key is already marked for eviction
-        // (`pending_eviction=true`), do not mark a second one. The marked
-        // backend's owner will evict it, freeing exactly one slot; marking
-        // additional backends would cause multiple idle sandboxes to be
-        // evicted when only one slot is needed. The caller should wait for
-        // the existing mark to be resolved (or roll back its own previously
-        // set mark on give-up) and retry.
+        // Already-marked guard: at most one backend per key is marked at a
+        // time (see method doc comment).
         let already_marked = entries.iter().any(|entry| entry.pending_eviction);
         if already_marked {
             return Err(BackendError::NeedsEviction);
@@ -1204,18 +1230,10 @@ impl BackendManager {
                     state.session_index.remove(session_id);
                 }
                 detach_from_parent(&mut state, &backend_id_obj, &entry);
-
-                let sandbox_key = Self::sandbox_key_from_config(&entry.config);
-                if entry.config.kind == "e2b" || entry.config.kind == "conch" {
-                    self.sandbox_counter.release(&sandbox_key).await.ok();
-                }
-
                 entry
             };
 
-        self.registry.unregister(backend_id).await.ok();
-
-        delete_backend_instance(removed, BackendLifecycleReason::ManagerReconcile)
+        self.finalize_removal(removed, BackendLifecycleReason::ManagerReconcile)
             .await
             .map_err(BackendError::from_operation_error)?;
 
@@ -1440,12 +1458,6 @@ impl BackendManager {
                 let removed = state.backends.remove(&backend_id);
                 if let Some(entry) = removed.as_ref() {
                     detach_from_parent(&mut state, &backend_id, entry);
-
-                    let sandbox_key = Self::sandbox_key_from_config(&entry.config);
-                    if entry.config.kind == "e2b" || entry.config.kind == "conch" {
-                        self.sandbox_counter.release(&sandbox_key).await.ok();
-                        self.registry.unregister(&backend_id.0).await.ok();
-                    }
                 }
                 removed
             } else {
@@ -1454,7 +1466,8 @@ impl BackendManager {
         };
 
         if let Some(instance) = removed {
-            delete_backend_instance(instance, BackendLifecycleReason::SessionClose).await?;
+            self.finalize_removal(instance, BackendLifecycleReason::SessionClose)
+                .await?;
         }
         Ok(())
     }
@@ -1471,15 +1484,8 @@ impl BackendManager {
         };
 
         for instance in removed {
-            let sandbox_key = Self::sandbox_key_from_config(&instance.config);
-            if instance.config.kind == "e2b" || instance.config.kind == "conch" {
-                self.sandbox_counter.release(&sandbox_key).await.ok();
-                self.registry
-                    .unregister(&instance.instance.backend_id.0)
-                    .await
-                    .ok();
-            }
-            delete_backend_instance(instance, BackendLifecycleReason::DaemonShutdown).await?;
+            self.finalize_removal(instance, BackendLifecycleReason::DaemonShutdown)
+                .await?;
         }
         Ok(())
     }

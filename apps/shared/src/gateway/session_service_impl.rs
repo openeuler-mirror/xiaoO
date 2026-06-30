@@ -44,30 +44,6 @@ pub struct CoreBackedSessionService {
     runtime_checkpoints: InMemoryRuntimeCheckpointStore,
 }
 
-struct RuntimeCheckpointInternal {
-    result: RuntimeCheckpointResult,
-    // session: SessionRecord,
-    // backend_checkpoint: Option<BackendCheckpointResult>,
-}
-
-struct RuntimeCheckoutInternal {
-    result: RuntimeCheckoutResult,
-    // session: SessionRecord,
-    // backend_checkout: Option<BackendCheckoutResult>,
-}
-
-struct RuntimePauseInternal {
-    result: RuntimePauseResult,
-}
-
-struct RuntimeResumeInternal {
-    result: RuntimeResumeResult,
-}
-
-struct RuntimeCheckpointSnapshotDeleteInternal {
-    result: RuntimeCheckpointSnapshotDeleteResult,
-}
-
 impl CoreBackedSessionService {
     pub fn new(
         session_store: Arc<dyn SessionStore>,
@@ -195,7 +171,7 @@ impl CoreBackedSessionService {
     async fn checkpoint_runtime_internal(
         &self,
         request: RuntimeCheckpointRequest,
-    ) -> Result<RuntimeCheckpointInternal, SessionServiceError> {
+    ) -> Result<RuntimeCheckpointResult, SessionServiceError> {
         let session = self.idle_session_snapshot(&request.runtime_id).await?;
         let backend_checkpoint = if let Some(parent_backend) = session.backend_instance.as_ref() {
             Some(
@@ -235,24 +211,20 @@ impl CoreBackedSessionService {
         };
         self.runtime_checkpoints.save(checkpoint).await;
 
-        Ok(RuntimeCheckpointInternal {
-            result: RuntimeCheckpointResult {
-                checkpoint_id,
-                runtime: RuntimeRecord::from_session(&session),
-                parent_checkpoint_id,
-                created_at_ms,
-                metadata: request.metadata,
-                name: request.name,
-            },
-            // session,
-            // backend_checkpoint,
+        Ok(RuntimeCheckpointResult {
+            checkpoint_id,
+            runtime: RuntimeRecord::from_session(&session),
+            parent_checkpoint_id,
+            created_at_ms,
+            metadata: request.metadata,
+            name: request.name,
         })
     }
 
     async fn checkout_runtime_internal(
         &self,
         request: RuntimeCheckoutRequest,
-    ) -> Result<RuntimeCheckoutInternal, SessionServiceError> {
+    ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
         let checkpoint = self
             .runtime_checkpoints
             .load(&request.checkpoint_id)
@@ -330,21 +302,17 @@ impl CoreBackedSessionService {
         .await;
         self.get_or_create_session_handle(child.clone()).await;
 
-        Ok(RuntimeCheckoutInternal {
-            result: RuntimeCheckoutResult {
-                checkpoint_id: checkpoint.checkpoint_id,
-                source_runtime_id: checkpoint.runtime_id,
-                runtime: RuntimeRecord::from_session(&child),
-            },
-            // session: child,
-            // backend_checkout,
+        Ok(RuntimeCheckoutResult {
+            checkpoint_id: checkpoint.checkpoint_id,
+            source_runtime_id: checkpoint.runtime_id,
+            runtime: RuntimeRecord::from_session(&child),
         })
     }
 
     async fn pause_runtime_internal(
         &self,
         request: RuntimePauseRequest,
-    ) -> Result<RuntimePauseInternal, SessionServiceError> {
+    ) -> Result<RuntimePauseResult, SessionServiceError> {
         let session = self.idle_session_snapshot(&request.runtime_id).await?;
         if session.status == SessionLifecycleStatus::Closed {
             return Err(SessionServiceError::SessionClosed {
@@ -419,21 +387,19 @@ impl CoreBackedSessionService {
             .await
             .remove(&request.runtime_id);
 
-        Ok(RuntimePauseInternal {
-            result: RuntimePauseResult {
-                runtime: RuntimeRecord::from_session(&paused),
-                checkpoint_id,
-                created_at_ms,
-                metadata: request.metadata,
-                name: request.name,
-            },
+        Ok(RuntimePauseResult {
+            runtime: RuntimeRecord::from_session(&paused),
+            checkpoint_id,
+            created_at_ms,
+            metadata: request.metadata,
+            name: request.name,
         })
     }
 
     async fn resume_runtime_internal(
         &self,
         request: RuntimeResumeRequest,
-    ) -> Result<RuntimeResumeInternal, SessionServiceError> {
+    ) -> Result<RuntimeResumeResult, SessionServiceError> {
         let mut session = self
             .session_store
             .load(&request.runtime_id)
@@ -519,17 +485,15 @@ impl CoreBackedSessionService {
             .await;
         self.get_or_create_session_handle(session.clone()).await;
 
-        Ok(RuntimeResumeInternal {
-            result: RuntimeResumeResult {
-                runtime: RuntimeRecord::from_session(&session),
-            },
+        Ok(RuntimeResumeResult {
+            runtime: RuntimeRecord::from_session(&session),
         })
     }
 
     async fn delete_checkpoint_snapshot_internal(
         &self,
         request: RuntimeCheckpointSnapshotDeleteRequest,
-    ) -> Result<RuntimeCheckpointSnapshotDeleteInternal, SessionServiceError> {
+    ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
         let checkpoint = self
             .runtime_checkpoints
             .load(&request.checkpoint_id)
@@ -539,16 +503,14 @@ impl CoreBackedSessionService {
             })?;
 
         let Some(backend_checkpoint) = checkpoint.backend_checkpoint.clone() else {
-            return Ok(RuntimeCheckpointSnapshotDeleteInternal {
-                result: RuntimeCheckpointSnapshotDeleteResult {
-                    checkpoint_id: checkpoint.checkpoint_id,
-                    runtime_id: checkpoint.runtime_id,
-                    provider: None,
-                    provider_snapshot_id: None,
-                    provider_snapshot_names: Vec::new(),
-                    deleted_provider_snapshot: false,
-                    deleted_at_ms: current_time_ms(),
-                },
+            return Ok(RuntimeCheckpointSnapshotDeleteResult {
+                checkpoint_id: checkpoint.checkpoint_id,
+                runtime_id: checkpoint.runtime_id,
+                provider: None,
+                provider_snapshot_id: None,
+                provider_snapshot_names: Vec::new(),
+                deleted_provider_snapshot: false,
+                deleted_at_ms: current_time_ms(),
             });
         };
 
@@ -576,16 +538,14 @@ impl CoreBackedSessionService {
             .clear_backend_snapshot(&request.checkpoint_id)
             .await;
 
-        Ok(RuntimeCheckpointSnapshotDeleteInternal {
-            result: RuntimeCheckpointSnapshotDeleteResult {
-                checkpoint_id: request.checkpoint_id,
-                runtime_id: checkpoint.runtime_id,
-                provider: Some(provider),
-                provider_snapshot_id,
-                provider_snapshot_names,
-                deleted_provider_snapshot: delete.deleted,
-                deleted_at_ms: current_time_ms(),
-            },
+        Ok(RuntimeCheckpointSnapshotDeleteResult {
+            checkpoint_id: request.checkpoint_id,
+            runtime_id: checkpoint.runtime_id,
+            provider: Some(provider),
+            provider_snapshot_id,
+            provider_snapshot_names,
+            deleted_provider_snapshot: delete.deleted,
+            deleted_at_ms: current_time_ms(),
         })
     }
 
@@ -940,45 +900,35 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: RuntimeCheckpointRequest,
     ) -> Result<RuntimeCheckpointResult, SessionServiceError> {
-        self.checkpoint_runtime_internal(request)
-            .await
-            .map(|internal| internal.result)
+        self.checkpoint_runtime_internal(request).await
     }
 
     async fn checkout_runtime(
         &self,
         request: RuntimeCheckoutRequest,
     ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
-        self.checkout_runtime_internal(request)
-            .await
-            .map(|internal| internal.result)
+        self.checkout_runtime_internal(request).await
     }
 
     async fn pause_runtime(
         &self,
         request: RuntimePauseRequest,
     ) -> Result<RuntimePauseResult, SessionServiceError> {
-        self.pause_runtime_internal(request)
-            .await
-            .map(|internal| internal.result)
+        self.pause_runtime_internal(request).await
     }
 
     async fn resume_runtime(
         &self,
         request: RuntimeResumeRequest,
     ) -> Result<RuntimeResumeResult, SessionServiceError> {
-        self.resume_runtime_internal(request)
-            .await
-            .map(|internal| internal.result)
+        self.resume_runtime_internal(request).await
     }
 
     async fn delete_checkpoint_snapshot(
         &self,
         request: RuntimeCheckpointSnapshotDeleteRequest,
     ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
-        self.delete_checkpoint_snapshot_internal(request)
-            .await
-            .map(|internal| internal.result)
+        self.delete_checkpoint_snapshot_internal(request).await
     }
 
     async fn submit_input(
