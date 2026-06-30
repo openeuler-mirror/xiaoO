@@ -14,6 +14,7 @@ use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
+use crate::services::input_history::load_input_history;
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
@@ -260,9 +261,16 @@ impl AppState {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Result<Self, anyhow::Error> {
+        let input_history = load_input_history().unwrap_or_else(|error| {
+            tracing::warn!("failed to load input history: {error:#}");
+            Vec::new()
+        });
+        let mut chat_state = build_chat_state(config);
+        chat_state.set_input_history(input_history);
+
         Ok(Self {
             theme: Theme::default(),
-            chat_state: build_chat_state(config),
+            chat_state,
             status_panel: build_status_panel(config),
             input_mode: InputMode::Editing,
             should_quit: false,
@@ -296,7 +304,9 @@ impl AppState {
     }
 
     pub fn reset_for_new_session(&mut self) {
+        let input_history = self.chat_state.input_history.clone();
         self.chat_state = build_chat_state(&self.agent_config);
+        self.chat_state.set_input_history(input_history);
         self.status_panel = build_status_panel(&self.agent_config);
         self.status_panel.set_workspace(&self.workspace);
         self.input_mode = InputMode::Editing;

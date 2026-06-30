@@ -18,6 +18,7 @@ use crate::remote_sessions_service::{
     list_remote_sessions, record_remote_session, RemoteSessionDialog, RemoteSessionDialogEntry,
     RemoteSessionDialogMode, RemoteSessionRecord,
 };
+use crate::services::input_history::append_input_history;
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{
     apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
@@ -379,7 +380,7 @@ impl App {
         }
 
         let trimmed = user_input.trim();
-        self.state.chat_state.reset_input_history_navigation();
+        self.record_submitted_input_history(&user_input);
 
         if trimmed.eq_ignore_ascii_case("/delete") {
             self.state.chat_state.input.reset();
@@ -670,6 +671,16 @@ impl App {
             self.state.chat_state.stick_to_bottom = true;
         }
         Ok(())
+    }
+
+    fn record_submitted_input_history(&mut self, input: &str) {
+        match append_input_history(input) {
+            Ok(history) => self.state.chat_state.set_input_history(history),
+            Err(error) => {
+                tracing::warn!("failed to persist input history: {error:#}");
+                self.state.chat_state.record_input_history(input);
+            }
+        }
     }
 
     fn external_command_body(&self, trimmed: &str) -> Option<String> {
