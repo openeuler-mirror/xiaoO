@@ -131,6 +131,7 @@ pub(crate) fn render_tool_detail_text(text: &str) -> String {
     text.replace("\\r\\n", "\n")
         .replace("\\n", "\n")
         .replace("\\r", "\n")
+        .replace("\\t", "\t")
         .replace("\r\n", "\n")
         .replace('\r', "\n")
 }

@@ -670,10 +670,20 @@ impl ChatState {
             .min(self.total_lines)
     }
 
+    pub fn sync_scrollbar_state(&mut self) {
+        let max_scroll = self.max_scroll_offset();
+        let scrollbar_content_length = max_scroll.saturating_add(1);
+        self.scrollbar_state = self
+            .scrollbar_state
+            .content_length(scrollbar_content_length)
+            .viewport_content_length(self.last_visible_height)
+            .position(self.scroll_offset.min(max_scroll));
+    }
+
     pub fn scroll_up(&mut self) {
         self.stick_to_bottom = false;
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+        self.sync_scrollbar_state();
     }
 
     pub fn scroll_down(&mut self) {
@@ -684,7 +694,7 @@ impl ChatState {
         if self.scroll_offset >= max {
             self.stick_to_bottom = true;
         }
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+        self.sync_scrollbar_state();
     }
 
     /// Set scroll position by line index (e.g. from scrollbar drag). Clamps to valid range.
@@ -692,13 +702,18 @@ impl ChatState {
         let max = self.max_scroll_offset();
         self.scroll_offset = line_offset.min(max);
         self.stick_to_bottom = self.scroll_offset >= max;
-        self.scrollbar_state = self.scrollbar_state.position(self.scroll_offset);
+        self.sync_scrollbar_state();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ChatState, Input, Message};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
+    };
 
     #[test]
     fn message_render_revision_updates_with_content_and_streaming_changes() {
@@ -777,5 +792,38 @@ mod tests {
             Some("queued".to_string())
         );
         assert!(!chat.has_pending_turns());
+    }
+
+    #[test]
+    fn synced_scrollbar_reaches_track_bottom_when_chat_is_at_bottom() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 100;
+        chat.last_visible_height = 20;
+        chat.scroll_offset = chat.max_scroll_offset();
+        chat.sync_scrollbar_state();
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 5));
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .render(buffer.area, &mut buffer, &mut chat.scrollbar_state);
+
+        assert_eq!(buffer[(0, 4)].symbol(), "█");
+    }
+
+    #[test]
+    fn total_line_scrollbar_state_leaves_gap_at_bottom_for_chat_offsets() {
+        let mut legacy_state = ScrollbarState::default()
+            .content_length(100)
+            .viewport_content_length(20)
+            .position(80);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 5));
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("░"))
+            .render(buffer.area, &mut buffer, &mut legacy_state);
+
+        assert_eq!(buffer[(0, 4)].symbol(), "░");
     }
 }

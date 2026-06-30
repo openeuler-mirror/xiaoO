@@ -1681,10 +1681,10 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
                     if tool_name == "ask_user_question" {
                         filter_ask_user_question_output(output)
                     } else {
-                        output.chars().take(200).collect()
+                        output.clone()
                     }
                 }
-                RawToolOutcome::Error { message } => message.chars().take(200).collect(),
+                RawToolOutcome::Error { message } => message.clone(),
             };
             (preview, false)
         }
