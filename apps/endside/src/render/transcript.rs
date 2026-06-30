@@ -283,12 +283,12 @@ fn render_message_entry(
         };
         let timestamp = message.timestamp.format("%H:%M:%S").to_string();
         if is_subagent_tool(&tool.tool) {
-            tool_toggle_row_offset = Some(0);
+            tool_toggle_row_offset = Some(if tool.expanded { 1 } else { 0 });
             let mut lines = render_subagent_tool_lines(tool, &timestamp, tool_color, theme, width);
             lines.push(Line::raw(""));
             lines
         } else {
-            tool_toggle_row_offset = Some(1);
+            tool_toggle_row_offset = Some(if tool.expanded { 2 } else { 1 });
             render_tool_message_lines(message, tool, tool_color, theme, width)
         }
     } else if let Some(checker) = &message.completion_check_state {
@@ -701,9 +701,9 @@ fn apply_expanded_tool_panel(lines: &mut Vec<Line<'static>>, theme: &Theme, widt
     let bg = expanded_tool_background(theme);
 
     for line in lines.iter_mut() {
-        line.style = style_with_default_bg(line.style, bg);
+        line.style = style_with_panel_bg(line.style, bg);
         for span in &mut line.spans {
-            span.style = style_with_default_bg(span.style, bg);
+            span.style = style_with_panel_bg(span.style, bg);
         }
     }
 
@@ -721,12 +721,8 @@ fn line_display_width(line: &Line<'static>) -> usize {
         .sum()
 }
 
-fn style_with_default_bg(style: Style, bg: Color) -> Style {
-    if style.bg.is_some() {
-        style
-    } else {
-        style.bg(bg)
-    }
+fn style_with_panel_bg(style: Style, bg: Color) -> Style {
+    style.bg(bg)
 }
 
 fn expanded_tool_background(theme: &Theme) -> Color {
@@ -1896,16 +1892,17 @@ fn format_completed_at_ms(value: u64) -> String {
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Color, Style};
-    use ratatui::text::Line;
+    use ratatui::text::{Line, Span};
 
     use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
     use crate::theme::Theme;
 
     use super::{
-        build_side_by_side_diff_rows, diff_change_counts, expanded_tool_background,
-        highlight_line_selection, line_display_width, parse_file_edit_args,
-        parse_join_subagent_terminal, parse_spawn_subagent_agent_id, render_file_edit_tool_lines,
-        render_tool_message_lines, wrap_line_to_visual_lines,
+        apply_expanded_tool_panel, build_side_by_side_diff_rows, diff_change_counts,
+        expanded_tool_background, highlight_line_selection, line_display_width,
+        parse_file_edit_args, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
+        render_file_edit_tool_lines, render_message_entry, render_tool_message_lines,
+        wrap_line_to_visual_lines,
     };
 
     #[test]
@@ -2131,6 +2128,59 @@ mod tests {
         assert!(rendered_line_text(panel_lines[panel_lines.len() - 1])
             .trim()
             .is_empty());
+    }
+
+    #[test]
+    fn expanded_tool_panel_overrides_nested_markdown_backgrounds() {
+        let theme = Theme::detect();
+        let mut lines = vec![Line::from(vec![Span::styled(
+            "`code`",
+            Style::default().fg(theme.foreground).bg(theme.code_bg),
+        )])];
+
+        apply_expanded_tool_panel(&mut lines, &theme, 80);
+
+        let bg = Some(expanded_tool_background(&theme));
+        assert!(lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .all(|span| span.style.bg.is_none() || span.style.bg == bg));
+        assert!(lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| span.content == "`code`" && span.style.bg == bg));
+    }
+
+    #[test]
+    fn tool_toggle_row_tracks_expanded_panel_spacer() {
+        let theme = Theme::detect();
+        let mut message = Message::tool_event(ToolExecutionUpdate {
+            call_id: "call-1".to_string(),
+            tool: "bash".to_string(),
+            summary: String::new(),
+            args_preview: serde_json::json!({
+                "command": "date"
+            })
+            .to_string(),
+            command_preview: None,
+            command: None,
+            detail: "ok".to_string(),
+            status: ToolExecutionStatus::Completed,
+            exit_code: Some(0),
+            duration_ms: None,
+            file_change: None,
+        });
+
+        let collapsed = render_message_entry(&message, &theme, 80, false, false, "");
+        assert_eq!(collapsed.tool_toggle_row_offset, Some(1));
+
+        message
+            .tool_state
+            .as_mut()
+            .expect("tool state should exist")
+            .expanded = true;
+        let expanded = render_message_entry(&message, &theme, 80, false, false, "");
+        assert_eq!(expanded.tool_toggle_row_offset, Some(2));
     }
 
     #[test]
