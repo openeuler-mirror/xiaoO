@@ -28,9 +28,8 @@ pub(crate) fn load_input_history() -> Result<Vec<String>> {
     load_input_history_from_path(&input_history_path()?)
 }
 
-pub(crate) fn append_input_history(input: &str) -> Result<Vec<String>> {
-    let path = input_history_path()?;
-    append_input_history_at(&path, input)
+pub(crate) fn save_input_history(entries: &[String]) -> Result<()> {
+    save_input_history_at(&input_history_path()?, entries)
 }
 
 fn load_input_history_from_path(path: &Path) -> Result<Vec<String>> {
@@ -54,13 +53,6 @@ fn load_input_history_from_path(path: &Path) -> Result<Vec<String>> {
         })?,
     };
     normalize_entries(&mut entries);
-    Ok(entries)
-}
-
-fn append_input_history_at(path: &Path, input: &str) -> Result<Vec<String>> {
-    let mut entries = load_input_history_from_path(path)?;
-    append_entry(&mut entries, input);
-    save_input_history_at(path, &entries)?;
     Ok(entries)
 }
 
@@ -112,7 +104,7 @@ fn truncate_to_limit(entries: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_entry, append_input_history_at, input_history_path, load_input_history_from_path,
+        append_entry, input_history_path, load_input_history_from_path, save_input_history_at,
         MAX_INPUT_HISTORY,
     };
 
@@ -155,15 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn append_input_history_persists_to_given_history_path() {
+    fn save_input_history_persists_to_given_history_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let history_path = temp.path().join(".xiaoo").join("input_history.json");
+        let entries = vec!["first".to_string(), "second".to_string()];
 
-        append_input_history_at(&history_path, "first").expect("append first");
-        append_input_history_at(&history_path, "second").expect("append second");
+        save_input_history_at(&history_path, &entries).expect("save history");
 
         let loaded = load_input_history_from_path(&history_path).expect("load history");
-        assert_eq!(loaded, vec!["first".to_string(), "second".to_string()]);
+        assert_eq!(loaded, entries);
         assert!(history_path.exists());
     }
 }
