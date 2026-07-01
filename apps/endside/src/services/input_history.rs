@@ -85,7 +85,11 @@ fn save_input_history_at(path: &Path, entries: &[String]) -> Result<()> {
 }
 
 fn input_history_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("unable to resolve home directory for ~/.xiaoo")?;
+    input_history_path_from_home(dirs::home_dir())
+}
+
+fn input_history_path_from_home(home: Option<PathBuf>) -> Result<PathBuf> {
+    let home = home.context("unable to resolve home directory for ~/.xiaoo")?;
     Ok(home.join(".xiaoo").join(HISTORY_FILE_NAME))
 }
 
@@ -104,9 +108,10 @@ fn truncate_to_limit(entries: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_entry, input_history_path, load_input_history_from_path, save_input_history_at,
-        MAX_INPUT_HISTORY,
+        append_entry, input_history_path_from_home, load_input_history_from_path,
+        save_input_history_at, MAX_INPUT_HISTORY,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn append_entry_keeps_recent_limit() {
@@ -133,17 +138,19 @@ mod tests {
 
     #[test]
     fn input_history_path_uses_xiaoo_home_dir() {
-        let path = input_history_path().expect("history path");
-        assert_eq!(
-            path.file_name().and_then(|name| name.to_str()),
-            Some("input_history.json")
-        );
-        assert_eq!(
-            path.parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str()),
-            Some(".xiaoo")
-        );
+        let path =
+            input_history_path_from_home(Some(PathBuf::from("/home/test"))).expect("history path");
+
+        assert_eq!(path, PathBuf::from("/home/test/.xiaoo/input_history.json"));
+    }
+
+    #[test]
+    fn input_history_path_errors_without_home_dir() {
+        let error = input_history_path_from_home(None).expect_err("missing home should error");
+
+        assert!(error
+            .to_string()
+            .contains("unable to resolve home directory for ~/.xiaoo"));
     }
 
     #[test]
