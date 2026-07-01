@@ -713,6 +713,7 @@ fn apply_expanded_tool_panel(lines: &mut Vec<Line<'static>>, theme: &Theme, widt
     lines.push(spacer());
 }
 
+#[cfg(test)]
 fn line_display_width(line: &Line<'static>) -> usize {
     line.spans
         .iter()
