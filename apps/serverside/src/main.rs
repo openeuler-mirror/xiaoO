@@ -121,12 +121,78 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!(config = %config_path.display(), %addr, "starting rebuild daemon");
     let serve_result = axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum server exited unexpectedly");
-    if let Err(error) = backend_manager.shutdown_all().await {
-        tracing::warn!(error = %error, "failed to shutdown daemon backend manager");
+    // Best-effort sandbox cleanup with a bounded timeout so a slow/stuck
+    // provider delete call cannot keep the daemon alive indefinitely after a
+    // shutdown signal. Matches the TUI exit path which also bounds remote
+    // close to a few seconds.
+    let shutdown_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        backend_manager.shutdown_all(),
+    )
+    .await;
+    match shutdown_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to shutdown daemon backend manager");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "daemon backend manager shutdown timed out after 10s; \
+                 some sandboxes may linger and will be reclaimed lazily"
+            );
+        }
     }
     serve_result
+}
+
+/// Future that completes when the daemon receives a shutdown signal (SIGINT or
+/// SIGTERM). Wired into [`axum::serve`] via `with_graceful_shutdown` so that
+/// the HTTP server stops accepting new connections and the `shutdown_all`
+/// cleanup path that follows actually runs — without this the OS default
+/// action terminates the process immediately and owned sandboxes are never
+/// deleted.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // `None` when the handler could not be installed; the SIGTERM branch
+        // below stays pending forever in that case so SIGINT alone still
+        // drives the shutdown.
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => Some(s),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to install SIGTERM handler; only SIGINT will trigger shutdown"
+                );
+                None
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received SIGINT (Ctrl+C), initiating graceful shutdown");
+            }
+            _ = async {
+                match &mut sigterm {
+                    Some(s) => s.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                tracing::info!("received SIGTERM, initiating graceful shutdown");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %error, "failed to listen for Ctrl+C");
+        } else {
+            tracing::info!("received SIGINT (Ctrl+C), initiating graceful shutdown");
+        }
+    }
 }
 
 fn spawn_feishu_websocket_service(

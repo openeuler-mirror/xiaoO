@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Write};
+use std::io::BufReader;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ pub const PENDING_RESERVATION_TTL_MS: u64 = 300_000;
 /// resolved e2b API key, so it must be one-way hashed before being written
 /// to the shared `sandbox_counts.json` / `backend_registry.json` files to
 /// avoid persisting the secret in plaintext.
-pub const KEY_IDENTIFIER_PBKDF2_ITERATIONS: u32 = 10_000;
+const KEY_IDENTIFIER_PBKDF2_ITERATIONS: u32 = 10_000;
 
 /// Fixed application-specific salt for the PBKDF2 derivation. A fixed salt
 /// is acceptable here because the derived value is used as a deterministic
@@ -104,6 +104,35 @@ pub struct SandboxCounterData {
     pub counts: HashMap<String, usize>,
     #[serde(default)]
     pub pending_reservations: HashMap<String, Vec<PendingReservation>>,
+    /// Per-key count of "ghost" sandboxes: real sandboxes whose
+    /// `confirm_creation` arrived after the pool had already been refilled
+    /// to `max_per_key` (their TTL reservation was reclaimed mid-build and
+    /// the slot reused). Kept separate from `counts` to preserve the
+    /// `counts <= max_per_key` invariant: the over-limit sandbox is
+    /// accounted here, and `release` consumes a ghost credit before
+    /// decrementing `counts`, so `counts` never dips below the real live
+    /// count (which would let `check_and_reserve` admit a further sandbox
+    /// and cascade the breach). Cleared by `reconcile_counts`, which
+    /// re-derives `counts` from the registry.
+    #[serde(default)]
+    pub ghosts: HashMap<String, usize>,
+}
+
+impl SandboxCounterData {
+    /// Pop one pending reservation for `string_key`, removing the empty vec
+    /// if it becomes empty. Returns `true` if a reservation was popped (so
+    /// callers know whether to persist the change).
+    fn pop_pending(&mut self, string_key: &str) -> bool {
+        if let Some(reservations) = self.pending_reservations.get_mut(string_key) {
+            reservations.pop();
+            if reservations.is_empty() {
+                self.pending_reservations.remove(string_key);
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +172,6 @@ impl std::error::Error for SandboxCounterError {}
 
 #[derive(Debug, Default, Deserialize)]
 struct SandboxGlobalConfig {
-    #[serde(default)]
     max_sandbox_cnt: Option<usize>,
 }
 
@@ -189,19 +217,15 @@ pub struct SandboxCounter {
 }
 
 impl SandboxCounter {
-    pub fn new() -> Self {
-        let max_per_key = load_global_max_sandbox_cnt().unwrap_or(MAX_ACTIVE_SANDBOXES_PER_KEY);
-        Self::new_with_limit(max_per_key)
-    }
-
-    pub fn new_with_limit(max_per_key: usize) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let xiaoo_dir = home.join(".xiaoo");
-        std::fs::create_dir_all(&xiaoo_dir).ok();
-
+    /// Construct with an explicit storage directory. The counter and lock
+    /// files are derived from `dir`, so callers (notably tests) can isolate
+    /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
+    /// directory.
+    pub fn new_with_storage_dir(max_per_key: usize, dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&dir).ok();
         Self {
-            storage_path: xiaoo_dir.join("sandbox_counts.json"),
-            lock_path: xiaoo_dir.join("sandbox_counts.lock"),
+            storage_path: dir.join("sandbox_counts.json"),
+            lock_path: dir.join("sandbox_counts.lock"),
             max_per_key,
         }
     }
@@ -254,18 +278,28 @@ impl SandboxCounter {
         let mut data = self.load_data()?;
 
         let string_key = key.to_string_key();
-        // Pop one pending reservation (if any). If the reservation was
-        // already GC'd by the TTL (e.g. a slow build), we still increment
-        // the confirmed count so the counter stays accurate.
-        if let Some(reservations) = data.pending_reservations.get_mut(&string_key) {
-            reservations.pop();
-            if reservations.is_empty() {
-                data.pending_reservations.remove(&string_key);
-            }
-        }
+        // Pop one pending reservation (if any). The reservation has done
+        // its job of holding a slot during the build, so it is consumed
+        // regardless of whether the confirmed count is incremented below.
+        data.pop_pending(&string_key);
 
         let current = data.counts.get(&string_key).copied().unwrap_or(0);
-        data.counts.insert(string_key, current + 1);
+        if current < self.max_per_key {
+            data.counts.insert(string_key, current + 1);
+        } else {
+            // Ghost: this build's reservation was TTL-reclaimed mid-build
+            // and the freed slot reused until `counts` reached the limit.
+            // The real sandbox exists (the build completed), so it must be
+            // accounted — but in `ghosts`, not `counts`, to preserve
+            // `counts <= max_per_key`. The eventual `release` consumes a
+            // ghost credit first (instead of decrementing another
+            // sandbox's `counts`), which prevents the cascade breach the
+            // old bare-skip caused (a ghost whose release mis-decremented
+            // `counts`, dipping it below the limit and admitting a further
+            // sandbox). `ghosts` is cleared by `reconcile_counts` once
+            // `counts` is re-derived from the registry.
+            *data.ghosts.entry(string_key.clone()).or_insert(0) += 1;
+        }
 
         self.save_data(&data)?;
         Ok(())
@@ -280,11 +314,7 @@ impl SandboxCounter {
         let mut data = self.load_data()?;
 
         let string_key = key.to_string_key();
-        if let Some(reservations) = data.pending_reservations.get_mut(&string_key) {
-            reservations.pop();
-            if reservations.is_empty() {
-                data.pending_reservations.remove(&string_key);
-            }
+        if data.pop_pending(&string_key) {
             self.save_data(&data)?;
         }
 
@@ -297,6 +327,26 @@ impl SandboxCounter {
         let mut data = self.load_data()?;
 
         let string_key = key.to_string_key();
+        let ghosts = data.ghosts.get(&string_key).copied().unwrap_or(0);
+        if ghosts > 0 {
+            // This release corresponds to a ghost sandbox (one whose
+            // confirm was accounted in `ghosts`, not `counts`). Consume a
+            // ghost credit instead of decrementing `counts` — otherwise
+            // `counts` would drop below the real live count and let
+            // `check_and_reserve` admit a further sandbox (cascade
+            // breach). Mis-attribution (a normal sandbox's release
+            // consuming a ghost credit) is harmless: `counts + ghosts`
+            // stays equal to the real live count, and `ghosts > 0`
+            // implies `counts == max_per_key`, so `check_and_reserve`
+            // keeps rejecting while any ghost is live.
+            if ghosts > 1 {
+                data.ghosts.insert(string_key, ghosts - 1);
+            } else {
+                data.ghosts.remove(&string_key);
+            }
+            self.save_data(&data)?;
+            return Ok(());
+        }
         let current = data.counts.get(&string_key).copied().unwrap_or(0);
         if current > 0 {
             data.counts.insert(string_key, current - 1);
@@ -336,6 +386,15 @@ impl SandboxCounter {
                 changed = true;
             }
         }
+        // `counts` is now re-derived from the registry (the source of
+        // truth for live sandboxes), so the separate ghost bookkeeping is
+        // no longer needed — any over-limit sandboxes are already
+        // reflected in `counts` via `live_counts`. Drop all ghost credits
+        // so `release` goes back to decrementing `counts` directly.
+        if !data.ghosts.is_empty() {
+            data.ghosts.clear();
+            changed = true;
+        }
 
         if changed {
             self.save_data(&data)?;
@@ -343,6 +402,7 @@ impl SandboxCounter {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn get_count(&self, key: &SandboxCounterKey) -> Result<usize, SandboxCounterError> {
         let _in_process = IN_PROCESS_LOCK.lock().await;
         let _file_lock = self.acquire_lock()?;
@@ -350,6 +410,7 @@ impl SandboxCounter {
         Ok(data.counts.get(&key.to_string_key()).copied().unwrap_or(0))
     }
 
+    #[cfg(test)]
     pub async fn get_pending_count(
         &self,
         key: &SandboxCounterKey,
@@ -454,27 +515,12 @@ impl SandboxCounter {
     }
 
     fn save_data(&self, data: &SandboxCounterData) -> Result<(), SandboxCounterError> {
-        let file =
-            File::create(&self.storage_path).map_err(|e| SandboxCounterError::FileError {
-                message: format!("failed to create storage file: {}", e),
-            })?;
-
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, data).map_err(|e| SandboxCounterError::ParseError {
-            message: format!("failed to write storage file: {}", e),
-        })?;
-
-        writer.flush().map_err(|e| SandboxCounterError::FileError {
-            message: format!("failed to flush storage file: {}", e),
-        })?;
-
-        Ok(())
-    }
-}
-
-impl Default for SandboxCounter {
-    fn default() -> Self {
-        Self::new()
+        super::atomic_save_json(&self.storage_path, data).map_err(|e| match e {
+            super::AtomicSaveError::Io(msg) => SandboxCounterError::FileError { message: msg },
+            super::AtomicSaveError::Serialize(msg) => {
+                SandboxCounterError::ParseError { message: msg }
+            }
+        })
     }
 }
 
@@ -488,6 +534,42 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    /// Build a counter backed by a fresh temporary directory so the test
+    /// never touches the shared `~/.xiaoo/sandbox_counts.json` used by a
+    /// running daemon. The returned `TempDir` must outlive the counter.
+    fn temp_counter() -> (TempDir, SandboxCounter) {
+        let dir = TempDir::new().expect("tempdir");
+        let counter = SandboxCounter::new_with_storage_dir(
+            MAX_ACTIVE_SANDBOXES_PER_KEY,
+            dir.path().to_path_buf(),
+        );
+        (dir, counter)
+    }
+
+    /// Force the most recent pending reservation for `key` to be stale so
+    /// the next `load_data` GCs it, simulating a build that exceeded
+    /// `PENDING_RESERVATION_TTL_MS`.
+    async fn force_pending_stale(counter: &SandboxCounter, key: &SandboxCounterKey) {
+        let _in_process = IN_PROCESS_LOCK.lock().await;
+        let mut data = counter.load_data().expect("load");
+        let stale_ms = current_time_ms().saturating_sub(PENDING_RESERVATION_TTL_MS + 1_000);
+        if let Some(reservations) = data.pending_reservations.get_mut(&key.to_string_key()) {
+            if let Some(last) = reservations.last_mut() {
+                last.reserved_at_ms = stale_ms;
+            }
+        }
+        counter.save_data(&data).expect("save stale");
+    }
+
+    /// Read the per-key ghost count directly from the data file (test-only
+    /// inspector; production code never reads `ghosts` directly).
+    async fn ghost_count(counter: &SandboxCounter, key: &SandboxCounterKey) -> usize {
+        let _in_process = IN_PROCESS_LOCK.lock().await;
+        let data = counter.load_data().expect("load");
+        data.ghosts.get(&key.to_string_key()).copied().unwrap_or(0)
+    }
 
     #[test]
     fn key_identifier_is_hashed_and_deterministic() {
@@ -511,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_and_reserve_at_limit() {
-        let counter = SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY);
+        let (_dir, counter) = temp_counter();
         let key = SandboxCounterKey::new("e2b", "test-limit");
 
         for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
@@ -538,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_and_release() {
-        let counter = SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY);
+        let (_dir, counter) = temp_counter();
         let key = SandboxCounterKey::new("e2b", "test-confirm");
 
         counter
@@ -560,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pending_counts() {
-        let counter = SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY);
+        let (_dir, counter) = temp_counter();
         let key = SandboxCounterKey::new("e2b", "test-pending");
 
         counter
@@ -594,7 +676,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_in_process_lock_protection() {
-        let counter = Arc::new(SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY));
+        let (_dir, counter) = temp_counter();
+        let counter = Arc::new(counter);
         let key = SandboxCounterKey::new("e2b", "test-concurrent");
 
         let mut tasks = Vec::new();
@@ -624,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stale_pending_reservations_are_gc_on_load() {
-        let counter = SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY);
+        let (_dir, counter) = temp_counter();
         let key = SandboxCounterKey::new("e2b", "test-stale-gc");
 
         // Seed a stale pending reservation directly into the data file.
@@ -644,6 +727,7 @@ mod tests {
                         },
                     ],
                 )]),
+                ghosts: HashMap::new(),
             };
             counter.save_data(&data).expect("save stale data");
         }
@@ -668,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fresh_pending_reservations_survive_gc() {
-        let counter = SandboxCounter::new_with_limit(MAX_ACTIVE_SANDBOXES_PER_KEY);
+        let (_dir, counter) = temp_counter();
         let key = SandboxCounterKey::new("e2b", "test-fresh-pending");
 
         counter
@@ -686,6 +770,130 @@ mod tests {
             .cancel_reservation(&key)
             .await
             .expect("should cancel");
+    }
+
+    #[tokio::test]
+    async fn test_confirm_after_pending_gc_does_not_breach_limit() {
+        // A slow build (> PENDING_RESERVATION_TTL_MS) has its reservation
+        // GC'd, the freed slot is reused until the pool is full, then the
+        // slow build completes and calls confirm_creation. `counts` must
+        // NOT exceed max_per_key; the over-limit sandbox is accounted in
+        // `ghosts`, and `release` consumes the ghost credit so `counts`
+        // never dips below the real live count (no cascade breach).
+        let (_dir, counter) = temp_counter();
+        let key = SandboxCounterKey::new("e2b", "test-gc-confirm-full");
+
+        // Reserve a slot for the "slow build".
+        counter
+            .check_and_reserve(&key)
+            .await
+            .expect("should reserve slow build");
+
+        // Force the reservation stale so the next load_data GCs it.
+        force_pending_stale(&counter, &key).await;
+
+        // Trigger GC; the stale reservation is reclaimed.
+        let pending = counter
+            .get_pending_count(&key)
+            .await
+            .expect("should get pending");
+        assert_eq!(pending, 0, "stale reservation should be gc'd");
+
+        // Another process fills the pool to the limit, reusing the freed slot.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            counter
+                .check_and_reserve(&key)
+                .await
+                .expect("should reserve");
+            counter
+                .confirm_creation(&key)
+                .await
+                .expect("should confirm");
+        }
+
+        // The slow build finally completes. Its reservation is gone and
+        // the pool is full, so confirm_creation cannot increment `counts`
+        // (that would breach the limit). Instead it records a ghost
+        // credit: the real sandbox exists and must be tracked, but in
+        // `ghosts` so `counts <= max_per_key` holds.
+        counter
+            .confirm_creation(&key)
+            .await
+            .expect("should confirm");
+
+        let count = counter.get_count(&key).await.expect("should get count");
+        assert_eq!(
+            count, MAX_ACTIVE_SANDBOXES_PER_KEY,
+            "counts must not breach max_per_key; the ghost is in `ghosts`"
+        );
+        assert_eq!(
+            ghost_count(&counter, &key).await,
+            1,
+            "the ghost sandbox must be accounted in ghosts"
+        );
+
+        // While the ghost is live, new reservations must be rejected so
+        // the over-limit does not cascade into a further sandbox.
+        let result = counter.check_and_reserve(&key).await;
+        assert!(
+            matches!(result, Err(SandboxCounterError::LimitExceeded { .. })),
+            "check_and_reserve must reject while a ghost is live"
+        );
+
+        // Releasing the ghost consumes the ghost credit (not `counts`), so
+        // `counts` stays at the limit and the bookkeeping self-corrects.
+        counter.release(&key).await.expect("should release ghost");
+        assert_eq!(
+            counter.get_count(&key).await.expect("count"),
+            MAX_ACTIVE_SANDBOXES_PER_KEY,
+            "ghost release must not decrement counts"
+        );
+        assert_eq!(
+            ghost_count(&counter, &key).await,
+            0,
+            "ghost credit consumed"
+        );
+
+        // A subsequent normal release now drops `counts` below the limit.
+        counter.release(&key).await.expect("should release normal");
+        assert_eq!(
+            counter.get_count(&key).await.expect("count"),
+            MAX_ACTIVE_SANDBOXES_PER_KEY - 1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_confirm_after_pending_gc_increments_when_under_limit() {
+        // When the reservation was GC'd but the pool is NOT full,
+        // confirm_creation should still increment the confirmed count so
+        // the real sandbox is tracked.
+        let (_dir, counter) = temp_counter();
+        let key = SandboxCounterKey::new("e2b", "test-gc-confirm-under");
+
+        counter
+            .check_and_reserve(&key)
+            .await
+            .expect("should reserve slow build");
+
+        // Force the reservation stale and trigger GC.
+        force_pending_stale(&counter, &key).await;
+        let pending = counter
+            .get_pending_count(&key)
+            .await
+            .expect("should get pending");
+        assert_eq!(pending, 0, "stale reservation should be gc'd");
+
+        // Pool is empty, so confirm_creation should still increment.
+        counter
+            .confirm_creation(&key)
+            .await
+            .expect("should confirm");
+
+        let count = counter.get_count(&key).await.expect("should get count");
+        assert_eq!(
+            count, 1,
+            "confirm after GC should still count the sandbox when under the limit"
+        );
     }
 
     #[test]

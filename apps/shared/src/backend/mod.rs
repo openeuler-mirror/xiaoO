@@ -1,13 +1,14 @@
 use agent_contracts::backend::{
-    BackendControlError, BackendCreateRequest as ProviderBackendCreateRequest,
-    BackendDeleteRequest, BackendId, BackendInstance, BackendLifecycle, BackendLifecycleReason,
-    BackendPath, BackendProvider, BackendResourceLimits, OperationBackend,
-    OperationBackendBuildError, OperationError,
+    BackendCreateRequest as ProviderBackendCreateRequest, BackendDeleteRequest, BackendId,
+    BackendInstance, BackendLifecycle, BackendLifecycleReason, BackendPath, BackendProvider,
+    BackendResourceLimits, OperationBackend, OperationBackendBuildError, OperationError,
 };
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod backend_manager;
@@ -19,23 +20,22 @@ mod sandbox_counter;
 
 pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
-pub use backend_registry::{
-    BackendRegistry, BackendRegistryData, BackendRegistryEntry, BackendRegistryError,
-    SessionStatusSnapshot,
-};
+use backend_registry::{BackendRegistry, BackendRegistryEntry, BackendRegistryError};
 pub use base::{
     BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
-    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
-    BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
-    BackendLease, BackendLineageInfo, BackendListFilter, BackendManagerLimits, BackendTreeNode,
-    GatewayBackendConfig, STALE_OWNER_THRESHOLD_MS,
+    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest, BackendCreateRequest,
+    BackendEnsureSessionRequest, BackendError, BackendForkResult, BackendLease,
+    GatewayBackendConfig,
+};
+use base::{
+    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendForkRequest, BackendInfo,
+    BackendLineageInfo, BackendListFilter, BackendManagerLimits, BackendTreeNode,
+    STALE_OWNER_THRESHOLD_MS,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
-pub use sandbox_counter::{
-    global_sandbox_config_path, load_global_max_sandbox_cnt, load_max_sandbox_cnt_from_path,
-    PendingReservation, SandboxCounter, SandboxCounterData, SandboxCounterError, SandboxCounterKey,
-    MAX_ACTIVE_SANDBOXES_PER_KEY, PENDING_RESERVATION_TTL_MS,
+use sandbox_counter::{
+    load_global_max_sandbox_cnt, SandboxCounter, SandboxCounterError, SandboxCounterKey,
+    MAX_ACTIVE_SANDBOXES_PER_KEY,
 };
 
 struct BackendInstanceEntry {
@@ -159,6 +159,58 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Error from [`atomic_save_json`].
+enum AtomicSaveError {
+    Io(String),
+    Serialize(String),
+}
+
+/// Atomically write `data` as JSON to `storage_path`: serialize into a
+/// sibling temp file, fsync it, then rename it over the real path.
+/// `File::create` would truncate the target immediately, so a crash
+/// between truncation and a complete flush would leave the storage file
+/// empty or partially written. Writing to a temp file first means the
+/// live file is never observed in a torn state: a crash at any point
+/// leaves either the previous contents or the fully written new contents.
+fn atomic_save_json<T: serde::Serialize>(
+    storage_path: &Path,
+    data: &T,
+) -> Result<(), AtomicSaveError> {
+    let parent = storage_path
+        .parent()
+        .ok_or_else(|| AtomicSaveError::Io("storage_path has no parent directory".to_string()))?;
+    let file_name = storage_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("data.json");
+    let temp_path = parent.join(format!(".{}.tmp", file_name));
+
+    let mut file = File::create(&temp_path)
+        .map_err(|e| AtomicSaveError::Io(format!("failed to create temp storage file: {}", e)))?;
+
+    let mut writer = BufWriter::new(&mut file);
+    serde_json::to_writer(&mut writer, data)
+        .map_err(|e| AtomicSaveError::Serialize(format!("failed to write storage file: {}", e)))?;
+    writer
+        .flush()
+        .map_err(|e| AtomicSaveError::Io(format!("failed to flush storage file: {}", e)))?;
+    // Drop the BufWriter borrow so we can fsync the underlying File.
+    drop(writer);
+    file.sync_all()
+        .map_err(|e| AtomicSaveError::Io(format!("failed to sync storage file: {}", e)))?;
+    drop(file);
+
+    if let Err(e) = std::fs::rename(&temp_path, storage_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(AtomicSaveError::Io(format!(
+            "failed to rename storage file: {}",
+            e
+        )));
+    }
+
+    Ok(())
 }
 
 fn metadata_matches_filter(metadata: &Value, filter: &BTreeMap<String, String>) -> bool {
@@ -365,14 +417,10 @@ async fn delete_backend_instance(
             metadata: instance.instance.metadata,
         })
         .await
-        .map_err(control_error_to_operation_error)?;
+        .map_err(|error| OperationError::Transport {
+            message: error.to_string(),
+        })?;
     Ok(())
-}
-
-fn control_error_to_operation_error(error: BackendControlError) -> OperationError {
-    OperationError::Transport {
-        message: error.to_string(),
-    }
 }
 
 impl BackendInstanceEntry {
@@ -443,13 +491,17 @@ mod tests {
     #[tokio::test]
     async fn e2b_limit_rejects_before_provider_build() {
         let workspace = TempDir::new().expect("workspace");
-        // Use an explicit limit so the test does not depend on the global
-        // `~/.config/xiaoo/sandbox.toml` config file that `BackendManager::new`
-        // would otherwise read.
-        let manager = BackendManager::new_with_limits(BackendManagerLimits {
-            max_active_sandboxes_per_key: Some(MAX_ACTIVE_SANDBOXES_PER_KEY),
-            ..Default::default()
-        });
+        // Use an explicit limit and an isolated storage dir so the test does
+        // not depend on, nor mutate, the shared `~/.xiaoo/` and
+        // `~/.config/xiaoo/` files used by a running daemon.
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits {
+                max_active_sandboxes_per_key: Some(MAX_ACTIVE_SANDBOXES_PER_KEY),
+                ..Default::default()
+            },
+            storage.path().to_path_buf(),
+        );
 
         // Compute the sandbox key the same way `create_backend` does so the
         // pre-filled counter matches what the manager will check, regardless
@@ -467,8 +519,7 @@ mod tests {
         // Pre-fill the sandbox pool to the hard limit via the counter directly,
         // without building real e2b sandboxes (which need provider
         // credentials). This isolates the limit-check path from the provider
-        // build path, mirroring the pre-scheduling behaviour where the limit
-        // was enforced before build_backend was ever called.
+        // build path.
         for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
             manager
                 .sandbox_counter()
@@ -519,7 +570,11 @@ mod tests {
         // that belongs to a live sandbox, letting
         // `MAX_ACTIVE_SANDBOXES_PER_KEY + N_stale` sandboxes coexist before
         // the limit truly bites.
-        let manager = BackendManager::new();
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits::default(),
+            storage.path().to_path_buf(),
+        );
         let key = SandboxCounterKey::new("e2b", "e2b_reconcile_stale_unique");
 
         // Clean slate for this test key in both shared stores.
@@ -591,7 +646,11 @@ mod tests {
     #[tokio::test]
     async fn local_backends_do_not_consume_sandbox_counter() {
         let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits::default(),
+            storage.path().to_path_buf(),
+        );
 
         for name in ["local-a", "local-b", "local-c"] {
             manager

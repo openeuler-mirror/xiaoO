@@ -16,7 +16,7 @@ use memory::MemorySnapshot;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use subagent::{
     HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
@@ -35,14 +35,8 @@ struct PendingJoinWaiter {
 }
 
 struct PendingInteractionWaiter {
-    #[allow(dead_code)]
-    request_id: String,
     agent_id: AgentId,
-    #[allow(dead_code)]
-    request: InteractionRequest,
     response_tx: oneshot::Sender<InteractionResponse>,
-    #[allow(dead_code)]
-    created_at: Instant,
 }
 
 struct LaneRunInput {
@@ -155,11 +149,8 @@ impl SessionSupervisor {
     ) {
         let supervisor = Arc::clone(self);
         let waiter = PendingInteractionWaiter {
-            request_id: request_id.clone(),
             agent_id: agent_id.clone(),
-            request: request.clone(),
             response_tx,
-            created_at: Instant::now(),
         };
 
         self.pending_interactions
