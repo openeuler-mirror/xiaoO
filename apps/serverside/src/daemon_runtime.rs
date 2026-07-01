@@ -24,7 +24,7 @@ use skill::FileSkillRegistry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
 use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
@@ -53,6 +53,20 @@ struct EffectiveLlmConfig {
     api_key: Option<String>,
 }
 
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct ProviderConfigSig {
+    provider: String,
+    model: String,
+    api_base: Option<String>,
+    api_key_env: Option<String>,
+    api_key: Option<String>,
+}
+
+struct CachedProvider {
+    provider: Arc<LlmProviderWrapper>,
+    context_window: usize,
+}
+
 impl EffectiveLlmConfig {
     fn session_config(&self) -> xiaoo_shared::gateway::LlmRuntimeConfig {
         xiaoo_shared::gateway::LlmRuntimeConfig {
@@ -61,6 +75,16 @@ impl EffectiveLlmConfig {
             api_base: self.api_base.clone(),
             api_key_env: self.api_key_env.clone(),
             api_key: None,
+        }
+    }
+
+    fn signature(&self) -> ProviderConfigSig {
+        ProviderConfigSig {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            api_base: self.api_base.clone(),
+            api_key_env: self.api_key_env.clone(),
+            api_key: self.api_key.clone(),
         }
     }
 }
@@ -78,6 +102,9 @@ pub struct ConfiguredRuntimeResolver {
     llm: LlmConfig,
     config_path: PathBuf,
     max_output_tokens: usize,
+    effective_context_window: usize,
+    llm_provider: Arc<LlmProviderWrapper>,
+    provider_pool: Arc<RwLock<HashMap<ProviderConfigSig, CachedProvider>>>,
     compact: Option<CompactConfig>,
     agent_roles: BTreeMap<String, AgentRoleConfig>,
     subagent_roles: BTreeMap<String, ConfigSubagentRole>,
@@ -139,6 +166,9 @@ impl ConfiguredRuntimeResolver {
             llm: config.app.llm.clone(),
             config_path: config.config_path().to_path_buf(),
             max_output_tokens: config.max_output_tokens(),
+            effective_context_window,
+            llm_provider,
+            provider_pool: Arc::new(RwLock::new(HashMap::new())),
             compact: config.resolve_compact_config().cloned(),
             agent_roles: config.app.agent.clone(),
             subagent_roles: config.app.subagent.clone(),
@@ -163,35 +193,16 @@ impl ConfiguredRuntimeResolver {
         existing: Option<&SessionRecord>,
     ) -> Result<ResolvedLlmRuntime, SessionRuntimeResolveError> {
         let effective = self.effective_llm_config(request, existing);
-        let api_key = resolve_llm_api_key(&effective)?;
-        let resolved_provider = resolve_config(ResolveInput {
-            provider: Some(effective.provider.clone()),
-            protocol: None,
-            api_key,
-            api_key_env: None,
-            base_url: effective.api_base.clone(),
-        })
-        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-            message: format!("failed to resolve llm provider config: {error}"),
-        })?;
 
-        let llm_provider = Arc::new(
-            create_llm_provider_from_resolved(
-                &resolved_provider,
-                effective.model.clone(),
-                Some(self.agent.id.clone()),
-                None,
-            )
-            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-                message: format!("failed to create llm provider: {error}"),
-            })?,
-        );
-        let effective_context_window = resolve_effective_context_window(
-            &resolved_provider,
-            &effective.model,
-            llm_provider.capabilities().max_context_window,
-        )
-        .await;
+        let (llm_provider, effective_context_window) =
+            if self.effective_config_matches_startup(&effective) {
+                (
+                    Arc::clone(&self.llm_provider),
+                    self.effective_context_window,
+                )
+            } else {
+                self.resolve_override_provider(&effective).await?
+            };
         let token_budget = build_token_budget(effective_context_window, self.max_output_tokens);
 
         validate_token_budget_config(
@@ -214,6 +225,80 @@ impl ConfiguredRuntimeResolver {
             token_budget,
             compression_pipeline: Some(compression_pipeline),
         })
+    }
+
+    fn effective_config_matches_startup(&self, effective: &EffectiveLlmConfig) -> bool {
+        effective.provider == self.llm.provider
+            && effective.model == self.agent.model
+            && effective.api_base == self.llm.api_base
+            && effective.api_key_env == self.llm.api_key_env
+            && effective.api_key.is_none()
+    }
+
+    async fn resolve_override_provider(
+        &self,
+        effective: &EffectiveLlmConfig,
+    ) -> Result<(Arc<LlmProviderWrapper>, usize), SessionRuntimeResolveError> {
+        let sig = effective.signature();
+
+        if let Ok(guard) = self.provider_pool.read() {
+            if let Some(cached) = guard.get(&sig) {
+                tracing::debug!(
+                    ?sig.provider,
+                    ?sig.model,
+                    "Reusing cached override LLM provider from pool"
+                );
+                return Ok((Arc::clone(&cached.provider), cached.context_window));
+            }
+        }
+
+        let api_key = resolve_llm_api_key(effective)?;
+        let resolved_provider = resolve_config(ResolveInput {
+            provider: Some(effective.provider.clone()),
+            protocol: None,
+            api_key,
+            api_key_env: None,
+            base_url: effective.api_base.clone(),
+        })
+        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+            message: format!("failed to resolve llm provider config: {error}"),
+        })?;
+
+        let created = Arc::new(
+            create_llm_provider_from_resolved(
+                &resolved_provider,
+                effective.model.clone(),
+                Some(self.agent.id.clone()),
+                None,
+            )
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("failed to create llm provider: {error}"),
+            })?,
+        );
+
+        let context_window = resolve_effective_context_window(
+            &resolved_provider,
+            &effective.model,
+            created.capabilities().max_context_window,
+        )
+        .await;
+
+        if let Ok(mut guard) = self.provider_pool.write() {
+            use std::collections::hash_map::Entry;
+            let (provider, context_window) = match guard.entry(sig) {
+                Entry::Occupied(e) => (Arc::clone(&e.get().provider), e.get().context_window),
+                Entry::Vacant(e) => {
+                    e.insert(CachedProvider {
+                        provider: Arc::clone(&created),
+                        context_window,
+                    });
+                    (Arc::clone(&created), context_window)
+                }
+            };
+            return Ok((provider, context_window));
+        }
+
+        Ok((created, context_window))
     }
 
     fn effective_llm_config(
