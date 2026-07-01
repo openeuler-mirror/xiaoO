@@ -410,7 +410,9 @@ pub fn apply_snapshot(
     state.slash = Default::default();
     state.render_state = Default::default();
     state.external_commands = crate::services::command_loader::load_external_commands();
+    let input_history = state.chat_state.input_history.clone();
     state.chat_state = chat_state_with_messages(&state.agent_config, snapshot.chat_messages);
+    state.chat_state.set_input_history(input_history);
 
     if let Some(metrics) = snapshot.status_metrics {
         state.status_panel.total_tokens = metrics.total_tokens;
