@@ -29,6 +29,7 @@ prompt = { path = "../../crates/prompt" }
 prost = "0.13"
 regex = "1.11"
 reqwest.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 skill = { path = "../../crates/skill" }

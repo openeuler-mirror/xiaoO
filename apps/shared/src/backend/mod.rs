@@ -24,13 +24,12 @@ use backend_registry::{BackendRegistry, BackendRegistryEntry, BackendRegistryErr
 pub use base::{
     BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
     BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest, BackendCreateRequest,
-    BackendEnsureSessionRequest, BackendError, BackendForkResult, BackendLease,
-    GatewayBackendConfig,
+    BackendEnsureSessionRequest, BackendError, BackendForkResult, BackendInfo, BackendLease,
+    BackendListFilter, BackendTreeNode, GatewayBackendConfig,
 };
 use base::{
-    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendForkRequest, BackendInfo,
-    BackendLineageInfo, BackendListFilter, BackendManagerLimits, BackendTreeNode,
-    STALE_OWNER_THRESHOLD_MS,
+    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendForkRequest,
+    BackendLineageInfo, BackendManagerLimits, STALE_OWNER_THRESHOLD_MS,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
 use sandbox_counter::{

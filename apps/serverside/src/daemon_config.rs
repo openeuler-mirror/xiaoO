@@ -123,6 +123,31 @@ pub struct HttpConfig {
     pub bearer_token_env: Option<String>,
     #[serde(default)]
     pub rate_limit: Option<RateLimitConfig>,
+    #[serde(default)]
+    pub dashboard: Option<DashboardConfig>,
+}
+
+/// Optional `[http.dashboard]` section controlling the read-only session and
+/// sandbox dashboard served on a separate HTTP port so it never clashes with
+/// the bearer-protected runtime API on the main port.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DashboardConfig {
+    /// Whether the dashboard server should start. Defaults to `true` when the
+    /// section is absent or the field is omitted.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Bind address. CLI `--dashboard-host` takes precedence over this value.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Listen port. CLI `--dashboard-port` takes precedence over this value.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl DashboardConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -404,6 +429,40 @@ impl DaemonConfig {
         }
 
         Ok(Some(trimmed.to_string()))
+    }
+
+    /// Resolves the dashboard listen host. CLI `--dashboard-host` (passed in
+    /// as `cli_host`) takes precedence over `[http.dashboard].host`; both
+    /// default to `127.0.0.1` so the dashboard is only reachable locally
+    /// unless explicitly exposed.
+    pub fn dashboard_host(&self, cli_host: Option<String>) -> String {
+        cli_host
+            .or_else(|| {
+                self.app
+                    .http
+                    .dashboard
+                    .as_ref()
+                    .and_then(|d| d.host.clone())
+            })
+            .unwrap_or_else(|| "127.0.0.1".to_string())
+    }
+
+    /// Resolves the requested dashboard port. CLI `--dashboard-port` (passed
+    /// in as `cli_port`) takes precedence over `[http.dashboard].port`; both
+    /// default to `28081`. Returns `None` when the dashboard is disabled via
+    /// `[http.dashboard].enabled = false`.
+    pub fn dashboard_port(&self, cli_port: Option<u16>) -> Option<u16> {
+        let dashboard = self.app.http.dashboard.as_ref();
+        if let Some(d) = dashboard {
+            if !d.is_enabled() {
+                return None;
+            }
+        }
+        Some(
+            cli_port
+                .or_else(|| dashboard.and_then(|d| d.port))
+                .unwrap_or(28_081),
+        )
     }
 
     pub fn feishu_config(&self) -> Result<Option<FeishuConfig>> {
