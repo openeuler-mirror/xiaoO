@@ -716,6 +716,33 @@ impl ChatState {
         self.stick_to_bottom = self.scroll_offset >= max;
         self.sync_scrollbar_state();
     }
+
+    /// Page step for PageUp/PageDown: scroll by the visible height minus one line so a
+    /// single line of context overlaps between pages (standard pager behavior). Always
+    /// at least one line so paging still works on very short viewports.
+    fn page_step(&self) -> usize {
+        self.last_visible_height.saturating_sub(1).max(1)
+    }
+
+    /// Scroll the transcript up by one page (visible height). Disables stick-to-bottom
+    /// so the view stays in place instead of jumping back to the streaming tail.
+    pub fn scroll_page_up(&mut self) {
+        self.stick_to_bottom = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(self.page_step());
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll the transcript down by one page (visible height). Re-enables
+    /// stick-to-bottom once the bottom of the transcript is reached.
+    pub fn scroll_page_down(&mut self) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = self
+            .scroll_offset
+            .saturating_add(self.page_step())
+            .min(max);
+        self.stick_to_bottom = self.scroll_offset >= max;
+        self.sync_scrollbar_state();
+    }
 }
 
 #[cfg(test)]
@@ -849,5 +876,102 @@ mod tests {
             .render(buffer.area, &mut buffer, &mut legacy_state);
 
         assert_eq!(buffer[(0, 4)].symbol(), "░");
+    }
+
+    #[test]
+    fn page_step_overlaps_one_line_for_pager_style_paging() {
+        let mut chat = ChatState::default();
+        chat.last_visible_height = 20;
+        assert_eq!(chat.page_step(), 19);
+
+        // A viewport of a single line still pages by one.
+        chat.last_visible_height = 1;
+        assert_eq!(chat.page_step(), 1);
+
+        // A zero-height viewport degrades to a one-line step instead of stalling.
+        chat.last_visible_height = 0;
+        assert_eq!(chat.page_step(), 1);
+    }
+
+    #[test]
+    fn scroll_page_up_moves_back_by_viewport_and_unsticks_from_bottom() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 100;
+        chat.last_visible_height = 20;
+        // Start glued to the streaming tail.
+        chat.scroll_offset = chat.max_scroll_offset(); // 80
+        chat.stick_to_bottom = true;
+
+        chat.scroll_page_up();
+
+        // 80 - 19 = 61, with one line of overlap retained.
+        assert_eq!(chat.scroll_offset, 61);
+        assert!(!chat.stick_to_bottom);
+    }
+
+    #[test]
+    fn scroll_page_up_clamps_at_top_without_overshooting() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 100;
+        chat.last_visible_height = 20;
+        chat.scroll_offset = 5;
+        chat.stick_to_bottom = false;
+
+        chat.scroll_page_up();
+
+        // 5.saturating_sub(19) == 0; never goes negative.
+        assert_eq!(chat.scroll_offset, 0);
+        assert!(!chat.stick_to_bottom);
+    }
+
+    #[test]
+    fn scroll_page_down_advances_by_viewport_and_resticks_at_bottom() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 100;
+        chat.last_visible_height = 20;
+        chat.scroll_offset = 0;
+        chat.stick_to_bottom = false;
+
+        chat.scroll_page_down();
+
+        // 0 + 19 = 19, one line of overlap with the previous page.
+        assert_eq!(chat.scroll_offset, 19);
+        assert!(!chat.stick_to_bottom);
+
+        // Paging further eventually lands exactly on the bottom and re-sticks.
+        chat.scroll_page_down(); // 19 + 19 = 38
+        chat.scroll_page_down(); // 38 + 19 = 57
+        chat.scroll_page_down(); // 57 + 19 = 76
+        chat.scroll_page_down(); // 76 + 19 = 95, clamped to max 80
+        assert_eq!(chat.scroll_offset, chat.max_scroll_offset());
+        assert!(chat.stick_to_bottom);
+    }
+
+    #[test]
+    fn scroll_page_down_at_bottom_keeps_stick_to_bottom() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 100;
+        chat.last_visible_height = 20;
+        chat.scroll_offset = chat.max_scroll_offset();
+        chat.stick_to_bottom = true;
+
+        chat.scroll_page_down();
+
+        // Already at the bottom: stays at max and remains stuck.
+        assert_eq!(chat.scroll_offset, chat.max_scroll_offset());
+        assert!(chat.stick_to_bottom);
+    }
+
+    #[test]
+    fn page_scroll_respects_short_transcript_without_overflow() {
+        let mut chat = ChatState::default();
+        chat.total_lines = 5;
+        chat.last_visible_height = 20;
+        chat.scroll_offset = 0;
+
+        // max_scroll_offset is 0 (everything fits), so paging down stays put and sticks.
+        chat.scroll_page_down();
+        assert_eq!(chat.scroll_offset, 0);
+        assert!(chat.stick_to_bottom);
     }
 }
