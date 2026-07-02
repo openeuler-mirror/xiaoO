@@ -24,6 +24,7 @@ use super::input::FileReadInput;
 use super::output::FileReadOutput;
 use super::readers;
 use super::spec::FileReadToolSpec;
+use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 use crate::r#impl::lsp_hooks::spawn_touch_file;
 use crate::r#impl::ToolRuntimeServices;
 
@@ -142,16 +143,18 @@ impl FileReadExecutor {
         backend: &dyn agent_contracts::backend::OperationBackend,
     ) -> Result<FileReadOutput, String> {
         if let Some(ref pages) = input.pages {
-            let temp_path = backend
-                .files()
-                .temp_path(TempPathRequest {
+            let temp_path = timed(
+                "file_read temp_path",
+                DEFAULT_FS_TIMEOUT_MS,
+                backend.files().temp_path(TempPathRequest {
                     kind: TempPathKind::Directory,
                     preferred_parent: None,
                     prefix: Some("pdf_pages".to_string()),
                     suffix: None,
-                })
-                .await
-                .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+                }),
+            )
+            .await
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
             let output_dir_str = temp_path.to_string();
             let (parts, files) =
@@ -159,15 +162,17 @@ impl FileReadExecutor {
                     .map_err(|e| e.to_string())?;
 
             for (output_path, content) in files {
-                backend
-                    .files()
-                    .write_bytes(WriteBytesRequest {
+                timed(
+                    "file_read write_pdf_part",
+                    DEFAULT_FS_TIMEOUT_MS,
+                    backend.files().write_bytes(WriteBytesRequest {
                         path: BackendPath(output_path),
                         content,
                         mode: WriteMode::Create,
-                    })
-                    .await
-                    .map_err(|e| format!("Failed to write PDF part: {}", e))?;
+                    }),
+                )
+                .await
+                .map_err(|e| format!("Failed to write PDF part: {}", e))?;
             }
 
             return Ok(FileReadOutput::Parts(parts));
@@ -319,18 +324,20 @@ impl ToolExecutor for FileReadExecutor {
 
         let file_path = Self::normalize_path(&input.file_path);
 
-        let resolved = backend
-            .paths()
-            .resolve_path(
+        let resolved = timed(
+            "file_read resolve_path",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.paths().resolve_path(
                 agent_contracts::backend::capability::path::ResolvePathRequest {
                     raw_path: file_path.clone(),
                     base: ResolveBase::WorkspaceRoot,
                 },
-            )
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to resolve path: {}", e),
-            })?;
+            ),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to resolve path: {}", e),
+        })?;
 
         let resolved_str = resolved.to_string();
 
@@ -349,10 +356,14 @@ impl ToolExecutor for FileReadExecutor {
             });
         }
 
-        let stat = backend.files().stat(&resolved).await.map_err(|e| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to stat file: {}", e),
-            }
+        let stat = timed(
+            "file_read stat",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().stat(&resolved),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to stat file: {}", e),
         })?;
 
         if !stat.exists {
@@ -363,15 +374,17 @@ impl ToolExecutor for FileReadExecutor {
             });
         }
 
-        let bytes = backend
-            .files()
-            .read_bytes(ReadBytesRequest {
+        let bytes = timed(
+            "file_read read_bytes",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().read_bytes(ReadBytesRequest {
                 path: resolved.clone(),
-            })
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to read file: {}", e),
-            })?;
+            }),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to read file: {}", e),
+        })?;
 
         let ext = Self::get_extension(&resolved_str).unwrap_or_default();
         let mtime = system_time_to_timestamp(stat.modified_at);

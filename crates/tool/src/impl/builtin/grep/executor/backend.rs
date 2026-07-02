@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agent_contracts::backend::capability::exec::ExecRequest;
 use agent_contracts::backend::capability::path::{ResolveBase, ResolvePathRequest};
@@ -11,10 +12,13 @@ use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, Too
 use async_trait::async_trait;
 
 use super::super::validation::backend as validation;
-use super::constants::{DEFAULT_HEAD_LIMIT, RG_MAX_COLUMNS, VCS_DIRECTORIES_TO_EXCLUDE};
+use super::constants::{
+    default_timeout_ms, DEFAULT_HEAD_LIMIT, RG_MAX_COLUMNS, VCS_DIRECTORIES_TO_EXCLUDE,
+};
 use super::input::{GrepInput, OutputMode};
 use super::output::GrepOutput;
 use super::spec::GrepToolSpec;
+use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedSearchTarget {
@@ -124,20 +128,24 @@ impl GrepExecutor {
                 search_target: ".".to_string(),
             }),
             Some(path) => {
-                let resolved = backend
-                    .paths()
-                    .resolve_path(ResolvePathRequest {
+                let resolved = timed(
+                    "grep resolve_path",
+                    DEFAULT_FS_TIMEOUT_MS,
+                    backend.paths().resolve_path(ResolvePathRequest {
                         raw_path: path.trim().to_string(),
                         base: ResolveBase::WorkspaceRoot,
-                    })
-                    .await
-                    .map_err(|e| format!("Failed to resolve path: {}", e))?;
+                    }),
+                )
+                .await
+                .map_err(|e| format!("Failed to resolve path: {}", e))?;
 
-                let stat = backend
-                    .files()
-                    .stat(&resolved)
-                    .await
-                    .map_err(|e| format!("Failed to stat path: {}", e))?;
+                let stat = timed(
+                    "grep stat",
+                    DEFAULT_FS_TIMEOUT_MS,
+                    backend.files().stat(&resolved),
+                )
+                .await
+                .map_err(|e| format!("Failed to stat path: {}", e))?;
 
                 if !stat.exists {
                     return Err(format!("Path does not exist: {}", path));
@@ -180,6 +188,7 @@ impl GrepExecutor {
         backend: &dyn agent_contracts::backend::OperationBackend,
         args: Vec<String>,
         cwd: BackendPath,
+        timeout_ms: u64,
     ) -> Result<Vec<String>, String> {
         let output = backend
             .exec()
@@ -188,7 +197,7 @@ impl GrepExecutor {
                 args,
                 shell: None,
                 cwd: Some(cwd),
-                timeout_ms: None,
+                timeout_ms: Some(timeout_ms),
                 env: None,
             })
             .await
@@ -197,6 +206,13 @@ impl GrepExecutor {
         if output.exit_code == Some(0) || output.exit_code == Some(1) {
             let stdout = String::from_utf8_lossy(output.stdout.as_slice());
             return Ok(stdout.lines().map(|line| line.replace('\r', "")).collect());
+        }
+
+        if output.timed_out {
+            return Err(format!(
+                "rg timed out after {}ms; narrow the search path, tighten the pattern, or pass a larger `timeout`",
+                timeout_ms
+            ));
         }
 
         Err(format!(
@@ -290,6 +306,7 @@ impl GrepExecutor {
         args: Vec<String>,
         cwd: BackendPath,
         output_mode: OutputMode,
+        timeout_ms: u64,
     ) -> Result<Vec<String>, String> {
         let output = backend
             .exec()
@@ -298,7 +315,7 @@ impl GrepExecutor {
                 args,
                 shell: None,
                 cwd: Some(cwd),
-                timeout_ms: None,
+                timeout_ms: Some(timeout_ms),
                 env: None,
             })
             .await
@@ -325,6 +342,13 @@ impl GrepExecutor {
             return Ok(lines);
         }
 
+        if output.timed_out {
+            return Err(format!(
+                "grep timed out after {}ms; narrow the search path, tighten the pattern, or pass a larger `timeout`",
+                timeout_ms
+            ));
+        }
+
         Err(format!(
             "grep exited with code {:?}: {}",
             output.exit_code,
@@ -337,14 +361,16 @@ impl GrepExecutor {
         cwd: &BackendPath,
         raw_path: &str,
     ) -> Result<BackendPath, String> {
-        backend
-            .paths()
-            .resolve_path(ResolvePathRequest {
+        timed(
+            "grep resolve_result_path",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.paths().resolve_path(ResolvePathRequest {
                 raw_path: raw_path.to_string(),
                 base: ResolveBase::Explicit(cwd.clone()),
-            })
-            .await
-            .map_err(|e| format!("Failed to resolve grep result path: {}", e))
+            }),
+        )
+        .await
+        .map_err(|e| format!("Failed to resolve grep result path: {}", e))
     }
 
     async fn call_inner(
@@ -356,20 +382,43 @@ impl GrepExecutor {
         let output_mode = input.output_mode.unwrap_or(OutputMode::FilesWithMatches);
         let head_limit = input.head_limit.unwrap_or(DEFAULT_HEAD_LIMIT);
         let offset = input.offset.unwrap_or(0);
+        let timeout_ms = input.timeout.unwrap_or_else(default_timeout_ms);
 
         let rg_args = Self::build_rg_args(input, &resolved_target.search_target);
-        let lines = match Self::run_rg(backend, rg_args, resolved_target.cwd.clone()).await {
+        // Compute a single wall-clock deadline for the whole search so the
+        // `rg`→`grep` fallback path cannot double the hang: the fallback only
+        // spends the *remaining* budget, and is skipped entirely once `rg`
+        // exhausted it (e.g. a timed-out `rg` would just time out `grep` too,
+        // slower, for no benefit).
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let lines = match Self::run_rg(backend, rg_args, resolved_target.cwd.clone(), timeout_ms)
+            .await
+        {
             Ok(lines) => lines,
             Err(rg_err) => {
                 // `rg` is missing or errored; fall back to GNU `grep`, which is
                 // present in environments (e.g. SWE-bench containers) that lack
                 // ripgrep. Without this the tool fails on every call there.
+                let grep_timeout = match deadline.checked_duration_since(Instant::now()) {
+                    Some(remaining) if remaining.as_millis() > 0 => remaining.as_millis() as u64,
+                    _ => {
+                        return Err(format!(
+                            "search failed (rg: {rg_err}); no time budget left for grep fallback"
+                        ));
+                    }
+                };
                 let grep_args = Self::build_grep_args(input, &resolved_target.search_target);
-                Self::run_grep(backend, grep_args, resolved_target.cwd.clone(), output_mode)
-                    .await
-                    .map_err(|grep_err| {
-                        format!("search failed (rg: {rg_err}) (grep fallback: {grep_err})")
-                    })?
+                Self::run_grep(
+                    backend,
+                    grep_args,
+                    resolved_target.cwd.clone(),
+                    output_mode,
+                    grep_timeout,
+                )
+                .await
+                .map_err(|grep_err| {
+                    format!("search failed (rg: {rg_err}) (grep fallback: {grep_err})")
+                })?
             }
         };
 
@@ -432,11 +481,13 @@ impl GrepExecutor {
                 for line in &lines {
                     let resolved_path =
                         Self::resolve_result_path(backend, &resolved_target.cwd, line).await?;
-                    let stat = backend
-                        .files()
-                        .stat(&resolved_path)
-                        .await
-                        .map_err(|e| format!("Failed to stat grep result file: {}", e))?;
+                    let stat = timed(
+                        "grep result stat",
+                        DEFAULT_FS_TIMEOUT_MS,
+                        backend.files().stat(&resolved_path),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to stat grep result file: {}", e))?;
                     files_with_mtime.push((
                         line.clone(),
                         stat.modified_at
