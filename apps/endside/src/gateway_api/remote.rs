@@ -33,16 +33,22 @@ enum RemoteSseEvent {
         turn: u32,
     },
     TextDelta {
+        #[serde(default)]
+        agent_id: Option<String>,
         #[allow(dead_code)]
         delta: String,
         snapshot: String,
     },
     ThinkingDelta {
+        #[serde(default)]
+        agent_id: Option<String>,
         #[allow(dead_code)]
         delta: String,
         snapshot: String,
     },
     ToolResult {
+        #[serde(default)]
+        agent_id: Option<String>,
         call_id: String,
         tool_name: String,
         output_preview: String,
@@ -406,27 +412,37 @@ async fn handle_remote_event(
     interaction_rx: &mut UnboundedReceiver<UserPromptResult>,
 ) {
     match event {
-        RemoteSseEvent::TurnStart { .. } => {}
-        RemoteSseEvent::TextDelta { snapshot, .. } => {
+        RemoteSseEvent::TurnStart { agent_id, turn } => {
+            let _ = updates_tx.send(SessionTurnUpdate::TurnStart {
+                agent_id: AgentId(agent_id),
+                turn,
+            });
+        }
+        RemoteSseEvent::TextDelta {
+            agent_id, snapshot, ..
+        } => {
             let _ = updates_tx.send(SessionTurnUpdate::SetAssistantContent {
-                agent_id: AgentId("cli-agent".to_string()),
+                agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
                 text: snapshot,
             });
         }
-        RemoteSseEvent::ThinkingDelta { snapshot, .. } => {
+        RemoteSseEvent::ThinkingDelta {
+            agent_id, snapshot, ..
+        } => {
             let _ = updates_tx.send(SessionTurnUpdate::SetAssistantThinking {
-                agent_id: AgentId("cli-agent".to_string()),
+                agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
                 text: snapshot,
             });
         }
         RemoteSseEvent::ToolResult {
+            agent_id,
             call_id,
             tool_name,
             output_preview,
             is_error,
         } => {
             let _ = updates_tx.send(SessionTurnUpdate::Tool {
-                _agent_id: AgentId("cli-agent".to_string()),
+                agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
                 update: ToolExecutionUpdate {
                     call_id,
                     tool: tool_name,
@@ -692,13 +708,34 @@ mod tests {
         let frame = take_sse_frame(&mut buffer).expect("frame");
         let parsed = parse_sse_frame(&frame).expect("parse").expect("event");
         match parsed {
-            RemoteSseEvent::TextDelta { delta, snapshot } => {
+            RemoteSseEvent::TextDelta {
+                agent_id,
+                delta,
+                snapshot,
+            } => {
+                assert!(agent_id.is_none());
                 assert_eq!(delta, "he");
                 assert_eq!(snapshot, "he");
             }
             other => panic!("unexpected event: {other:?}"),
         }
         assert_eq!(buffer, "rest");
+    }
+
+    #[test]
+    fn parses_sse_frame_with_agent_id() {
+        let parsed = parse_sse_frame(
+            "event: text_delta\ndata: {\"type\":\"text_delta\",\"agent_id\":\"child\",\"delta\":\"he\",\"snapshot\":\"he\"}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::TextDelta { agent_id, .. } => {
+                assert_eq!(agent_id.as_deref(), Some("child"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

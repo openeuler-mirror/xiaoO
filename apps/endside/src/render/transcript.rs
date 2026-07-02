@@ -12,7 +12,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 use crate::app_state::{
-    CachedMessageLayout, CachedMessageRender, ToolToggleRegion, TranscriptRenderCache,
+    CachedMessageLayout, CachedMessageRender, SubagentOpenRegion, SubagentOpenTarget,
+    ToolToggleRegion, TranscriptRenderCache,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
 use crate::markdown::{contains_markdown_table, render_markdown};
@@ -24,11 +25,23 @@ use super::utils::{
 
 impl App {
     pub(crate) fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
+        let transcript_key = self.state.active_transcript_key();
+        let active_agent_id = self
+            .state
+            .chat_state
+            .active_subagent_id()
+            .filter(|agent_id| self.state.chat_state.subagent_lanes.contains_key(*agent_id))
+            .map(ToOwned::to_owned);
+        let title = self
+            .state
+            .active_subagent_title()
+            .map(|title| format!(" {title} | Shift+↑ Back "))
+            .unwrap_or_else(|| " Messages ".to_string());
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(self.state.theme.border))
-            .title(" Messages ")
+            .title(sanitize_terminal_text(&title))
             .style(Style::default().bg(self.state.theme.background));
         let inner_area = block.inner(area);
         let scrollbar_area = Rect {
@@ -42,74 +55,97 @@ impl App {
 
         let inner_height = inner_area.height as usize;
         let loading_animation = self.loading_animation();
-        let message_count = self.state.chat_state.messages.len();
-        if self.state.render_state.message_renders.len() != message_count {
-            self.state
-                .render_state
-                .message_renders
-                .resize(message_count, None);
-            self.state.render_state.transcript_cache = None;
-        }
+        let root_stream_index = self.gateway.stream_message_index;
+        let theme = self.state.theme;
 
-        let mut transcript_dirty = self.state.render_state.transcript_cache.is_none();
-        for message_index in 0..message_count {
-            let message = &self.state.chat_state.messages[message_index];
-            let is_active_stream_message = self.gateway.stream_message_index == Some(message_index);
-            let should_bypass_cache = is_active_stream_message && self.state.chat_state.is_loading;
-            if should_bypass_cache {
-                transcript_dirty = true;
-                continue;
+        {
+            let chat_state = &self.state.chat_state;
+            let render_state = &mut self.state.render_state;
+            if render_state.active_transcript_key.as_deref() != Some(transcript_key.as_str()) {
+                render_state.message_renders.clear();
+                render_state.transcript_cache = None;
+                render_state.active_transcript_key = Some(transcript_key.clone());
             }
 
-            let cache_slot = &mut self.state.render_state.message_renders[message_index];
-            let needs_rebuild = cache_slot.as_ref().is_none_or(|cached| {
-                cached.revision != message.render_revision
-                    || cached.width != inner_area.width
-                    || cached.theme != self.state.theme
-            });
-            if needs_rebuild {
-                *cache_slot = Some(render_message_entry(
-                    message,
-                    &self.state.theme,
-                    inner_area.width,
-                    is_active_stream_message,
-                    self.state.chat_state.is_loading,
-                    &loading_animation,
-                ));
-                transcript_dirty = true;
-            }
-        }
+            let (messages, active_stream_index, chat_is_loading) =
+                if let Some(agent_id) = active_agent_id.as_deref() {
+                    let lane = chat_state
+                        .subagent_lanes
+                        .get(agent_id)
+                        .expect("active subagent lane should exist");
+                    (&lane.messages, lane.stream_message_index, lane.is_running)
+                } else {
+                    (
+                        &chat_state.messages,
+                        root_stream_index,
+                        chat_state.is_loading,
+                    )
+                };
 
-        if transcript_dirty {
-            let mut current_renders = Vec::with_capacity(message_count);
+            let message_count = messages.len();
+            if render_state.message_renders.len() != message_count {
+                render_state.message_renders.resize(message_count, None);
+                render_state.transcript_cache = None;
+            }
+
+            let mut transcript_dirty = render_state.transcript_cache.is_none();
             for message_index in 0..message_count {
-                let message = &self.state.chat_state.messages[message_index];
-                let is_active_stream_message =
-                    self.gateway.stream_message_index == Some(message_index);
-                let should_bypass_cache =
-                    is_active_stream_message && self.state.chat_state.is_loading;
+                let message = &messages[message_index];
+                let is_active_stream_message = active_stream_index == Some(message_index);
+                let should_bypass_cache = is_active_stream_message && chat_is_loading;
                 if should_bypass_cache {
-                    current_renders.push(render_message_entry(
+                    transcript_dirty = true;
+                    continue;
+                }
+
+                let cache_slot = &mut render_state.message_renders[message_index];
+                let needs_rebuild = cache_slot.as_ref().is_none_or(|cached| {
+                    cached.revision != message.render_revision
+                        || cached.width != inner_area.width
+                        || cached.theme != theme
+                });
+                if needs_rebuild {
+                    *cache_slot = Some(render_message_entry(
                         message,
-                        &self.state.theme,
+                        &theme,
                         inner_area.width,
                         is_active_stream_message,
-                        self.state.chat_state.is_loading,
+                        chat_is_loading,
                         &loading_animation,
                     ));
-                } else {
-                    current_renders.push(
-                        self.state.render_state.message_renders[message_index]
-                            .as_ref()
-                            .expect("message render cache must be populated")
-                            .clone(),
-                    );
+                    transcript_dirty = true;
                 }
             }
-            let transcript_cache = build_transcript_cache(&current_renders);
-            self.state.render_state.line_texts = transcript_cache.line_texts.clone();
-            self.state.render_state.line_is_header = transcript_cache.line_is_header.clone();
-            self.state.render_state.transcript_cache = Some(transcript_cache);
+
+            if transcript_dirty {
+                let mut current_renders = Vec::with_capacity(message_count);
+                for message_index in 0..message_count {
+                    let message = &messages[message_index];
+                    let is_active_stream_message = active_stream_index == Some(message_index);
+                    let should_bypass_cache = is_active_stream_message && chat_is_loading;
+                    if should_bypass_cache {
+                        current_renders.push(render_message_entry(
+                            message,
+                            &theme,
+                            inner_area.width,
+                            is_active_stream_message,
+                            chat_is_loading,
+                            &loading_animation,
+                        ));
+                    } else {
+                        current_renders.push(
+                            render_state.message_renders[message_index]
+                                .as_ref()
+                                .expect("message render cache must be populated")
+                                .clone(),
+                        );
+                    }
+                }
+                let transcript_cache = build_transcript_cache(&current_renders);
+                render_state.line_texts = transcript_cache.line_texts.clone();
+                render_state.line_is_header = transcript_cache.line_is_header.clone();
+                render_state.transcript_cache = Some(transcript_cache);
+            }
         }
 
         let transcript_cache = self
@@ -119,20 +155,36 @@ impl App {
             .as_ref()
             .expect("transcript cache must be populated");
 
-        self.state.chat_state.total_lines = transcript_cache.total_lines;
-        self.state.chat_state.last_visible_height = inner_height;
-
         let max_scroll = transcript_cache
             .total_lines
             .saturating_sub(inner_height)
             .min(transcript_cache.total_lines);
-        if self.state.chat_state.stick_to_bottom {
-            self.state.chat_state.scroll_offset = max_scroll;
+        let scroll_offset = if let Some(agent_id) = active_agent_id.as_deref() {
+            let lane = self
+                .state
+                .chat_state
+                .subagent_lanes
+                .get_mut(agent_id)
+                .expect("active subagent lane should exist");
+            lane.total_lines = transcript_cache.total_lines;
+            lane.last_visible_height = inner_height;
+            if lane.stick_to_bottom {
+                lane.scroll_offset = max_scroll;
+            } else {
+                lane.scroll_offset = lane.scroll_offset.min(max_scroll);
+            }
+            lane.scroll_offset
         } else {
-            self.state.chat_state.scroll_offset =
-                self.state.chat_state.scroll_offset.min(max_scroll);
-        }
-        let scroll_offset = self.state.chat_state.scroll_offset;
+            self.state.chat_state.total_lines = transcript_cache.total_lines;
+            self.state.chat_state.last_visible_height = inner_height;
+            if self.state.chat_state.stick_to_bottom {
+                self.state.chat_state.scroll_offset = max_scroll;
+            } else {
+                self.state.chat_state.scroll_offset =
+                    self.state.chat_state.scroll_offset.min(max_scroll);
+            }
+            self.state.chat_state.scroll_offset
+        };
         let scroll_end = scroll_offset.saturating_add(inner_height);
         paint_visible_line_backgrounds(frame, inner_area, transcript_cache, scroll_offset);
         if let Some(sel) = &self.state.transcript_selection {
@@ -231,7 +283,28 @@ impl App {
         }
 
         self.state.render_state.tool_toggle_regions.clear();
+        self.state.render_state.subagent_open_regions.clear();
         for layout in &transcript_cache.message_layouts {
+            if let Some(open_target) = &layout.subagent_open_target {
+                let open_row = layout
+                    .start_visual_row
+                    .saturating_add(open_target.row_offset);
+                if open_row >= scroll_offset && open_row < scroll_end {
+                    self.state
+                        .render_state
+                        .subagent_open_regions
+                        .push(SubagentOpenRegion {
+                            agent_id: open_target.agent_id.clone(),
+                            rect: Rect {
+                                x: inner_area.x,
+                                y: inner_area.y + (open_row.saturating_sub(scroll_offset) as u16),
+                                width: inner_area.width,
+                                height: 1,
+                            },
+                        });
+                }
+            }
+
             if let Some(toggle_row_offset) = layout.tool_toggle_row_offset {
                 let toggle_row = layout.start_visual_row.saturating_add(toggle_row_offset);
                 if toggle_row >= scroll_offset && toggle_row < scroll_end {
@@ -251,17 +324,27 @@ impl App {
             }
         }
 
-        self.state.chat_state.sync_scrollbar_state();
-
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .style(Style::default().fg(self.state.theme.border));
-        frame.render_stateful_widget(
-            scrollbar,
-            scrollbar_area,
-            &mut self.state.chat_state.scrollbar_state,
-        );
+        if let Some(agent_id) = active_agent_id.as_deref() {
+            let lane = self
+                .state
+                .chat_state
+                .subagent_lanes
+                .get_mut(agent_id)
+                .expect("active subagent lane should exist");
+            lane.sync_scrollbar_state();
+            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut lane.scrollbar_state);
+        } else {
+            self.state.chat_state.sync_scrollbar_state();
+            frame.render_stateful_widget(
+                scrollbar,
+                scrollbar_area,
+                &mut self.state.chat_state.scrollbar_state,
+            );
+        }
     }
 }
 
@@ -274,6 +357,7 @@ fn render_message_entry(
     loading_animation: &str,
 ) -> CachedMessageRender {
     let mut tool_toggle_row_offset = None;
+    let mut subagent_open_target = None;
 
     let lines = if let Some(tool) = &message.tool_state {
         let tool_color = match tool.status {
@@ -285,6 +369,19 @@ fn render_message_entry(
         if is_subagent_tool(&tool.tool) {
             tool_toggle_row_offset = Some(if tool.expanded { 1 } else { 0 });
             let mut lines = render_subagent_tool_lines(tool, &timestamp, tool_color, theme, width);
+            if tool.tool == "spawn_subagent" && tool.expanded {
+                if let Some(agent_id) = parse_spawn_subagent_agent_id(&tool.detail) {
+                    if let Some(row_offset) = lines
+                        .iter()
+                        .position(|line| line_plain_text(line).contains("agent_id:"))
+                    {
+                        subagent_open_target = Some(SubagentOpenTarget {
+                            agent_id,
+                            row_offset,
+                        });
+                    }
+                }
+            }
             lines.push(Line::raw(""));
             lines
         } else {
@@ -309,6 +406,7 @@ fn render_message_entry(
         width,
         theme: *theme,
         tool_toggle_row_offset,
+        subagent_open_target,
         lines,
     }
 }
@@ -328,6 +426,18 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
             message_index,
             start_visual_row: absolute_visual_row,
             tool_toggle_row_offset: render.tool_toggle_row_offset,
+            subagent_open_target: render.subagent_open_target.as_ref().map(|target| {
+                let visual_offset = render
+                    .lines
+                    .iter()
+                    .take(target.row_offset)
+                    .map(|line| rendered_line_count(std::slice::from_ref(line), render.width))
+                    .sum();
+                SubagentOpenTarget {
+                    agent_id: target.agent_id.clone(),
+                    row_offset: visual_offset,
+                }
+            }),
         });
 
         for (line_index, line) in render.lines.iter().enumerate() {
@@ -411,6 +521,13 @@ fn merge_spans_with_styles(line: &Line<'static>) -> (String, Vec<StyleRange>) {
     }
 
     (full_text, style_ranges)
+}
+
+fn line_plain_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
 }
 
 fn find_style_at_position(style_ranges: &[StyleRange], pos: usize) -> Style {
@@ -1730,10 +1847,27 @@ fn render_spawn_subagent_detail_lines(
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
-        lines.push(Line::styled(
-            format!("    agent_id: {}", sanitize_terminal_text(&agent_id)),
-            Style::default().fg(theme.foreground),
-        ));
+        lines.push(Line::from(vec![
+            Span::styled("    agent_id: ", Style::default().fg(theme.foreground)),
+            Span::styled(
+                sanitize_terminal_text(&agent_id),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                sanitize_terminal_text("→"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                "click to open",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
         return;
     }
 

@@ -281,12 +281,14 @@ fn discard_redundant_boundary_scrolls(
     let boundary_kind = match handled_event {
         Event::Mouse(mouse)
             if mouse.kind == MouseEventKind::ScrollDown
-                && state.chat_state.scroll_offset >= state.chat_state.max_scroll_offset() =>
+                && state.active_transcript_scroll_offset()
+                    >= state.active_transcript_max_scroll_offset() =>
         {
             Some(MouseEventKind::ScrollDown)
         }
         Event::Mouse(mouse)
-            if mouse.kind == MouseEventKind::ScrollUp && state.chat_state.scroll_offset == 0 =>
+            if mouse.kind == MouseEventKind::ScrollUp
+                && state.active_transcript_scroll_offset() == 0 =>
         {
             Some(MouseEventKind::ScrollUp)
         }

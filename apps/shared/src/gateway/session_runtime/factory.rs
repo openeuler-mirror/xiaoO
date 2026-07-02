@@ -7,7 +7,7 @@ use agent_contracts::{
     CompressionPipeline, InteractionHandle, PromptBuilder, SkillRegistry, ToolEventSink,
     ToolRegistry,
 };
-use agent_types::common::{AgentMetadata, BuildError};
+use agent_types::common::{AgentId, AgentMetadata, BuildError};
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::ToolStateStoreConfig;
@@ -163,6 +163,7 @@ impl AppRuntimeFactory {
                     ))
                     .build()?,
                 Box::new(SharedToolEventSink::new(
+                    resolved.descriptor.agent_id.clone(),
                     resolved.bindings.tool_event_sink.clone(),
                 )),
                 trace_recorder,
@@ -226,19 +227,20 @@ fn tool_state_store_config_for_entry_kind(
 }
 
 struct SharedToolEventSink {
+    agent_id: AgentId,
     inner: Option<Arc<dyn ToolEventSink>>,
 }
 
 impl SharedToolEventSink {
-    fn new(inner: Option<Arc<dyn ToolEventSink>>) -> Self {
-        Self { inner }
+    fn new(agent_id: AgentId, inner: Option<Arc<dyn ToolEventSink>>) -> Self {
+        Self { agent_id, inner }
     }
 }
 
 impl ToolEventSink for SharedToolEventSink {
     fn emit(&self, event: ToolLifecycleEvent) {
         if let Some(inner) = &self.inner {
-            inner.emit(event);
+            inner.emit(event.scoped(self.agent_id.clone()));
             return;
         }
         NoopToolEventSink::new().emit(event);

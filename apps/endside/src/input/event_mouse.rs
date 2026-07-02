@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
+use crate::app_state::AppState;
 use crate::interaction_prompt::PromptFocus;
 use crate::provider_service::copy_to_clipboard;
 use crate::render::scroll_offset_from_drag;
@@ -149,14 +150,14 @@ impl App {
         match mouse_event.kind {
             MouseEventKind::ScrollUp => {
                 self.state.transcript_selection = None;
-                self.state.chat_state.scroll_up();
+                self.state.active_transcript_scroll_up();
             }
             MouseEventKind::ScrollDown => {
                 self.state.transcript_selection = None;
-                self.state.chat_state.scroll_down();
+                self.state.active_transcript_scroll_down();
             }
             MouseEventKind::Down(MouseButton::Left) if in_scrollbar_zone => {
-                self.state.chat_state.scrollbar_dragging = true;
+                self.state.set_active_transcript_scrollbar_dragging(true);
             }
             // Right-click: copy whatever is currently selected (like opencode's right-click copy).
             MouseEventKind::Down(MouseButton::Right) => {
@@ -183,6 +184,18 @@ impl App {
                     return;
                 }
 
+                if let Some(region) = self
+                    .state
+                    .render_state
+                    .subagent_open_regions
+                    .iter()
+                    .find(|region| mouse_in_rect(mouse_event.column, mouse_event.row, region.rect))
+                    .cloned()
+                {
+                    self.state.enter_subagent_view(&region.agent_id);
+                    return;
+                }
+
                 // Check tool toggle first.
                 if let Some(region) = self
                     .state
@@ -192,8 +205,7 @@ impl App {
                     .find(|region| mouse_in_rect(mouse_event.column, mouse_event.row, region.rect))
                     .copied()
                 {
-                    if let Some(message) =
-                        self.state.chat_state.messages.get_mut(region.message_index)
+                    if let Some(message) = active_message_mut(&mut self.state, region.message_index)
                     {
                         if let Some(tool) = message.tool_state.as_mut() {
                             tool.expanded = !tool.expanded;
@@ -208,7 +220,7 @@ impl App {
                     mouse_event.column,
                     mouse_event.row,
                     area,
-                    self.state.chat_state.scroll_offset,
+                    self.state.active_transcript_scroll_offset(),
                     &self.state.render_state.line_texts,
                 );
                 self.state.transcript_selection = Some(TranscriptSelection::new(line_idx, col));
@@ -220,12 +232,13 @@ impl App {
                 self.state.transcript_selection = None;
             }
             MouseEventKind::Drag(MouseButton::Left) if in_content_zone => {
+                let scroll_offset = self.state.active_transcript_scroll_offset();
                 if let Some(sel) = self.state.transcript_selection.as_mut() {
                     let (line_idx, col) = mouse_to_line_col(
                         mouse_event.column,
                         mouse_event.row,
                         area,
-                        self.state.chat_state.scroll_offset,
+                        scroll_offset,
                         &self.state.render_state.line_texts,
                     );
                     sel.cursor_line = line_idx;
@@ -233,16 +246,15 @@ impl App {
                 }
             }
             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
-                if self.state.chat_state.scrollbar_dragging =>
+                if self.state.active_transcript_scrollbar_dragging() =>
             {
                 let track_height = area.height as usize;
-                let max_scroll = self.state.chat_state.max_scroll_offset();
+                let max_scroll = self.state.active_transcript_max_scroll_offset();
                 if track_height > 0 && max_scroll > 0 {
                     let rel_y = (mouse_event.row.saturating_sub(area.y) as usize)
                         .min(track_height.saturating_sub(1));
                     self.state
-                        .chat_state
-                        .set_scroll_offset(scroll_offset_from_drag(
+                        .set_active_transcript_scroll_offset(scroll_offset_from_drag(
                             rel_y,
                             track_height,
                             max_scroll,
@@ -250,7 +262,7 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.state.chat_state.scrollbar_dragging = false;
+                self.state.set_active_transcript_scrollbar_dragging(false);
                 // Auto copy-on-select: mirrors opencode's onMouseUp handler.
                 // Any non-empty selection is automatically copied when the mouse is released,
                 // and the selection is cleared to confirm the action.
@@ -273,6 +285,20 @@ impl App {
             _ => {}
         }
     }
+}
+
+fn active_message_mut(
+    state: &mut AppState,
+    message_index: usize,
+) -> Option<&mut crate::chat::Message> {
+    if let Some(agent_id) = state.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+        return state
+            .chat_state
+            .subagent_lanes
+            .get_mut(&agent_id)
+            .and_then(|lane| lane.messages.get_mut(message_index));
+    }
+    state.chat_state.messages.get_mut(message_index)
 }
 
 fn mouse_in_rect(column: u16, row: u16, rect: Rect) -> bool {

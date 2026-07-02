@@ -1,8 +1,13 @@
+use crate::common::ids::AgentId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolLifecycleEvent {
+    AgentScoped {
+        agent_id: AgentId,
+        event: Box<ToolLifecycleEvent>,
+    },
     Pending {
         call_id: String,
         tool_name: String,
@@ -35,6 +40,15 @@ pub enum ToolLifecycleEvent {
         #[serde(default)]
         args_preview: String,
     },
+}
+
+impl ToolLifecycleEvent {
+    pub fn scoped(self, agent_id: AgentId) -> Self {
+        Self::AgentScoped {
+            agent_id,
+            event: Box::new(self),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use crate::input::Input;
 use ratatui::widgets::ScrollbarState;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionStatus {
@@ -261,6 +261,115 @@ pub struct ChatState {
     pub last_visible_height: usize,
     /// True while user is dragging the scrollbar thumb.
     pub scrollbar_dragging: bool,
+    pub subagent_lanes: BTreeMap<String, SubagentLaneState>,
+    pub active_subagent_stack: Vec<String>,
+}
+
+pub struct SubagentLaneState {
+    pub agent_id: String,
+    pub parent_agent_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub task_goal: String,
+    pub messages: Vec<Message>,
+    pub stream_message_index: Option<usize>,
+    pub scroll_offset: usize,
+    pub scrollbar_state: ScrollbarState,
+    pub stick_to_bottom: bool,
+    pub total_lines: usize,
+    pub last_visible_height: usize,
+    pub scrollbar_dragging: bool,
+    pub is_running: bool,
+    pub last_turn: Option<u32>,
+}
+
+impl SubagentLaneState {
+    pub fn new(
+        agent_id: String,
+        parent_agent_id: Option<String>,
+        title: String,
+        description: String,
+        task_goal: String,
+    ) -> Self {
+        Self {
+            agent_id,
+            parent_agent_id,
+            title,
+            description,
+            task_goal,
+            messages: Vec::new(),
+            stream_message_index: None,
+            scroll_offset: 0,
+            scrollbar_state: ScrollbarState::default(),
+            stick_to_bottom: true,
+            total_lines: 0,
+            last_visible_height: 0,
+            scrollbar_dragging: false,
+            is_running: true,
+            last_turn: None,
+        }
+    }
+
+    pub fn update_metadata(
+        &mut self,
+        parent_agent_id: Option<String>,
+        title: String,
+        description: String,
+        task_goal: String,
+    ) {
+        if self.parent_agent_id.is_none() {
+            self.parent_agent_id = parent_agent_id;
+        }
+        if !title.trim().is_empty() {
+            self.title = title;
+        }
+        if !description.trim().is_empty() {
+            self.description = description;
+        }
+        if !task_goal.trim().is_empty() {
+            self.task_goal = task_goal;
+        }
+    }
+
+    pub fn max_scroll_offset(&self) -> usize {
+        self.total_lines
+            .saturating_sub(self.last_visible_height)
+            .min(self.total_lines)
+    }
+
+    pub fn sync_scrollbar_state(&mut self) {
+        let max_scroll = self.max_scroll_offset();
+        let scrollbar_content_length = max_scroll.saturating_add(1);
+        self.scrollbar_state = self
+            .scrollbar_state
+            .content_length(scrollbar_content_length)
+            .viewport_content_length(self.last_visible_height)
+            .position(self.scroll_offset.min(max_scroll));
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.stick_to_bottom = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.sync_scrollbar_state();
+    }
+
+    pub fn scroll_down(&mut self) {
+        let max = self.max_scroll_offset();
+        if self.scroll_offset < max {
+            self.scroll_offset = (self.scroll_offset + 1).min(max);
+        }
+        if self.scroll_offset >= max {
+            self.stick_to_bottom = true;
+        }
+        self.sync_scrollbar_state();
+    }
+
+    pub fn set_scroll_offset(&mut self, line_offset: usize) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = line_offset.min(max);
+        self.stick_to_bottom = self.scroll_offset >= max;
+        self.sync_scrollbar_state();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,6 +690,8 @@ impl Default for ChatState {
             total_lines: 0,
             last_visible_height: 0,
             scrollbar_dragging: false,
+            subagent_lanes: BTreeMap::new(),
+            active_subagent_stack: Vec::new(),
         }
     }
 }
@@ -742,6 +853,52 @@ impl ChatState {
             .min(max);
         self.stick_to_bottom = self.scroll_offset >= max;
         self.sync_scrollbar_state();
+    }
+
+    pub fn active_subagent_id(&self) -> Option<&str> {
+        self.active_subagent_stack.last().map(String::as_str)
+    }
+
+    pub fn is_subagent_view_active(&self) -> bool {
+        self.active_subagent_id().is_some()
+    }
+
+    pub fn enter_subagent_view(&mut self, agent_id: &str) -> bool {
+        if !self.subagent_lanes.contains_key(agent_id) {
+            return false;
+        }
+        if self.active_subagent_id() == Some(agent_id) {
+            return true;
+        }
+        self.active_subagent_stack.push(agent_id.to_string());
+        true
+    }
+
+    pub fn leave_subagent_view(&mut self) -> bool {
+        self.active_subagent_stack.pop().is_some()
+    }
+
+    pub fn ensure_subagent_lane(
+        &mut self,
+        agent_id: String,
+        parent_agent_id: Option<String>,
+        title: String,
+        description: String,
+        task_goal: String,
+    ) -> &mut SubagentLaneState {
+        self.subagent_lanes
+            .entry(agent_id.clone())
+            .and_modify(|lane| {
+                lane.update_metadata(
+                    parent_agent_id.clone(),
+                    title.clone(),
+                    description.clone(),
+                    task_goal.clone(),
+                );
+            })
+            .or_insert_with(|| {
+                SubagentLaneState::new(agent_id, parent_agent_id, title, description, task_goal)
+            })
     }
 }
 

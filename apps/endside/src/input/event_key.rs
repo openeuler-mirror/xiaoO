@@ -78,6 +78,21 @@ impl App {
             return Ok(());
         }
 
+        if key.code == KeyCode::Up
+            && key.modifiers.contains(event::KeyModifiers::SHIFT)
+            && self.state.is_subagent_view_active()
+            && self.state.api_key_dialog.is_none()
+            && self.state.provider_dialog.is_none()
+            && self.state.sandbox_dialog.is_none()
+            && self.state.remote_session_dialog.is_none()
+            && self.state.session_snapshot_dialog.is_none()
+            && self.state.delete_dialog.is_none()
+            && self.state.interaction_prompt.is_none()
+        {
+            self.state.leave_subagent_view();
+            return Ok(());
+        }
+
         if key.code == KeyCode::Esc && self.state.chat_state.is_loading {
             self.gateway.cancel_streaming(&mut self.state);
             return Ok(());
@@ -268,6 +283,32 @@ impl App {
     }
 
     async fn handle_editing_mode_key(&mut self, key: KeyEvent) -> Result<()> {
+        if self.state.is_subagent_view_active() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.state.transcript_selection = None;
+                }
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    self.state.active_transcript_scroll_up();
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    self.state.active_transcript_scroll_down();
+                }
+                KeyCode::PageUp => {
+                    for _ in 0..10 {
+                        self.state.active_transcript_scroll_up();
+                    }
+                }
+                KeyCode::PageDown => {
+                    for _ in 0..10 {
+                        self.state.active_transcript_scroll_down();
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if key.code == KeyCode::Tab {
             let has_slash_prefix = crate::slash_complete::slash_typed_prefix(
                 self.state.chat_state.input.value(),
