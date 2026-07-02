@@ -1,7 +1,6 @@
 //! Input validation for FileWriteTool.
 //!
 //! Validates FileWriteInput before processing to ensure:
-//! - UNC paths are allowed (like TypeScript)
 //! - Secret patterns are detected
 
 use super::constants::{error_code, SECRET_DETECTED_MESSAGE, SECRET_PATTERNS};
@@ -38,21 +37,6 @@ impl ValidationResult {
     }
 }
 
-/// Checks if a path is a UNC path (Windows network share path).
-///
-/// UNC paths start with `\\` (Windows-style) or `//` (Unix-style representation).
-/// These paths refer to network resources and should be blocked for security reasons.
-///
-/// # Arguments
-/// * `path` - The file path to check
-///
-/// # Returns
-/// * `true` if the path is a UNC path, `false` otherwise
-pub fn is_unc_path(path: &str) -> bool {
-    let path = path.trim();
-    path.starts_with("\\\\") || path.starts_with("//")
-}
-
 /// Checks if the content contains any secret patterns.
 ///
 /// # Arguments
@@ -75,13 +59,27 @@ fn contains_secret(content: &str) -> bool {
 /// This variant is used when path resolution has already been performed
 /// by the backend, avoiding redundant host-local path expansion.
 pub fn validate_input_with_base_from_bytes(input: &FileWriteInput) -> ValidationResult {
-    if is_unc_path(&input.file_path) {
-        return ValidationResult::ok();
-    }
-
     if contains_secret(&input.content) {
         return ValidationResult::error(SECRET_DETECTED_MESSAGE, error_code::SECRET_DETECTED);
     }
 
     ValidationResult::ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_secret_content_for_unc_like_path() {
+        let input = FileWriteInput {
+            file_path: "//tmp/config.txt".to_string(),
+            content: "api_key = \"sk-demo\"".to_string(),
+        };
+
+        let result = validate_input_with_base_from_bytes(&input);
+
+        assert!(!result.result);
+        assert_eq!(result.error_code, Some(error_code::SECRET_DETECTED));
+    }
 }
