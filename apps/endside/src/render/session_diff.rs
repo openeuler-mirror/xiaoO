@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::chat::{TodoDisplayStatus, TodoMessageState};
-use crate::render::utils::truncate_display_width;
+use crate::render::utils::{sanitize_terminal_text, truncate_display_width};
 
 impl App {
     pub(crate) fn render_sidebar(&self, frame: &mut Frame, area: Rect) {
@@ -76,11 +76,11 @@ impl App {
             }
             shown_items += 1;
             let (marker, color) = match status {
-                TodoDisplayStatus::Completed => ("x", self.state.theme.success),
+                TodoDisplayStatus::Completed => ("✓", self.state.theme.success),
                 TodoDisplayStatus::InProgress => (">", self.state.theme.accent),
                 TodoDisplayStatus::Pending => (" ", self.state.theme.muted),
             };
-            let prefix = format!("[{marker}] ");
+            let prefix = sanitize_terminal_text(&format!("[{marker}] "));
             let content_width = inner.width.saturating_sub(prefix.chars().count() as u16) as usize;
             lines.push(Line::from(vec![
                 Span::styled(prefix, Style::default().fg(color)),
