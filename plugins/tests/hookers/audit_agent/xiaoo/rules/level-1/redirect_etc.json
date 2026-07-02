@@ -11,5 +11,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent",
     "reason": "意图偏离检测拦截"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "/etc/passwd"
   }
 }

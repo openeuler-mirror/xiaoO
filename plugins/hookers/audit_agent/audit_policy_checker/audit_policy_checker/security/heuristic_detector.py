@@ -21,28 +21,24 @@ DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
 # 包含：递归删除根目录、全权限设置、提权执行、访问敏感文件等
 CRITICAL_COMMAND_PATTERNS: list[dict] = [
     # rm 命令分级检测（规则从严格到宽松，先匹配的优先）
-    # 1. rm -rf 根目录 — critical（最高危）
+    # 1. rm -rf 根目录（含通配符如 /* /.* 等） — critical（最高危）
+    # 使用负向先行断言 (?!\w)：/ 后面不是单词字符时匹配（空格、*、&&、行尾等）
+    # /tmp、/etc 等有子路径的不在此规则匹配，由后续规则处理
     {
-        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/\s",
+        "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+/(?!\w)",
         "risk_level": "critical",
         "risk_type": "script_execution",
         "reason": "检测到递归强制删除根目录 (rm -rf /)",
     },
-    # 2. rm 同时带 -r 和 -f 且目标是绝对路径 — critical
-    {
-        "pattern": r"\brm\s+-(?=[^\s]*r)(?=[^\s]*f)[a-zA-Z]*\s+/",
-        "risk_level": "critical",
-        "risk_type": "script_execution",
-        "reason": "检测到递归强制删除绝对路径 (rm -rf /...)",
-    },
-    # 3. rm 带 -r 或 -f 且目标是关键系统目录 — critical
+    # 2. rm 带 -r 或 -f 且目标是关键系统目录 — critical
+    # 注意：已移除"rm -rf /任意绝对路径"的宽泛规则，避免误杀 /tmp 等临时目录清理操作
     {
         "pattern": r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\s+/(etc|var|home|usr|boot|root|opt|srv|sys|proc)\b",
         "risk_level": "critical",
         "risk_type": "script_execution",
         "reason": "检测到删除关键系统目录",
     },
-    # 4. rm -r 后跟绝对路径（无 -f）— high
+    # 3. rm -r 后跟绝对路径（无 -f）— high
     {
         "pattern": r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+/",
         "risk_level": "high",
@@ -68,11 +64,13 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "risk_type": "script_execution",
         "reason": "检测到修改文件所有者为 root",
     },
+    # sudo 提权执行 — 只拦截 sudo 后跟的危险命令，不一刀切拦截所有 sudo
+    # 安全的 sudo 操作（apt update、systemctl status 等）不应被拦截
     {
-        "pattern": r"\bsudo\s+",
+        "pattern": r"\bsudo\s+(rm|chmod|chown|dd|mkfs|format|iptables|crontab|passwd|userdel|useradd|groupdel)\b",
         "risk_level": "high",
-        "risk_type": "script_execution",
-        "reason": "检测到提权执行 (sudo)",
+        "risk_type": "privilege_escalation",
+        "reason": "检测到提权执行高危命令 (sudo + 危险操作)",
     },
     {
         "pattern": r"/etc/shadow",
@@ -80,12 +78,8 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
         "risk_type": "file_access",
         "reason": "检测到访问系统密码文件 (/etc/shadow)",
     },
-    {
-        "pattern": r"/etc/passwd",
-        "risk_level": "high",
-        "risk_type": "file_access",
-        "reason": "检测到访问系统用户文件 (/etc/passwd)",
-    },
+    # 注意：/etc/passwd 已从拦截列表移除，因为它是公开可读的标准系统文件，
+    # 大量合法工具（getent passwd、id、ls -l 等）依赖它。真正敏感的是 /etc/shadow。
     {
         "pattern": r"\.ssh/id_rsa",
         "risk_level": "critical",
@@ -132,17 +126,19 @@ CRITICAL_COMMAND_PATTERNS: list[dict] = [
 # ==================== 额外危险命令模式 ====================
 # 额外增加的危险操作检测
 EXTRA_DANGEROUS_PATTERNS: list[dict] = [
+    # dd 磁盘清零操作 — 只拦截写入系统关键目录，放行 /tmp 等临时目录
     {
-        "pattern": r"\bdd\s+if=/dev/zero",
+        "pattern": r"\bdd\s+if=/dev/zero.*\bof\s*=\s*/(etc|var|home|usr|boot|root|opt|srv|sys|proc)\b",
         "risk_level": "critical",
         "risk_type": "script_execution",
-        "reason": "检测到磁盘清零操作 (dd if=/dev/zero)",
+        "reason": "检测到磁盘清零写入关键系统目录 (dd if=/dev/zero of=/系统目录)",
     },
+    # mkfs 格式化操作 — 只拦截对块设备（/dev/sdX 等）的格式化，放行对普通文件的格式化（如 mkfs.ext4 /tmp/test.img）
     {
-        "pattern": r"\bmkfs\b",
+        "pattern": r"\bmkfs\.\w+\s+/dev/(sd|hd|nvme|vd|loop|mapper|md|dm)\S+",
         "risk_level": "critical",
         "risk_type": "script_execution",
-        "reason": "检测到格式化文件系统操作 (mkfs)",
+        "reason": "检测到格式化块设备 (mkfs /dev/块设备)",
     },
     {
         "pattern": r">\s*/etc/",
@@ -150,17 +146,14 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "file_access",
         "reason": "检测到覆盖写入系统配置目录",
     },
+    # format Windows 命令 — 已移除，在 Linux 环境中无实际意义
+    # 设备文件写入检测 — 只拦截写入设备文件（> /dev/），不拦截读取（cat /dev/zero | head）
+    # 注意：只读访问设备文件（如 cat /dev/zero | head -c 100）通常无安全风险
     {
-        "pattern": r"\bformat\b.*[A-Z]:",
-        "risk_level": "critical",
-        "risk_type": "script_execution",
-        "reason": "检测到磁盘格式化操作",
-    },
-    {
-        "pattern": r"/dev/(zero|random|urandom|full|core|loop|sd|hd|nvme|vd|mem|kmsg|port)",
+        "pattern": r">\s*/dev/(sd|hd|nvme|vd|loop|mem|kmsg|port|zero|random|urandom|full|core)",
         "risk_level": "high",
         "risk_type": "file_access",
-        "reason": "检测到访问设备文件 (/dev/*)",
+        "reason": "检测到重定向写入设备文件",
     },
     # Docker socket 权限提升
     {
@@ -169,12 +162,25 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "risk_type": "privilege_escalation",
         "reason": "检测到访问 Docker socket，可能导致容器逃逸",
     },
-    # git 强制推送
+    # git 强制推送 — 降级为 medium（开发常见操作，允许但记录）
     {
         "pattern": r"git\s+push\s+.*--force",
-        "risk_level": "high",
+        "risk_level": "medium",
         "risk_type": "script_execution",
         "reason": "检测到强制推送操作 (git push --force)，可能覆盖远程提交历史",
+    },
+    # 网络端口扫描（横向移动侦察）
+    {
+        "pattern": r"\bnmap\s+",
+        "risk_level": "high",
+        "risk_type": "lateral_movement",
+        "reason": "检测到网络端口扫描 (nmap)，可能用于横向移动侦察",
+    },
+    {
+        "pattern": r"\b(masscan|zmap|unicornscan)\s+",
+        "risk_level": "high",
+        "risk_type": "lateral_movement",
+        "reason": "检测到网络端口扫描工具，可能用于横向移动侦察",
     },
     # curl POST 外传敏感数据
     {
@@ -212,10 +218,10 @@ EXTRA_DANGEROUS_PATTERNS: list[dict] = [
         "reason": "检测到 chpasswd 批量密码修改命令",
     },
     {
-        "pattern": r"\bnewusers\b",
+        "pattern": r"\b(newusers|lnewusers)\b",
         "risk_level": "high",
         "risk_type": "script_execution",
-        "reason": "检测到 newusers 批量用户添加命令",
+        "reason": "检测到 newusers/lnewusers 批量用户添加命令",
     },
     {
         "pattern": r"\bpasswd\s+-[a-zA-Z]*d\b",
