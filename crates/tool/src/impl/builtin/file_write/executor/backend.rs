@@ -19,6 +19,7 @@ use super::super::validation::backend as validation;
 use super::input::FileWriteInput;
 use super::output::{CreateOutput, FileWriteOutput, Hunk, StructuredPatch, UpdateOutput};
 use super::spec::FileWriteToolSpec;
+use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::ToolRuntimeServices;
 
@@ -135,35 +136,43 @@ impl ToolExecutor for FileWriteExecutor {
             });
         }
 
-        let resolved = backend
-            .paths()
-            .resolve_path(
+        let resolved = timed(
+            "file_write resolve_path",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.paths().resolve_path(
                 agent_contracts::backend::capability::path::ResolvePathRequest {
                     raw_path: file_path.clone(),
                     base: ResolveBase::WorkspaceRoot,
                 },
-            )
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to resolve path: {}", e),
-            })?;
+            ),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to resolve path: {}", e),
+        })?;
 
-        let stat = backend.files().stat(&resolved).await.map_err(|e| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to stat file: {}", e),
-            }
+        let stat = timed(
+            "file_write stat",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().stat(&resolved),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to stat file: {}", e),
         })?;
 
         let original_content = if stat.exists {
-            let bytes = backend
-                .files()
-                .read_bytes(ReadBytesRequest {
+            let bytes = timed(
+                "file_write read_bytes",
+                DEFAULT_FS_TIMEOUT_MS,
+                backend.files().read_bytes(ReadBytesRequest {
                     path: resolved.clone(),
-                })
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed {
-                    message: format!("Failed to read existing file: {}", e),
-                })?;
+                }),
+            )
+            .await
+            .map_err(|e| ToolExecutionError::ExecutionFailed {
+                message: format!("Failed to read existing file: {}", e),
+            })?;
             Some(String::from_utf8_lossy(&bytes).into_owned())
         } else {
             None
@@ -189,25 +198,31 @@ impl ToolExecutor for FileWriteExecutor {
 
         if original_content.is_none() {
             if let Some(parent) = Self::parent_backend_path(&resolved) {
-                backend.files().create_dir_all(&parent).await.map_err(|e| {
-                    ToolExecutionError::ExecutionFailed {
-                        message: format!("Failed to create parent directory: {}", e),
-                    }
+                timed(
+                    "file_write create_dir_all",
+                    DEFAULT_FS_TIMEOUT_MS,
+                    backend.files().create_dir_all(&parent),
+                )
+                .await
+                .map_err(|e| ToolExecutionError::ExecutionFailed {
+                    message: format!("Failed to create parent directory: {}", e),
                 })?;
             }
         }
 
-        let _write_result = backend
-            .files()
-            .write_bytes(WriteBytesRequest {
+        let _write_result = timed(
+            "file_write write_bytes",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().write_bytes(WriteBytesRequest {
                 path: resolved.clone(),
                 content: input.content.as_bytes().to_vec(),
                 mode: write_mode,
-            })
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to write file: {}", e),
-            })?;
+            }),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to write file: {}", e),
+        })?;
 
         let resolved_path = Path::new(resolved.0.as_str());
         if let Some(ref lsp) = lsp {

@@ -2,6 +2,8 @@ use agent_contracts::tool::ToolSpecView;
 use agent_types::common::ids::{ToolId, ToolName};
 use agent_types::tool::spec_types::{EffectProfile, InputSchemaRef, OutputContract};
 
+use super::constants::{default_timeout_ms, max_timeout_ms};
+
 #[derive(Debug, Clone)]
 pub struct GrepToolSpec {
     id: ToolId,
@@ -73,6 +75,14 @@ impl GrepToolSpec {
                 "multiline": {
                     "type": "boolean",
                     "description": "Enable multiline mode where . matches newlines (rg -U --multiline-dotall). Default: false."
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": format!(
+                        "Optional per-call execution timeout in milliseconds. Defaults to {}ms and may not exceed {}ms. When the deadline elapses the underlying rg/grep process is killed and the call returns an error.",
+                        default_timeout_ms(),
+                        max_timeout_ms()
+                    )
                 }
             },
             "required": ["pattern"]

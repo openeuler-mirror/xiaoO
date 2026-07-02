@@ -38,7 +38,8 @@ impl Default for OutputMode {
 ///     "type": { "type": "string", "description": "File type filter" },
 ///     "head_limit": { "type": "number", "description": "Limit output" },
 ///     "offset": { "type": "number", "description": "Skip first N results" },
-///     "multiline": { "type": "boolean", "description": "Enable multiline mode" }
+///     "multiline": { "type": "boolean", "description": "Enable multiline mode" },
+///     "timeout": { "type": "number", "description": "Optional execution timeout in ms" }
 ///   },
 ///   "required": ["pattern"]
 /// }
@@ -101,4 +102,12 @@ pub struct GrepInput {
     /// Enable multiline mode where . matches newlines (rg -U --multiline-dotall)
     #[serde(default)]
     pub multiline: Option<bool>,
+
+    /// Optional per-call execution timeout in milliseconds. Defaults to the
+    /// value returned by [`super::constants::default_timeout_ms`] and may not
+    /// exceed [`super::constants::max_timeout_ms`]. When the deadline elapses
+    /// the underlying `rg`/`grep` process is killed and the call returns an
+    /// error. Mirrors the `bash` tool's `timeout` contract.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }

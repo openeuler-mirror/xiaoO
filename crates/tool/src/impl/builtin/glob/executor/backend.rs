@@ -14,6 +14,7 @@ use super::constants::GLOB_LIMIT;
 use super::input::GlobInput;
 use super::output::GlobOutput;
 use super::spec::GlobToolSpec;
+use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 
 pub struct GlobToolExecutor {
     spec: Arc<GlobToolSpec>,
@@ -42,20 +43,24 @@ impl GlobToolExecutor {
                 .unwrap_or_else(|| "Validation failed".to_string()));
         }
 
-        let resolved = backend
-            .paths()
-            .resolve_path(ResolvePathRequest {
+        let resolved = timed(
+            "glob resolve_path",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.paths().resolve_path(ResolvePathRequest {
                 raw_path: path_str.to_string(),
                 base: ResolveBase::WorkspaceRoot,
-            })
-            .await
-            .map_err(|e| format!("Failed to resolve path: {}", e))?;
+            }),
+        )
+        .await
+        .map_err(|e| format!("Failed to resolve path: {}", e))?;
 
-        let stat = backend
-            .files()
-            .stat(&resolved)
-            .await
-            .map_err(|e| format!("Failed to stat path: {}", e))?;
+        let stat = timed(
+            "glob stat",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().stat(&resolved),
+        )
+        .await
+        .map_err(|e| format!("Failed to stat path: {}", e))?;
 
         let validation_result = validation::validate_base_dir(path, &stat);
         if !validation_result.result {
@@ -135,10 +140,14 @@ impl ToolExecutor for GlobToolExecutor {
             limit: Some(GLOB_LIMIT),
         };
 
-        let result = backend.search().glob(request).await.map_err(|e| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!("Backend glob failed: {}", e),
-            }
+        let result = timed(
+            "glob",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.search().glob(request),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Backend glob failed: {}", e),
         })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
