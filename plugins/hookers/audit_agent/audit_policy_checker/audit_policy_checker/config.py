@@ -77,7 +77,8 @@ def load_config(config_path: str | Path | None = None) -> Config:
     加载优先级：
     1. 指定的 config_path
     2. 环境变量 AUDIT_CONFIG_PATH 指定的路径
-    3. 默认路径：audit_policy_checker/config.json
+    3. audit_settings.json 中的 AUDIT_CONFIG_PATH（仅当指向的文件存在时）
+    4. 默认路径：audit_policy_checker/config.json
 
     对于 LLM 的 api_key，额外支持环境变量 OPENROUTER_API_KEY 覆盖文件中的值。
 
@@ -97,7 +98,12 @@ def load_config(config_path: str | Path | None = None) -> Config:
     elif os.getenv("AUDIT_CONFIG_PATH"):
         path = Path(os.getenv("AUDIT_CONFIG_PATH"))
     else:
-        path = DEFAULT_CONFIG_PATH
+        # 回退：从 audit_settings.json 读取 AUDIT_CONFIG_PATH（仅当指向的文件存在时使用）
+        settings_config_path = get_audit_setting("AUDIT_CONFIG_PATH", "")
+        if settings_config_path and Path(settings_config_path).exists():
+            path = Path(settings_config_path)
+        else:
+            path = DEFAULT_CONFIG_PATH
 
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}。请创建 config.json 文件，可参考 config.json.example。")
@@ -302,30 +308,54 @@ def load_config_with_xiaoo_fallback() -> Config:
 # ========== audit_settings.json 加载逻辑 ==========
 # 优先级：环境变量 > audit_settings.json > 默认值
 
-# audit_settings.json 默认路径：与 config.py 同级目录
+# audit_settings.json 默认路径：与 config.py 同级目录（包目录）
 DEFAULT_AUDIT_SETTINGS_PATH = Path(__file__).parent / "audit_settings.json"
+
+# 插件根目录回退路径：config.py 位于 audit_policy_checker/audit_policy_checker/config.py，
+# 插件根目录是上三级。打包时 audit_settings.json.example 放在插件根目录，
+# 用户按文档 `cp audit_settings.json.example audit_settings.json` 生成的配置也在此层。
+# 包目录找不到时回退到这里，使根目录配置生效。
+_PLUGIN_ROOT_FALLBACK_PATH = Path(__file__).parent.parent.parent / "audit_settings.json"
+
+# 候选查找路径（按优先级）：包目录 → 插件根目录
+_AUDIT_SETTINGS_CANDIDATE_PATHS = (
+    DEFAULT_AUDIT_SETTINGS_PATH,
+    _PLUGIN_ROOT_FALLBACK_PATH,
+)
+
+
+def _resolve_audit_settings_path() -> Path | None:
+    """按优先级返回第一个存在的 audit_settings.json 路径，都不存在则返回 None。"""
+    for candidate in _AUDIT_SETTINGS_CANDIDATE_PATHS:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def load_audit_settings(settings_path: str | Path | None = None) -> dict:
     """
     从 audit_settings.json 加载审计配置。
 
+    查找顺序（settings_path 为 None 时）：
+      1. 包目录（与 config.py 同级，DEFAULT_AUDIT_SETTINGS_PATH）
+      2. 插件根目录（上三级，打包/文档约定的用户配置位置）
+    任一存在即读取；都不存在则返回空 dict（沿用默认值）。
+
     Args:
-        settings_path: 配置文件路径，为 None 时使用默认路径
+        settings_path: 配置文件路径，为 None 时按上述顺序自动查找
 
     Returns:
         dict: 审计配置字典
 
     Raises:
-        FileNotFoundError: 配置文件不存在
         json.JSONDecodeError: 配置文件 JSON 格式错误
     """
     if settings_path is not None:
-        path = Path(settings_path)
+        path: Path | None = Path(settings_path)
     else:
-        path = DEFAULT_AUDIT_SETTINGS_PATH
+        path = _resolve_audit_settings_path()
 
-    if not path.exists():
+    if path is None or not path.exists():
         return {}
 
     with open(path, "r", encoding="utf-8") as f:

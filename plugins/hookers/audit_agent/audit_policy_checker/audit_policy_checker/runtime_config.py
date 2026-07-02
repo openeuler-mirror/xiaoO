@@ -346,10 +346,21 @@ def generate_source_defaults() -> dict:
 # ==================== 配置加载与合并 ====================
 
 def get_runtime_config_path() -> Path:
-    """获取 runtime 配置文件路径（优先环境变量）"""
+    """
+    获取 runtime 配置文件路径。
+
+    优先级：环境变量 AUDIT_RUNTIME_CONFIG_PATH > audit_settings.json 中的同名键 > 默认路径
+    """
     env_path = os.getenv(ENV_RUNTIME_CONFIG_PATH)
     if env_path:
         return Path(env_path)
+
+    # 回退：从 audit_settings.json 读取（静态配置，运维统一设定）
+    from .config import get_audit_setting
+    settings_path = get_audit_setting(ENV_RUNTIME_CONFIG_PATH, "")
+    if settings_path:
+        return Path(settings_path)
+
     return RUNTIME_CONFIG_PATH
 
 
@@ -509,7 +520,7 @@ def is_layer_enabled(layer_key: str) -> bool:
     """
     判断指定层级是否启用。
 
-    优先级：环境变量 > 用户本地 JSON > 默认值
+    优先级：环境变量 > 用户本地 runtime JSON（热更新） > audit_settings.json（静态） > 默认值
 
     Args:
         layer_key: "L1_heuristic" | "L2_logic_rules" | "L3_llm_analysis"
@@ -517,20 +528,35 @@ def is_layer_enabled(layer_key: str) -> bool:
     Returns:
         bool: 是否启用
     """
-    # 环境变量覆盖
-    env_map = {
+    # 层级键 → 对应的"禁用"配置键（环境变量与 audit_settings.json 共用同一键名）
+    disable_key_map = {
         "L1_heuristic": "AUDIT_DISABLE_L1",
         "L2_logic_rules": "AUDIT_DISABLE_L2",
         "L3_llm_analysis": "AUDIT_DISABLE_LLM_LAYER3",
     }
-    env_key = env_map.get(layer_key)
-    if env_key and os.getenv(env_key) == "1":
-        logger.info("层级 %s 被环境变量 %s=1 强制禁用", layer_key, env_key)
+    disable_key = disable_key_map.get(layer_key)
+
+    # 1. 环境变量覆盖（最高优先级，紧急运维硬性禁用）
+    if disable_key and os.getenv(disable_key) == "1":
+        logger.info("层级 %s 被环境变量 %s=1 强制禁用", layer_key, disable_key)
         return False
 
-    # 从 runtime JSON 读取
+    # 2. 用户本地 runtime JSON（热更新，可视化平台改的就是这里）
     runtime = load_runtime_config()
-    return runtime.get("layers", {}).get(layer_key, True)
+    layers = runtime.get("layers", {})
+    if layer_key in layers:
+        return bool(layers[layer_key])
+
+    # 3. audit_settings.json 静态配置（值="1" 表示禁用，与 L3 的 is_llm_layer3_enabled 语义一致）
+    if disable_key:
+        # 延迟 import，避免模块加载顺序问题
+        from .config import get_audit_setting
+        if get_audit_setting(disable_key, "") == "1":
+            logger.info("层级 %s 被 audit_settings.json %s=1 禁用", layer_key, disable_key)
+            return False
+
+    # 4. 默认启用
+    return True
 
 
 def get_env_overrides() -> dict:

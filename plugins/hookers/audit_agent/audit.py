@@ -27,9 +27,25 @@ import os
 import sys
 from datetime import datetime
 
+from audit_policy_checker.config import get_log_path
 from audit_policy_checker.main import audit_action
 
-_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/dev/null")
+
+def _resolve_log_path() -> str:
+    """
+    解析日志路径，优先级：环境变量 > audit_settings.json > /dev/null。
+
+    与设置环境变量效果一致：在 audit_settings.json 中配置 AUDIT_LOG_PATH
+    即可让 HOOK_INPUT/HOOK_OUTPUT 等全量日志写入指定文件。
+    get_log_path 内部已实现"环境变量 > settings > 默认"，此处再兜底 /dev/null。
+    """
+    path = get_log_path()
+    if not path:
+        path = os.environ.get("AUDIT_LOG_PATH", "")
+    return path or "/dev/null"
+
+
+_LOG_PATH = _resolve_log_path()
 
 
 def _log(tag: str, payload: object) -> None:
