@@ -27,8 +27,15 @@ import os
 import sys
 from datetime import datetime
 
-from audit_policy_checker.config import get_log_path
-from audit_policy_checker.main import audit_action
+# 在导入 audit_policy_checker 之前，先把插件根目录（audit.py 所在目录）
+# 注入环境变量。audit.py 始终位于插件根目录（不被 pip 装进 venv），
+# 是唯一可靠的"插件根目录锚点"——无论 pip 安装还是 RPM 源码直跑，
+# 都能用它定位到统一的 audit_settings.json 位置（插件根目录）。
+_PLUGIN_ROOT = os.path.dirname(os.path.abspath(__file__))
+os.environ.setdefault("AUDIT_PLUGIN_ROOT", _PLUGIN_ROOT)
+
+from audit_policy_checker.config import get_log_path  # noqa: E402
+from audit_policy_checker.main import audit_action  # noqa: E402
 
 
 def _resolve_log_path() -> str:

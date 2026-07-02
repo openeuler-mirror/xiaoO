@@ -307,26 +307,38 @@ def load_config_with_xiaoo_fallback() -> Config:
 
 # ========== audit_settings.json 加载逻辑 ==========
 # 优先级：环境变量 > audit_settings.json > 默认值
+#
+# audit_settings.json 统一放在插件根目录（与 audit.py 同级）。
+# 定位插件根目录的可靠锚点是 audit.py——它始终在插件根目录，不被 pip 装进 venv。
+# audit.py 在导入本模块前会设置环境变量 AUDIT_PLUGIN_ROOT 指向插件根目录。
+# 这样无论 pip 安装（config.py 在 venv site-packages 里）还是 RPM 源码直跑，
+# 都能找到同一个 audit_settings.json。
 
-# audit_settings.json 默认路径：与 config.py 同级目录（包目录）
+# 包目录（config.py 同级）：源码直跑时的兜底位置
 DEFAULT_AUDIT_SETTINGS_PATH = Path(__file__).parent / "audit_settings.json"
 
-# 插件根目录回退路径：config.py 位于 audit_policy_checker/audit_policy_checker/config.py，
-# 插件根目录是上三级。打包时 audit_settings.json.example 放在插件根目录，
-# 用户按文档 `cp audit_settings.json.example audit_settings.json` 生成的配置也在此层。
-# 包目录找不到时回退到这里，使根目录配置生效。
-_PLUGIN_ROOT_FALLBACK_PATH = Path(__file__).parent.parent.parent / "audit_settings.json"
 
-# 候选查找路径（按优先级）：包目录 → 插件根目录
-_AUDIT_SETTINGS_CANDIDATE_PATHS = (
-    DEFAULT_AUDIT_SETTINGS_PATH,
-    _PLUGIN_ROOT_FALLBACK_PATH,
-)
+def _audit_settings_candidates() -> list[Path]:
+    """按优先级返回 audit_settings.json 候选路径。运行时动态读取，确保拿到最新环境变量。"""
+    candidates: list[Path] = []
+
+    # 1. 插件根目录（audit.py 注入的 AUDIT_PLUGIN_ROOT）——首选，统一位置
+    plugin_root = os.environ.get("AUDIT_PLUGIN_ROOT")
+    if plugin_root:
+        candidates.append(Path(plugin_root) / "audit_settings.json")
+
+    # 2. 包目录（config.py 同级）——源码直跑且未走 audit.py 入口时的兜底
+    candidates.append(DEFAULT_AUDIT_SETTINGS_PATH)
+
+    # 3. config.py 上三级——源码态（config.py 在源码树 audit_policy_checker/audit_policy_checker/）时的兜底
+    candidates.append(Path(__file__).parent.parent.parent / "audit_settings.json")
+
+    return candidates
 
 
 def _resolve_audit_settings_path() -> Path | None:
     """按优先级返回第一个存在的 audit_settings.json 路径，都不存在则返回 None。"""
-    for candidate in _AUDIT_SETTINGS_CANDIDATE_PATHS:
+    for candidate in _audit_settings_candidates():
         if candidate.exists():
             return candidate
     return None
