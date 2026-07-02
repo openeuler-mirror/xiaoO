@@ -188,6 +188,9 @@ pub struct AppState {
     pub status_panel: StatusPanel,
     pub input_mode: InputMode,
     pub should_quit: bool,
+    /// Set when the user quits via an interrupt (Ctrl+C / SIGINT / SIGTERM)
+    /// so that `App::run` can auto-save the session before shutting down.
+    pub quit_via_interrupt: bool,
     pub provider_dialog: Option<ProviderDialog>,
     pub sandbox_dialog: Option<SandboxDialog>,
     pub remote_session_dialog: Option<crate::remote_sessions_service::RemoteSessionDialog>,
@@ -227,6 +230,7 @@ impl AppState {
             status_panel: build_status_panel(&Config::default()),
             input_mode: InputMode::Editing,
             should_quit: false,
+            quit_via_interrupt: false,
             provider_dialog: None,
             sandbox_dialog: None,
             remote_session_dialog: None,
@@ -274,6 +278,7 @@ impl AppState {
             status_panel: build_status_panel(config),
             input_mode: InputMode::Editing,
             should_quit: false,
+            quit_via_interrupt: false,
             provider_dialog: None,
             sandbox_dialog: None,
             remote_session_dialog: None,

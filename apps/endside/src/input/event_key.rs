@@ -62,6 +62,7 @@ impl App {
             }
             // No selection → quit.
             self.state.should_quit = true;
+            self.state.quit_via_interrupt = true;
             return Ok(());
         }
 
