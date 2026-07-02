@@ -113,6 +113,7 @@ impl App {
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
                             self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
                         }
                         _ = async {
                             match &mut sigterm {
@@ -122,6 +123,7 @@ impl App {
                         } => {
                             tracing::info!("Received SIGTERM, initiating graceful shutdown");
                             self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
                         }
                     }
                 }
@@ -153,6 +155,7 @@ impl App {
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
                             self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
                         }
                     }
                 }
@@ -188,6 +191,23 @@ impl App {
                 }
             }
         }
+        // If the user interrupted the runtime (Ctrl+C / SIGINT / SIGTERM),
+        // persist the session so it can be resumed later. This mirrors the
+        // `/save` command but derives the name automatically as
+        // `{date}-{topic}` (date to the second, topic = first prompt summary).
+        if self.state.quit_via_interrupt {
+            let record = self.gateway.session_snapshot(&self.state.session_id).await;
+            match crate::session_snapshot_service::autosave_on_interrupt(&self.state, record) {
+                Ok(Some(path)) => {
+                    tracing::info!("Auto-saved session on interrupt to {}", path.display());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("Failed to auto-save session on interrupt: {error:#}");
+                }
+            }
+        }
+
         self.gateway.close_sessions(&self.state.session_id).await;
         reset_cursor_color();
         terminal.show_cursor()?;

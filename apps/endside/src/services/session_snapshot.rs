@@ -244,6 +244,71 @@ pub fn save_snapshot_with_chain(
     Ok(path)
 }
 
+/// Auto-save the current session when the user interrupts the runtime
+/// (Ctrl+C / SIGINT / SIGTERM).
+///
+/// The snapshot is written to the default session directory (`~/.xiaoo/session/`)
+/// — the same location used by the `/save` command — using the name pattern
+/// `{date}-{topic}`:
+/// * `date`  — local timestamp precise to the second (`YYYYMMDD-HHMMSS`).
+/// * `topic` — a ≤10-character summary derived from the first user prompt.
+///
+/// Returns `Ok(None)` when there is no user prompt to summarise (nothing worth
+/// saving). Errors are propagated so the caller can log them without aborting
+/// the shutdown sequence.
+pub fn autosave_on_interrupt(
+    state: &AppState,
+    session_record: Option<SessionRecord>,
+) -> Result<Option<PathBuf>> {
+    let Some(topic) = autosave_topic(state) else {
+        return Ok(None);
+    };
+    let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let name = format!("{date}-{topic}");
+    let snapshot = build_snapshot(state, session_record, Vec::new());
+    let path = save_snapshot_with_chain(&name, &snapshot, Some(&[]))?;
+    Ok(Some(path))
+}
+
+/// Derive a short topic label (≤10 characters) from the first user prompt.
+/// Returns `None` when the session has no user messages.
+fn autosave_topic(state: &AppState) -> Option<String> {
+    let first = state
+        .chat_state
+        .messages
+        .iter()
+        .find(|message| message.role == MessageRole::User && !message.content.trim().is_empty())?;
+    Some(sanitize_topic(first.content.trim()))
+}
+
+/// Flatten whitespace, cap at 10 characters, then make the result a valid
+/// snapshot name: replace every non-alphanumeric rune with `-`, collapse
+/// consecutive dashes and trim trailing ones. Falls back to `"untitled"` when
+/// nothing usable remains (e.g. a prompt made solely of punctuation).
+fn sanitize_topic(text: &str) -> String {
+    let flattened: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated: String = flattened.chars().take(10).collect();
+    let mut out = String::with_capacity(truncated.len());
+    let mut prev_dash = false;
+    for ch in truncated.chars() {
+        if ch.is_alphanumeric() {
+            out.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "untitled".to_string()
+    } else {
+        out
+    }
+}
+
 pub fn load_snapshot_by_key(snapshot_key: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
     let dir = snapshot_dir()?;
     let path = dir.join(format!("{snapshot_key}.json"));
@@ -451,7 +516,7 @@ fn validate_snapshot_name(name: &str) -> Result<()> {
         || name == ".."
         || !name
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.'))
     {
         bail!("snapshot name must contain only letters, numbers, '-', '_' or '.'");
     }
@@ -747,5 +812,50 @@ mod tests {
             vec!["grandparent", "parent"]
         );
         assert_eq!(extract_parent_chain("a_b_c_d"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_sanitize_topic_caps_at_ten_chars() {
+        // Whitespace is flattened then the first 10 chars are kept.
+        assert_eq!(sanitize_topic("hello world"), "hello-worl");
+        // Long ASCII prompts are truncated to 10 chars.
+        assert_eq!(
+            sanitize_topic("the quick brown fox jumps over the lazy dog"),
+            "the-quick"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_topic_keeps_unicode_and_drops_punctuation() {
+        // Chinese letters are alphanumeric and therefore preserved; the space
+        // between words becomes a single dash.
+        assert_eq!(
+            sanitize_topic("帮我为xiaoo agent runtime增加会话自动保存机制"),
+            "帮我为xiaoo-a"
+        );
+        // A prompt made solely of punctuation yields the fallback label.
+        assert_eq!(sanitize_topic("!@#$%^&*()"), "untitled");
+        // Whitespace-only input also falls back.
+        assert_eq!(sanitize_topic("    "), "untitled");
+    }
+
+    #[test]
+    fn test_autosave_topic_uses_first_user_prompt() {
+        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
+        // No user messages → nothing to summarise.
+        assert_eq!(autosave_topic(&state), None);
+
+        state
+            .chat_state
+            .messages
+            .push(Message::user("帮我为xiaoo agent runtime增加保存机制"));
+        assert_eq!(autosave_topic(&state), Some("帮我为xiaoo-a".to_string()));
+
+        // A subsequent user prompt must not override the first one.
+        state
+            .chat_state
+            .messages
+            .push(Message::user("another unrelated question"));
+        assert_eq!(autosave_topic(&state), Some("帮我为xiaoo-a".to_string()));
     }
 }
