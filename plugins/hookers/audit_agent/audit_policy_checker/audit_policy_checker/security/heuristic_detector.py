@@ -6,6 +6,10 @@
 3. InjectionKeywordChecker — Prompt 注入检测（工具结果注入关键词匹配）
 
 三者由 HeuristicDetector 统一协调，按优先级依次执行，支持短路返回。
+
+规则来源优先级：
+  runtime JSON 用户本地副本 > 源码种子默认值
+  禁用的规则/skill 在 runtime JSON 中 enabled=False，加载时自动过滤。
 """
 
 import json
@@ -13,6 +17,11 @@ import re
 from pathlib import Path
 
 from .types import HeuristicResult
+from ..runtime_config import (
+    load_runtime_config,
+    get_enabled_l1_command_patterns,
+    get_enabled_l1_injection_keywords,
+)
 
 # 默认用户规则文件路径
 DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
@@ -489,14 +498,29 @@ class UserRuleMatcher:
 
 
 class CommandPatternScanner:
-    """子检测器：关键命令正则扫描"""
+    """子检测器：关键命令正则扫描
+
+    规则来源：优先从 runtime JSON 加载启用的规则，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    """
 
     def __init__(self):
-        all_patterns = CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
-        self._compiled = [
-            {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
-            for p in all_patterns
-        ]
+        # 从 runtime config 加载启用的规则
+        runtime = load_runtime_config()
+        enabled_patterns = get_enabled_l1_command_patterns(runtime)
+
+        if enabled_patterns:
+            self._compiled = [
+                {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
+                for p in enabled_patterns
+            ]
+        else:
+            # 回退到源码硬编码默认值
+            all_patterns = CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
+            self._compiled = [
+                {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
+                for p in all_patterns
+            ]
 
     def scan(self, action_detail: str) -> HeuristicResult:
         hits = [
@@ -530,10 +554,19 @@ def is_inline_script_command(action_detail: str) -> bool:
 
 
 class InjectionKeywordChecker:
-    """子检测器：Prompt 注入关键词检测"""
+    """子检测器：Prompt 注入关键词检测
+
+    规则来源：优先从 runtime JSON 加载启用的关键词，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    """
+
+    def __init__(self):
+        runtime = load_runtime_config()
+        enabled_keywords = get_enabled_l1_injection_keywords(runtime)
+        self._keywords = enabled_keywords if enabled_keywords else INJECTION_KEYWORDS
 
     def check(self, text: str) -> HeuristicResult:
-        hits = [p for p in INJECTION_KEYWORDS if p["keyword"].lower() in text]
+        hits = [p for p in self._keywords if p["keyword"].lower() in text]
         if not hits:
             return HeuristicResult(hit=False)
 

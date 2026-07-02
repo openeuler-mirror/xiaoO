@@ -7,14 +7,17 @@
 
 优化：白名单只读工具（grep/read/glob等）在启发式检测未命中 high/critical 时，跳过后续检测。
 
-配置控制（优先级：环境变量 > audit_settings.json > 默认值）：
-- AUDIT_DISABLE_LLM_LAYER3=1: 禁用第三层 LLM 分析，只执行前两层静态分析
+配置控制（优先级：环境变量 > runtime JSON 用户本地副本 > config.json 默认值）：
+- 环境变量: AUDIT_DISABLE_L1=1 / AUDIT_DISABLE_L2=1 / AUDIT_DISABLE_LLM_LAYER3=1
+- runtime JSON: ~/.config/xiaoo/audit_runtime.json 中的 layers 字段
+- config.json: security.heuristic_enabled / logic_rules_enabled / llm_analysis_enabled
 """
 
 import logging
 from pathlib import Path
 
 from ..config import Config, is_llm_layer3_enabled
+from ..runtime_config import is_layer_enabled
 from .heuristic_detector import (
     HeuristicDetector,
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
@@ -105,7 +108,9 @@ class xiaoOSecBot:
         skip_inline_file_access = False
 
         # ========== 层1: 启发式静态检测 ==========
-        if security_cfg.heuristic_enabled:
+        # 优先级：环境变量 > runtime JSON > config.json > 默认值
+        l1_enabled = is_layer_enabled("L1_heuristic") and security_cfg.heuristic_enabled
+        if l1_enabled:
             heuristic_result = self._heuristic_detector.detect(a_next, reason)
             logger.debug(
                 "启发式检测结果: hit=%s, risk_level=%s, reason=%s",
@@ -213,7 +218,9 @@ class xiaoOSecBot:
             )
 
         # ========== 层2: 逻辑规则检测 ==========
-        if security_cfg.logic_rules_enabled:
+        # 优先级：环境变量 > runtime JSON > config.json > 默认值
+        l2_enabled = is_layer_enabled("L2_logic_rules") and security_cfg.logic_rules_enabled
+        if l2_enabled:
             logic_result = self._logic_rules_checker.check(
                 prompt_session, action_history, a_next, reason
             )
@@ -247,9 +254,10 @@ class xiaoOSecBot:
             logic_result = LogicRuleResult(hit=False)
 
         # ========== 层3: LLM + Skill 深度分析 ==========
-        # 配置控制：环境变量 > audit_settings.json > 默认值
+        # 配置控制：环境变量 > runtime JSON > config.json > 默认值
         # skip_llm 由白名单快速放行逻辑设置，只读敏感工具跳过 LLM 分析
-        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and not skip_llm
+        l3_runtime_enabled = is_layer_enabled("L3_llm_analysis")
+        llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and l3_runtime_enabled and not skip_llm
 
         if llm_analysis_enabled:
             try:

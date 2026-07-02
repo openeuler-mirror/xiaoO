@@ -1,10 +1,35 @@
-"""LLM 调用客户端 — 基于 OpenAI SDK 调用多种大模型（支持不同 Provider 的 Headers）"""
+"""LLM 调用客户端 — 基于 OpenAI SDK 调用多种大模型（支持不同 Provider 的 Headers）
+
+新增功能：返回 LLM 调用的 token 用量统计（prompt_tokens, completion_tokens, total_tokens），
+用于 audit-agent 的 token 消耗追踪和 Dashboard 展示。
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from openai import OpenAI
 
 from .config import LLMConfig, get_default_config
+
+
+@dataclass
+class LLMResult:
+    """LLM 调用结果 — 包含返回文本和 token 用量"""
+    content: str                # LLM 返回的文本内容
+    prompt_tokens: int = 0      # 输入 prompt 的 token 数
+    completion_tokens: int = 0  # LLM 生成的 token 数
+    total_tokens: int = 0       # 总 token 数（prompt + completion）
+    model: str = ""             # 实际使用的模型名称（可能被 Provider 路径修改）
+
+    def to_usage_dict(self) -> dict:
+        """转换为 token 用量字典（用于统计记录）"""
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "model": self.model,
+        }
+
 
 # OpenRouter 固定 base_url（向后兼容）
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -73,71 +98,41 @@ def detect_provider(base_url: str, provider_hint: str = "") -> str:
     # 回退到 URL 推测
     url = base_url.lower()
 
-    # OpenRouter
     if "openrouter.ai" in url:
         return "openrouter"
-
-    # OpenAI
     if "api.openai.com" in url:
         return "openai"
-
-    # Anthropic（注意：通常不走 OpenAI SDK）
     if "anthropic.com" in url or "api.anthropic.com" in url:
         return "anthropic"
-
-    # Gemini（注意：通常不走 OpenAI SDK）
     if "generativelanguage.googleapis.com" in url or "gemini" in url:
         return "gemini"
-
-    # DeepSeek
     if "api.deepseek.com" in url:
         return "deepseek"
-
-    # Groq
     if "api.groq.com" in url:
         return "groq"
-
-    # Mistral
     if "api.mistral.ai" in url:
         return "mistral"
-
-    # Together
     if "api.together.xyz" in url:
         return "together"
-
-    # xAI
     if "api.x.ai" in url:
         return "xai"
-
-    # Minimax
     if "api.minimaxi.com" in url:
         return "minimax"
-
-    # GitCode
     if "api-ai.gitcode.com" in url:
         return "gitcode"
-
-    # Z.AI / Zhipu
     if "api.z.ai" in url:
         return "zai-coding-plan"
     if "open.bigmodel.cn" in url or "bigmodel" in url:
         return "zhipu"
-
-    # Ollama（本地）
     if ":11434" in url:
         return "ollama"
 
     return "openai-compatible"
 
+
 def get_provider_headers(provider: str) -> dict[str, str]:
     """
     获取 provider 特定的 headers。
-
-    Args:
-        provider: provider 标识符
-
-    Returns:
-        dict[str, str]: 需要注入的额外 headers（不含基础认证 Header）
     """
     return PROVIDER_HEADERS.get(provider, {})
 
@@ -145,18 +140,11 @@ def get_provider_headers(provider: str) -> dict[str, str]:
 def create_client(config: LLMConfig | None = None) -> OpenAI:
     """
     创建 LLM 客户端（根据 Provider 自动添加特殊 Headers）。
-
-    Args:
-        config: LLM 配置，为 None 时使用默认配置
-
-    Returns:
-        OpenAI: 客户端实例
     """
     if config is None:
         config = get_default_config().llm
 
     base_url = config.base_url or OPENROUTER_BASE_URL
-    # 使用 config.provider 作为优先提示，回退到 URL 推测
     provider = detect_provider(base_url, config.provider)
     extra_headers = get_provider_headers(provider)
 
@@ -172,7 +160,7 @@ def call_llm(
     prompt: str,
     timeout: float = 5.0,
     config: LLMConfig | None = None,
-) -> str:
+) -> LLMResult:
     """
     调用大模型（根据 Provider 自动添加特殊 Headers）。
 
@@ -182,7 +170,7 @@ def call_llm(
         config: LLM 配置，为 None 时使用默认配置
 
     Returns:
-        str: 模型返回的文本
+        LLMResult: 包含返回文本和 token 用量的结果对象
 
     Raises:
         TimeoutError: 调用超时
@@ -192,7 +180,6 @@ def call_llm(
         config = get_default_config().llm
 
     base_url = config.base_url or OPENROUTER_BASE_URL
-    # 使用 config.provider 作为优先提示，回退到 URL 推测
     provider = detect_provider(base_url, config.provider)
     extra_headers = get_provider_headers(provider)
 
@@ -225,10 +212,23 @@ def call_llm(
 
         # 清理 BOM 和前后空白
         cleaned = content.strip()
-        if cleaned.startswith("\ufeff"):
+        if cleaned.startswith("﻿"):
             cleaned = cleaned[1:]
 
-        return cleaned
+        # 提取 token 用量统计
+        usage = response.usage
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        total_tokens = usage.total_tokens if usage else 0
+        model_used = response.model if response.model else config.model
+
+        return LLMResult(
+            content=cleaned,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model=model_used,
+        )
 
     except Exception as e:
         error_msg = str(e).lower()

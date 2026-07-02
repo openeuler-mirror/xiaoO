@@ -11,7 +11,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from datetime import datetime
 
 from ..config import Config, get_log_path, get_llm_timeout
-from ..llm_client import call_llm
+from ..llm_client import call_llm, LLMResult
+from ..token_stats import record_token_usage
 from .script_content_analyzer import (
     ScriptAnalysisResult,
     analyze_script_content,
@@ -120,9 +121,19 @@ class LLMAnalyzer:
                         timeout=single_call_timeout,
                         config=config.llm,
                     )
-                    llm_response = future.result(timeout=llm_timeout)
+                    llm_result: LLMResult = future.result(timeout=llm_timeout)
 
-                judgment = self._parse_llm_response(llm_response)
+                # 记录 token 用量
+                record_token_usage(
+                    session_id="audit",  # session_id 在 LLMAnalyzer 中不可用，用占位符
+                    step="L3_security_judge",
+                    model=llm_result.model,
+                    prompt_tokens=llm_result.prompt_tokens,
+                    completion_tokens=llm_result.completion_tokens,
+                    total_tokens=llm_result.total_tokens,
+                )
+
+                judgment = self._parse_llm_response(llm_result.content)
                 judgment.source = "llm"
                 return judgment
 
