@@ -35,6 +35,13 @@ pub trait SessionStore: Send + Sync {
     /// Used by `force_close_session` to cascade-close descendants forked via
     /// `checkout`.
     async fn list_children(&self, parent_runtime_id: &str) -> Vec<SessionRecord>;
+
+    /// Returns every session currently in the store. Default returns an empty
+    /// vec so existing trait implementations keep compiling; the in-memory
+    /// store overrides it to snapshot its records for the dashboard.
+    async fn list_all(&self) -> Vec<SessionRecord> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -105,6 +112,12 @@ impl SessionStore for InMemorySessionStore {
             .filter(|r| r.parent_runtime_id.as_deref() == Some(parent_runtime_id))
             .cloned()
             .collect()
+    }
+
+    async fn list_all(&self) -> Vec<SessionRecord> {
+        let mut records: Vec<SessionRecord> = self.records.read().await.values().cloned().collect();
+        records.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        records
     }
 }
 

@@ -14,8 +14,18 @@
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
-| `--host <HOST>` | Bind address | `0.0.0.0` |
-| `--port <PORT>` | Listen port | `18080` |
+| `--host <HOST>` | Bind address for the runtime API | `0.0.0.0` |
+| `--port <PORT>` | Listen port for the runtime API | `18080` |
+| `--dashboard-host <HOST>` | Bind address for the read-only session/sandbox dashboard | `127.0.0.1` |
+| `--dashboard-port <PORT>` | Listen port for the dashboard. If the port is already in use the daemon automatically tries the next one (28082, 28083, …) up to 100 attempts. | `28081` |
+
+When the dashboard starts, the daemon prints and logs the resolved address, e.g.:
+
+```
+dashboard ready at http://127.0.0.1:28081
+```
+
+Open that URL in a browser to inspect every session and sandbox the daemon is currently tracking. The page auto-refreshes every 5 seconds.
 
 ---
 
@@ -87,6 +97,26 @@ burst = 10                          # Max burst size; default: 10
 # requests_per_second = 1           # Chat API is the most expensive endpoint
 # burst = 5
 ```
+
+#### Dashboard
+
+The dashboard is a read-only web UI served on its own port so it never
+shares the runtime API's bearer auth. Open `http://<dashboard-host>:<dashboard-port>/`
+in a browser to inspect every session, every sandbox (operation backend) and
+the link between them. The page auto-refreshes every 5 seconds; no actions
+are exposed.
+
+```toml
+[http.dashboard]
+enabled = true                # Optional; default true. Set false to skip starting the dashboard server.
+host = "127.0.0.1"            # Optional; default 127.0.0.1. Set 0.0.0.0 to expose externally.
+port = 28081                  # Optional; default 28081. On conflict the daemon walks the next port up to 100 times.
+```
+
+CLI flags `--dashboard-host` and `--dashboard-port` take precedence over the
+config-file values. The dashboard never requires a bearer token regardless of
+the `[http]` auth configuration; bind to `127.0.0.1` (the default) or front it
+with a reverse proxy if you need access control.
 
 ---
 

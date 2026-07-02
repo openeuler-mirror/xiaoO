@@ -12,7 +12,8 @@ use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
-    create_router_with_control_plane_and_auth, ChannelRuntimeProcessor, HttpBearerAuthConfig,
+    create_router_with_control_plane_and_auth, dashboard_router, ChannelRuntimeProcessor,
+    DashboardState, HttpBearerAuthConfig,
 };
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
@@ -35,10 +36,23 @@ async fn main() -> Result<()> {
         print_usage();
         return Ok(());
     }
-    run_daemon(cli.config, cli.host, cli.port).await
+    run_daemon(
+        cli.config,
+        cli.host,
+        cli.port,
+        cli.dashboard_host,
+        cli.dashboard_port,
+    )
+    .await
 }
 
-async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Result<()> {
+async fn run_daemon(
+    config_path: Option<PathBuf>,
+    host: String,
+    port: u16,
+    dashboard_cli_host: Option<String>,
+    dashboard_cli_port: Option<u16>,
+) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path).with_context(|| {
         format!(
@@ -63,7 +77,7 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
         handler_handle.await.ok();
     });
     let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        session_store,
+        session_store.clone(),
         resolver,
         hooker_config,
         backend_manager.clone(),
@@ -113,6 +127,25 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
         .context("failed to create router with channel runtimes")?
     };
 
+    // Dashboard runs on its own listener so it never shares the runtime
+    // API port (and its bearer auth). When `[http.dashboard].enabled = false`
+    // is set in the config, `dashboard_port` resolves to `None` and no
+    // dashboard server is started.
+    if let Some(dash_addr) = spawn_dashboard_server(
+        &config,
+        dashboard_cli_host,
+        dashboard_cli_port,
+        session_store.clone(),
+        backend_manager.clone(),
+    )
+    .await?
+    {
+        tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
+        eprintln!("dashboard ready at http://{dash_addr}");
+    } else {
+        tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
+    }
+
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
         .with_context(|| format!("invalid listen address {host}:{port}"))?;
@@ -148,13 +181,95 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
     serve_result
 }
 
+/// Bind the dashboard listener. Starts at the preferred port (default
+/// `28081`) and, if that port is already in use, walks forward up to 100
+/// ports before giving up so a port conflict never blocks daemon startup.
+/// Returns the resolved `SocketAddr` that was actually bound (which may
+/// differ from the requested port), or `None` when the dashboard was
+/// disabled via config.
+async fn spawn_dashboard_server(
+    config: &DaemonConfig,
+    cli_host: Option<String>,
+    cli_port: Option<u16>,
+    session_store: Arc<dyn SessionStore>,
+    backend_manager: Arc<BackendManager>,
+) -> Result<Option<SocketAddr>> {
+    let Some(requested_port) = config.dashboard_port(cli_port) else {
+        return Ok(None);
+    };
+    let host = config.dashboard_host(cli_host);
+
+    let max_attempts: u16 = 100;
+    let mut current_port = requested_port;
+    let listener = loop {
+        let Ok(addr) = format!("{host}:{current_port}").parse::<SocketAddr>() else {
+            bail!("invalid dashboard listen address {host}:{current_port}");
+        };
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => break listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                let attempt = current_port.wrapping_sub(requested_port) + 1;
+                if attempt >= max_attempts {
+                    bail!(
+                        "dashboard port {requested_port} and the next {} ports are all in use; \
+                         set [http.dashboard].port or pass --dashboard-port to pick a free one",
+                        max_attempts - 1
+                    );
+                }
+                tracing::warn!(
+                    "dashboard port {current_port} in use, trying {}",
+                    current_port.wrapping_add(1)
+                );
+                current_port = current_port.wrapping_add(1);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to bind dashboard {addr}"));
+            }
+        }
+    };
+
+    let bound_addr = listener
+        .local_addr()
+        .with_context(|| "failed to read bound dashboard address")?;
+    let router = dashboard_router(DashboardState::new(session_store, backend_manager));
+    tokio::spawn(async move {
+        let result = axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = wait_for_shutdown_signal().await;
+            })
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "dashboard server exited with error");
+        }
+    });
+    Ok(Some(bound_addr))
+}
+
 /// Future that completes when the daemon receives a shutdown signal (SIGINT or
 /// SIGTERM). Wired into [`axum::serve`] via `with_graceful_shutdown` so that
 /// the HTTP server stops accepting new connections and the `shutdown_all`
 /// cleanup path that follows actually runs — without this the OS default
 /// action terminates the process immediately and owned sandboxes are never
-/// deleted.
+/// deleted. Also emits the single "received <signal>" log line; secondary
+/// listeners (dashboard) should use [`wait_for_shutdown_signal`] instead so a
+/// single Ctrl+C does not produce duplicate log lines.
 async fn shutdown_signal() {
+    match wait_for_shutdown_signal().await {
+        "SIGINT" => {
+            tracing::info!("received SIGINT (Ctrl+C), initiating graceful shutdown")
+        }
+        "SIGTERM" => tracing::info!("received SIGTERM, initiating graceful shutdown"),
+        _ => {}
+    }
+}
+
+/// Same as [`shutdown_signal`] but silent — no "received <signal>" log line.
+/// Used by secondary `axum::serve` listeners (e.g. the dashboard server) so
+/// that only the primary daemon handler logs the signal; each call still
+/// installs its own SIGINT/SIGTERM listener, which is supported by tokio.
+/// Returns the signal kind as a `&'static str` (`"SIGINT"` / `"SIGTERM"`,
+/// or `""` on the non-Unix error path where nothing useful was received).
+async fn wait_for_shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -172,25 +287,23 @@ async fn shutdown_signal() {
             }
         };
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("received SIGINT (Ctrl+C), initiating graceful shutdown");
-            }
+            _ = tokio::signal::ctrl_c() => "SIGINT",
             _ = async {
                 match &mut sigterm {
                     Some(s) => s.recv().await,
                     None => std::future::pending().await,
                 }
-            } => {
-                tracing::info!("received SIGTERM, initiating graceful shutdown");
-            }
+            } => "SIGTERM",
         }
     }
     #[cfg(not(unix))]
     {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %error, "failed to listen for Ctrl+C");
-        } else {
-            tracing::info!("received SIGINT (Ctrl+C), initiating graceful shutdown");
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => "SIGINT",
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to listen for Ctrl+C");
+                ""
+            }
         }
     }
 }
@@ -258,6 +371,8 @@ struct Cli {
     config: Option<PathBuf>,
     host: String,
     port: u16,
+    dashboard_host: Option<String>,
+    dashboard_port: Option<u16>,
     help: bool,
 }
 
@@ -269,6 +384,8 @@ impl Cli {
         let mut config = None;
         let mut host = "0.0.0.0".to_string();
         let mut port = 18080_u16;
+        let mut dashboard_host: Option<String> = None;
+        let mut dashboard_port: Option<u16> = None;
         let remaining = args.into_iter().collect::<Vec<_>>();
         let mut index = 0;
         while index < remaining.len() {
@@ -278,6 +395,8 @@ impl Cli {
                         config,
                         host,
                         port,
+                        dashboard_host,
+                        dashboard_port,
                         help: true,
                     });
                 }
@@ -298,6 +417,24 @@ impl Cli {
                         .parse()
                         .with_context(|| format!("invalid port `{value}`"))?;
                 }
+                "--dashboard-host" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --dashboard-host")?;
+                    dashboard_host = Some(value.clone());
+                }
+                "--dashboard-port" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --dashboard-port")?;
+                    dashboard_port = Some(
+                        value
+                            .parse()
+                            .with_context(|| format!("invalid dashboard port `{value}`"))?,
+                    );
+                }
                 other => bail!("unknown argument `{other}`"),
             }
             index += 1;
@@ -306,6 +443,8 @@ impl Cli {
             config,
             host,
             port,
+            dashboard_host,
+            dashboard_port,
             help: false,
         })
     }
@@ -313,7 +452,11 @@ impl Cli {
 
 fn print_usage() {
     eprintln!(
-        "Usage: xiaoo-daemon [--config <path>] [--host <host>] [--port <port>]\n\nDefaults: --host 0.0.0.0 --port 18080"
+        "Usage: xiaoo-daemon [--config <path>] [--host <host>] [--port <port>]\n\
+         \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\n\
+         Defaults: --host 0.0.0.0 --port 18080\n\
+         \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
+         Dashboard port auto-increments on conflict (28081, 28082, ...)."
     );
 }
 
@@ -358,5 +501,36 @@ mod tests {
             Cli::parse(["--help"].into_iter().map(str::to_string)).expect("cli should parse help");
 
         assert!(cli.help);
+    }
+
+    #[test]
+    fn dashboard_arguments_are_optional_and_default_to_none() {
+        let cli = Cli::parse(std::iter::empty::<String>()).expect("cli should parse with defaults");
+
+        assert!(cli.dashboard_host.is_none());
+        assert!(cli.dashboard_port.is_none());
+    }
+
+    #[test]
+    fn parses_dashboard_host_and_port() {
+        let cli = Cli::parse(
+            ["--dashboard-host", "0.0.0.0", "--dashboard-port", "29000"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("cli should parse dashboard flags");
+
+        assert_eq!(cli.dashboard_host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(cli.dashboard_port, Some(29000));
+    }
+
+    #[test]
+    fn dashboard_port_must_be_numeric() {
+        let result = Cli::parse(
+            ["--dashboard-port", "not-a-number"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        assert!(result.is_err());
     }
 }

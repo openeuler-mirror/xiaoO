@@ -33,7 +33,9 @@ pub use session_base::{
     SessionForkResult, SessionInput, SessionInputKind, SessionInteractionRequest,
     SessionOpenRequest, SessionSubmitReceipt,
 };
-pub use session_record::{SessionLifecycleStatus, SessionRecord};
+pub use session_record::{
+    SessionAgentRecord, SessionLifecycleStatus, SessionRecord, SessionRuntimeSnapshot,
+};
 pub use session_runtime::{
     AppRuntimeAssembly, AppRuntimeFactory, AppRuntimeFactoryError, ResolvedSessionRuntime,
     SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
