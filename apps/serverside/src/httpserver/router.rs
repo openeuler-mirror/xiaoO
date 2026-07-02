@@ -253,7 +253,13 @@ fn create_router_from_state(
             )
             .route("/api/v1/runtimes/pause", post(handle_runtime_pause))
             .route("/api/v1/runtimes/resume", post(handle_runtime_resume))
-            .route("/api/v1/runtimes/checkout", post(handle_runtime_checkout)),
+            .route("/api/v1/runtimes/checkout", post(handle_runtime_checkout))
+            .route("/api/v1/runtimes/exec", post(handle_runtime_exec))
+            .route("/api/v1/runtimes/read-file", post(handle_runtime_read_file))
+            .route(
+                "/api/v1/runtimes/write-file",
+                post(handle_runtime_write_file),
+            ),
         bearer_auth.clone(),
     );
 
@@ -601,6 +607,66 @@ async fn handle_runtime_checkpoint_snapshot_delete(
     };
 
     match control_plane.delete_checkpoint_snapshot(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_exec(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeExecRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.exec_runtime(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_read_file(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeReadFileRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.read_runtime_file(payload).await {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_write_file(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::RuntimeWriteFileRequest>,
+) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.write_runtime_file(payload).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
     }

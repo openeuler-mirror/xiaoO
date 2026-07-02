@@ -4,8 +4,9 @@ use crate::gateway::{
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimePauseRequest, RuntimePauseResult,
-    RuntimeResumeRequest, RuntimeResumeResult,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimeExecRequest, RuntimeExecResult,
+    RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest, RuntimeReadFileResult,
+    RuntimeResumeRequest, RuntimeResumeResult, RuntimeWriteFileRequest, RuntimeWriteFileResult,
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
@@ -141,6 +142,33 @@ pub trait SessionControlPlane: Send + Sync {
     ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
             capability: "delete_checkpoint_snapshot".to_string(),
+        })
+    }
+
+    async fn exec_runtime(
+        &self,
+        _request: RuntimeExecRequest,
+    ) -> Result<RuntimeExecResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "exec_runtime".to_string(),
+        })
+    }
+
+    async fn read_runtime_file(
+        &self,
+        _request: RuntimeReadFileRequest,
+    ) -> Result<RuntimeReadFileResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "read_runtime_file".to_string(),
+        })
+    }
+
+    async fn write_runtime_file(
+        &self,
+        _request: RuntimeWriteFileRequest,
+    ) -> Result<RuntimeWriteFileResult, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "write_runtime_file".to_string(),
         })
     }
 
