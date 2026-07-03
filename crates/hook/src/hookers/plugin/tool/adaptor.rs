@@ -1114,4 +1114,84 @@ else:
             elapsed
         );
     }
+
+    /// 真实复现客户卡死：经 Rust hooker 调真实 audit.py，audit.py 的 L3 call_llm
+    /// 被 monkeypatch（sitecustomize）永久阻塞（等效 http 超时失效），audit.py 子进程
+    /// 卡死不退出。验证 Rust 侧超时 + kill 兜底能强杀卡死的真实 audit.py 子进程。
+    ///
+    /// 注意：依赖本仓库 plugins/hookers/audit_agent 下的 venv 与 audit.py 存在，
+    /// CI 环境可能没有，故标 #[ignore]，手动 `cargo test -- --ignored` 跑。
+    #[tokio::test]
+    #[ignore]
+    async fn rust_kills_real_hung_audit_py_via_hooker() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let audit_py = repo_root.join("plugins/hookers/audit_agent/audit.py");
+        let venv_python = repo_root
+            .join("plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3");
+        let inject_dir = repo_root.join("plugins/tests/hookers/audit_agent/cases/hang-llm-repro");
+        let cfg_dir = std::env::temp_dir().join("audit_hang_test_cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg = cfg_dir.join("config.json");
+        std::fs::write(
+            &cfg,
+            r#"{"llm":{"api_key":"sk-fake","model":"m","temperature":0.1,"base_url":"http://127.0.0.1:1/api/v1"},"timeout":{"total_timeout":60.0,"prompt1_timeout":30.0,"prompt2_timeout":20.0,"step_interval":0.0},"cache":{"enabled":false,"max_size":1000},"retry":{"max_retries":1,"retry_interval":1.0},"security":{"enabled":true,"heuristic_enabled":true,"logic_rules_enabled":true,"llm_analysis_enabled":true,"rules_path":"","skills_dir":""},"log_level":"INFO"}"#,
+        )
+        .unwrap();
+
+        // command 经 sh -c，前缀设 env：注入 sitecustomize（patch call_llm 永久阻塞）+
+        // 测试 config（开 L3）+ 短 L3 超时 + 隔离 HOME。venv python 跑真实 audit.py。
+        let command = format!(
+            "PYTHONPATH={inject} HOME={home} AUDIT_CONFIG_PATH={cfg} AUDIT_LLM_TIMEOUT=10 {py} {audit}",
+            inject = inject_dir.display(),
+            home = std::env::temp_dir().display(),
+            cfg = cfg.display(),
+            py = venv_python.display(),
+            audit = audit_py.display(),
+        );
+        let adaptor = PluginToolHookerAdaptor::new(
+            HookerId("audit_agent".to_string()),
+            HookPointId("test-agent.Tool.file_write.pre".to_string()),
+            command,
+            Value::Null,
+        );
+        // 会进 L3 的 payload（file_write 非白名单）
+        let payload = json!({
+            "stage": "pre",
+            "session_id": "s",
+            "prompt_session": "写测试文件",
+            "action_history": [],
+            "call": {"call_id": "c", "tool_name": "file_write",
+                     "input": {"file_path": "/tmp/test_hang.txt", "content": "hello"}}
+        });
+
+        // Rust 侧用 5s 超时（比 L3 的 10s 短），验证 Rust 先杀掉卡死的 audit.py。
+        let start = std::time::Instant::now();
+        let result = adaptor
+            .run_plugin_command_with_timeout(&payload, Duration::from_secs(5))
+            .await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ToolExecutionError::Timeout { timeout_ms }) => {
+                assert_eq!(timeout_ms, 5000, "应为 Rust 侧 5s 超时");
+            }
+            other => panic!("expected Timeout(Rust 杀掉卡死 audit.py), got: {:?}", other),
+        }
+        // Rust 超时附近返回（~5s），证明强杀了卡死的真实 audit.py 子进程，未永久阻塞。
+        assert!(
+            elapsed.as_secs() < 15,
+            "Rust 应在 ~5s 超时杀掉 audit.py，实际 {:?}（疑似没杀掉）",
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() >= 5,
+            "应等到 5s 超时，实际 {:?}（疑似 audit.py 没卡住）",
+            elapsed
+        );
+    }
 }
