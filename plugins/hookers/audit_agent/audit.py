@@ -167,4 +167,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # 用 os._exit 而非 sys.exit：跳过解释器清理，不等非守护线程。
+    # audit_agent 的 L3 用 ThreadPoolExecutor 调 LLM，worker 是非守护线程；
+    # 当 call_llm 卡死（http 超时失效）且 future.result 超时后，worker 仍永久阻塞，
+    # sys.exit 会在进程退出阶段等它 → 卡死。os._exit 立即退出，worker 随进程消亡。
+    # audit.py 是一次性 hook 脚本，无 atexit/需清理资源，flush stdout 后直接退出安全。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
