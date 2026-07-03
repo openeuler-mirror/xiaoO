@@ -287,15 +287,17 @@ impl App {
     }
 
     pub(crate) fn render_input(&self, frame: &mut Frame, area: Rect) {
-        let has_tool_cards = self
-            .state
-            .chat_state
-            .messages
-            .iter()
-            .any(|message| message.tool_state.is_some());
-        let title = if self.state.chat_state.is_loading {
-            " Enter 加入队列 | Esc 取消当前任务 "
-        } else if self.state.input_mode == InputMode::InteractionPrompt {
+        let has_tool_cards = self.state.active_transcript_has_tool_cards();
+        let readonly_subagent_view = self.state.is_subagent_view_active()
+            && self.state.input_mode == InputMode::Editing
+            && self.state.api_key_dialog.is_none()
+            && self.state.provider_dialog.is_none()
+            && self.state.sandbox_dialog.is_none()
+            && self.state.remote_session_dialog.is_none()
+            && self.state.session_snapshot_dialog.is_none()
+            && self.state.delete_dialog.is_none()
+            && self.state.interaction_prompt.is_none();
+        let title = if self.state.input_mode == InputMode::InteractionPrompt {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 | Tab 切换补充 "
         } else if self.state.slash_menu_visible() {
             " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
@@ -309,6 +311,10 @@ impl App {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 "
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
+        } else if readonly_subagent_view {
+            " Subagent view is read-only | Shift+↑ Back "
+        } else if self.state.chat_state.is_loading {
+            " Enter 加入队列 | Esc 取消当前任务 "
         } else if has_tool_cards {
             " Enter 发送 | Alt+Enter 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
         } else {
@@ -324,9 +330,21 @@ impl App {
             .style(Style::default().bg(self.state.theme.input_bg));
 
         let inner = block.inner(area);
-        let value = self.state.chat_state.input.value();
-        let cursor = self.state.chat_state.input.cursor();
-        let selection = self.state.chat_state.input.selected_range();
+        let readonly_value;
+        let (value, cursor, selection) = if readonly_subagent_view {
+            readonly_value = self.state.active_subagent_readonly_text();
+            (
+                readonly_value.as_str(),
+                readonly_value.chars().count(),
+                None,
+            )
+        } else {
+            (
+                self.state.chat_state.input.value(),
+                self.state.chat_state.input.cursor(),
+                self.state.chat_state.input.selected_range(),
+            )
+        };
 
         let inner_height = inner.height.max(1) as usize;
         let max_width = inner.width.max(1) as usize;
@@ -365,6 +383,7 @@ impl App {
             && self.state.sandbox_dialog.is_none()
             && self.state.remote_session_dialog.is_none()
             && self.state.session_snapshot_dialog.is_none()
+            && !readonly_subagent_view
             && matches!(
                 self.state.input_mode,
                 InputMode::Editing

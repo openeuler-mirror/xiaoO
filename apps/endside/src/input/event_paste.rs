@@ -28,6 +28,10 @@ impl App {
             return Ok(());
         }
 
+        if self.state.is_subagent_view_active() {
+            return Ok(());
+        }
+
         if self.state.input_mode == InputMode::Editing && self.state.provider_dialog.is_none() {
             paste_into_input(&mut self.state.chat_state.input, text);
             self.state.chat_state.reset_input_history_navigation();

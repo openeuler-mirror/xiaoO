@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Mutex;
 
@@ -19,14 +20,17 @@ pub enum SseStreamEvent {
         turn: u32,
     },
     TextDelta {
+        agent_id: String,
         delta: String,
         snapshot: String,
     },
     ThinkingDelta {
+        agent_id: String,
         delta: String,
         snapshot: String,
     },
     ToolResult {
+        agent_id: String,
         call_id: String,
         tool_name: String,
         output_preview: String,
@@ -75,8 +79,8 @@ impl SseStreamEvent {
 
 pub struct SseLoopEventSink {
     tx: mpsc::UnboundedSender<SseStreamEvent>,
-    last_snapshot_len: Mutex<usize>,
-    last_thinking_snapshot_len: Mutex<usize>,
+    last_snapshot_len: Mutex<BTreeMap<String, usize>>,
+    last_thinking_snapshot_len: Mutex<BTreeMap<String, usize>>,
     loop_summary: Mutex<Option<LoopEndSummary>>,
 }
 
@@ -84,8 +88,8 @@ impl SseLoopEventSink {
     pub fn new(tx: mpsc::UnboundedSender<SseStreamEvent>) -> Self {
         Self {
             tx,
-            last_snapshot_len: Mutex::new(0),
-            last_thinking_snapshot_len: Mutex::new(0),
+            last_snapshot_len: Mutex::new(BTreeMap::new()),
+            last_thinking_snapshot_len: Mutex::new(BTreeMap::new()),
             loop_summary: Mutex::new(None),
         }
     }
@@ -101,10 +105,10 @@ impl SseLoopEventSink {
 impl LoopEventSink for SseLoopEventSink {
     fn on_turn_start(&self, agent_id: &AgentId, turn: u32) {
         if let Ok(mut len) = self.last_snapshot_len.lock() {
-            *len = 0;
+            len.insert(agent_id.0.clone(), 0);
         }
         if let Ok(mut len) = self.last_thinking_snapshot_len.lock() {
-            *len = 0;
+            len.insert(agent_id.0.clone(), 0);
         }
         let _ = self.tx.send(SseStreamEvent::TurnStart {
             agent_id: agent_id.0.clone(),
@@ -112,14 +116,14 @@ impl LoopEventSink for SseLoopEventSink {
         });
     }
 
-    fn on_assistant_message(&self, _agent_id: &AgentId, text: &str) {
+    fn on_assistant_message(&self, agent_id: &AgentId, text: &str) {
         let delta = {
             let mut last_len = self
                 .last_snapshot_len
                 .lock()
                 .expect("sse sink last_snapshot_len mutex should not be poisoned");
-            let prev = *last_len;
-            *last_len = text.len();
+            let prev = *last_len.get(&agent_id.0).unwrap_or(&0);
+            last_len.insert(agent_id.0.clone(), text.len());
             if prev < text.len() {
                 text[prev..].to_string()
             } else {
@@ -127,19 +131,20 @@ impl LoopEventSink for SseLoopEventSink {
             }
         };
         let _ = self.tx.send(SseStreamEvent::TextDelta {
+            agent_id: agent_id.0.clone(),
             delta,
             snapshot: text.to_string(),
         });
     }
 
-    fn on_assistant_reasoning(&self, _agent_id: &AgentId, text: &str) {
+    fn on_assistant_reasoning(&self, agent_id: &AgentId, text: &str) {
         let delta = {
             let mut last_len = self
                 .last_thinking_snapshot_len
                 .lock()
                 .expect("sse sink last_thinking_snapshot_len mutex should not be poisoned");
-            let prev = *last_len;
-            *last_len = text.len();
+            let prev = *last_len.get(&agent_id.0).unwrap_or(&0);
+            last_len.insert(agent_id.0.clone(), text.len());
             if prev < text.len() {
                 text[prev..].to_string()
             } else {
@@ -147,13 +152,15 @@ impl LoopEventSink for SseLoopEventSink {
             }
         };
         let _ = self.tx.send(SseStreamEvent::ThinkingDelta {
+            agent_id: agent_id.0.clone(),
             delta,
             snapshot: text.to_string(),
         });
     }
 
-    fn on_tool_result(&self, _agent_id: &AgentId, event: &ToolResultEvent) {
+    fn on_tool_result(&self, agent_id: &AgentId, event: &ToolResultEvent) {
         let _ = self.tx.send(SseStreamEvent::ToolResult {
+            agent_id: agent_id.0.clone(),
             call_id: event.call_id.clone(),
             tool_name: event.tool_name.clone(),
             output_preview: event.output_preview.clone(),

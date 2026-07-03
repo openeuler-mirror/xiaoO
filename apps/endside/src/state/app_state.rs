@@ -106,6 +106,18 @@ pub struct ToolToggleRegion {
     pub rect: Rect,
 }
 
+#[derive(Debug, Clone)]
+pub struct SubagentOpenRegion {
+    pub agent_id: String,
+    pub rect: Rect,
+}
+
+#[derive(Clone)]
+pub struct SubagentOpenTarget {
+    pub agent_id: String,
+    pub row_offset: usize,
+}
+
 #[derive(Clone)]
 pub struct CachedMessageRender {
     pub revision: u64,
@@ -113,6 +125,7 @@ pub struct CachedMessageRender {
     pub theme: Theme,
     pub lines: Vec<Line<'static>>,
     pub tool_toggle_row_offset: Option<usize>,
+    pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
 #[derive(Clone)]
@@ -120,6 +133,7 @@ pub struct CachedMessageLayout {
     pub message_index: usize,
     pub start_visual_row: usize,
     pub tool_toggle_row_offset: Option<usize>,
+    pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
 #[derive(Clone)]
@@ -142,6 +156,7 @@ pub struct RenderState {
     pub message_renders: Vec<Option<CachedMessageRender>>,
     pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
+    pub subagent_open_regions: Vec<SubagentOpenRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
     pub interaction_prompt_supplement_area: Option<Rect>,
@@ -155,6 +170,7 @@ pub struct RenderState {
     /// Index of the first visible agent tab in the header.
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
+    pub active_transcript_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -358,6 +374,164 @@ impl AppState {
     pub fn toggle_api_key_visibility(&mut self) {
         if let Some(dialog) = self.api_key_dialog.as_mut() {
             dialog.show_plaintext = !dialog.show_plaintext;
+        }
+    }
+
+    pub fn active_transcript_key(&self) -> String {
+        self.chat_state
+            .active_subagent_id()
+            .map(|agent_id| format!("subagent:{agent_id}"))
+            .unwrap_or_else(|| "main".to_string())
+    }
+
+    pub fn is_subagent_view_active(&self) -> bool {
+        self.chat_state.is_subagent_view_active()
+    }
+
+    pub fn active_transcript_has_tool_cards(&self) -> bool {
+        if let Some(agent_id) = self.chat_state.active_subagent_id() {
+            return self
+                .chat_state
+                .subagent_lanes
+                .get(agent_id)
+                .map(|lane| {
+                    lane.messages
+                        .iter()
+                        .any(|message| message.tool_state.is_some())
+                })
+                .unwrap_or(false);
+        }
+        self.chat_state
+            .messages
+            .iter()
+            .any(|message| message.tool_state.is_some())
+    }
+
+    pub fn active_subagent_title(&self) -> Option<String> {
+        let agent_id = self.chat_state.active_subagent_id()?;
+        let lane = self.chat_state.subagent_lanes.get(agent_id)?;
+        let mut title = if lane.title.trim().is_empty() {
+            format!("Subagent {}", short_agent_id(&lane.agent_id))
+        } else {
+            lane.title.clone()
+        };
+        if lane.is_running {
+            title.push_str(" (running)");
+        }
+        Some(title)
+    }
+
+    pub fn active_subagent_readonly_text(&self) -> String {
+        let Some(agent_id) = self.chat_state.active_subagent_id() else {
+            return String::new();
+        };
+        let Some(lane) = self.chat_state.subagent_lanes.get(agent_id) else {
+            return format!("Subagent {}", short_agent_id(agent_id));
+        };
+        let mut parts = Vec::new();
+        if !lane.description.trim().is_empty() {
+            parts.push(lane.description.trim().to_string());
+        }
+        if !lane.task_goal.trim().is_empty() {
+            parts.push(lane.task_goal.trim().to_string());
+        }
+        if parts.is_empty() {
+            format!("Subagent {}", short_agent_id(&lane.agent_id))
+        } else {
+            parts.join("\n")
+        }
+    }
+
+    pub fn enter_subagent_view(&mut self, agent_id: &str) -> bool {
+        let entered = self.chat_state.enter_subagent_view(agent_id);
+        if entered {
+            self.invalidate_transcript_render_cache();
+            self.transcript_selection = None;
+            self.chat_state.input.clear_selection();
+        }
+        entered
+    }
+
+    pub fn leave_subagent_view(&mut self) -> bool {
+        let left = self.chat_state.leave_subagent_view();
+        if left {
+            self.invalidate_transcript_render_cache();
+            self.transcript_selection = None;
+        }
+        left
+    }
+
+    pub fn invalidate_transcript_render_cache(&mut self) {
+        self.render_state.message_renders.clear();
+        self.render_state.transcript_cache = None;
+        self.render_state.line_texts.clear();
+        self.render_state.line_is_header.clear();
+        self.render_state.tool_toggle_regions.clear();
+        self.render_state.subagent_open_regions.clear();
+        self.render_state.active_transcript_key = None;
+    }
+
+    pub fn active_transcript_scroll_up(&mut self) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.scroll_up();
+            }
+        } else {
+            self.chat_state.scroll_up();
+        }
+    }
+
+    pub fn active_transcript_scroll_down(&mut self) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.scroll_down();
+            }
+        } else {
+            self.chat_state.scroll_down();
+        }
+    }
+
+    pub fn active_transcript_scroll_offset(&self) -> usize {
+        self.chat_state
+            .active_subagent_id()
+            .and_then(|agent_id| self.chat_state.subagent_lanes.get(agent_id))
+            .map(|lane| lane.scroll_offset)
+            .unwrap_or(self.chat_state.scroll_offset)
+    }
+
+    pub fn active_transcript_max_scroll_offset(&self) -> usize {
+        self.chat_state
+            .active_subagent_id()
+            .and_then(|agent_id| self.chat_state.subagent_lanes.get(agent_id))
+            .map(|lane| lane.max_scroll_offset())
+            .unwrap_or_else(|| self.chat_state.max_scroll_offset())
+    }
+
+    pub fn set_active_transcript_scroll_offset(&mut self, line_offset: usize) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.set_scroll_offset(line_offset);
+            }
+        } else {
+            self.chat_state.set_scroll_offset(line_offset);
+        }
+    }
+
+    pub fn active_transcript_scrollbar_dragging(&self) -> bool {
+        self.chat_state
+            .active_subagent_id()
+            .and_then(|agent_id| self.chat_state.subagent_lanes.get(agent_id))
+            .map(|lane| lane.scrollbar_dragging)
+            .unwrap_or(self.chat_state.scrollbar_dragging)
+    }
+
+    pub fn set_active_transcript_scrollbar_dragging(&mut self, dragging: bool) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.scrollbar_dragging = dragging;
+            }
+        } else {
+            self.chat_state.scrollbar_dragging = dragging;
         }
     }
 
@@ -582,6 +756,9 @@ impl AppState {
     }
 
     pub fn slash_menu_visible(&self) -> bool {
+        if self.is_subagent_view_active() {
+            return false;
+        }
         if self.interaction_prompt.is_some() {
             return false;
         }
@@ -765,6 +942,15 @@ fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String>
             value.get("file_path")?.as_str().map(ToOwned::to_owned)
         }
         _ => None,
+    }
+}
+
+fn short_agent_id(agent_id: &str) -> String {
+    let trimmed = agent_id.trim();
+    if trimmed.chars().count() <= 8 {
+        trimmed.to_string()
+    } else {
+        trimmed.chars().take(8).collect::<String>()
     }
 }
 

@@ -50,10 +50,15 @@ impl SessionWorker {
         let is_root_lane = input.agent_id == input.session.runtime.agent_id;
         let mut resolved = input.resolved_runtime;
         if !is_root_lane {
-            resolved.bindings.loop_event_sink = None;
-            resolved.bindings.tool_event_sink = None;
             resolved.bindings.interaction_handle = input.interaction_handle_override.clone();
             resolved.bindings.pending_user_messages = None;
+            if let Some(override_sender) = input.channel_file_sender_override.clone() {
+                resolved.bindings.channel_file_sender = Some(override_sender);
+            }
+            resolved.bindings.loop_event_sink = merge_loop_event_sinks(
+                resolved.bindings.loop_event_sink.clone(),
+                input.loop_event_sink_override.clone(),
+            );
         } else {
             // Merge overrides: override takes precedence.
             if let Some(override_handle) = input.interaction_handle_override.clone() {

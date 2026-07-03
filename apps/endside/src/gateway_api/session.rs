@@ -10,9 +10,14 @@ use crate::gateway::{InMemorySessionStore, SessionControlPlane, SessionStore};
 use crate::interaction_prompt::PromptRequest;
 
 use agent_types::common::ids::AgentId;
+use agent_types::events::LoopEndSummary;
 
 #[derive(Debug)]
 pub enum SessionTurnUpdate {
+    TurnStart {
+        agent_id: AgentId,
+        turn: u32,
+    },
     SetAssistantContent {
         agent_id: AgentId,
         text: String,
@@ -22,8 +27,12 @@ pub enum SessionTurnUpdate {
         text: String,
     },
     Tool {
-        _agent_id: AgentId,
+        agent_id: AgentId,
         update: ToolExecutionUpdate,
+    },
+    LoopEnd {
+        agent_id: AgentId,
+        summary: LoopEndSummary,
     },
     InteractionPrompt(PromptRequest),
     PendingUserMessagesConsumed {
