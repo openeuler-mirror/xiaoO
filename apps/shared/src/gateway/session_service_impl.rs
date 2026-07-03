@@ -7,13 +7,23 @@ use crate::gateway::{
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimePauseRequest, RuntimePauseResult, RuntimeRecord,
-    RuntimeResumeRequest, RuntimeResumeResult,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimeExecRequest, RuntimeExecResult,
+    RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest, RuntimeReadFileResult,
+    RuntimeRecord, RuntimeResumeRequest, RuntimeResumeResult, RuntimeWriteFileRequest,
+    RuntimeWriteFileResult,
+};
+use agent_contracts::backend::{
+    capability::{
+        exec::ExecRequest,
+        filesystem::{ReadBytesRequest, WriteBytesRequest, WriteMode},
+    },
+    BackendPath,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
 use agent_types::session::{SessionClosedHookInput, SessionCreatedHookInput};
 use async_trait::async_trait;
+use base64::Engine as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use subagent::{
@@ -31,7 +41,7 @@ use super::session_handle::SessionHandle;
 use super::session_supervisor::SessionSupervisor;
 use crate::backend::{
     BackendCheckoutRequest, BackendCheckpointRequest, BackendCheckpointSnapshotDeleteRequest,
-    BackendError, BackendManager,
+    BackendError, BackendLease, BackendManager,
 };
 use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
 
@@ -164,6 +174,38 @@ impl CoreBackedSessionService {
             },
             error => SessionServiceError::RuntimeBuild {
                 message: format!("{context}: {error}"),
+            },
+        }
+    }
+
+    async fn lease_bound_backend_for_idle_runtime(
+        &self,
+        runtime_id: &str,
+    ) -> Result<BackendLease, SessionServiceError> {
+        let session = self.idle_session_snapshot(runtime_id).await?;
+        if session.status == SessionLifecycleStatus::Closed {
+            return Err(SessionServiceError::SessionClosed {
+                session_id: runtime_id.to_string(),
+            });
+        }
+        self.backend_manager
+            .lease_bound_session(runtime_id)
+            .await
+            .map_err(|error| Self::map_runtime_backend_error(runtime_id, error))
+    }
+
+    fn map_runtime_backend_error(runtime_id: &str, error: BackendError) -> SessionServiceError {
+        match error {
+            BackendError::NotFound { .. } => SessionServiceError::SessionNotFound {
+                session_id: runtime_id.to_string(),
+            },
+            BackendError::UnsupportedBackend { kind } => {
+                SessionServiceError::UnsupportedCapability {
+                    capability: format!("runtime backend: {kind}"),
+                }
+            }
+            error => SessionServiceError::RuntimeBuild {
+                message: format!("runtime backend operation failed: {error}"),
             },
         }
     }
@@ -929,6 +971,92 @@ impl SessionControlPlane for CoreBackedSessionService {
         request: RuntimeCheckpointSnapshotDeleteRequest,
     ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
         self.delete_checkpoint_snapshot_internal(request).await
+    }
+
+    async fn exec_runtime(
+        &self,
+        request: RuntimeExecRequest,
+    ) -> Result<RuntimeExecResult, SessionServiceError> {
+        let lease = self
+            .lease_bound_backend_for_idle_runtime(&request.runtime_id)
+            .await?;
+        let env = (!request.env.is_empty()).then(|| request.env.into_iter().collect());
+        let result = lease
+            .backend()
+            .exec()
+            .exec(ExecRequest {
+                command: request.command,
+                args: Vec::new(),
+                shell: request.shell,
+                cwd: request.cwd.map(BackendPath),
+                timeout_ms: request.timeout_ms,
+                env,
+            })
+            .await
+            .map_err(|error| SessionServiceError::CoreRun {
+                message: format!("runtime exec failed: {error}"),
+            })?;
+
+        Ok(RuntimeExecResult {
+            stdout_base64: base64::engine::general_purpose::STANDARD.encode(result.stdout),
+            stderr_base64: base64::engine::general_purpose::STANDARD.encode(result.stderr),
+            exit_code: result.exit_code,
+            timed_out: result.timed_out,
+        })
+    }
+
+    async fn read_runtime_file(
+        &self,
+        request: RuntimeReadFileRequest,
+    ) -> Result<RuntimeReadFileResult, SessionServiceError> {
+        let lease = self
+            .lease_bound_backend_for_idle_runtime(&request.runtime_id)
+            .await?;
+        let content = lease
+            .backend()
+            .files()
+            .read_bytes(ReadBytesRequest {
+                path: BackendPath(request.path),
+            })
+            .await
+            .map_err(|error| SessionServiceError::CoreRun {
+                message: format!("runtime file read failed: {error}"),
+            })?;
+
+        Ok(RuntimeReadFileResult {
+            content_base64: base64::engine::general_purpose::STANDARD.encode(content),
+        })
+    }
+
+    async fn write_runtime_file(
+        &self,
+        request: RuntimeWriteFileRequest,
+    ) -> Result<RuntimeWriteFileResult, SessionServiceError> {
+        let lease = self
+            .lease_bound_backend_for_idle_runtime(&request.runtime_id)
+            .await?;
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(request.content_base64)
+            .map_err(|error| SessionServiceError::RuntimeBuild {
+                message: format!("invalid content_base64: {error}"),
+            })?;
+        let outcome = lease
+            .backend()
+            .files()
+            .write_bytes(WriteBytesRequest {
+                path: BackendPath(request.path),
+                content,
+                mode: WriteMode::Overwrite,
+            })
+            .await
+            .map_err(|error| SessionServiceError::CoreRun {
+                message: format!("runtime file write failed: {error}"),
+            })?;
+
+        Ok(RuntimeWriteFileResult {
+            path: outcome.path.0,
+            created: outcome.created,
+        })
     }
 
     async fn submit_input(

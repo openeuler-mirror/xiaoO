@@ -120,6 +120,52 @@ pub struct RuntimeCheckpointSnapshotDeleteResult {
     pub deleted_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeExecRequest {
+    pub runtime_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeExecResult {
+    pub stdout_base64: String,
+    pub stderr_base64: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeReadFileRequest {
+    pub runtime_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeReadFileResult {
+    pub content_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWriteFileRequest {
+    pub runtime_id: String,
+    pub path: String,
+    pub content_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeWriteFileResult {
+    pub path: String,
+    pub created: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeCheckpoint {
     pub checkpoint_id: String,
