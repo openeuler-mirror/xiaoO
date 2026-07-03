@@ -319,6 +319,9 @@ impl App {
                     self.state.dismiss_current_slash_menu();
                     return Ok(());
                 }
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -361,6 +364,12 @@ impl App {
                     self.state.chat_state.input.handle_event(&Event::Key(key));
                     self.state.note_input_changed();
                 }
+            }
+            KeyCode::PageUp => {
+                self.state.chat_state.scroll_page_up();
+            }
+            KeyCode::PageDown => {
+                self.state.chat_state.scroll_page_down();
             }
             _ => {
                 let before = self.state.chat_state.input.value().to_string();
