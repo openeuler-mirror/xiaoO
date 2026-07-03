@@ -45,6 +45,7 @@ impl SessionOpenRequest {
             mentions: Vec::new(),
             reasoning_effort: Default::default(),
             llm: self.llm,
+            command_context: None,
         }
     }
 }

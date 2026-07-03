@@ -1,6 +1,4 @@
 use std::any::Any;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
@@ -18,6 +16,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 pub(crate) struct PluginToolHookerAdaptor {
@@ -41,24 +40,17 @@ struct AskUserDirective {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)]
 enum PluginAskUserRequest {
     Confirm {
         prompt: String,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
     TextInput {
         prompt: String,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
     Choice {
         prompt: String,
         options: Vec<String>,
         allow_custom_input: bool,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
 }
 
@@ -153,7 +145,7 @@ impl PluginToolHookerAdaptor {
         let mut payload = initial_payload;
 
         loop {
-            let output = self.run_plugin_command(&payload)?;
+            let output = self.run_plugin_command(&payload).await?;
             match self.parse_plugin_command_response(output)? {
                 PluginCommandResponse::Final(final_output) => return Ok(final_output),
                 PluginCommandResponse::AskUser(directive) => {
@@ -360,75 +352,15 @@ impl PluginToolHookerAdaptor {
         }
     }
 
-    fn run_plugin_command(&self, payload: &Value) -> Result<Value, ToolExecutionError> {
-        let payload_bytes =
-            serde_json::to_vec(payload).map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to serialize plugin command payload for hooker '{}': {}",
-                    self.id.0, error
-                ),
-            })?;
-
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&self.command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
-                    self.id.0, self.command, error
-                ),
-            })?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin.write_all(&payload_bytes).map_err(|error| {
-                ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "failed to write stdin for plugin hooker '{}' (command='{}'): {}",
-                        self.id.0, self.command, error
-                    ),
-                }
-            })?;
-        }
-
-        let output =
-            child
-                .wait_with_output()
-                .map_err(|error| ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "failed to wait for plugin hooker '{}' (command='{}'): {}",
-                        self.id.0, self.command, error
-                    ),
-                })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' command '{}' exited with status {}{}",
-                    self.id.0,
-                    self.command,
-                    output.status,
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", stderr)
-                    }
-                ),
-            });
-        }
-
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' command '{}' returned invalid JSON: {}",
-                    self.id.0, self.command, error
-                ),
-            }
-        })
+    async fn run_plugin_command(&self, payload: &Value) -> Result<Value, ToolExecutionError> {
+        run_plugin_subprocess(
+            &self.id,
+            &self.command,
+            payload,
+            |message| ToolExecutionError::ExecutionFailed { message },
+            Some(super::super::PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+        )
+        .await
     }
 
     fn parse_plugin_command_response(
@@ -471,10 +403,10 @@ impl PluginToolHookerAdaptor {
         });
 
         match request {
-            PluginAskUserRequest::Confirm { prompt, source: _ } => {
+            PluginAskUserRequest::Confirm { prompt } => {
                 InteractionRequest::Confirm { prompt, source }
             }
-            PluginAskUserRequest::TextInput { prompt, source: _ } => {
+            PluginAskUserRequest::TextInput { prompt } => {
                 InteractionRequest::TextInput {
                     prompt,
                     source,
@@ -485,7 +417,6 @@ impl PluginToolHookerAdaptor {
                 prompt,
                 options,
                 allow_custom_input,
-                source: _,
             } => InteractionRequest::Choice {
                 prompt,
                 options,
@@ -657,11 +588,10 @@ impl Hooker for PluginToolHookerAdaptor {
 mod tests {
     use super::*;
     use std::borrow::Cow;
-    use std::future::Future;
     use std::path::PathBuf;
-    use std::pin::Pin;
     use std::sync::Mutex;
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use super::super::super::test_support::block_on;
 
     use agent_contracts::events::tool_events::ToolEventSink;
     use agent_contracts::hook::registry::HookerRegistry;
@@ -1004,7 +934,7 @@ else:
     }
 
     #[test]
-    fn ask_user_request_allows_missing_source_field() {
+    fn ask_user_request_parses_minimal_confirm() {
         let adaptor = PluginToolHookerAdaptor::new(
             HookerId("plugin_pre_ask".to_string()),
             HookPointId("test-agent.Tool.bash.pre".to_string()),
@@ -1059,34 +989,4 @@ else:
         assert!(matches!(legacy, PluginCommandResponse::Final(_)));
         assert!(matches!(explicit, PluginCommandResponse::Final(_)));
     }
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = unsafe { Waker::from_raw(noop_raw_waker()) };
-        let mut context = Context::from_waker(&waker);
-        let mut future = Box::pin(future);
-
-        loop {
-            match Pin::new(&mut future).poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
-
-    unsafe fn noop_raw_waker() -> RawWaker {
-        RawWaker::new(
-            std::ptr::null(),
-            &RawWakerVTable::new(clone, wake, wake_by_ref, drop_raw),
-        )
-    }
-
-    unsafe fn clone(_data: *const ()) -> RawWaker {
-        noop_raw_waker()
-    }
-
-    unsafe fn wake(_data: *const ()) {}
-
-    unsafe fn wake_by_ref(_data: *const ()) {}
-
-    unsafe fn drop_raw(_data: *const ()) {}
 }

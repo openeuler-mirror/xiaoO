@@ -12,6 +12,34 @@ pub enum GatewayEntryKind {
     Cli,
 }
 
+/// Terminal kind of a completed (non-error) root turn, mirroring the four
+/// `Ok` variants of [`agent_types::outcome::AgentOutcome`]. Carried on
+/// [`AppTurnResult`] so downstream consumers (notably the
+/// `*.Session.lifecycle.state` plugin hook) can distinguish a normal
+/// completion from a soft termination (`max_turns_reached` /
+/// `budget_exhausted` / `cancelled`). True errors stay on the `Err` side of
+/// `Result<AppTurnResult, _>` and are out of scope for this enum.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOutcome {
+    Complete,
+    MaxTurnsReached,
+    BudgetExhausted,
+    Cancelled,
+}
+
+impl TurnOutcome {
+    /// Snake-case tag used in hook payloads (matches the serde renaming).
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::MaxTurnsReached => "max_turns_reached",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppTurnResult {
     pub raw_reply: String,
@@ -21,6 +49,7 @@ pub struct AppTurnResult {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub estimated_input_tokens: u64,
+    pub outcome: TurnOutcome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -102,6 +131,12 @@ pub struct AppTurnRequest {
     pub reasoning_effort: ReasoningEffort,
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
+    /// When the turn originates from a slash command
+    /// (`~/.xiaoo/commands/<name>.md`), carries the command name and raw
+    /// arguments so the `*.Chat.command.before` hooker can fire with full
+    /// command metadata. `None` for free-form user input.
+    #[serde(default)]
+    pub command_context: Option<agent_types::chat::CommandContext>,
 }
 
 pub type RuntimeTurnRequest = AppTurnRequest;
@@ -127,6 +162,7 @@ mod tests {
             mentions: Vec::new(),
             reasoning_effort: ReasoningEffort::default(),
             llm: None,
+            command_context: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");

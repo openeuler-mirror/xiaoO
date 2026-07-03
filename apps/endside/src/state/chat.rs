@@ -85,6 +85,11 @@ pub struct TodoMessageState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedTurn {
     pub prompt: String,
+    /// Slash-command metadata when the queued turn originated from a
+    /// `~/.xiaoo/commands/<name>.md` invocation; `None` for free-form input.
+    /// Carried through the queue so `*.Chat.command.before` still fires when
+    /// the turn is dequeued after the running turn finishes.
+    pub command_context: Option<agent_types::chat::CommandContext>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -726,8 +731,15 @@ impl ChatState {
         self.input_history_draft.clear();
     }
 
-    pub fn enqueue_pending_turn(&mut self, prompt: String) {
-        self.pending_turns.push_back(QueuedTurn { prompt });
+    pub fn enqueue_pending_turn(
+        &mut self,
+        prompt: String,
+        command_context: Option<agent_types::chat::CommandContext>,
+    ) {
+        self.pending_turns.push_back(QueuedTurn {
+            prompt,
+            command_context,
+        });
         self.input.reset();
         self.stick_to_bottom = true;
     }
@@ -847,10 +859,7 @@ impl ChatState {
     /// stick-to-bottom once the bottom of the transcript is reached.
     pub fn scroll_page_down(&mut self) {
         let max = self.max_scroll_offset();
-        self.scroll_offset = self
-            .scroll_offset
-            .saturating_add(self.page_step())
-            .min(max);
+        self.scroll_offset = self.scroll_offset.saturating_add(self.page_step()).min(max);
         self.stick_to_bottom = self.scroll_offset >= max;
         self.sync_scrollbar_state();
     }
@@ -990,7 +999,7 @@ mod tests {
         chat.messages.clear();
         chat.input = Input::from("queued");
 
-        chat.enqueue_pending_turn("queued".to_string());
+        chat.enqueue_pending_turn("queued".to_string(), None);
 
         assert_eq!(chat.input.value(), "");
         assert!(chat.stick_to_bottom);

@@ -20,8 +20,11 @@ use agent_contracts::backend::{
     BackendPath,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
+use agent_types::common::HookerId;
 use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
-use agent_types::session::{SessionClosedHookInput, SessionCreatedHookInput};
+use agent_types::session::{
+    SessionClosedHookInput, SessionCreatedHookInput, SessionStateHookInput,
+};
 use async_trait::async_trait;
 use base64::Engine as _;
 use std::collections::{BTreeMap, HashMap};
@@ -72,13 +75,7 @@ impl CoreBackedSessionService {
     }
 
     async fn fire_session_hooks(&self, input: HookInvokeInput, hook_point: HookPointId) {
-        let hookers: Vec<_> = self
-            .hooker_registry
-            .list_for_hook_point(&hook_point)
-            .into_iter()
-            .filter(|h| self.hooker_registry.is_enabled(h.id()))
-            .map(|h| h.id().clone())
-            .collect();
+        let hookers = self.enabled_hooker_ids_for(&hook_point);
 
         let noop_runtime = NoopRuntimeView::new();
         for hooker_id in hookers {
@@ -93,6 +90,93 @@ impl CoreBackedSessionService {
                 }
             }
         }
+    }
+
+    /// Fire-and-forget dispatch for the `*.Session.lifecycle.state` event hook.
+    ///
+    /// Mirrors opencode's `event` hook semantics: read-only observer (no
+    /// mutable output), non-blocking (runs in a spawned task so the user's
+    /// `run_turn` result is returned without waiting for plugin scripts), and
+    /// errors are swallowed into `tracing::warn` logs. `state` carries the
+    /// session-lifecycle tag (`"idle"` = session back to idle, ready for the
+    /// next turn) and `outcome` carries the turn's terminal kind
+    /// (`"complete"` / `"max_turns_reached"` / `"budget_exhausted"` /
+    /// `"cancelled"`) so plugins can distinguish a normal completion from a
+    /// soft termination while still seeing the same `state="idle"`. The
+    /// list+filter of registered hookers runs on the caller side so we can
+    /// short-circuit when no state hookers are configured (avoiding a useless
+    /// spawn).
+    fn fire_session_state_hook_background(
+        &self,
+        session_id: String,
+        sender_id: String,
+        agent_id: String,
+        state: String,
+        outcome: String,
+    ) {
+        let hook_point = session_lifecycle_hook_point(&agent_id, "state");
+        let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
+        if hooker_ids.is_empty() {
+            return;
+        }
+
+        let registry = Arc::clone(&self.hooker_registry);
+        let hook_task = tokio::spawn(async move {
+            let noop_runtime = NoopRuntimeView::new();
+            let input = HookInvokeInput::SessionState {
+                input: SessionStateHookInput {
+                    session_id,
+                    sender_id,
+                    agent_id,
+                    state,
+                    outcome,
+                },
+                metadata: HookInvokeMetadata::default(),
+            };
+            for hooker_id in hooker_ids {
+                let Some(hooker) = registry.get(&hooker_id) else {
+                    continue;
+                };
+                if let Err(error) = hooker.invoke(input.clone(), &noop_runtime).await {
+                    tracing::warn!(
+                        hooker_id = %hooker_id,
+                        hook_point = "session.lifecycle.state",
+                        error = %error,
+                        "session state hook invocation failed"
+                    );
+                }
+            }
+        });
+        // The spawn above is fire-and-forget, but dropping the JoinHandle
+        // would silently lose a panic or a runtime-shutdown cancellation
+        // (JoinError). Spawn a lightweight watcher that surfaces those as a
+        // `tracing::warn` so a failing background hook does not vanish
+        // silently. The watcher itself detaches; if the runtime is shutting
+        // down the watcher is cancelled too, which is not actionable.
+        tokio::spawn(async move {
+            if let Err(join_error) = hook_task.await {
+                tracing::warn!(
+                    hook_point = "session.lifecycle.state",
+                    error = %join_error,
+                    "background session state hook task did not complete"
+                );
+            }
+        });
+    }
+
+    /// Collect the (id)s of enabled hookers registered for `hook_point`,
+    /// sorted by id for a stable execution order. Shared by both
+    /// [`fire_session_hooks`] and [`fire_session_state_hook_background`].
+    fn enabled_hooker_ids_for(&self, hook_point: &HookPointId) -> Vec<HookerId> {
+        let mut ids: Vec<HookerId> = self
+            .hooker_registry
+            .list_for_hook_point(hook_point)
+            .into_iter()
+            .filter(|h| self.hooker_registry.is_enabled(h.id()))
+            .map(|h| h.id().clone())
+            .collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids
     }
 
     async fn get_or_create_session_handle(&self, session: SessionRecord) -> SessionHandle {
@@ -327,10 +411,7 @@ impl CoreBackedSessionService {
             .register_runtime_head(child.session_id.clone(), checkpoint.checkpoint_id.clone())
             .await;
 
-        let hook_point = HookPointId(format!(
-            "{}.Session.lifecycle.created",
-            child.runtime.agent_id.0
-        ));
+        let hook_point = session_lifecycle_hook_point(&child.runtime.agent_id.0, "created");
         self.fire_session_hooks(
             HookInvokeInput::SessionCreated {
                 input: SessionCreatedHookInput {
@@ -708,10 +789,8 @@ impl CoreBackedSessionService {
         }
 
         if is_new_session {
-            let hook_point = HookPointId(format!(
-                "{}.Session.lifecycle.created",
-                resolved.descriptor.agent_id.0
-            ));
+            let hook_point =
+                session_lifecycle_hook_point(&resolved.descriptor.agent_id.0, "created");
             self.fire_session_hooks(
                 HookInvokeInput::SessionCreated {
                     input: SessionCreatedHookInput {
@@ -725,8 +804,12 @@ impl CoreBackedSessionService {
             .await;
         }
 
+        let idle_session_id = request.session_id.clone();
+        let idle_sender_id = request.sender_id.clone();
+        let idle_agent_id = resolved.descriptor.agent_id.0.clone();
+
         let handle = self.get_or_create_session_handle(seed_session).await;
-        handle
+        let turn_result = handle
             .run_turn(
                 request,
                 resolved,
@@ -734,7 +817,30 @@ impl CoreBackedSessionService {
                 interaction_handle,
                 channel_file_sender,
             )
-            .await
+            .await;
+
+        // Fire the session.lifecycle.state event hook after any non-error
+        // turn termination. `run_turn` returns `Ok(AppTurnResult)` for ALL
+        // four `AgentOutcome` variants (Complete / MaxTurnsReached /
+        // BudgetExhausted / Cancelled) — they all leave the session back in
+        // `idle` (ready for the next turn), so `state="idle"` is correct for
+        // each. Only `Err(_)` (a true failure) is excluded; that branch
+        // currently emits no event. The per-variant terminal kind is carried
+        // in the payload's `outcome` field so plugins can distinguish a
+        // normal completion from a soft termination without switching on
+        // `state`. Dispatch is fire-and-forget so plugin scripts cannot
+        // delay the user's turn result; the spawn returns immediately.
+        if let Ok(turn) = turn_result.as_ref() {
+            self.fire_session_state_hook_background(
+                idle_session_id,
+                idle_sender_id,
+                idle_agent_id,
+                "idle".to_string(),
+                turn.outcome.as_tag().to_string(),
+            );
+        }
+
+        turn_result
     }
 }
 
@@ -797,10 +903,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         }
         self.session_store.save(session.clone()).await;
 
-        let hook_point = HookPointId(format!(
-            "{}.Session.lifecycle.created",
-            resolved.descriptor.agent_id.0
-        ));
+        let hook_point = session_lifecycle_hook_point(&resolved.descriptor.agent_id.0, "created");
         self.fire_session_hooks(
             HookInvokeInput::SessionCreated {
                 input: SessionCreatedHookInput {
@@ -915,10 +1018,7 @@ impl SessionControlPlane for CoreBackedSessionService {
         self.runtime_checkpoints.remove_runtime(session_id).await;
 
         if !was_already_closed {
-            let hook_point = HookPointId(format!(
-                "{}.Session.lifecycle.closed",
-                closed.runtime.agent_id.0
-            ));
+            let hook_point = session_lifecycle_hook_point(&closed.runtime.agent_id.0, "closed");
             self.fire_session_hooks(
                 HookInvokeInput::SessionClosed {
                     input: SessionClosedHookInput {
@@ -1136,6 +1236,13 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Build a `*.Session.lifecycle.<stage>` hook point id. Consolidates the
+/// inline `format!("{}.Session.lifecycle.<stage>", agent_id)` previously
+/// repeated across the session created/closed/state call sites.
+fn session_lifecycle_hook_point(agent_id: &str, stage: &str) -> HookPointId {
+    HookPointId(format!("{}.Session.lifecycle.{}", agent_id, stage))
 }
 
 #[cfg(test)]

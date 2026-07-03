@@ -835,7 +835,7 @@ mod tests {
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
     use xiaoo_shared::gateway::{
-        AppTurnRequest, AppTurnResult, SessionService, SessionServiceError,
+        AppTurnRequest, AppTurnResult, SessionService, SessionServiceError, TurnOutcome,
     };
 
     #[tokio::test(flavor = "current_thread")]
@@ -1117,6 +1117,7 @@ mod tests {
                 completion_tokens: 0,
                 total_tokens: 0,
                 estimated_input_tokens: 0,
+                outcome: TurnOutcome::Complete,
             })
         }
     }

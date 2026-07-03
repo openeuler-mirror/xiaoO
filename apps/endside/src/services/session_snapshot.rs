@@ -273,11 +273,10 @@ pub fn autosave_on_interrupt(
 /// Derive a short topic label (≤10 characters) from the first user prompt.
 /// Returns `None` when the session has no user messages.
 fn autosave_topic(state: &AppState) -> Option<String> {
-    let first = state
-        .chat_state
-        .messages
-        .iter()
-        .find(|message| message.role == MessageRole::User && !message.content.trim().is_empty())?;
+    let first =
+        state.chat_state.messages.iter().find(|message| {
+            message.role == MessageRole::User && !message.content.trim().is_empty()
+        })?;
     Some(sanitize_topic(first.content.trim()))
 }
 

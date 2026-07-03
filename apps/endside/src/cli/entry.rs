@@ -917,6 +917,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         mentions: Vec::new(),
         reasoning_effort: config.reasoning_effort,
         llm: None,
+        command_context: None,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

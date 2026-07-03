@@ -24,43 +24,40 @@ const CHANNEL_FILE_INSTRUCTION: &str = include_str!("prompts/channel_file_instru
 const CHANNEL_CONTEXT_BOUNDARY_INSTRUCTION: &str =
     include_str!("prompts/channel_context_boundary_instruction.md");
 
-pub(crate) fn compose_system_messages(base_system: &str, context: &PromptContext) -> Vec<String> {
+/// Split the system prompt into cache-stable prefix parts (base prompt,
+/// workspace rules, skills catalog, and repo map when present) and the
+/// per-turn-volatile `# Context` tail (environment, horizon, plan, memory).
+/// Returns the stable parts un-joined so callers can either join them into a
+/// single string or feed the array to the `*.Chat.system.transform` hooker.
+/// The volatile tail, when present, is the final element of a merged system
+/// message so the stable prefix stays a byte-identical leading span every
+/// turn, enabling auto-prefix caching on providers that cache the longest
+/// matching prefix.
+pub(crate) fn compose_system_sections(
+    base_system: &str,
+    context: &PromptContext,
+) -> (Vec<String>, Option<String>) {
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let (base_system, repo_map) = split_repo_map_section(&base_system);
-    let mut messages = Vec::new();
-
-    // Stable prefix first: the base system prompt, workspace rules, and skill
-    // catalog rarely change, so they form a cache-friendly span. The volatile
-    // `# Context` block (date, remaining horizon, live plan) used to sit at the
-    // front, where its changing first bytes shifted the whole prefix and defeated
-    // provider prefix caching; it is now appended last.
+    let mut stable = Vec::new();
     let base_system = base_system.trim();
     if !base_system.is_empty() {
-        messages.push(base_system.to_string());
+        stable.push(base_system.to_string());
     }
-
     if let Some(workspace_prompt) = workspace_prompt {
-        messages.push(workspace_prompt);
+        stable.push(workspace_prompt);
     }
-
     if let Some(skill_section) = compose_skill_section(context) {
-        messages.push(skill_section);
+        stable.push(skill_section);
     }
-
     // Repo map sits after the skills catalog so it does not split
     // `## Skills System` from `### Available Skills`. It is workspace-derived
     // and stable, so it stays in the cacheable prefix.
     if let Some(repo_map) = repo_map {
-        messages.push(repo_map);
+        stable.push(repo_map);
     }
-
-    // Volatile tail last — environment, remaining-horizon notice, active plan,
-    // and recalled memory change turn-to-turn and must stay out of the cached prefix.
-    if let Some(context_section) = compose_context_section(context) {
-        messages.push(context_section);
-    }
-
-    messages
+    let volatile = compose_context_section(context);
+    (stable, volatile)
 }
 
 /// The per-turn dynamic block: environment, remaining-budget horizon, the live
@@ -129,38 +126,11 @@ fn compose_plan_section(context: &PromptContext) -> Option<String> {
 }
 
 pub fn compose_system_text(base_system: &str, context: &PromptContext) -> String {
-    compose_system_messages(base_system, context).join("\n\n")
-}
-
-/// Split the system prompt into a cache-stable prefix (base prompt, workspace
-/// rules, skills catalog) and the per-turn-volatile `# Context` tail (environment,
-/// horizon, plan, memory). The caller merges them into a single system message
-/// (stable first, volatile appended) so the stable prefix is a byte-identical
-/// leading span every turn, enabling auto-prefix caching on providers that
-/// cache the longest matching prefix. Returns `(stable, volatile?)`.
-pub(crate) fn compose_system_parts(
-    base_system: &str,
-    context: &PromptContext,
-) -> (String, Option<String>) {
-    let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
-    let (base_system, repo_map) = split_repo_map_section(&base_system);
-    let mut stable = Vec::new();
-    let base_system = base_system.trim();
-    if !base_system.is_empty() {
-        stable.push(base_system.to_string());
+    let (mut parts, volatile) = compose_system_sections(base_system, context);
+    if let Some(volatile) = volatile {
+        parts.push(volatile);
     }
-    if let Some(workspace_prompt) = workspace_prompt {
-        stable.push(workspace_prompt);
-    }
-    if let Some(skill_section) = compose_skill_section(context) {
-        stable.push(skill_section);
-    }
-    // Repo map after the skills catalog — see compose_system_messages for rationale.
-    if let Some(repo_map) = repo_map {
-        stable.push(repo_map);
-    }
-    let volatile = compose_context_section(context);
-    (stable.join("\n\n"), volatile)
+    parts.join("\n\n")
 }
 
 pub fn compose_channel_system_prompt(sections: ChannelPromptSections<'_>) -> String {
@@ -410,28 +380,34 @@ mod tests {
                 "hello",
             )]),
         };
-        let messages = compose_system_messages(
+        let (stable, volatile) = compose_system_sections(
             &format!(
                 "base system\n\n{WORKSPACE_PROMPT_MARKER_BEGIN}\n## Workspace Instructions\n### /repo/AGENTS.md\nroot rules\n{WORKSPACE_PROMPT_MARKER_END}\n\n## 当前通道\n- 当前 channel: capture."
             ),
             &context,
         );
 
-        assert_eq!(messages.len(), 3);
-        assert!(messages[0].starts_with("base system"));
-        assert!(messages[0].contains("当前 channel: capture."));
-        assert!(messages[1].starts_with("# Context"));
-        assert!(messages[1].contains("## Environment"));
-        assert!(messages[1].contains("## Instructions"));
-        assert!(messages[1].contains("## Memory"));
-        assert!(messages[1].contains("## Available Skills"));
-        assert!(messages[2].starts_with("## Workspace Instructions"));
-        assert!(messages[2].contains("/repo/AGENTS.md"));
-        assert!(messages[1].contains("[fact/repo] remember this"));
-        assert!(messages[1].contains("- policy: be precise"));
-        assert!(!messages[1].contains("score="));
-        assert!(!messages[1].contains("# Conversation"));
-        assert!(!messages[1].contains("# Tools"));
+        // stable: [base (before+after merged), workspace_prompt, skill_section]
+        assert_eq!(stable.len(), 3);
+        assert!(stable[0].starts_with("base system"));
+        assert!(stable[0].contains("当前 channel: capture."));
+        assert!(stable[2].contains("## Available Skills"));
+        assert!(stable[2].contains("- skill: do thing"));
+
+        // volatile: # Context (environment + instructions + memory)
+        let context_section = volatile.expect("volatile context section should be present");
+        assert!(context_section.starts_with("# Context"));
+        assert!(context_section.contains("## Environment"));
+        assert!(context_section.contains("## Instructions"));
+        assert!(context_section.contains("## Memory"));
+        assert!(context_section.contains("[fact/repo] remember this"));
+        assert!(context_section.contains("- policy: be precise"));
+        assert!(!context_section.contains("score="));
+        assert!(!context_section.contains("# Conversation"));
+        assert!(!context_section.contains("# Tools"));
+
+        assert!(stable[1].starts_with("## Workspace Instructions"));
+        assert!(stable[1].contains("/repo/AGENTS.md"));
     }
 
     #[test]
