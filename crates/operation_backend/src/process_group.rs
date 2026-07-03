@@ -198,6 +198,20 @@ impl Drop for ProcessGroupCleanupGuard {
     fn drop(&mut self) {}
 }
 
+/// Test serialization lock for the global `ACTIVE_PGIDS` registry.
+///
+/// `kill_all_process_groups()` clears the entire shared set and signals every
+/// registered pgid, which would clobber real child processes spawned by other
+/// concurrent tests (e.g. the bubblewrap exec tests). Tests that touch the
+/// global registry acquire this lock so they never run in parallel with each
+/// other.
+#[cfg(test)]
+pub(crate) fn process_group_test_lock() -> &'static Mutex<()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +219,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_register_unregister_pgid() {
+        let _guard = process_group_test_lock().lock().unwrap();
         register_pgid(12345);
         {
             if let Ok(set) = ACTIVE_PGIDS.lock() {
@@ -222,11 +237,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_kill_all_process_groups() {
+        let _guard = process_group_test_lock().lock().unwrap();
         register_pgid(11111);
         register_pgid(22222);
         {
             if let Ok(set) = ACTIVE_PGIDS.lock() {
-                assert_eq!(set.len(), 2);
+                assert!(set.contains(&11111));
+                assert!(set.contains(&22222));
             }
         }
         kill_all_process_groups();
