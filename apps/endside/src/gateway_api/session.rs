@@ -58,12 +58,16 @@ impl Default for SessionGateway {
 
         // Start the cross-process signal handler so backends owned by this
         // process that another process has marked for eviction get evicted
-        // immediately upon receiving SIGUSR1.
-        let handler_store: Arc<dyn SessionStore> = session_store.clone();
-        let handler_handle = backend_manager.clone().start_signal_handler(handler_store);
-        tokio::spawn(async move {
-            handler_handle.await.ok();
-        });
+        // immediately upon receiving SIGUSR1. Only spawn when a Tokio runtime
+        // is available; unit tests that construct this type outside a runtime
+        // don't need cross-process eviction.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let handler_store: Arc<dyn SessionStore> = session_store.clone();
+            let handler_handle = backend_manager.clone().start_signal_handler(handler_store);
+            handle.spawn(async move {
+                handler_handle.await.ok();
+            });
+        }
 
         Self {
             session_store,

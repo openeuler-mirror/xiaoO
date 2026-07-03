@@ -1,12 +1,15 @@
 use std::fmt::Write as _;
 
 use agent_contracts::SkillRegistry;
-use skill::FileSkillRegistry;
+use skill::{FileSkillRegistry, SkillsConfig};
 
 use crate::config::Config;
 
 pub fn render_skills_overview(config: &Config) -> String {
-    let skills_config = config.resolve_skills_config();
+    render_skills_overview_with_config(&config.resolve_skills_config())
+}
+
+pub fn render_skills_overview_with_config(skills_config: &SkillsConfig) -> String {
     let mut scanned_dirs: Vec<String> = skills_config
         .skills_dirs
         .iter()
@@ -15,7 +18,7 @@ pub fn render_skills_overview(config: &Config) -> String {
     scanned_dirs.sort();
     scanned_dirs.dedup();
 
-    let registry = FileSkillRegistry::new(&skills_config);
+    let registry = FileSkillRegistry::new(skills_config);
     let mut skills = registry.list_skills();
     skills.sort_by(|left, right| left.skill_id.cmp(&right.skill_id));
 
@@ -45,26 +48,15 @@ pub fn render_skills_overview(config: &Config) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_skills_overview;
-    use crate::config::{Config, SkillsSection};
-    use std::sync::{Mutex, OnceLock};
+    use super::render_skills_overview_with_config;
+    use skill::SkillsConfig;
     use tempfile::TempDir;
 
-    fn with_temp_home<T>(temp_home: &std::path::Path, test_fn: impl FnOnce() -> T) -> T {
-        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = HOME_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("home env lock should not be poisoned");
-
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp_home);
-        let result = test_fn();
-        match previous_home {
-            Some(previous_home) => std::env::set_var("HOME", previous_home),
-            None => std::env::remove_var("HOME"),
+    fn skills_config_with_dirs(dirs: Vec<std::path::PathBuf>) -> SkillsConfig {
+        SkillsConfig {
+            skills_dirs: dirs,
+            ..SkillsConfig::default()
         }
-        result
     }
 
     #[test]
@@ -79,17 +71,10 @@ mod tests {
         )
         .expect("write skill file");
 
-        let mut config = Config::default();
-        config.skills = Some(SkillsSection {
-            dirs: Some(vec![skills_root.display().to_string()]),
-            allow_scripts: Some(false),
-        });
-
-        with_temp_home(temp_dir.path(), || {
-            let rendered = render_skills_overview(&config);
-            assert!(rendered.contains("当前可用 skills（1）:"));
-            assert!(rendered.contains("- reviewer: 审查当前改动"));
-        });
+        let config = skills_config_with_dirs(vec![skills_root]);
+        let rendered = render_skills_overview_with_config(&config);
+        assert!(rendered.contains("当前可用 skills（1）:"));
+        assert!(rendered.contains("- reviewer: 审查当前改动"));
     }
 
     #[test]
@@ -98,16 +83,9 @@ mod tests {
         let empty_root = temp_dir.path().join("empty-skills");
         std::fs::create_dir_all(&empty_root).expect("create empty skill root");
 
-        let mut config = Config::default();
-        config.skills = Some(SkillsSection {
-            dirs: Some(vec![empty_root.display().to_string()]),
-            allow_scripts: Some(false),
-        });
-
-        with_temp_home(temp_dir.path(), || {
-            let rendered = render_skills_overview(&config);
-            assert!(rendered.contains("当前未发现可用的 skills。"));
-            assert!(rendered.contains(&empty_root.display().to_string()));
-        });
+        let config = skills_config_with_dirs(vec![empty_root.clone()]);
+        let rendered = render_skills_overview_with_config(&config);
+        assert!(rendered.contains("当前未发现可用的 skills。"));
+        assert!(rendered.contains(&empty_root.display().to_string()));
     }
 }

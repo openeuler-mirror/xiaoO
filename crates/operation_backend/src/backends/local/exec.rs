@@ -239,6 +239,12 @@ mod linux_bubblewrap_tests {
         if !has_bwrap() {
             return;
         }
+        // Serialize against the process-group unit tests: `exec` registers real
+        // child pgids in the shared global registry, and `kill_all_process_groups`
+        // would otherwise clear it (and signal our children) mid-test.
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
         let root = test_root("fs");
         let workspace = root.join("workspace");
         let writable = workspace.join("tmp");
@@ -320,6 +326,9 @@ mod linux_bubblewrap_tests {
         if !has_bwrap() {
             return;
         }
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
         let root = test_root("net");
         let workspace = root.join("workspace");
         let writable = workspace.join("tmp");
