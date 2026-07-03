@@ -361,6 +361,15 @@ impl PluginToolHookerAdaptor {
     }
 
     async fn run_plugin_command(&self, payload: &Value) -> Result<Value, ToolExecutionError> {
+        self.run_plugin_command_with_timeout(payload, PLUGIN_HOOKER_TIMEOUT)
+            .await
+    }
+
+    async fn run_plugin_command_with_timeout(
+        &self,
+        payload: &Value,
+        cmd_timeout: Duration,
+    ) -> Result<Value, ToolExecutionError> {
         let payload_bytes =
             serde_json::to_vec(payload).map_err(|error| ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -395,10 +404,10 @@ impl PluginToolHookerAdaptor {
             })?;
         }
 
-        let output = timeout(PLUGIN_HOOKER_TIMEOUT, child.wait_with_output())
+        let output = timeout(cmd_timeout, child.wait_with_output())
             .await
             .map_err(|_| ToolExecutionError::Timeout {
-                timeout_ms: 600_000,
+                timeout_ms: cmd_timeout.as_millis() as u64,
             })?
             .map_err(|error| ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -1060,5 +1069,49 @@ else:
 
         assert!(matches!(legacy, PluginCommandResponse::Final(_)));
         assert!(matches!(explicit, PluginCommandResponse::Final(_)));
+    }
+
+    /// 验证 plugin hooker 子进程超时 + kill 兜底链路：
+    /// spawn 一个 `sleep 30` 子进程（模拟卡死），用 2s 超时，断言：
+    /// 1. 返回 ToolExecutionError::Timeout（而非永久阻塞）；
+    /// 2. 耗时在超时附近（~2s），证明是超时触发而非子进程自己退出；
+    /// 3. kill_on_drop 在 future drop 后杀掉子进程（不验证残留进程，靠 kill_on_drop 语义保证）。
+    #[tokio::test]
+    async fn run_plugin_command_times_out_and_kills_hung_child() {
+        let adaptor = PluginToolHookerAdaptor::new(
+            HookerId("plugin_timeout".to_string()),
+            HookPointId("test-agent.Tool.bash.pre".to_string()),
+            "sleep 30".to_string(),
+            Value::Null,
+        );
+        let payload = json!({"stage": "pre"});
+
+        let start = std::time::Instant::now();
+        let result = adaptor
+            .run_plugin_command_with_timeout(&payload, Duration::from_secs(2))
+            .await;
+        let elapsed = start.elapsed();
+
+        // 1. 返回 Timeout 错误（不是 Ok，不是其它 ExecutionFailed）
+        match result {
+            Err(ToolExecutionError::Timeout { timeout_ms }) => {
+                assert_eq!(timeout_ms, 2000, "timeout_ms 应等于传入超时(2s=2000ms)");
+            }
+            other => panic!("expected Timeout, got: {:?}", other),
+        }
+
+        // 2. 耗时应在超时附近（2s），允许调度抖动，但远小于 sleep 30 的 30s。
+        //    上界给 10s：超过则说明根本没被超时 kill（卡住了）。
+        assert!(
+            elapsed.as_secs() < 10,
+            "超时应在 ~2s 触发，实际耗时 {:?}（疑似未被超时 kill）",
+            elapsed
+        );
+        // 下界：至少要等到超时阈值，不能秒回（秒回说明子进程没卡住）
+        assert!(
+            elapsed.as_secs() >= 2,
+            "应等到 2s 超时才返回，实际耗时 {:?}（疑似子进程未卡住）",
+            elapsed
+        );
     }
 }
