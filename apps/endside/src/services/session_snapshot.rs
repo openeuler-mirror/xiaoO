@@ -247,9 +247,14 @@ pub fn save_snapshot_with_chain(
 /// Auto-save the current session when the user interrupts the runtime
 /// (Ctrl+C / SIGINT / SIGTERM).
 ///
-/// The snapshot is written to the default session directory (`~/.xiaoo/session/`)
-/// — the same location used by the `/save` command — using the name pattern
-/// `{date}-{topic}`:
+/// When the running session was itself loaded via `/load` (i.e.
+/// `state.current_snapshot_context` is populated), the snapshot is written
+/// back under the same name and parent chain so subsequent `/load` calls
+/// resume the same file instead of spawning a fresh timestamped one.
+///
+/// Otherwise the snapshot is written to the default session directory
+/// (`~/.xiaoo/session/`) — the same location used by the `/save` command —
+/// using the name pattern `{date}-{topic}`:
 /// * `date`  — local timestamp precise to the second (`YYYYMMDD-HHMMSS`).
 /// * `topic` — a ≤10-character summary derived from the first user prompt.
 ///
@@ -260,6 +265,13 @@ pub fn autosave_on_interrupt(
     state: &AppState,
     session_record: Option<SessionRecord>,
 ) -> Result<Option<PathBuf>> {
+    if let Some(context) = state.current_snapshot_context.as_ref() {
+        let parent_chain = context.parent_chain.clone();
+        let snapshot = build_snapshot(state, session_record, parent_chain.clone());
+        let path = save_snapshot_with_chain(&context.name, &snapshot, Some(&parent_chain))?;
+        return Ok(Some(path));
+    }
+
     let Some(topic) = autosave_topic(state) else {
         return Ok(None);
     };
@@ -856,5 +868,47 @@ mod tests {
             .messages
             .push(Message::user("another unrelated question"));
         assert_eq!(autosave_topic(&state), Some("帮我为xiaoo-a".to_string()));
+    }
+
+    #[test]
+    fn test_autosave_on_interrupt_uses_loaded_context_name() {
+        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
+        state
+            .chat_state
+            .messages
+            .push(Message::user("any prompt to make autosave eligible"));
+        state.current_snapshot_context = Some(SnapshotContext {
+            name: "loaded-name".to_string(),
+            parent_chain: vec!["parent".to_string()],
+        });
+
+        let path = autosave_on_interrupt(&state, None).expect("autosave ok").expect("path");
+
+        // The file must reuse the loaded name and parent chain, not a fresh
+        // timestamped one.
+        assert_eq!(path.file_name().unwrap(), "parent_loaded-name.json");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_autosave_on_interrupt_uses_save_context_name() {
+        // Mirrors the state after `/save my-snapshot`: the save handler
+        // populates `current_snapshot_context` with the chosen name and an
+        // empty parent chain (no prior context to extend). The exit autosave
+        // must overwrite the same file instead of spawning a timestamped one.
+        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
+        state
+            .chat_state
+            .messages
+            .push(Message::user("any prompt to make autosave eligible"));
+        state.current_snapshot_context = Some(SnapshotContext {
+            name: "my-snapshot".to_string(),
+            parent_chain: Vec::new(),
+        });
+
+        let path = autosave_on_interrupt(&state, None).expect("autosave ok").expect("path");
+
+        assert_eq!(path.file_name().unwrap(), "my-snapshot.json");
+        let _ = fs::remove_file(&path);
     }
 }
