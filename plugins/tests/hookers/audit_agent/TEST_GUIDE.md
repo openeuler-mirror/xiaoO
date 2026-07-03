@@ -169,6 +169,25 @@ bash run-deny-01-passwd.sh
 bash run-allow-01-read-log.sh
 ```
 
+#### 2.4.1 L3 卡死自愈测试（手动，验证 audit.py 的 os._exit 修复）
+
+`cases/hang-llm-repro/repro_hang.sh` 验证：开启 L3 时若 `call_llm` 永久阻塞（客户"http 超时失效"的等效条件），audit.py 能在 L3 超时附近自愈退出、不卡死。
+
+**原理：** `sitecustomize.py` 注入把 `llm_analyzer.call_llm` patch 成永久阻塞函数（确定性复现 worker 永不退出）。audit.py 末尾用 `os._exit` 而非 `sys.exit`，跳过解释器清理，不等卡住的非守护 worker 线程，进程在 L3 超时后立即退出。
+
+**何时跑：** 改了 `audit.py` 退出逻辑、`llm_analyzer.py` 的 L3 超时包装、或 L3 相关代码时复跑。不进 CI（依赖 venv + 等 ~10s）。
+
+**前置：** 已跑 `plugins/hookers/audit_agent/install.sh` 建好 venv。
+
+```bash
+cd plugins/tests/hookers/audit_agent/cases/hang-llm-repro
+bash repro_hang.sh
+```
+
+**通过标准：** `✅ PASS`，exit 0，耗时 ≈ `AUDIT_LLM_TIMEOUT`（默认 10s）。若 `❌ FAIL: 被外层 timeout 杀掉` 说明 audit.py 卡死、os._exit 修复失效。
+
+可调参数：`AUDIT_LLM_TIMEOUT=10`（L3 超时）、`OUTER_TIMEOUT=30`（外层兜底）。
+
 ### 2.5 Cerberus 测试（需要额外安装）
 
 Cerberus 使用 Landlock LSM 做内核级保护，需要先安装：
