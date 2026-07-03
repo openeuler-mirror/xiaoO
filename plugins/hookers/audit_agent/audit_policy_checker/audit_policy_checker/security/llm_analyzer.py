@@ -113,24 +113,15 @@ class LLMAnalyzer:
 
         for attempt in range(1, max_retries + 1):
             try:
-                # 用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制。
-                # 注意：不能用 `with` 上下文管理器——其 __exit__ 调的是 shutdown(wait=True)，
-                # 若 worker 线程里的 HTTP 请求卡死（且其网络层超时失效，Python 线程又无法被
-                # 强制中断），wait=True 会永久阻塞，使 future.result(timeout=...) 的超时形同
-                # 虚设、L3 钉死。故手动管理 executor，超时/正常/异常路径一律用
-                # shutdown(wait=False, cancel_futures=True)：不阻塞等待卡死的 worker，
-                # 让其作为后台线程自然消亡（进程退出时一并清理），L3 主流程得以在时限内返回。
-                executor = ThreadPoolExecutor(max_workers=1)
-                future = executor.submit(
-                    call_llm,
-                    prompt=judge_prompt,
-                    timeout=single_call_timeout,
-                    config=config.llm,
-                )
-                try:
+                # 使用 ThreadPoolExecutor 包装 LLM 调用，支持超时控制
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        call_llm,
+                        prompt=judge_prompt,
+                        timeout=single_call_timeout,
+                        config=config.llm,
+                    )
                     llm_result: LLMResult = future.result(timeout=llm_timeout)
-                finally:
-                    executor.shutdown(wait=False, cancel_futures=True)
 
                 # 记录 token 用量
                 record_token_usage(
