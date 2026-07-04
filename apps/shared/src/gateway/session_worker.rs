@@ -176,8 +176,24 @@ impl SessionWorker {
         };
 
         if let Err(error) = shutdown_result {
-            return Err(SessionServiceError::RuntimeShutdown {
-                message: error.to_string(),
+            tracing::warn!(
+                session_id = %input.session.session_id,
+                agent_id = %input.agent_id,
+                shutdown_error = %error,
+                messages_count = loop_state.messages.read().len(),
+                "runtime shutdown failed after successful loop, preserving state for recovery"
+            );
+            // The agent loop already completed successfully, so the loop state
+            // contains the full message history for this turn. Return it as
+            // `CoreRunWithState` (instead of the stateless `RuntimeShutdown`)
+            // so `run_root_turn`'s error handler persists it — otherwise the
+            // next turn loses all context.
+            memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
+            return Err(SessionServiceError::CoreRunWithState {
+                message: format!("runtime shutdown failed: {error}"),
+                partial_loop_state: loop_state.to_snapshot(),
+                partial_memory_snapshot: memory_manager.snapshot().clone(),
+                tool_manifest,
             });
         }
 

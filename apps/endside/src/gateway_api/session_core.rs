@@ -95,6 +95,7 @@ impl SessionGateway {
         updates_tx: tokio::sync::mpsc::UnboundedSender<SessionTurnUpdate>,
         interaction_rx: tokio::sync::mpsc::UnboundedReceiver<UserPromptResult>,
         pending_user_messages: Arc<Mutex<VecDeque<String>>>,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     ) {
         let session_store: Arc<dyn SessionStore> = self.session_store.clone();
         let active_session_ids = Arc::clone(&self.active_session_ids);
@@ -121,6 +122,7 @@ impl SessionGateway {
                     updates_tx.clone(),
                     pending_user_messages,
                 ))),
+                cancel_token,
             };
 
             let hooker_config = runtime_config.hooker.clone();

@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use crate::app_state::{AppState, InputMode};
 use crate::chat::{
     Message, TodoDisplayStatus, TodoSnapshotItem, TodoSnapshotUpdate, ToolExecutionStatus,
@@ -151,8 +149,14 @@ impl GatewayRuntime {
         if self.remote.is_some() {
             self.cancel_remote_turn(state.session_id.clone());
         }
-        if let Some(flag) = self.cancel_flag.take() {
-            flag.store(true, Ordering::Relaxed);
+        // Fire the shared CancellationToken so the backend's agent loop
+        // observes cancellation via `ctx.state.cancel.is_cancelled()` and
+        // exits through `LoopDecision::ReturnCancelled` — which returns
+        // `Ok(Complete(..))`, letting `persist_lane_state` save the partial
+        // loop state (user prompt + assistant reply + tool results) so the
+        // next turn has full context.
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
         }
         let stream_message_index = self.stream_message_index.take();
         state.chat_state.is_loading = false;
