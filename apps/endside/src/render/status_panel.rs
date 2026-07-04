@@ -15,7 +15,6 @@ pub struct StatusPanel {
     pub is_connected: bool,
     pub input_context_tokens: u64,
     pub input_context_tokens_estimated: bool,
-    pub context_window_tokens: u64,
 }
 
 impl Default for StatusPanel {
@@ -32,7 +31,6 @@ impl Default for StatusPanel {
             is_connected: false,
             input_context_tokens: 0,
             input_context_tokens_estimated: false,
-            context_window_tokens: 0,
         }
     }
 }
@@ -46,10 +44,6 @@ impl StatusPanel {
         self.provider_name = provider.to_string();
         self.model_name = model.to_string();
         self.is_connected = true;
-    }
-
-    pub fn set_context_window(&mut self, context_window_tokens: u64) {
-        self.context_window_tokens = context_window_tokens;
     }
 
     /// Update the workspace line from an absolute path (caller should pass canonical path when possible).
@@ -93,22 +87,9 @@ impl StatusPanel {
         }
     }
 
-    pub(crate) fn format_context_usage(
-        input_tokens: u64,
-        context_window_tokens: u64,
-        input_tokens_estimated: bool,
-    ) -> String {
+    pub(crate) fn format_context_usage(input_tokens: u64, input_tokens_estimated: bool) -> String {
         let prefix = if input_tokens_estimated { "~" } else { "" };
-        let usage = if context_window_tokens == 0 {
-            Self::format_token_count(input_tokens)
-        } else {
-            format!(
-                "{}/{}",
-                Self::format_token_count(input_tokens),
-                Self::format_token_count(context_window_tokens)
-            )
-        };
-
+        let usage = Self::format_token_count(input_tokens);
         format!("{prefix}{usage}")
     }
 }
@@ -131,17 +112,11 @@ mod tests {
 
     #[test]
     fn format_context_usage_marks_estimated_values() {
-        assert_eq!(
-            StatusPanel::format_context_usage(24_000, 128_000, true),
-            "~24.0K/128.0K"
-        );
+        assert_eq!(StatusPanel::format_context_usage(24_000, true), "~24.0K");
     }
 
     #[test]
     fn format_context_usage_leaves_reported_values_unmarked() {
-        assert_eq!(
-            StatusPanel::format_context_usage(24_000, 128_000, false),
-            "24.0K/128.0K"
-        );
+        assert_eq!(StatusPanel::format_context_usage(24_000, false), "24.0K");
     }
 }

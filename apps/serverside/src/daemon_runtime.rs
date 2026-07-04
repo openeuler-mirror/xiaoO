@@ -385,23 +385,9 @@ async fn resolve_effective_context_window(
 ) -> usize {
     match resolve_model_context_length(resolved_provider, model).await {
         Ok(Some(context_window)) => match usize::try_from(context_window) {
-            Ok(value) if value > 0 => {
-                tracing::info!(
-                    context_window = value,
-                    source = "model_catalog",
-                    model = %model,
-                    "Using context_window from model catalog API"
-                );
-                return value;
-            }
+            Ok(value) if value > 0 => return value,
             Ok(_) => {}
-            Err(_) => {
-                tracing::warn!(
-                    model = %model,
-                    context_window,
-                    "dynamic context window does not fit usize; falling back"
-                );
-            }
+            Err(_) => {}
         },
         Ok(None) => {}
         Err(error) => {
@@ -413,14 +399,7 @@ async fn resolve_effective_context_window(
         }
     }
 
-    let fallback = static_fallback.max(1);
-    tracing::info!(
-        context_window = fallback,
-        source = "provider_default",
-        model = %model,
-        "Using context_window from provider default"
-    );
-    fallback
+    static_fallback.max(1)
 }
 
 fn resolve_llm_api_key(
@@ -632,18 +611,18 @@ fn validate_token_budget_config(
 
     if configured_max_tokens > max_reasonable_output_tokens {
         let warning_msg = format!(
-            "Warning: max_tokens {} exceeds 50% of context_window ({} * 0.5 = {}) for model {}. \
+            "Warning: max_tokens {} exceeds 50% of the estimated context window for model {}. \
             This may limit input space.",
-            configured_max_tokens, budget.total_budget, max_reasonable_output_tokens, model
+            configured_max_tokens, model
         );
         tracing::warn!("{}", warning_msg);
     }
 
     if configured_max_tokens >= budget.total_budget {
         let error_msg = format!(
-            "Config Error: max_tokens {} >= context_window {} (from provider/model). \
+            "Config Error: max_tokens {} is too large relative to the estimated context window. \
             This would leave NO space for input.",
-            configured_max_tokens, budget.total_budget
+            configured_max_tokens
         );
 
         eprintln!("{}", error_msg);

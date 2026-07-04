@@ -1114,9 +1114,6 @@ pub(crate) fn build_chat_state(config: &Config) -> ChatState {
 
 fn build_status_panel(config: &Config) -> StatusPanel {
     let mut status_panel = StatusPanel::new();
-    if let Some(context_window) = crate::config::resolve_context_window(config) {
-        status_panel.set_context_window(context_window as u64);
-    }
     if !config.llm.provider.trim().is_empty() && !config.llm.model.trim().is_empty() {
         status_panel.set_provider(&config.llm.provider, &config.llm.model);
     }
