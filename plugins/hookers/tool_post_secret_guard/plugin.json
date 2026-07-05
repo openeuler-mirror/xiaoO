@@ -2,6 +2,7 @@
   {
     "id": "pluginguard_secret_like_output",
     "hook_point": "*.Tool.*.post",
-    "command": "python3 guard_secret_like_output.py"
+    "command": "python3 /home/hkl/gitcode/xiaoO/plugins/hookers/tool_post_secret_guard/guard_secret_like_output.py",
+    "raw_command": "python3 guard_secret_like_output.py"
   }
 ]

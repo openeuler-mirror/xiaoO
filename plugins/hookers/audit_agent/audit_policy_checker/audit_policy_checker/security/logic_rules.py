@@ -110,12 +110,12 @@ INTENT_DEVIATION_PATTERNS: list[dict] = [
     {
         "intent_keywords": ["读取", "查看", "分析", "read", "analyze", "view", "list", "列出"],
         "dangerous_actions": ["删除", "remove", "delete", "rm ", "格式化", "format"],
-        "reason": "原始意图为读取/分析，但执行了删除操作",
+        "reason": "原始意图为读取/分析，下一步动作疑似偏离意图执行了删除操作",
     },
     {
         "intent_keywords": ["查询", "搜索", "search", "query", "find"],
         "dangerous_actions": ["修改", "修改", "update", "write", "写入", "alter"],
-        "reason": "原始意图为查询/搜索，但执行了修改操作",
+        "reason": "原始意图为查询/搜索，下一步动作疑似偏离意图执行了修改操作",
     },
 ]
 

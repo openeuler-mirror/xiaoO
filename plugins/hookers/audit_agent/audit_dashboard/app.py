@@ -49,6 +49,7 @@ from audit_policy_checker.runtime_config import (
 from audit_policy_checker.token_stats import (
     get_token_stats,
     get_recent_records,
+    get_token_trend,
     reset_token_stats,
 )
 
@@ -280,6 +281,20 @@ async def remove_skill(body: DeleteSkill):
         raise HTTPException(status_code=403, detail="内置 skill 不可删除，只能禁用")
     return runtime
 
+@app.get("/api/skills/{skill_id}/content", dependencies=[Depends(auth_dependency)])
+async def get_skill_content(skill_id: str):
+    """获取 skill 的完整 Markdown 内容（详情弹窗用）。
+    优先读用户自定义目录，再读内置 skills 目录。"""
+    from audit_policy_checker.security.skill_engine import DEFAULT_SKILLS_DIR, USER_SKILLS_DIR
+    # 防路径穿越：skill_id 只允许字母数字下划线横线
+    if not skill_id.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(status_code=400, detail="非法 skill id")
+    for base in (USER_SKILLS_DIR, DEFAULT_SKILLS_DIR):
+        p = base / f"{skill_id}.md"
+        if p.exists():
+            return {"skill_id": skill_id, "path": str(p), "content": p.read_text(encoding="utf-8")}
+    raise HTTPException(status_code=404, detail=f"skill {skill_id} 不存在")
+
 # 配置完整查看
 @app.get("/api/config", dependencies=[Depends(auth_dependency)])
 async def get_full_config():
@@ -307,19 +322,36 @@ async def reset_config():
 # ==================== Token Stats API ====================
 
 @app.get("/api/token-stats", dependencies=[Depends(auth_dependency)])
-async def get_token_stats_api(days: int = 0):
+async def get_token_stats_api(
+    days: int = 0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
     """
     获取 token 用量统计汇总。
 
     Args:
         days: 查询最近多少天的数据。0=全部, 1=今天, 7=近7天, 30=近30天
+        start_date: 起始日期（YYYY-MM-DD，含当天）。优先于 days。
+        end_date: 结束日期（YYYY-MM-DD，含当天全天）。优先于 days。
     """
-    return get_token_stats(days)
+    return get_token_stats(days, start_date=start_date, end_date=end_date)
 
 @app.get("/api/token-stats/recent", dependencies=[Depends(auth_dependency)])
 async def get_recent_token_records(limit: int = 20):
     """获取最近的 N 条 token 用量记录"""
     return get_recent_records(limit)
+
+@app.get("/api/token-stats/trend", dependencies=[Depends(auth_dependency)])
+async def get_token_trend_api(
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
+    """
+    获取 Token 消耗趋势（按日期 + 模型聚合），供前端折线图渲染。
+    日期范围必填（YYYY-MM-DD）。
+    """
+    return get_token_trend(start_date=start_date, end_date=end_date)
 
 @app.post("/api/token-stats/reset", dependencies=[Depends(auth_dependency)])
 async def reset_token_stats_api():

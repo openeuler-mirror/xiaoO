@@ -2,6 +2,7 @@
   {
     "id": "plugin_llm_pre_secret_guard",
     "hook_point": "*.Llm.complete.pre",
-    "command": "python3 guard_secret_like_request.py"
+    "command": "python3 /home/hkl/gitcode/xiaoO/plugins/hookers/llm_pre_secret_guard/guard_secret_like_request.py",
+    "raw_command": "python3 guard_secret_like_request.py"
   }
 ]
