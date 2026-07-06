@@ -1282,16 +1282,17 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let messages = ctx.state.messages.read().clone();
     let secrets = extract_secrets_from_messages(&messages);
 
+    let runtime_view = ctx.input.runtime_view.as_deref();
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
         ctx.snapshot
             .llm_provider
-            .complete(&build_result.request)
+            .complete_scoped(runtime_view, &build_result.request)
             .await?
     } else {
         let first_token_at = std::sync::Arc::clone(&first_token_at);
         ctx.snapshot
             .llm_provider
-            .complete_stream(&build_result.request, &|chunk| {
+            .complete_stream_scoped(runtime_view, &build_result.request, &|chunk| {
                 if first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
                     first_token_at.store(
                         start.elapsed().as_millis() as u64,
