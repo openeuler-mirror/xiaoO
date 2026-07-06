@@ -46,6 +46,6 @@ pub use session_service_impl::CoreBackedSessionService;
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turns::{
     AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig,
-    RuntimeTurnRequest, TurnMention,
+    RuntimeTurnRequest, TurnMention, TurnOutcome,
 };
 pub use workspace_prompt::{compose_repo_map, compose_workspace_system_prompt};

@@ -510,10 +510,23 @@ impl App {
         }
 
         if self.state.chat_state.is_loading {
-            if let Some(body) = self.external_command_body(trimmed) {
-                self.gateway
-                    .enqueue_pending_user_message_for_running_turn(body.clone());
-                self.state.chat_state.enqueue_pending_turn(body);
+            if let Some((body, command_context)) = self.external_command_body(trimmed) {
+                // Slash commands carry `command_context` and must start their
+                // own turn so the `*.Chat.command.before` hook fires with
+                // `{ command, arguments }`. Enqueuing the body to
+                // `pending_user_messages` as well would let
+                // `drain_pending_user_messages` inject it into the *current*
+                // turn's history as a plain user message — only
+                // `*.Chat.message.received` runs there, never
+                // `command.before` — and then `start_next_queued_turn` would
+                // write it again (with the command hook) when starting the
+                // deferred turn. The body would appear twice and the command
+                // hook would fire for only the second copy. Queue it solely
+                // as a pending turn so it is processed once, after the
+                // running turn ends.
+                self.state
+                    .chat_state
+                    .enqueue_pending_turn(body, Some(command_context));
                 return Ok(());
             }
 
@@ -526,9 +539,18 @@ impl App {
                             .to_string(),
                     ));
             } else {
-                self.gateway
-                    .enqueue_pending_user_message_for_running_turn(user_input.clone());
-                self.state.chat_state.enqueue_pending_turn(user_input);
+                // Queue free-form text solely as a pending turn. Mirrors the
+                // slash-command branch above: enqueuing to
+                // `pending_user_messages` as well would let
+                // `drain_pending_user_messages` inject a copy into the
+                // *current* turn's history (where `*.Chat.message.received`
+                // fires), and then `start_next_queued_turn` would write it
+                // again as the next turn's user message (where the same hook
+                // fires a second time). The message would appear twice and
+                // any `Transform` would be applied twice (e.g. a prefix
+                // added twice). Queue it once so it is processed once, after
+                // the running turn ends.
+                self.state.chat_state.enqueue_pending_turn(user_input, None);
             }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
@@ -700,9 +722,13 @@ impl App {
         // if user_input.trim().starts_with("/create-skill") { ... }
 
         // External commands from ~/.xiaoo/commands/
-        if let Some(body) = self.external_command_body(trimmed) {
+        if let Some((body, command_context)) = self.external_command_body(trimmed) {
             self.state.chat_state.input.reset();
-            if let Err(error) = self.gateway.start_turn(&mut self.state, body).await {
+            if let Err(error) = self
+                .gateway
+                .start_turn_for_command(&mut self.state, body, command_context)
+                .await
+            {
                 let display_error = crate::error_log::record_tui_error("start_turn", &error);
                 self.state
                     .chat_state
@@ -739,7 +765,10 @@ impl App {
         }
     }
 
-    fn external_command_body(&self, trimmed: &str) -> Option<String> {
+    fn external_command_body(
+        &self,
+        trimmed: &str,
+    ) -> Option<(String, agent_types::chat::CommandContext)> {
         expand_external_command(trimmed, &self.state.external_commands)
     }
 
@@ -1359,15 +1388,28 @@ fn normalize_remote_url_input(value: &str) -> String {
     }
 }
 
+/// Returns `(body, command_context)` when `trimmed` is a slash command
+/// matching an external command from `~/.xiaoo/commands/`. The command
+/// context bundles the resolved command name and raw arguments so callers
+/// don't have to reassemble them and there is no positional-tuple footgun.
 fn expand_external_command(
     trimmed: &str,
     external: &[crate::services::command_loader::ExternalCommand],
-) -> Option<String> {
+) -> Option<(String, agent_types::chat::CommandContext)> {
     let (cmd_name, user_args) = external_command_parts(trimmed)?;
     external
         .iter()
         .find(|cmd| cmd.name.eq_ignore_ascii_case(cmd_name))
-        .map(|cmd| append_external_command_args(&cmd.body, user_args))
+        .map(|cmd| {
+            let body = append_external_command_args(&cmd.body, user_args);
+            (
+                body,
+                agent_types::chat::CommandContext {
+                    command: cmd.name.clone(),
+                    arguments: user_args.to_string(),
+                },
+            )
+        })
 }
 
 fn external_command_parts(trimmed: &str) -> Option<(&str, &str)> {
@@ -1407,7 +1449,13 @@ mod tests {
     fn external_command_exact_match_expands_to_body() {
         assert_eq!(
             expand_external_command("/review", &external_commands()),
-            Some("Review this carefully.".to_string())
+            Some((
+                "Review this carefully.".to_string(),
+                agent_types::chat::CommandContext {
+                    command: "review".to_string(),
+                    arguments: "".to_string()
+                }
+            ))
         );
     }
 
@@ -1415,7 +1463,13 @@ mod tests {
     fn external_command_appends_user_input_after_command_token() {
         assert_eq!(
             expand_external_command("/review src/main.rs 看一下边界条件", &external_commands()),
-            Some("Review this carefully.\n\nsrc/main.rs 看一下边界条件".to_string())
+            Some((
+                "Review this carefully.\n\nsrc/main.rs 看一下边界条件".to_string(),
+                agent_types::chat::CommandContext {
+                    command: "review".to_string(),
+                    arguments: "src/main.rs 看一下边界条件".to_string()
+                }
+            ))
         );
     }
 
@@ -1440,7 +1494,13 @@ mod tests {
         }];
         assert_eq!(
             expand_external_command("/ask hello", &commands),
-            Some("hello".to_string())
+            Some((
+                "hello".to_string(),
+                agent_types::chat::CommandContext {
+                    command: "ask".to_string(),
+                    arguments: "hello".to_string()
+                }
+            ))
         );
     }
 }

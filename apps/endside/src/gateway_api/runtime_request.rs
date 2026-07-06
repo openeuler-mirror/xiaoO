@@ -24,7 +24,19 @@ const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
-        self.start_turn_internal(state, prompt, true).await
+        self.start_turn_internal(state, prompt, true, None).await
+    }
+
+    /// Like `start_turn` but carries slash-command metadata so the
+    /// `*.Chat.command.before` hooker can fire with `{ command, arguments }`.
+    pub async fn start_turn_for_command(
+        &mut self,
+        state: &mut AppState,
+        prompt: String,
+        command_context: agent_types::chat::CommandContext,
+    ) -> Result<(), String> {
+        self.start_turn_internal(state, prompt, true, Some(command_context))
+            .await
     }
 
     pub async fn start_next_queued_turn(&mut self, state: &mut AppState) -> Result<bool, String> {
@@ -35,21 +47,9 @@ impl GatewayRuntime {
             return Ok(false);
         };
         self.discard_pending_user_message(&queued.prompt);
-        self.start_turn_internal(state, queued.prompt, true).await?;
+        self.start_turn_internal(state, queued.prompt, true, queued.command_context)
+            .await?;
         Ok(true)
-    }
-
-    pub fn enqueue_pending_user_message_for_running_turn(&mut self, prompt: String) -> bool {
-        if self.remote.is_some() || self.stream_rx.is_none() {
-            return false;
-        }
-
-        if let Ok(mut pending) = self.pending_user_messages.lock() {
-            pending.push_back(prompt);
-            true
-        } else {
-            false
-        }
     }
 
     fn discard_pending_user_message(&mut self, prompt: &str) {
@@ -67,10 +67,11 @@ impl GatewayRuntime {
         state: &mut AppState,
         prompt: String,
         append_user_message: bool,
+        command_context: Option<agent_types::chat::CommandContext>,
     ) -> Result<(), String> {
         if self.remote.is_some() {
             return self
-                .start_remote_turn(state, prompt, append_user_message)
+                .start_remote_turn(state, prompt, append_user_message, command_context)
                 .await;
         }
 
@@ -96,7 +97,7 @@ impl GatewayRuntime {
 
         let runtime_config = self.build_runtime_config(state)?;
         let open_request = self.session_open_request(state)?;
-        let turn_request = self.turn_request(state, prompt.clone())?;
+        let turn_request = self.turn_request(state, prompt.clone(), command_context)?;
 
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(Instant::now());
@@ -267,7 +268,12 @@ impl GatewayRuntime {
         })
     }
 
-    fn turn_request(&self, state: &AppState, text: String) -> Result<AppTurnRequest, String> {
+    fn turn_request(
+        &self,
+        state: &AppState,
+        text: String,
+        command_context: Option<agent_types::chat::CommandContext>,
+    ) -> Result<AppTurnRequest, String> {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
         Ok(AppTurnRequest {
             session_id: state.session_id.clone(),
@@ -284,6 +290,7 @@ impl GatewayRuntime {
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
             llm: None,
+            command_context,
         })
     }
 }

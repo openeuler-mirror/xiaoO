@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -5,16 +6,20 @@ use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
 use agent_contracts::tool::ToolCallBuilder;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
+use agent_contracts::{Hooker, RuntimeView};
 use agent_llm::{AssistantMessageExt, ChatMessageExt, MessageRoleExt};
+use agent_types::chat::{ChatSystemTransformInput, ChatSystemTransformResult, ModelRef};
 use agent_types::compression::CompressedView;
 use agent_types::context::prompt::result::PromptBuildResult;
 use agent_types::events::ToolResultEvent;
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
 use agent_types::outcome::{AgentError, AgentOutcome};
 use agent_types::tool::{EffectProfile, RawToolCall, RawToolOutcome, ToolExecutionResult};
 use agent_types::{
-    AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk, ToolUseBlock,
+    AgentId, AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk,
+    ToolUseBlock,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use tool::{tool_filter_from_specs, ToolCallBuilderImpl};
 
 use crate::input::{AgentLoopInput, LoopStopRule};
@@ -88,11 +93,54 @@ pub async fn run_agent_loop(
         {
             input.user_message = expanded;
         }
-        state.messages.write().push(ChatMessage::text(
-            MessageRole::User,
-            &input.user_message,
-            now_ms(),
-        ));
+        // command.execute.before — fires before chat.message so the
+        // command-layer body rewrite feeds into the message-layer hook.
+        if let Some(cmd_ctx) = input.command_context.as_ref() {
+            if let Some(runtime_view) = input.runtime_view.as_ref() {
+                let (body, deny) = run_command_execute_before_hook(
+                    runtime_view,
+                    &state.session_id.to_string(),
+                    input.agent_id.as_ref(),
+                    &cmd_ctx.command,
+                    &cmd_ctx.arguments,
+                    input.user_message.clone(),
+                )
+                .await;
+                if let Some(reason) = deny {
+                    let deny_text =
+                        format!("Command '{}' denied by plugin: {}", cmd_ctx.command, reason);
+                    let deny_msg = ChatMessage::text(MessageRole::Assistant, &deny_text, now_ms());
+                    state.messages.write().push(deny_msg);
+                    if let Some(ref sink) = input.event_sink {
+                        let agent_id = agent_id_or_anonymous(input.agent_id.as_ref());
+                        sink.on_assistant_message(agent_id, &deny_text);
+                    }
+                    return Ok(LoopRunResult::Complete(AgentOutcome::Complete {
+                        reply: deny_text,
+                        messages: state.messages.read().clone(),
+                        turn_count: 0,
+                        token_usage: agent_types::outcome::TokenUsage::default(),
+                        estimated_input_tokens: 0,
+                    }));
+                }
+                input.user_message = body;
+            }
+        }
+        let candidate = ChatMessage::text(MessageRole::User, &input.user_message, now_ms());
+        // chat.message — fires before the user message is persisted.
+        let final_message = apply_chat_message_hook(
+            input.runtime_view.as_ref(),
+            &state.session_id.to_string(),
+            input.agent_id.as_ref(),
+            candidate,
+        )
+        .await;
+        // Sync transformed text back into loop input for event sinks/tracing.
+        // Non-text transforms are persisted as-is via the message push below.
+        if let Some(text) = final_message.text_content() {
+            input.user_message = text.to_string();
+        }
+        state.messages.write().push(final_message);
     }
 
     let mut ctx = LoopContext {
@@ -107,8 +155,7 @@ pub async fn run_agent_loop(
         begin_turn_span(&mut ctx).await;
 
         if let Some(ref sink) = ctx.input.event_sink {
-            let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-            let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+            let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
             sink.on_turn_start(agent_id, ctx.turn.turn_number);
         }
         drain_pending_user_messages(&mut ctx).await;
@@ -341,10 +388,15 @@ async fn drain_pending_user_messages(ctx: &mut LoopContext<'_>) {
         if message.trim().is_empty() {
             continue;
         }
-        ctx.state
-            .messages
-            .write()
-            .push(ChatMessage::text(MessageRole::User, &message, now_ms()));
+        let candidate = ChatMessage::text(MessageRole::User, &message, now_ms());
+        let final_message = apply_chat_message_hook(
+            ctx.input.runtime_view.as_ref(),
+            &ctx.state.session_id.to_string(),
+            ctx.input.agent_id.as_ref(),
+            candidate,
+        )
+        .await;
+        ctx.state.messages.write().push(final_message);
     }
 }
 
@@ -376,13 +428,7 @@ async fn begin_turn_span(ctx: &mut LoopContext<'_>) {
     let Some(runtime_view) = ctx.input.runtime_view.clone() else {
         return;
     };
-    let agent_id = ctx
-        .input
-        .agent_id
-        .as_ref()
-        .map(|id| id.0.as_str())
-        .unwrap_or("anonymous")
-        .to_string();
+    let agent_id = chat_agent_segment(ctx.input.agent_id.as_ref());
     let span = runtime_view
         .trace_recorder()
         .begin_span(
@@ -687,26 +733,6 @@ async fn compress(
     }
 }
 
-#[allow(dead_code)]
-fn microcompact(ctx: &mut LoopContext<'_>) {
-    let messages = ctx.state.messages.read();
-    let result = ctx
-        .snapshot
-        .compression_pipeline
-        .microcompact(&messages, now_ms());
-    drop(messages);
-
-    if result.applied {
-        tracing::info!(
-            removed = result.removed_count,
-            removed_call_ids = ?result.removed_call_ids,
-            token_delta = result.token_delta,
-            "microcompact applied"
-        );
-        *ctx.state.messages.write() = result.messages;
-    }
-}
-
 fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
     const KEEP_RECENT_TOOL_BYTES: usize = 40_000;
     const MIN_PRUNABLE_BYTES: usize = 1_000;
@@ -875,6 +901,10 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
     match result {
         Ok(mut result) => {
             result.request.reasoning_effort = ctx.input.reasoning_effort;
+
+            // system.transform — fires on un-merged system parts.
+            run_chat_system_transform_sequence(ctx, &mut result).await;
+
             // end span — success, record estimated token count and other output info
             if let (Some(rv), Some(span)) = (ctx.input.runtime_view.clone(), prompt_build_span) {
                 rv.trace_recorder()
@@ -908,6 +938,326 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
             Err(e)
         }
     }
+}
+
+/// Per-hooker application outcome returned by the callback driving
+/// [`run_chat_hook_chain`].
+enum HookApply {
+    /// Apply succeeded; record `span_fields` on the trace span and keep
+    /// iterating the remaining hookers.
+    Continue(Value),
+    /// Apply succeeded and wants the chain to stop early (e.g. a `Deny`
+    /// result). Records `span_fields` then breaks the loop.
+    Break(Value),
+}
+
+/// Collects the hookers registered for `hook_point`, keeping only enabled
+/// ones and sorting by id for a stable, predictable execution order.
+fn enabled_hookers_for<'a>(
+    runtime_view: &'a Arc<dyn RuntimeView>,
+    hook_point: &HookPointId,
+) -> Vec<&'a dyn Hooker> {
+    let mut hookers = runtime_view.hookers().list_for_hook_point(hook_point);
+    hookers.retain(|h| runtime_view.hookers().is_enabled(h.id()));
+    hookers.sort_by(|a, b| a.id().0.cmp(&b.id().0));
+    hookers
+}
+
+/// Extracts the inner payload of a [`HookInvokeOutput`] variant, or returns
+/// an error string naming the expected variant when the output is any other
+/// variant. Used inside `apply` closures to keep the downcast terse.
+macro_rules! downcast_hook_output {
+    ($output:expr, $variant:ident) => {
+        match $output {
+            HookInvokeOutput::$variant(r) => r,
+            other => {
+                return Err(format!(
+                    "expected {} output, got {other:?}",
+                    stringify!($variant)
+                ));
+            }
+        }
+    };
+}
+
+/// Resolve the agent segment used to build chat-level hook point ids.
+/// Falls back to `"anonymous"` when the loop has no agent id, mirroring
+/// the convention used by the event-sink agent id resolution below.
+fn chat_agent_segment(agent_id: Option<&AgentId>) -> String {
+    agent_id
+        .map(|id| id.0.clone())
+        .unwrap_or_else(|| "anonymous".to_string())
+}
+
+/// Lazily-initialized shared `"anonymous"` agent id, used as the fallback by
+/// [`agent_id_or_anonymous`] so the event-sink sites don't allocate a fresh
+/// `AgentId` on every call.
+static ANON_AGENT_ID: std::sync::OnceLock<AgentId> = std::sync::OnceLock::new();
+
+/// Returns the loop's agent id, or a shared `"anonymous"` fallback when none
+/// is configured. Consolidates the 7× `default_agent_id + unwrap_or` pattern
+/// previously inlined at every event-sink emission site.
+fn agent_id_or_anonymous(agent_id: Option<&AgentId>) -> &AgentId {
+    agent_id.unwrap_or_else(|| ANON_AGENT_ID.get_or_init(|| AgentId("anonymous".to_string())))
+}
+
+/// Drives the common dispatch loop shared by the three chat-level hook
+/// points. `build_input` produces the per-iteration [`HookInvokeInput`]
+/// from the current accumulator; `apply` destructures the hooker's output,
+/// mutates the accumulator, and returns either [`HookApply::Continue`] to
+/// keep iterating or [`HookApply::Break`] to short-circuit the chain. A
+/// hooker whose output variant does not match the hook point, or whose
+/// invocation errors, is logged and skipped so a single bad hooker can't
+/// break the turn.
+async fn run_chat_hook_chain<Acc>(
+    runtime_view: &Arc<dyn RuntimeView>,
+    hook_point: HookPointId,
+    span_name: &'static str,
+    hook_kind: &'static str,
+    acc: &mut Acc,
+    build_input: impl Fn(&Acc) -> HookInvokeInput,
+    mut apply: impl FnMut(&mut Acc, HookInvokeOutput) -> Result<HookApply, String>,
+) {
+    let hookers = enabled_hookers_for(runtime_view, &hook_point);
+    if hookers.is_empty() {
+        return;
+    }
+
+    for hooker in hookers {
+        let hook_span = runtime_view
+            .trace_recorder()
+            .begin_span(
+                TraceSpanKind::Hook,
+                std::borrow::Cow::Borrowed(span_name),
+                json!({
+                    "hook_kind": hook_kind,
+                    "hooker_id": hooker.id().to_string(),
+                    "hook_point": hook_point.0,
+                }),
+            )
+            .await;
+
+        let input = build_input(acc);
+        let output = match hooker.invoke(input, runtime_view.as_ref()).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "{hook_kind} hook invoke failed for hooker '{}' (hook_point='{}'): {e}",
+                    hooker.id(),
+                    hook_point.0
+                );
+                runtime_view
+                    .trace_recorder()
+                    .end_span(
+                        hook_span,
+                        TraceOutcome::Error,
+                        json!({"error": e.to_string()}),
+                    )
+                    .await;
+                continue;
+            }
+        };
+
+        let (span_fields, do_break) = match apply(acc, output) {
+            Ok(HookApply::Continue(span_fields)) => (span_fields, false),
+            Ok(HookApply::Break(span_fields)) => (span_fields, true),
+            Err(err) => {
+                tracing::warn!(
+                    "{hook_kind} hooker '{}' returned unexpected output for hook_point '{}': {err}",
+                    hooker.id(),
+                    hook_point.0
+                );
+                runtime_view
+                    .trace_recorder()
+                    .end_span(hook_span, TraceOutcome::Error, json!({"error": err}))
+                    .await;
+                continue;
+            }
+        };
+        runtime_view
+            .trace_recorder()
+            .end_span(hook_span, TraceOutcome::Ok, span_fields)
+            .await;
+        if do_break {
+            break;
+        }
+    }
+}
+
+/// `*.Chat.system.transform` — fires on the prompt builder's un-merged
+/// `system: Vec<String>` parts; a `Transform` result replaces both the
+/// parts and the joined system message in `request.messages[0]`.
+async fn run_chat_system_transform_sequence(ctx: &LoopContext<'_>, result: &mut PromptBuildResult) {
+    let Some(runtime_view) = ctx.input.runtime_view.as_ref() else {
+        return;
+    };
+
+    let agent_segment = chat_agent_segment(ctx.input.agent_id.as_ref());
+    let hook_point = HookPointId(format!("{}.Chat.system.transform", agent_segment));
+
+    let session_id = ctx.state.session_id.to_string();
+    // xiaoo's RuntimeSnapshot does not currently expose provider/model ids
+    // at the loop level; pass an empty ModelRef so plugins that key on
+    // model still receive the field. Populate when model metadata lands.
+    let model = ModelRef::default();
+
+    run_chat_hook_chain(
+        runtime_view,
+        hook_point,
+        "chat_system_transform_hook",
+        "chat_system_transform",
+        result,
+        |result| HookInvokeInput::ChatSystemTransform {
+            input: ChatSystemTransformInput {
+                session_id: Some(session_id.clone()),
+                model: model.clone(),
+                current_system: result.system_parts.clone(),
+            },
+            metadata: HookInvokeMetadata::default(),
+        },
+        |result, output| {
+            let transform_result = downcast_hook_output!(output, ChatSystemTransform);
+            match transform_result {
+                ChatSystemTransformResult::Allow => {
+                    Ok(HookApply::Continue(json!({"result": "allow"})))
+                }
+                ChatSystemTransformResult::Transform { system } => {
+                    result.system_parts = system;
+                    // Rewrite the merged system message in-place so the LlmRequest
+                    // carries the plugin-authored system text.
+                    let joined = result.system_parts.join("\n\n");
+                    if let Some(first) = result.request.messages.first_mut() {
+                        if first.role == MessageRole::System {
+                            first.blocks.clear();
+                            first.blocks.push(ContentBlock::Text { text: joined });
+                        }
+                    }
+                    Ok(HookApply::Continue(json!({"result": "transform"})))
+                }
+            }
+        },
+    )
+    .await;
+}
+
+/// `*.Chat.message.received` — fires before a user message is persisted.
+/// Returns the (possibly transformed) message; on error or when no hookers
+/// are configured, the original candidate is returned unchanged.
+async fn run_chat_message_hook(
+    runtime_view: &Arc<dyn RuntimeView>,
+    session_id: &str,
+    agent_id: Option<&AgentId>,
+    candidate: ChatMessage,
+) -> ChatMessage {
+    let agent_segment = chat_agent_segment(agent_id);
+    let hook_point = HookPointId(format!("{}.Chat.message.received", agent_segment));
+
+    let mut current = candidate;
+    run_chat_hook_chain(
+        runtime_view,
+        hook_point,
+        "chat_message_hook",
+        "chat_message",
+        &mut current,
+        |message| HookInvokeInput::ChatMessage {
+            input: agent_types::chat::ChatMessageHookInput {
+                session_id: session_id.to_string(),
+                agent: Some(agent_segment.clone()),
+                model: None,
+                message_id: message.message_id.clone(),
+                message: message.clone(),
+            },
+            metadata: HookInvokeMetadata::default(),
+        },
+        |message, output| {
+            let result = downcast_hook_output!(output, ChatMessage);
+            match result {
+                agent_types::chat::ChatMessageHookResult::Accept => {
+                    Ok(HookApply::Continue(json!({"result": "accept"})))
+                }
+                agent_types::chat::ChatMessageHookResult::Transform {
+                    message: new_message,
+                } => {
+                    *message = new_message;
+                    Ok(HookApply::Continue(json!({"result": "transform"})))
+                }
+            }
+        },
+    )
+    .await;
+    current
+}
+
+/// Run `*.Chat.message.received` over `candidate` when a runtime view is
+/// configured, otherwise return `candidate` unchanged. Consolidates the
+/// "optional hook + push" pattern shared between [`run_agent_loop`] and
+/// [`drain_pending_user_messages`]; callers that need to sync the
+/// transformed text back into their input read it off the returned message.
+async fn apply_chat_message_hook(
+    runtime_view: Option<&Arc<dyn RuntimeView>>,
+    session_id: &str,
+    agent_id: Option<&AgentId>,
+    candidate: ChatMessage,
+) -> ChatMessage {
+    match runtime_view {
+        Some(runtime_view) => {
+            run_chat_message_hook(runtime_view, session_id, agent_id, candidate).await
+        }
+        None => candidate,
+    }
+}
+
+/// `*.Chat.command.before` — fires on an expanded slash-command body
+/// before it becomes the user message. Returns `(body, Option<deny_reason>)`;
+/// `Some(reason)` short-circuits the turn.
+async fn run_command_execute_before_hook(
+    runtime_view: &Arc<dyn RuntimeView>,
+    session_id: &str,
+    agent_id: Option<&AgentId>,
+    command: &str,
+    arguments: &str,
+    body: String,
+) -> (String, Option<String>) {
+    let agent_segment = chat_agent_segment(agent_id);
+    let hook_point = HookPointId(format!("{}.Chat.command.before", agent_segment));
+
+    let mut acc = (body, None);
+    run_chat_hook_chain(
+        runtime_view,
+        hook_point,
+        "chat_command_before_hook",
+        "chat_command_before",
+        &mut acc,
+        |acc| HookInvokeInput::CommandExecuteBefore {
+            input: agent_types::chat::CommandExecuteBeforeInput {
+                command: command.to_string(),
+                session_id: session_id.to_string(),
+                arguments: arguments.to_string(),
+                body: acc.0.clone(),
+            },
+            metadata: HookInvokeMetadata::default(),
+        },
+        |acc, output| {
+            let result = downcast_hook_output!(output, CommandExecuteBefore);
+            match result {
+                agent_types::chat::CommandExecuteBeforeResult::Allow => {
+                    Ok(HookApply::Continue(json!({"result": "allow"})))
+                }
+                agent_types::chat::CommandExecuteBeforeResult::Transform { body } => {
+                    acc.0 = body;
+                    Ok(HookApply::Continue(json!({"result": "transform"})))
+                }
+                agent_types::chat::CommandExecuteBeforeResult::Deny { reason } => {
+                    acc.1 = Some(reason.clone());
+                    Ok(HookApply::Break(
+                        json!({"result": "deny", "reason": reason}),
+                    ))
+                }
+            }
+        },
+    )
+    .await;
+    acc
 }
 
 async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
@@ -948,13 +1298,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-                let agent_id = ctx
-                    .input
-                    .agent_id
-                    .as_ref()
-                    .unwrap_or(&default_agent_id)
-                    .clone();
+                let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref()).clone();
                 stream_assistant_chunk(
                     event_sink.as_deref(),
                     &agent_id,
@@ -994,8 +1338,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     if let Some(ref sink) = event_sink {
         if let Some(ref text) = response.message.text {
             if streamed_text != *text {
-                let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-                let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+                let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
                 let filtered_text = filter_secrets_in_text(text, &secrets);
                 sink.on_assistant_message(agent_id, &filtered_text);
             }
@@ -1177,7 +1520,7 @@ async fn llm_call_with_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentEr
 
 fn stream_assistant_chunk(
     sink: Option<&dyn LoopEventSink>,
-    agent_id: &agent_types::common::ids::AgentId,
+    agent_id: &AgentId,
     streamed_text: &Mutex<String>,
     streamed_reasoning: &Mutex<String>,
     chunk: StreamChunk,
@@ -1331,8 +1674,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
         );
 
         if let Some(ref sink) = ctx.input.event_sink {
-            let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-            let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+            let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
 
             let messages = ctx.state.messages.read().clone();
             let secrets = extract_secrets_from_messages(&messages);
@@ -1702,8 +2044,7 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
     };
 
     if should_emit {
-        let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-        let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+        let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
 
         // Extract secrets and filter args_preview for bash commands
         let messages = ctx.state.messages.read().clone();
@@ -1771,8 +2112,6 @@ fn filter_ask_user_question_output(output: &str) -> String {
 
 /// Extract secret values from message history for filtering in assistant messages
 fn extract_secrets_from_messages(messages: &[ChatMessage]) -> Vec<String> {
-    use agent_types::llm::ContentBlock;
-
     messages
         .iter()
         .filter(|m| m.role == MessageRole::Tool)
@@ -2019,8 +2358,7 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
 
 fn emit_loop_end(ctx: &LoopContext<'_>, stop_reason: &str) {
     if let Some(ref sink) = ctx.input.event_sink {
-        let default_agent_id = agent_types::common::ids::AgentId(String::from("anonymous"));
-        let agent_id = ctx.input.agent_id.as_ref().unwrap_or(&default_agent_id);
+        let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
         sink.on_loop_end(
             agent_id,
             &agent_types::events::LoopEndSummary {
@@ -2148,7 +2486,7 @@ mod tests {
         SkillRegistry,
     };
     use agent_llm::LlmRequestExt;
-    use agent_types::common::ids::{AgentId, ToolId, ToolName};
+    use agent_types::common::ids::{ToolId, ToolName};
     use agent_types::context::budget::BudgetError;
     use agent_types::context::prompt::{PromptBuildError, PromptBuildResult};
     use agent_types::context::{FeatureFlags, TokenBudgetConfig};
@@ -2509,6 +2847,7 @@ mod tests {
             Ok(PromptBuildResult {
                 request: LlmRequest::new(input.messages),
                 estimated_input_tokens: 0,
+                system_parts: Vec::new(),
             })
         }
     }
@@ -3045,8 +3384,6 @@ mod tests {
 
     #[test]
     fn test_extract_secrets_from_messages() {
-        use agent_types::llm::ContentBlock;
-
         // Test 1: Only extract secrets with display_value (is_secret=true)
         let message_with_secret = ChatMessage {
             role: MessageRole::Tool,

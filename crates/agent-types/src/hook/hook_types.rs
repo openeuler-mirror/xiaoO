@@ -1,10 +1,15 @@
+use crate::chat::{
+    ChatHookError, ChatMessageHookInput, ChatMessageHookResult, ChatSystemTransformInput,
+    ChatSystemTransformResult, CommandExecuteBeforeInput, CommandExecuteBeforeResult,
+};
 use crate::llm::error::LlmError;
 use crate::llm::hook_types::{
     ErrorLlmHookInput, ErrorLlmHookResult, PostLlmHookInput, PostLlmHookResult, PreLlmHookInput,
     PreLlmHookResult,
 };
 use crate::session::hook_types::{
-    SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult,
+    SessionClosedHookInput, SessionCreatedHookInput, SessionHookError, SessionHookResult,
+    SessionStateHookInput,
 };
 use crate::tool::execution_types::ToolExecutionError;
 use crate::tool::hook_types::{
@@ -18,6 +23,10 @@ pub enum HookInvokeError {
     Tool(#[from] ToolExecutionError),
     #[error("{0}")]
     Llm(#[from] LlmError),
+    #[error("{0}")]
+    Chat(#[from] ChatHookError),
+    #[error("{0}")]
+    Session(#[from] SessionHookError),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -64,6 +73,23 @@ pub enum HookInvokeInput {
         input: SessionClosedHookInput,
         metadata: HookInvokeMetadata,
     },
+    SessionState {
+        input: SessionStateHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    // Chat hook variants
+    ChatSystemTransform {
+        input: ChatSystemTransformInput,
+        metadata: HookInvokeMetadata,
+    },
+    ChatMessage {
+        input: ChatMessageHookInput,
+        metadata: HookInvokeMetadata,
+    },
+    CommandExecuteBefore {
+        input: CommandExecuteBeforeInput,
+        metadata: HookInvokeMetadata,
+    },
 }
 
 impl HookInvokeInput {
@@ -76,7 +102,11 @@ impl HookInvokeInput {
             | Self::LlmPost { metadata, .. }
             | Self::LlmError { metadata, .. }
             | Self::SessionCreated { metadata, .. }
-            | Self::SessionClosed { metadata, .. } => metadata,
+            | Self::SessionClosed { metadata, .. }
+            | Self::SessionState { metadata, .. }
+            | Self::ChatSystemTransform { metadata, .. }
+            | Self::ChatMessage { metadata, .. }
+            | Self::CommandExecuteBefore { metadata, .. } => metadata,
         }
     }
 }
@@ -94,4 +124,9 @@ pub enum HookInvokeOutput {
     // Session hook variants
     SessionCreated(SessionHookResult),
     SessionClosed(SessionHookResult),
+    SessionState(SessionHookResult),
+    // Chat hook variants
+    ChatSystemTransform(ChatSystemTransformResult),
+    ChatMessage(ChatMessageHookResult),
+    CommandExecuteBefore(CommandExecuteBeforeResult),
 }

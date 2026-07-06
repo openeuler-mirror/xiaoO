@@ -4,6 +4,7 @@ use crate::gateway::session_record::SessionAgentRecord;
 use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLifecycleStatus, SessionRecord,
     SessionRuntimeBuildInput, SessionRuntimeResolver, SessionServiceError, SessionStore,
+    TurnOutcome,
 };
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
@@ -50,6 +51,7 @@ struct LaneRunInput {
     interaction_handle_override: Option<Arc<dyn InteractionHandle>>,
     channel_file_sender_override: Option<Arc<dyn ChannelFileSender>>,
     cancellation_token: Option<CancellationToken>,
+    command_context: Option<agent_types::chat::CommandContext>,
 }
 
 struct LaneTerminal {
@@ -327,6 +329,7 @@ impl SessionSupervisor {
                 interaction_handle_override,
                 channel_file_sender_override,
                 cancellation_token,
+                command_context: request.command_context,
             })
             .await;
 
@@ -410,6 +413,7 @@ impl SessionSupervisor {
                 memory_snapshot: memory_snapshot.clone(),
                 tool_manifest: tool_manifest.clone(),
                 cancellation_token: input.cancellation_token.clone(),
+                command_context: input.command_context.clone(),
             })
             .await?;
 
@@ -714,6 +718,7 @@ impl SessionSupervisor {
                     interaction_handle_override: Some(interaction_handle),
                     channel_file_sender_override: None,
                     cancellation_token: None,
+                    command_context: None,
                 })
                 .await;
 
@@ -1028,7 +1033,7 @@ fn terminal_from_outcome(
 ) -> LaneTerminal {
     let completed_at_ms = current_time_ms();
 
-    let (status, reply, messages, token_usage, estimated_input_tokens) = match outcome {
+    let (status, reply, messages, token_usage, estimated_input_tokens, outcome) = match outcome {
         AgentOutcome::Complete {
             reply,
             messages,
@@ -1041,6 +1046,7 @@ fn terminal_from_outcome(
             messages,
             token_usage,
             estimated_input_tokens,
+            TurnOutcome::Complete,
         ),
         AgentOutcome::MaxTurnsReached {
             partial_reply,
@@ -1054,6 +1060,7 @@ fn terminal_from_outcome(
             messages,
             token_usage,
             estimated_input_tokens,
+            TurnOutcome::MaxTurnsReached,
         ),
         AgentOutcome::BudgetExhausted {
             partial_reply,
@@ -1067,6 +1074,7 @@ fn terminal_from_outcome(
             messages,
             token_usage,
             estimated_input_tokens,
+            TurnOutcome::BudgetExhausted,
         ),
         AgentOutcome::Cancelled {
             partial_reply,
@@ -1080,6 +1088,7 @@ fn terminal_from_outcome(
             messages,
             token_usage,
             estimated_input_tokens,
+            TurnOutcome::Cancelled,
         ),
     };
 
@@ -1092,6 +1101,7 @@ fn terminal_from_outcome(
             completion_tokens: token_usage.completion_tokens as u64,
             total_tokens: token_usage.total_tokens as u64,
             estimated_input_tokens: estimated_input_tokens as u64,
+            outcome,
         },
         terminal: SubagentTerminalSnapshot {
             status,

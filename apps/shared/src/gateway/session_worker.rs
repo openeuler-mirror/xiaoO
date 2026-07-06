@@ -32,6 +32,7 @@ pub struct SessionWorkerInput {
     pub memory_snapshot: Option<MemorySnapshot>,
     pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
     pub cancellation_token: Option<CancellationToken>,
+    pub command_context: Option<agent_types::chat::CommandContext>,
 }
 
 pub struct SessionWorkerResult {
@@ -124,6 +125,7 @@ impl SessionWorker {
         if !input.append_user_message {
             loop_input = loop_input.resume_without_user_message();
         }
+        loop_input.command_context = input.command_context.clone();
         if input.runtime_input.entry.runtime_profile_id.as_deref() == Some(PLAN_AGENT_ID) {
             loop_input = loop_input.with_stop_rules([LoopStopRule::AfterSuccessfulTool {
                 tool_name: "todo_write".to_string(),
