@@ -186,7 +186,7 @@ impl TraceBackend for MoiraiSqliteBackend {
 
     async fn finalize_trace(
         &self,
-        _occurred_at_ms: u64,
+        occurred_at_ms: u64,
         final_parent_span_id: Option<String>,
         outcome: TraceOutcome,
         fields: Value,
@@ -196,16 +196,41 @@ impl TraceBackend for MoiraiSqliteBackend {
             return;
         }
 
-        let active_spans = self.active_spans.lock().await;
-        if !active_spans.is_empty() {
-            let active_span_ids: Vec<String> = active_spans.iter().cloned().collect();
-            panic!(
+        let mut active_spans = self.active_spans.lock().await;
+        let active_span_ids: Vec<String> = active_spans.iter().cloned().collect();
+        active_spans.clear();
+        drop(active_spans);
+
+        if !active_span_ids.is_empty() {
+            eprintln!(
                 "moirai trace finalization called while spans are still active: count={} active_span_ids={:?}",
                 active_span_ids.len(),
                 active_span_ids
             );
+            for span_id in &active_span_ids {
+                let force_closed_fields = merge_json_fields(
+                    serde_json::json!({
+                        "abnormal_closed": true,
+                        "finalize_closed_active_span": true,
+                    }),
+                    fields.clone(),
+                );
+                if let Err(error) = self
+                    .context
+                    .update_span_at(span_id, force_closed_fields, occurred_at_ms as i64)
+                    .await
+                {
+                    eprintln!("moirai finalize update failed for active span {span_id}: {error}");
+                }
+                if let Err(error) = self
+                    .context
+                    .end_span_at(span_id, occurred_at_ms as i64)
+                    .await
+                {
+                    eprintln!("moirai finalize end failed for active span {span_id}: {error}");
+                }
+            }
         }
-        drop(active_spans);
 
         let message = fields
             .get("message")
@@ -213,10 +238,13 @@ impl TraceBackend for MoiraiSqliteBackend {
             .map(str::to_string);
         let success = matches!(outcome, TraceOutcome::Ok);
 
-        self.context
+        if let Err(error) = self
+            .context
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
             .await
-            .ok();
+        {
+            eprintln!("moirai trace finalization failed: {error}");
+        }
 
         *finalized = true;
     }

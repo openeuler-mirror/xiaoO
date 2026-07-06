@@ -28,7 +28,6 @@ use xiaoo_core::{
     NoopInteractionHandle, NoopToolEventSink,
 };
 
-use llm_client::LlmProviderWrapper;
 use parking_lot::RwLock;
 
 use super::ResolvedSessionRuntime;
@@ -40,7 +39,6 @@ pub struct AppRuntimeAssembly {
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
-    llm_provider: Arc<LlmProviderWrapper>,
 }
 
 impl AppRuntimeAssembly {
@@ -50,10 +48,8 @@ impl AppRuntimeAssembly {
             runtime_view,
             visible_tools: _,
             tool_manifest: _,
-            llm_provider,
         } = self;
 
-        llm_provider.clear_runtime_view();
         drop(runtime_view);
         drop(runtime);
 
@@ -181,10 +177,6 @@ impl AppRuntimeFactory {
             Some(runtime_view)
         };
 
-        if let Some(rv) = &runtime_view {
-            resolved.llm_provider.set_runtime_view(rv.clone());
-        }
-
         let mut builder = AgentRuntimeBuilder::new()
             .llm_provider(Arc::clone(&resolved.llm_provider))
             .compression_pipeline(compression_pipeline)
@@ -207,7 +199,6 @@ impl AppRuntimeFactory {
             runtime_view,
             visible_tools,
             tool_manifest,
-            llm_provider: Arc::clone(&resolved.llm_provider),
         })
     }
 }
