@@ -429,10 +429,21 @@ Input payload shape (the `message` field is a full `ChatMessage` object — `rol
     "reasoning_content": null,
     "estimated_tokens": null
   },
+  "prior_message_count": 0,
   "policy": null,
   "definition": { ... }
 }
 ```
+
+`prior_message_count` is the number of messages already in the conversation history **at the moment this hook fires**. Because the hook fires *before* the current user message is persisted, this count reflects prior messages only — it does NOT include the message under inspection. Use it to detect the "first effective user input" of a session:
+
+| Scenario | `prior_message_count` |
+|---|---|
+| Brand-new session, first user message | `0` |
+| First turn done (user+assistant persisted), second user message | `2` |
+| User persisted but assistant interrupted, new message arrives | `1` |
+
+The idiomatic check is `prior_message_count <= 1` (not `=== 0`): the `<= 1` buffer covers retry / interrupted-recovery where only a user message was persisted without an assistant reply, so the current input is still logically the session's first effective turn. This mirrors opencode's `chat.message` first-message detection, but computed in-process from the shared message store (no HTTP callback needed).
 
 Legal output:
 

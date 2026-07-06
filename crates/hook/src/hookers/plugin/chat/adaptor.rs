@@ -204,6 +204,7 @@ impl PluginChatHookerAdaptor {
             })),
             "message_id": input.message_id,
             "message": input.message,
+            "prior_message_count": input.prior_message_count,
             "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
             "definition": self.core.definition().clone(),
         })
@@ -748,6 +749,7 @@ mod tests {
             model: None,
             message_id: None,
             message: candidate,
+            prior_message_count: 0,
         };
         let output =
             block_on(adaptor.invoke_chat_message(&input, &HookInvokeMetadata::default(), &runtime))
@@ -774,6 +776,7 @@ mod tests {
             model: None,
             message_id: None,
             message: candidate,
+            prior_message_count: 0,
         };
         let output =
             block_on(adaptor.invoke_chat_message(&input, &HookInvokeMetadata::default(), &runtime))

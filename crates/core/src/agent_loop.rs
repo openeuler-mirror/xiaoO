@@ -1152,6 +1152,10 @@ async fn run_chat_message_hook(
     let agent_segment = chat_agent_segment(agent_id);
     let hook_point = HookPointId(format!("{}.Chat.message.received", agent_segment));
 
+    // Snapshot before the agent loop pushes the current user message into
+    // the shared conversation storage — count reflects prior messages only.
+    let prior_message_count = runtime_view.agent_context().conversation().message_count();
+
     let mut current = candidate;
     run_chat_hook_chain(
         runtime_view,
@@ -1166,6 +1170,7 @@ async fn run_chat_message_hook(
                 model: None,
                 message_id: message.message_id.clone(),
                 message: message.clone(),
+                prior_message_count,
             },
             metadata: HookInvokeMetadata::default(),
         },
