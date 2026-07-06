@@ -232,7 +232,7 @@ cat /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker.log
 
 ### Minimal demo script
 
-最简 demo（`.js`）：每个 hook 都做一次**用户可感知**的改写，让你在对话里直接看到效果——`[HOOK:command_before:<command> <args>]`/`[HOOK:chat_message]` 出现在用户消息里、`[HOOK:system_transform]` 出现在 LLM 回复开头（标记名与 stage 一致，便于核对哪个钩子触发；`command_before` 额外把 `payload.command`/`payload.arguments` 拼进标记，演示如何读取命令元信息）：
+最简 demo（`.js`）：每个 hook 都做一次**用户可感知**的改写，让你在对话里直接看到效果——`[HOOK:command_before:<command> <args>]`/`[HOOK:chat_message:first#0]`（首条用户消息，`prior_message_count <= 1`）或 `[HOOK:chat_message:follow-up#2]`（后续消息）出现在用户消息里、`[HOOK:system_transform]` 出现在 LLM 回复开头（标记名与 stage 一致，便于核对哪个钩子触发；`command_before` 额外把 `payload.command`/`payload.arguments` 拼进标记，演示如何读取命令元信息；`chat_message` 额外把 `payload.prior_message_count` 拼进标记，演示首条消息检测）：
 
 ```js
 #!/usr/bin/env node
@@ -255,8 +255,17 @@ switch (payload.stage) {
   }
   case "chat_message": {
     // 在用户消息每个文本块前插标记 → 消息历史里的 user 文本开头出现 [HOOK:chat_message]
+    // payload.prior_message_count 是当前用户消息落库前的历史消息数：
+    //   全新 session 首条 = 0；首轮完成后再发 = 2；只回放了 user 的恢复 = 1。
+    // 用 <= 1 判定「会话首条有效输入」（兼容 retry/中断恢复），与 opencode
+    //   的 chat.message 首条注入语义对齐——但 xiaoo 是宿主侧就地从共享消息
+    //   存储算好塞进 payload 的，插件无需 HTTP 回查。
+    const count = payload.prior_message_count ?? 0;
+    const tag = count <= 1
+      ? `[HOOK:chat_message:first#${count}]`
+      : `[HOOK:chat_message:follow-up#${count}]`;
     const blocks = (payload.message?.blocks || []).map((b) =>
-      b.type === "text" ? { ...b, text: `[HOOK:chat_message] ${b.text}` } : b
+      b.type === "text" ? { ...b, text: `${tag} ${b.text}` } : b
     );
     result = { result: "transform", message: { ...payload.message, blocks } };
     break;

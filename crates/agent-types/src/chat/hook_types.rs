@@ -44,6 +44,13 @@ pub struct ChatMessageHookInput {
     pub model: Option<ModelRef>,
     pub message_id: Option<String>,
     pub message: ChatMessage,
+    /// Number of messages already in the conversation history at the
+    /// moment this hook fires. The current user message is NOT yet
+    /// persisted, so this is the count of prior messages. Plugins use
+    /// `prior_message_count <= 1` to detect the "first effective user
+    /// input" of a session (handles retry/recovery where only a user
+    /// message was persisted without an assistant reply).
+    pub prior_message_count: usize,
 }
 
 #[derive(Clone, Debug)]
