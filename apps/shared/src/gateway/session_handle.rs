@@ -366,7 +366,15 @@ impl SessionActor {
 
         self.queue_depth.fetch_sub(1, Ordering::SeqCst);
         let turn_id = uuid::Uuid::new_v4();
-        let cancel = CancellationToken::new();
+        // Use the externally-provided cancel token (from the TUI via bindings)
+        // when available so Esc can actually cancel the backend turn; fall back
+        // to a fresh token for non-TUI callers (CLI, daemon, subagents).
+        let cancel = turn
+            .resolved_runtime
+            .bindings
+            .cancel_token
+            .clone()
+            .unwrap_or_else(CancellationToken::new);
         let (done_tx, done_rx) = oneshot::channel();
         let supervisor = self.supervisor.clone();
         let cancel_for_task = cancel.clone();

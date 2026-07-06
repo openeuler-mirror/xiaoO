@@ -1,6 +1,4 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc::unbounded_channel;
@@ -95,6 +93,25 @@ impl GatewayRuntime {
             }
         }
 
+        // Defensive sync of the TUI's `session_messages` cache from the
+        // backend session store. The `Done` update that normally refreshes
+        // `session_messages` via `finish_stream_done` can be missed for many
+        // reasons while the session is still alive (channel drop, panic
+        // recovery, subagent writes to the backend store, Esc cancellation,
+        // etc.). Reloading `loop_state.messages` here at turn start keeps the
+        // cache fresh so snapshots and subsequent turns see the full
+        // conversation history. This is an in-memory load and short-circuits
+        // when the cache is already equal to the persisted state.
+        if let Some(record) = self.session_snapshot(&state.session_id).await {
+            if let Some(loop_state) = record.loop_state.as_ref() {
+                if !loop_state.messages.is_empty()
+                    && state.session_messages != loop_state.messages
+                {
+                    state.session_messages = loop_state.messages.clone();
+                }
+            }
+        }
+
         let runtime_config = self.build_runtime_config(state)?;
         let open_request = self.session_open_request(state)?;
         let turn_request = self.turn_request(state, prompt.clone(), command_context)?;
@@ -119,7 +136,8 @@ impl GatewayRuntime {
         let (interaction_tx, interaction_rx) = unbounded_channel();
         self.interaction_reply_tx = Some(interaction_tx);
         self.stream_rx = Some(updates_rx);
-        self.cancel_flag = Some(Arc::new(AtomicBool::new(false)));
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.cancel_token = Some(cancel_token.clone());
 
         let session_gateway = self.session_gateway.clone();
         let pending_user_messages = self.pending_user_messages.clone();
@@ -151,6 +169,7 @@ impl GatewayRuntime {
                 updates_tx,
                 interaction_rx,
                 pending_user_messages,
+                Some(cancel_token),
             );
         });
 

@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
 
 use super::remote::RemoteRuntimeConfig;
 use crate::interaction_prompt::UserPromptResult;
@@ -25,7 +25,11 @@ pub struct GatewayRuntime {
     pub(crate) stream_message_index: Option<usize>,
     pub(super) stream_reveal_buffer: String,
     pub(super) pending_stream_done: Option<PendingStreamDone>,
-    pub(super) cancel_flag: Option<Arc<AtomicBool>>,
+    /// Cancellation token shared with the backend turn. The TUI holds a clone
+    /// so `cancel_streaming` can fire `.cancel()`; the original is passed into
+    /// `spawn_turn` via `SessionRuntimeBindings` so the session actor uses it
+    /// instead of creating its own token.
+    pub(super) cancel_token: Option<CancellationToken>,
     pub(super) request_start: Option<Instant>,
     pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
@@ -42,7 +46,7 @@ impl GatewayRuntime {
             stream_message_index: None,
             stream_reveal_buffer: String::new(),
             pending_stream_done: None,
-            cancel_flag: None,
+            cancel_token: None,
             request_start: None,
             first_token_latency_recorded: false,
             interaction_reply_tx: None,
@@ -63,7 +67,7 @@ impl GatewayRuntime {
         self.stream_message_index = None;
         self.stream_reveal_buffer.clear();
         self.pending_stream_done = None;
-        self.cancel_flag = None;
+        self.cancel_token = None;
         self.request_start = None;
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;

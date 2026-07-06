@@ -882,6 +882,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         interaction_handle: None,
         channel_file_sender: None,
         pending_user_messages: None,
+        cancel_token: None,
     };
 
     // 5. Bootstrap gateway
