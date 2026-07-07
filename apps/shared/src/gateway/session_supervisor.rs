@@ -1102,6 +1102,7 @@ fn terminal_from_outcome(
             total_tokens: token_usage.total_tokens as u64,
             estimated_input_tokens: estimated_input_tokens as u64,
             outcome,
+            hook_actions: Vec::new(),
         },
         terminal: SubagentTerminalSnapshot {
             status,

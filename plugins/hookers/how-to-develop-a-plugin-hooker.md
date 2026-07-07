@@ -345,6 +345,8 @@ If the command exits with failure, the adaptor treats the hook as failed.
 
 The three chat hooks (`*.Chat.command.before`, `*.Chat.message.received`, `*.Chat.system.transform`) are **mutable** hooks: a plugin may rewrite or deny the input flowing through the agent loop. They share the same subprocess protocol as Tool hooks (`sh -c <command>`, one JSON payload on stdin, one JSON object on stdout, non-zero exit = failure), but the payload shape and the set of legal result tags differ per hook.
 
+> **session_id**: All three chat hooks carry `payload.session_id`. It is the **same value** in local and remote mode — the TUI sends its own `session_id` to the daemon via `RuntimeTurnRequest`, and the daemon reuses it verbatim, so a plugin never needs to detect which mode it is running in. Just read `payload.session_id`. (`*.Chat.system.transform` types it as `Option<String>`, so it may serialize as `null`; guard with `payload.session_id || "(unknown)"`.) Tool `pre` hooks and the session lifecycle state hook also carry `session_id`; Tool `post`/`error` and all `*.Llm.*` hooks currently do **not** — see the table in [`docs/plugins.md`](../../docs/plugins.md) "session_id 获取".
+
 ### 14.1 How chat hooks are dispatched
 
 Inside `run_agent_loop`, on the `append_user_message == true` branch, xiaoo fires them in this fixed order:
@@ -570,6 +572,8 @@ The session state hook (section 15) does **not** support `ask_user` — it is ev
 
 The hook point sent to the plugin is constructed as `<agent_id>.Session.lifecycle.state`, so `agent_id` is also available inside `hooker.agent_id` and at top level.
 
+> **session_id**: `payload.session_id` is the current session id. It is identical in local and remote mode (the TUI forwards its `session_id` to the daemon, which reuses it), so a plugin does not need to detect the run mode to obtain the correct id — just read `payload.session_id`. In remote mode the hooker subprocess is spawned by the daemon process; in local mode by the TUI process. The `create_session` / `switch_session` actions in the response only take effect in remote (daemon) mode (see 16.4); in local mode the hooker still runs and `payload.session_id` is still correct, but requested actions are dropped by the TUI.
+
 ### 15.3 Legal output
 
 ```json
@@ -603,3 +607,123 @@ process.stdout.write(JSON.stringify({ result: "ack" }));
 ```
 
 The `state` branch is intentional — the same hooker script will keep working unchanged when future xiaoo versions emit `running` / `failed` / etc.; you simply add another `case`. Reading `payload.outcome` lets audit-style plugins tell a normal completion apart from a soft termination without switching on `state`.
+
+## 16. Plugin-requested session actions
+
+Alongside the existing `result` field, a plugin response may carry an `actions` array. Each entry requests a side-effect action that the host executes **after** applying the primary `result`. The flagship use case is a `*.Session.lifecycle.state` hooker that, after observing a turn termination, asks xiaoo to create or switch to a different session (e.g. spawn a debug session when a tool failed, or hand off to a planner session when budget is exhausted).
+
+### 16.1 Which hook can return `actions`
+
+Today only the **session lifecycle state hook** (`*.Session.lifecycle.state`, section 15) parses the `actions` field from the plugin's stdout JSON. The chat and tool adaptors do **not** parse it — appending `actions` to a chat/tool response is a no-op today. This restriction is intentional: it keeps the mutability surface small and matches the post-turn, observer-only nature of the session state hook (the action runs *after* the turn terminates, so it cannot interfere with the turn that produced it).
+
+### 16.2 Response shape
+
+A session state hooker returns the usual `{"result":"ack"}` plus an optional `actions` array:
+
+```json
+{
+  "result": "ack",
+  "actions": [
+    { "kind": "create_session", "session_id": "debug-1" },
+    { "kind": "switch_session", "session_id": "debug-1" }
+  ]
+}
+```
+
+Field rules:
+
+- `result` is parsed by the existing adaptor logic (unchanged, non-breaking). For the session state hook it must still be `"ack"` (or the alias `"acknowledged"`).
+- `actions` is optional. When absent, not an array, or empty, no side effects are requested.
+- Each entry is a tagged-union object: `{ "kind": "<variant>", ...fields }`. The `kind` discriminator is matched `snake_case`-style (see `HookAction` in `crates/agent-types/src/hook/action.rs`).
+- Invalid entries (unknown `kind`, missing required fields, wrong types, or non-object entries) are **silently skipped** — a single malformed action does not poison the rest of the array. `parse_actions` collects only the entries that deserialize cleanly.
+
+### 16.3 Action kinds
+
+| `kind` | Required fields | Daemon-side effect | TUI-side effect |
+|---|---|---|---|
+| `create_session` | `session_id: String` | Calls `open_session` (idempotent resume — opens a new session or resumes an existing one with the same id). | Switches focus to that session (transcript restored from daemon state). |
+| `switch_session` | `session_id: String` | Calls `open_session` (idempotent resume — ensures the target session exists before the TUI tries to switch to it). | Switches focus to that session (transcript restored from daemon state). |
+
+Both kinds collapse to the same daemon call today (`open_session` is idempotent), but the two variants exist so future xiaoo versions can distinguish "create a brand-new session and seed it" from "switch the TUI to an existing session" without breaking the JSON contract.
+
+### 16.4 Execution flow
+
+The dispatcher changed from fire-and-forget to **awaited** for the session state hook specifically so actions can be collected before the turn result is returned.
+
+> **Mode-dependent contract**: `create_session` / `switch_session` actions **only take effect in remote (daemon) mode**. In local (non-daemon) mode the hooker is still invoked and its actions are still collected (so the hooker can use `session_state` for logging/auditing), but the actions are dropped at the TUI's `switch_to_remote_session` step because `remote_base_url()` is None — no session is created, no focus switch happens. See step 5 below.
+
+The full flow:
+
+1. `run_turn` returns `Ok(turn_result)`. The session is back in `idle`.
+2. `CoreBackedSessionService::fire_session_state_hook_and_collect_actions` invokes every registered `*.Session.lifecycle.state` hooker **sequentially** (sorted by id), awaiting each one. The `actions` arrays returned by all hookers are concatenated into `AppTurnResult.hook_actions`. The whole collection is bounded by an overall deadline of 30s (`SESSION_STATE_HOOK_OVERALL_DEADLINE`, equal to one hooker's per-subprocess cap): a single legitimately slow hooker is unaffected, but the sum across N hookers is capped at 30s instead of N × 30s. On timeout the spawned task is aborted (the in-flight subprocess is reaped via `kill_on_drop`) and **no actions are returned** — best-effort. This step is identical in local and remote mode.
+3. **Remote mode only**: The HTTP router (`apps/serverside/src/httpserver/router.rs`) calls `DaemonHookActionSink::execute_on_daemon(hook_actions)`. For each action the daemon runs the daemon-side effect (currently `open_session` for both kinds). Actions that fail daemon-side execution are **filtered out** and logged via `tracing::warn!`; they are not forwarded to the TUI. (In local mode this step does not exist — there is no daemon, so no `open_session` runs.)
+4. **Remote mode only**: The surviving actions are bundled into the SSE `Done` event's `actions` field and sent to the TUI. They are emitted **before** the `Done` event itself — the TUI's receive loop exits as soon as it sees `Done` (it sets `stream_rx = None`), so any update sent after `Done` would never be drained. (In local mode actions travel via `SessionTurnUpdate::HookActions` on the in-process channel, not via SSE.)
+5. The TUI buffers the actions in `pending_hook_actions`, then the App event loop drains them via `take_pending_hook_actions()` and calls `switch_to_remote_session(session_id)` for each.
+   - **Remote mode**: switching focus re-calls `open_session` (idempotent) to fetch the target session's `SessionRecord` and reconstructs the local transcript from `loop_state.messages` so the user sees the prior turns instead of a blank transcript.
+   - **Local mode**: `switch_to_remote_session` checks `remote_base_url()`, finds `None`, logs `tracing::warn!("switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)")`, and returns without switching. The action is a no-op.
+
+> **Trade-off vs the previous fire-and-forget design**: the user sees the turn result *after* the session state hookers finish (or time out). This is acceptable because session lifecycle hooks only fire after turn termination anyway — there is no LLM streaming to interrupt — and most setups register zero or fast hookers. If your hooker script is slow (e.g. calls an external audit service), it will delay the `Done` event proportionally; keep `actions`-emitting hookers fast.
+
+### 16.5 Best-effort semantics
+
+Actions are best-effort at every layer:
+
+- **Plugin layer**: `parse_actions` skips invalid entries (see 16.2).
+- **Daemon layer** (remote mode only): `DaemonHookActionSink::execute_on_daemon` catches per-action failures (e.g. `open_session` returns `Err`) and filters them out — the failed action is logged via `tracing::warn!` with `action`, `session_id`, and `error` fields, and is **not** forwarded to the TUI.
+- **Collection layer**: `fire_session_state_hook_and_collect_actions` enforces a 30s overall deadline (`SESSION_STATE_HOOK_OVERALL_DEADLINE`). If the sequential hooker chain does not finish in time, the task is aborted and **all** actions (including ones from hookers that already finished) are dropped — `Done` is delivered with an empty `actions` array. Keep `actions`-emitting hookers fast.
+- **TUI layer**: `switch_to_remote_session` is best-effort. In remote mode, if the daemon-side `open_session` somehow failed and the action was still forwarded (it shouldn't be, but defensive coding applies), the TUI logs a `tracing::warn!` and continues without crashing. In local mode, the action is dropped at the `remote_base_url() == None` check (also via `tracing::warn!`) — this is the intended contract, not a failure.
+
+No action failure is propagated back to the caller of the hook. A plugin that requests an unreachable `session_id` simply sees no session switch happen — the user is not shown an error.
+
+### 16.6 Depth limiting
+
+The host enforces a max action depth of 3 (see `agent_contracts::MAX_ACTION_DEPTH`) to prevent recursive `hook → action → hook` loops (a `create_session` action that opens a session whose first turn immediately fires another state hook that requests another `create_session`, ...). `DaemonHookActionSink::execute_on_daemon` truncates any batch longer than the limit: only the first `MAX_ACTION_DEPTH` entries are processed, the trailing actions are dropped and logged via `tracing::warn!` with `requested` and `max` fields. Do not rely on chaining actions across multiple turns or batching more than three actions in a single hook response.
+
+### 16.7 Minimal example
+
+A `*.Session.lifecycle.state` hooker that opens a debug session whenever a turn ends with the `budget_exhausted` outcome, then switches the user's focus to it:
+
+```js
+#!/usr/bin/env node
+const fs = require("fs");
+const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
+
+let result = { result: "ack" };
+
+if (payload.stage === "session_state" && payload.state === "idle") {
+  fs.appendFileSync("/tmp/xiaoo-actions.log",
+    `[${new Date().toISOString()}] idle: session=${payload.session_id} outcome=${payload.outcome}\n`);
+
+  if (payload.outcome === "budget_exhausted") {
+    // Spawn a debug session on the daemon and switch the TUI to it.
+    // The daemon calls open_session (idempotent resume) first, so a
+    // second budget_exhausted on the same source session won't create
+    // a duplicate debug session — it'll just re-focus the existing one.
+    const debugId = `debug-${payload.session_id}`;
+    result = {
+      result: "ack",
+      actions: [
+        { kind: "create_session", session_id: debugId },
+        { kind: "switch_session", session_id: debugId }
+      ]
+    };
+  }
+}
+
+process.stdout.write(JSON.stringify(result));
+```
+
+Notes on this example:
+
+- The two actions are dispatched **in order**: the daemon opens `debug-<src>` first (or no-ops if it already exists), then ensures the same id exists again (idempotent), then forwards both actions to the TUI. The TUI switches focus once per forwarded action — both target the same `session_id`, so the net effect is one switch.
+- If `open_session` fails on the daemon (e.g. the daemon's session store is unhealthy), both actions are filtered out and the TUI never sees them; the user stays on the original session.
+- Combining `actions` with `ask_user` is **not** supported — the session state hook does not implement the `ask_user` interaction protocol (section 14.6). If you need user confirmation before opening a debug session, return `actions` unconditionally and let the user dismiss the new session manually, or move that logic into a `*.Chat.command.before` hooker instead.
+
+### 16.8 Checklist before you say "my actions don't fire"
+
+- is your hooker registered under `*.Session.lifecycle.state` (the only hook point whose adaptor parses `actions` today)?
+- does your response JSON include both `"result": "ack"` **and** a top-level `"actions"` array? (`actions` nested inside `result` is silently ignored.)
+- is every entry an object with a `kind` field equal to `create_session` or `switch_session` (snake_case)? Unknown kinds are skipped.
+- does every entry carry its required `session_id` field as a string?
+- in remote/daemon mode, are you checking the daemon logs for `daemon-side create_session action failed; not forwarding to TUI` warnings? A failing `open_session` filters the action out before it reaches the TUI.
+- in local (non-daemon) mode, are you aware that `create_session` / `switch_session` are **no-ops**? The hooker still runs (so your logging side-effects still happen), but the actions are dropped at the TUI's `switch_to_remote_session` because `remote_base_url()` is None — you will see a `tracing::warn!` reading `switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)`. To exercise create/switch actions, run the daemon and connect the TUI in remote mode (see `docs/remote_tui.md`).

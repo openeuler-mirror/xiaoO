@@ -5,7 +5,7 @@ use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::hook::HookPointId;
-use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokePrimary};
 use agent_types::llm::{
     ErrorLlmHookInput, ErrorLlmHookResult, LlmError, LlmRequest, LlmResponse, PostLlmHookInput,
     PostLlmHookResult, PreLlmHookInput, PreLlmHookResult, StreamChunk,
@@ -146,8 +146,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let pre_result = match output {
-                HookInvokeOutput::LlmPre(r) => r,
+            let pre_result = match output.primary {
+                HookInvokePrimary::LlmPre(r) => r,
                 other => {
                     eprintln!(
                         "llm pre-hooker '{}' returned unexpected output {:?} for hook_point '{}'",
@@ -281,8 +281,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let post_result = match output {
-                HookInvokeOutput::LlmPost(r) => r,
+            let post_result = match output.primary {
+                HookInvokePrimary::LlmPost(r) => r,
                 other => {
                     let err = LlmError::RequestFailed {
                         message: format!(
@@ -419,8 +419,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let error_result = match output {
-                HookInvokeOutput::LlmError(r) => r,
+            let error_result = match output.primary {
+                HookInvokePrimary::LlmError(r) => r,
                 other => {
                     let err = LlmError::RequestFailed {
                         message: format!(

@@ -21,7 +21,7 @@ use agent_contracts::backend::{
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
 use agent_types::common::HookerId;
-use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookPointId};
+use agent_types::hook::{HookAction, HookInvokeInput, HookInvokeMetadata, HookPointId};
 use agent_types::session::{
     SessionClosedHookInput, SessionCreatedHookInput, SessionStateHookInput,
 };
@@ -47,6 +47,16 @@ use crate::backend::{
     BackendError, BackendLease, BackendManager,
 };
 use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
+
+/// Overall wall-clock budget for collecting `*.Session.lifecycle.state`
+/// hook actions before the turn's `Done` event is emitted. Bounded at one
+/// hooker's per-subprocess cap (`PLUGIN_HOOK_COMMAND_TIMEOUT_MS = 30s`) so a
+/// single legitimately slow hooker is unaffected, while the sum across N
+/// hookers is capped at 30s instead of N × 30s. On timeout the spawned task
+/// is aborted (its in-flight subprocess is reaped via `kill_on_drop`) and no
+/// actions are returned.
+const SESSION_STATE_HOOK_OVERALL_DEADLINE: tokio::time::Duration =
+    tokio::time::Duration::from_secs(30);
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
@@ -92,36 +102,52 @@ impl CoreBackedSessionService {
         }
     }
 
-    /// Fire-and-forget dispatch for the `*.Session.lifecycle.state` event hook.
+    /// Fire the `*.Session.lifecycle.state` event hook, await all hookers,
+    /// and collect the side-effect `actions` they request.
     ///
-    /// Mirrors opencode's `event` hook semantics: read-only observer (no
-    /// mutable output), non-blocking (runs in a spawned task so the user's
-    /// `run_turn` result is returned without waiting for plugin scripts), and
-    /// errors are swallowed into `tracing::warn` logs. `state` carries the
-    /// session-lifecycle tag (`"idle"` = session back to idle, ready for the
-    /// next turn) and `outcome` carries the turn's terminal kind
-    /// (`"complete"` / `"max_turns_reached"` / `"budget_exhausted"` /
-    /// `"cancelled"`) so plugins can distinguish a normal completion from a
-    /// soft termination while still seeing the same `state="idle"`. The
-    /// list+filter of registered hookers runs on the caller side so we can
-    /// short-circuit when no state hookers are configured (avoiding a useless
-    /// spawn).
-    fn fire_session_state_hook_background(
+    /// Used by the daemon's `stream_session_input` path (via `run_turn_inner`)
+    /// so that plugin-requested actions are bundled into the turn's `Done`
+    /// event — the TUI processes them when it receives `Done`. The trade-off
+    /// vs a fire-and-forget design is that the user sees the turn result after
+    /// the hookers finish (or time out), which is acceptable for session
+    /// lifecycle hooks that only fire after turn termination anyway.
+    ///
+    /// An overall deadline of [`SESSION_STATE_HOOK_OVERALL_DEADLINE`] (30s)
+    /// bounds the collection regardless of how many hookers are registered:
+    /// a single hooker can still take up to its 30s per-subprocess cap (no
+    /// regression), but the sum across N hookers is capped at 30s instead of
+    /// growing to N × 30s. On timeout the spawned task is aborted (the
+    /// in-flight subprocess is reaped via `kill_on_drop`) and no actions are
+    /// returned — best-effort, matching the documented semantics that action
+    /// failures never propagate to the hook caller.
+    ///
+    /// Actions are returned raw: daemon-side execution (e.g. `open_session`
+    /// for `CreateSession`/`SwitchSession`) is the caller's responsibility
+    /// (the HTTP router does this via its own `DaemonHookActionSink`).
+    ///
+    /// The hooker invocations run inside a `tokio::spawn`d task and the
+    /// `JoinHandle` is awaited here (under the overall deadline). We still
+    /// block on the hookers (so the requested actions are collected before
+    /// `Done` is emitted) but a panicking or cancelled plugin task surfaces
+    /// as a `JoinError` here rather than unwinding into `run_turn_inner` and
+    /// tearing down the daemon's SSE connection. A `JoinError` yields an
+    /// empty action set so the turn result is still delivered.
+    pub async fn fire_session_state_hook_and_collect_actions(
         &self,
         session_id: String,
         sender_id: String,
         agent_id: String,
         state: String,
         outcome: String,
-    ) {
+    ) -> Vec<HookAction> {
         let hook_point = session_lifecycle_hook_point(&agent_id, "state");
         let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
         if hooker_ids.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let registry = Arc::clone(&self.hooker_registry);
-        let hook_task = tokio::spawn(async move {
+        let mut hook_task = tokio::spawn(async move {
             let noop_runtime = NoopRuntimeView::new();
             let input = HookInvokeInput::SessionState {
                 input: SessionStateHookInput {
@@ -133,40 +159,60 @@ impl CoreBackedSessionService {
                 },
                 metadata: HookInvokeMetadata::default(),
             };
+
+            let mut all_actions = Vec::new();
             for hooker_id in hooker_ids {
                 let Some(hooker) = registry.get(&hooker_id) else {
                     continue;
                 };
-                if let Err(error) = hooker.invoke(input.clone(), &noop_runtime).await {
-                    tracing::warn!(
-                        hooker_id = %hooker_id,
-                        hook_point = "session.lifecycle.state",
-                        error = %error,
-                        "session state hook invocation failed"
-                    );
+                match hooker.invoke(input.clone(), &noop_runtime).await {
+                    Ok(invoke_output) => {
+                        all_actions.extend(invoke_output.actions);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            hooker_id = %hooker_id,
+                            hook_point = "session.lifecycle.state",
+                            error = %error,
+                            "session state hook invocation failed"
+                        );
+                    }
                 }
             }
+            all_actions
         });
-        // The spawn above is fire-and-forget, but dropping the JoinHandle
-        // would silently lose a panic or a runtime-shutdown cancellation
-        // (JoinError). Spawn a lightweight watcher that surfaces those as a
-        // `tracing::warn` so a failing background hook does not vanish
-        // silently. The watcher itself detaches; if the runtime is shutting
-        // down the watcher is cancelled too, which is not actionable.
-        tokio::spawn(async move {
-            if let Err(join_error) = hook_task.await {
+
+        let deadline_sleep = tokio::time::sleep(SESSION_STATE_HOOK_OVERALL_DEADLINE);
+        tokio::pin!(deadline_sleep);
+        tokio::select! {
+            task_result = &mut hook_task => match task_result {
+                Ok(actions) => actions,
+                Err(join_error) => {
+                    tracing::warn!(
+                        hook_point = "session.lifecycle.state",
+                        error = %join_error,
+                        "session state hook task did not complete \
+                         (panic or runtime shutdown); returning no actions"
+                    );
+                    Vec::new()
+                }
+            },
+            _ = &mut deadline_sleep => {
                 tracing::warn!(
                     hook_point = "session.lifecycle.state",
-                    error = %join_error,
-                    "background session state hook task did not complete"
+                    deadline_secs = SESSION_STATE_HOOK_OVERALL_DEADLINE.as_secs(),
+                    "session state hook collection exceeded overall deadline; \
+                     aborting pending hookers and returning no actions"
                 );
+                hook_task.abort();
+                Vec::new()
             }
-        });
+        }
     }
 
     /// Collect the (id)s of enabled hookers registered for `hook_point`,
     /// sorted by id for a stable execution order. Shared by both
-    /// [`fire_session_hooks`] and [`fire_session_state_hook_background`].
+    /// [`fire_session_hooks`] and [`fire_session_state_hook_and_collect_actions`].
     fn enabled_hooker_ids_for(&self, hook_point: &HookPointId) -> Vec<HookerId> {
         let mut ids: Vec<HookerId> = self
             .hooker_registry
@@ -809,7 +855,7 @@ impl CoreBackedSessionService {
         let idle_agent_id = resolved.descriptor.agent_id.0.clone();
 
         let handle = self.get_or_create_session_handle(seed_session).await;
-        let turn_result = handle
+        let mut turn_result = handle
             .run_turn(
                 request,
                 resolved,
@@ -828,16 +874,28 @@ impl CoreBackedSessionService {
         // currently emits no event. The per-variant terminal kind is carried
         // in the payload's `outcome` field so plugins can distinguish a
         // normal completion from a soft termination without switching on
-        // `state`. Dispatch is fire-and-forget so plugin scripts cannot
-        // delay the user's turn result; the spawn returns immediately.
-        if let Ok(turn) = turn_result.as_ref() {
-            self.fire_session_state_hook_background(
-                idle_session_id,
-                idle_sender_id,
-                idle_agent_id,
-                "idle".to_string(),
-                turn.outcome.as_tag().to_string(),
-            );
+        // `state`.
+        //
+        // Actions requested by the hookers are collected into
+        // `AppTurnResult.hook_actions` and returned raw. Daemon-side
+        // execution (e.g. `open_session` for `CreateSession`/`SwitchSession`)
+        // is performed by the HTTP router via its own `DaemonHookActionSink`
+        // after `run_turn` returns, before forwarding to the TUI via the SSE
+        // `Done` event. The trade-off vs a fire-and-forget design is that the
+        // user sees the turn result after the hookers finish; acceptable
+        // because session lifecycle hooks only fire after turn termination
+        // anyway, and most setups register zero or fast hookers.
+        if let Ok(turn) = turn_result.as_mut() {
+            let actions = self
+                .fire_session_state_hook_and_collect_actions(
+                    idle_session_id,
+                    idle_sender_id,
+                    idle_agent_id,
+                    "idle".to_string(),
+                    turn.outcome.as_tag().to_string(),
+                )
+                .await;
+            turn.hook_actions = actions;
         }
 
         turn_result
@@ -1516,7 +1574,7 @@ mod tests {
         )
         .await;
         seeded.loop_state = Some(LoopStateSnapshot {
-            session_id: uuid::Uuid::new_v4(),
+            session_id: "s-import".to_string(),
             messages: imported_messages.clone(),
             turn_count: 1,
             token_usage: Default::default(),

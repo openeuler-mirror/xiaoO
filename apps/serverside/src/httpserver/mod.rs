@@ -1,3 +1,4 @@
+pub mod action_sink;
 pub mod channel_ingress;
 pub mod channel_runtime;
 pub mod dashboard;
@@ -6,6 +7,7 @@ pub mod router;
 pub mod service;
 pub mod sse_sink;
 
+pub use action_sink::DaemonHookActionSink;
 pub use channel_runtime::ChannelRuntimeProcessor;
 pub use dashboard::{dashboard_router, DashboardState};
 pub use router::{

@@ -50,6 +50,13 @@ pub struct AppTurnResult {
     pub total_tokens: u64,
     pub estimated_input_tokens: u64,
     pub outcome: TurnOutcome,
+    /// Actions requested by `*.Session.lifecycle.state` plugin hookers after
+    /// the turn terminated. Collected by `run_turn_inner` (await variant, not
+    /// fire-and-forget) and executed daemon-side via `HookActionSink`. Callers
+    /// that expose a UI (daemon HTTP/SSE, TUI) forward these to the client so
+    /// it can switch session focus / sync titles. CLI and channel callers
+    /// currently ignore this field.
+    pub hook_actions: Vec<agent_types::hook::HookAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

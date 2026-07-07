@@ -243,6 +243,140 @@ impl Message {
     }
 }
 
+/// Reconstruct TUI display `Message`s from the daemon-side LLM conversation
+/// context (`LoopStateSnapshot.messages`). Used when switching to a remote
+/// session that already has history so the user sees the prior turns
+/// instead of a blank transcript.
+///
+/// Lossy by design: the daemon only stores the LLM-facing
+/// `ChatMessage`s (role + content blocks + reasoning_content), not the
+/// TUI's rich per-message metadata (render revisions, subagent lane
+/// layout, completion-check state, etc.). What we recover:
+/// - User text → `Message::user`
+/// - Assistant text + `reasoning_content` → `Message::assistant` (with
+///   thinking content)
+/// - Tool results → `Message::tool_event` with args pulled from the
+///   matching earlier `ToolUse` block (same `call_id`)
+///
+/// System messages are dropped: they are internal LLM context (system
+/// prompt, tool descriptions) and not part of the user-visible chat
+/// transcript the TUI maintains.
+pub fn messages_from_chat_messages(messages: Vec<llm_client::ChatMessage>) -> Vec<Message> {
+    use agent_types::llm::message::{ContentBlock, MessageRole};
+    use std::collections::HashMap;
+
+    // First pass: collect ToolUse (tool_name, args) keyed by call_id so the
+    // ToolResult pass can attach the original invocation args to the same
+    // tool card. The LLM context stores the call (Assistant role with
+    // ToolUse block) and the result (Tool role with ToolResult block) in
+    // separate ChatMessages; the TUI display wants a single tool card per
+    // call_id showing both args and output.
+    let mut tool_args: HashMap<String, (String, String)> = HashMap::new();
+    for msg in &messages {
+        if !matches!(msg.role, MessageRole::Assistant) {
+            continue;
+        }
+        for block in &msg.blocks {
+            if let ContentBlock::ToolUse {
+                call_id,
+                tool_name,
+                input,
+            } = block
+            {
+                let args_preview = input.to_string();
+                tool_args.insert(call_id.clone(), (tool_name.clone(), args_preview));
+            }
+        }
+    }
+
+    let mut result: Vec<Message> = Vec::new();
+    for msg in messages {
+        match msg.role {
+            MessageRole::System => {
+                // Skip — see doc comment above.
+                continue;
+            }
+            MessageRole::User => {
+                let text: String = msg
+                    .blocks
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !text.trim().is_empty() {
+                    result.push(Message::user(text));
+                }
+            }
+            MessageRole::Assistant => {
+                let text: String = msg
+                    .blocks
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let has_reasoning = msg
+                    .reasoning_content
+                    .as_deref()
+                    .map(|rc| !rc.trim().is_empty())
+                    .unwrap_or(false);
+                if !text.trim().is_empty() || has_reasoning {
+                    let mut message = Message::assistant_streaming();
+                    message.set_content(text);
+                    message.set_streaming(false);
+                    if let Some(reasoning) = msg.reasoning_content {
+                        message.set_thinking_content(reasoning);
+                    }
+                    result.push(message);
+                }
+            }
+            MessageRole::Tool => {
+                for block in msg.blocks {
+                    if let ContentBlock::ToolResult {
+                        call_id,
+                        tool_name,
+                        output,
+                        is_error,
+                    } = block
+                    {
+                        let (tool, args_preview) = tool_args
+                            .remove(&call_id)
+                            .unwrap_or((tool_name, String::new()));
+                        let update = ToolExecutionUpdate {
+                            call_id,
+                            tool,
+                            summary: if is_error {
+                                "tool failed".to_string()
+                            } else {
+                                "tool completed".to_string()
+                            },
+                            args_preview,
+                            command_preview: None,
+                            command: None,
+                            detail: output,
+                            status: if is_error {
+                                ToolExecutionStatus::Failed
+                            } else {
+                                ToolExecutionStatus::Completed
+                            },
+                            exit_code: None,
+                            duration_ms: None,
+                            file_change: None,
+                        };
+                        result.push(Message::tool_event(update));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 pub struct ChatState {
     pub messages: Vec<Message>,
     pub input: Input,
@@ -1139,5 +1273,154 @@ mod tests {
         chat.scroll_page_down();
         assert_eq!(chat.scroll_offset, 0);
         assert!(chat.stick_to_bottom);
+    }
+
+    #[test]
+    fn messages_from_chat_messages_drops_system_role_and_maps_user_assistant_text() {
+        use super::messages_from_chat_messages;
+        use super::MessageRole;
+        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
+        use llm_client::ChatMessage;
+
+        let messages = vec![
+            ChatMessage {
+                role: LlmRole::System,
+                blocks: vec![ContentBlock::Text {
+                    text: "you are helpful".to_string(),
+                }],
+                message_id: None,
+                timestamp_ms: 0,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+            ChatMessage {
+                role: LlmRole::User,
+                blocks: vec![ContentBlock::Text {
+                    text: "hello there".to_string(),
+                }],
+                message_id: None,
+                timestamp_ms: 1,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+            ChatMessage {
+                role: LlmRole::Assistant,
+                blocks: vec![
+                    ContentBlock::Text {
+                        text: "thinking...".to_string(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ],
+                message_id: None,
+                timestamp_ms: 2,
+                api_usage_tokens: None,
+                reasoning_content: Some("reasoning here".to_string()),
+                estimated_tokens: None,
+            },
+        ];
+
+        let tui = messages_from_chat_messages(messages);
+
+        // System message dropped; user text joined; assistant text blocks
+        // joined with thinking content preserved.
+        assert_eq!(tui.len(), 2);
+        assert_eq!(tui[0].role, MessageRole::User);
+        assert_eq!(tui[0].content, "hello there");
+        assert_eq!(tui[1].role, MessageRole::Assistant);
+        assert_eq!(tui[1].content, "thinking...\nanswer");
+        assert_eq!(tui[1].thinking_content, "reasoning here");
+        assert!(!tui[1].is_streaming);
+    }
+
+    #[test]
+    fn messages_from_chat_messages_merges_tool_use_and_tool_result_into_one_card() {
+        use super::messages_from_chat_messages;
+        use super::{MessageRole, ToolExecutionStatus};
+        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
+        use llm_client::ChatMessage;
+
+        let messages = vec![
+            ChatMessage {
+                role: LlmRole::Assistant,
+                blocks: vec![ContentBlock::ToolUse {
+                    call_id: "call-1".to_string(),
+                    tool_name: "shell".to_string(),
+                    input: serde_json::json!({ "command": "ls" }),
+                }],
+                message_id: None,
+                timestamp_ms: 0,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+            ChatMessage {
+                role: LlmRole::Tool,
+                blocks: vec![ContentBlock::ToolResult {
+                    call_id: "call-1".to_string(),
+                    tool_name: "shell".to_string(),
+                    output: "file.txt".to_string(),
+                    is_error: false,
+                }],
+                message_id: None,
+                timestamp_ms: 1,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+        ];
+
+        let tui = messages_from_chat_messages(messages);
+
+        // ToolUse + ToolResult collapse to a single tool card carrying both
+        // args (from the ToolUse) and output (from the ToolResult).
+        assert_eq!(tui.len(), 1);
+        assert_eq!(tui[0].role, MessageRole::Tool);
+        let tool = tui[0]
+            .tool_state
+            .as_ref()
+            .expect("tool_state should be populated");
+        assert_eq!(tool.call_id, "call-1");
+        assert_eq!(tool.tool, "shell");
+        assert!(tool.args_preview.contains("ls"));
+        assert_eq!(tool.detail, "file.txt");
+        assert_eq!(tool.status, ToolExecutionStatus::Completed);
+    }
+
+    #[test]
+    fn messages_from_chat_messages_marks_failed_tool_results() {
+        use super::messages_from_chat_messages;
+        use super::ToolExecutionStatus;
+        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
+        use llm_client::ChatMessage;
+
+        let messages = vec![ChatMessage {
+            role: LlmRole::Tool,
+            blocks: vec![ContentBlock::ToolResult {
+                call_id: "call-9".to_string(),
+                tool_name: "file_edit".to_string(),
+                output: "permission denied".to_string(),
+                is_error: true,
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        }];
+
+        let tui = messages_from_chat_messages(messages);
+        assert_eq!(tui.len(), 1);
+        let tool = tui[0]
+            .tool_state
+            .as_ref()
+            .expect("tool_state should be populated");
+        assert_eq!(tool.status, ToolExecutionStatus::Failed);
+        assert_eq!(tool.detail, "permission denied");
+        // No matching ToolUse → tool_name falls back to the ToolResult's name.
+        assert_eq!(tool.tool, "file_edit");
     }
 }

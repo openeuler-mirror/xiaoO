@@ -602,6 +602,7 @@ mod tests {
     use agent_contracts::trace::{TraceOutcome, TraceRecorder, TraceSpanHandle, TraceSpanKind};
     use agent_types::common::{AgentMetadata, WorkspaceRef};
     use agent_types::events::ToolLifecycleEvent;
+    use agent_types::hook::HookInvokePrimary;
     use agent_types::tool::FinalToolCall;
     use agent_types::ChatMessage;
 
@@ -879,8 +880,8 @@ else:
         let output =
             block_on(adaptor.invoke_pre(&input, &HookInvokeMetadata::default(), &runtime)).unwrap();
 
-        match output {
-            HookInvokeOutput::Pre(PreHookResult::Deny { reason }) => {
+        match output.primary {
+            HookInvokePrimary::Pre(PreHookResult::Deny { reason }) => {
                 assert_eq!(reason, "approved by alice");
             }
             other => panic!("unexpected output: {:?}", other),

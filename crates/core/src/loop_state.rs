@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::kvcache::KvCacheMap;
 
 pub struct LoopState {
-    pub session_id: uuid::Uuid,
+    pub session_id: String,
     pub messages: Arc<RwLock<Vec<ChatMessage>>>,
     pub turn_count: u32,
     pub token_usage: TokenUsage,
@@ -26,7 +26,7 @@ pub struct LoopState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LoopStateSnapshot {
-    pub session_id: uuid::Uuid,
+    pub session_id: String,
     pub messages: Vec<ChatMessage>,
     pub turn_count: u32,
     pub token_usage: TokenUsage,
@@ -35,11 +35,11 @@ pub struct LoopStateSnapshot {
 }
 
 impl LoopState {
-    pub fn new(session_id: uuid::Uuid) -> Self {
+    pub fn new(session_id: String) -> Self {
         Self::new_with_cancel(session_id, CancellationToken::new())
     }
 
-    pub fn new_with_cancel(session_id: uuid::Uuid, cancel: CancellationToken) -> Self {
+    pub fn new_with_cancel(session_id: String, cancel: CancellationToken) -> Self {
         Self {
             session_id,
             messages: Arc::new(RwLock::new(Vec::new())),
@@ -59,7 +59,7 @@ impl LoopState {
 
     pub fn to_snapshot(&self) -> LoopStateSnapshot {
         LoopStateSnapshot {
-            session_id: self.session_id,
+            session_id: self.session_id.clone(),
             messages: self.messages.read().clone(),
             turn_count: self.turn_count,
             token_usage: self.token_usage.clone(),
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn new_with_cancel_uses_provided_token() {
         let cancel = CancellationToken::new();
-        let state = LoopState::new_with_cancel(uuid::Uuid::new_v4(), cancel.clone());
+        let state = LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel.clone());
 
         cancel.cancel();
 

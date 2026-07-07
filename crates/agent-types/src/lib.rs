@@ -21,7 +21,7 @@ pub use compression::CompressionMeta;
 pub use context::{
     BudgetError, FeatureFlags, PromptBuildError, PromptBuildResult, TokenBudgetConfig,
 };
-pub use hook::{HookPointId, HookerDescriptor, HookerRegistryConfig};
+pub use hook::{HookAction, HookPointId, HookerDescriptor, HookerRegistryConfig};
 pub use llm::{
     AssistantMessage, ChatMessage, CompletionConfig, ContentBlock, LlmError, LlmRequest,
     LlmResponse, MessageRole, ReasoningEffort, ResponseFormat, StopReason, StreamChunk, Tool,

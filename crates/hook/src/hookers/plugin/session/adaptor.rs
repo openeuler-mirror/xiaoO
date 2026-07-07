@@ -75,9 +75,9 @@ impl PluginSessionHookerAdaptor {
             .core
             .run_plugin_command(&payload, Self::err, Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS))
             .await?;
-        Ok(HookInvokeOutput::SessionState(
-            self.parse_session_state_result(&output)?,
-        ))
+        let primary = self.parse_session_state_result(&output)?;
+        let actions = agent_types::hook::parse_actions(&output);
+        Ok(HookInvokeOutput::SessionState(primary).with_actions(actions))
     }
 
     fn build_session_state_payload(
@@ -167,7 +167,7 @@ mod tests {
     use agent_contracts::trace::{TraceOutcome, TraceRecorder, TraceSpanHandle, TraceSpanKind};
     use agent_types::common::{AgentMetadata, HookerId, WorkspaceRef};
     use agent_types::events::ToolLifecycleEvent;
-    use agent_types::hook::HookPointId;
+    use agent_types::hook::{HookInvokePrimary, HookPointId};
     use agent_types::tool::execution_types::ToolExecutionError;
     use agent_types::tool::FinalToolCall;
 
@@ -378,8 +378,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::SessionState(SessionHookResult::Acknowledged) => {}
+        match output.primary {
+            HookInvokePrimary::SessionState(SessionHookResult::Acknowledged) => {}
             other => panic!("expected SessionState(Acknowledged), got {:?}", other),
         }
     }
@@ -394,8 +394,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::SessionState(SessionHookResult::Acknowledged) => {}
+        match output.primary {
+            HookInvokePrimary::SessionState(SessionHookResult::Acknowledged) => {}
             other => panic!("expected SessionState(Acknowledged), got {:?}", other),
         }
     }

@@ -1,6 +1,6 @@
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
-use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokePrimary, HookPointId};
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
@@ -92,8 +92,8 @@ impl ToolCallImpl {
                 }
             };
 
-            let pre_result = match output {
-                HookInvokeOutput::Pre(pre_result) => pre_result,
+            let pre_result = match output.primary {
+                HookInvokePrimary::Pre(pre_result) => pre_result,
                 other => {
                     tracing::warn!(
                         hooker_id = %hooker.id(),
@@ -251,8 +251,8 @@ impl ToolCallImpl {
                 }
             };
 
-            let post_result = match output {
-                HookInvokeOutput::Post(post_result) => post_result,
+            let post_result = match output.primary {
+                HookInvokePrimary::Post(post_result) => post_result,
                 other => {
                     let error = format!(
                         "post-hooker '{}' returned non-post output {:?} for tool call '{}'",
@@ -380,8 +380,8 @@ impl ToolCallImpl {
                 }
             };
 
-            let error_result = match output {
-                HookInvokeOutput::Error(error_result) => error_result,
+            let error_result = match output.primary {
+                HookInvokePrimary::Error(error_result) => error_result,
                 other => {
                     let error = format!(
                         "error-hooker '{}' returned non-error output {:?} for tool call '{}'",

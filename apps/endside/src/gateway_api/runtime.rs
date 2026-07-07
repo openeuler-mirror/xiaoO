@@ -36,6 +36,10 @@ pub struct GatewayRuntime {
     pub(super) pending_user_messages: Arc<Mutex<VecDeque<String>>>,
     pub(super) remote: Option<RemoteRuntimeConfig>,
     pub(super) remote_session_open: bool,
+    /// Hook actions received from the daemon (via SSE `Done` event) that
+    /// the TUI needs to execute (switch session, set title). Drained by the
+    /// App's event loop after `poll_stream_updates` returns.
+    pub(crate) pending_hook_actions: Vec<agent_types::hook::HookAction>,
 }
 
 impl GatewayRuntime {
@@ -53,6 +57,7 @@ impl GatewayRuntime {
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
             remote: None,
             remote_session_open: false,
+            pending_hook_actions: Vec::new(),
         }
     }
 
@@ -138,5 +143,12 @@ impl GatewayRuntime {
     /// Returns whether remote mode is active
     pub fn is_remote_mode(&self) -> bool {
         self.remote.is_some() && self.remote_session_open
+    }
+
+    /// Drain and return any hook actions collected from the SSE stream.
+    /// Called by the App's event loop after `poll_stream_updates`. The App
+    /// executes each action (switch session, set title) asynchronously.
+    pub fn take_pending_hook_actions(&mut self) -> Vec<agent_types::hook::HookAction> {
+        std::mem::take(&mut self.pending_hook_actions)
     }
 }

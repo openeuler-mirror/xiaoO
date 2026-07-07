@@ -673,6 +673,11 @@ impl App {
             return Ok(());
         }
 
+        if is_named_slash_command(trimmed, "/sessions") {
+            self.handle_sessions_command(trimmed).await;
+            return Ok(());
+        }
+
         if trimmed.eq_ignore_ascii_case("/sandbox") {
             self.state.chat_state.input.reset();
             self.open_sandbox_selection_dialog();
@@ -857,6 +862,122 @@ impl App {
         }
     }
 
+    /// `/sessions [session_id]` — switch the TUI focus to another session on
+    /// the currently connected daemon. With no argument, opens a dialog
+    /// listing every known session on that daemon (filtered out of the local
+    /// `remote_sessions.json` registry) and marks the active one. With an
+    /// explicit `session_id`, switches immediately. The daemon-side session
+    /// is assumed to already exist (created via a hook or `/remote`); the
+    /// TUI only resets local state and re-points at it.
+    async fn handle_sessions_command(&mut self, trimmed: &str) {
+        self.state.chat_state.input.reset();
+
+        let Some(base_url) = self.gateway.remote_base_url().map(str::to_string) else {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(
+                    "No remote daemon connected. Use /remote <url> first.".to_string(),
+                ));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        };
+        let normalized = crate::remote_sessions_service::normalize_base_url(&base_url);
+
+        if let Some(arg) = slash_command_argument(trimmed, "/sessions")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if arg == self.state.session_id {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(format!(
+                        "Already on session: {arg}"
+                    )));
+            } else {
+                // Validate the target session is recorded for the currently
+                // connected daemon *before* entering `switch_to_remote_session`,
+                // which unconditionally clears the local transcript. Otherwise
+                // a mistyped/non-existent session id would leave the user with
+                // an empty conversation and no way to recover the prior one.
+                let known = match list_remote_sessions() {
+                    Ok(records) => records.iter().any(|record| {
+                        record.session_id == arg
+                            && crate::remote_sessions_service::normalize_base_url(&record.base_url)
+                                == normalized
+                    }),
+                    Err(_) => false,
+                };
+                if !known {
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::error(format!(
+                            "Session {arg} is not recorded for {normalized}. \
+                             Run /sessions without an argument to pick a known session."
+                        )));
+                } else {
+                    self.switch_to_remote_session(arg.to_string()).await;
+                }
+            }
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+
+        let records = match list_remote_sessions() {
+            Ok(records) => records,
+            Err(error) => {
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::error(format!(
+                        "Remote session history failed: {error:#}"
+                    )));
+                self.state.chat_state.stick_to_bottom = true;
+                return;
+            }
+        };
+        let filtered: Vec<RemoteSessionRecord> = records
+            .into_iter()
+            .filter(|record| {
+                crate::remote_sessions_service::normalize_base_url(&record.base_url) == normalized
+            })
+            .collect();
+
+        if filtered.is_empty() {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(format!(
+                    "No other sessions recorded for {normalized}. Use /remote to create one."
+                )));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+
+        if filtered.len() == 1
+            && filtered
+                .iter()
+                .any(|record| record.session_id == self.state.session_id)
+        {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(format!(
+                    "Only the current session is recorded for {normalized}."
+                )));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+
+        self.state.input_mode = InputMode::RemoteSessionSelection;
+        self.state.remote_session_dialog = Some(RemoteSessionDialog::new_for_switch(
+            filtered,
+            Some(self.state.session_id.clone()),
+        ));
+    }
+
     async fn handle_remote_session_selection_key(&mut self, key: KeyEvent) -> Result<()> {
         let Some(mode) = self
             .state
@@ -951,28 +1072,28 @@ impl App {
     }
 
     async fn activate_remote_session(&mut self, record: RemoteSessionRecord) {
-        self.gateway.reset_for_new_session(&mut self.state);
-        self.state.reset_for_new_session();
-        self.state.session_id = record.session_id.clone();
-        self.gateway.configure_remote(
-            &mut self.state,
+        if record.session_id == self.state.session_id {
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(format!(
+                    "Already on session: {}",
+                    record.session_id
+                )));
+            self.state.chat_state.stick_to_bottom = true;
+            return;
+        }
+        let system_message = format!(
+            "Remote session selected: {} ({})",
+            record.session_id, record.base_url
+        );
+        self.apply_remote_session_switch(
+            record.session_id.clone(),
             record.base_url.clone(),
             record.bearer_token_env.clone(),
-        );
-        let _ = record_remote_session(
-            &record.session_id,
-            &record.base_url,
-            record.bearer_token_env.clone(),
-            None,
-        );
-        self.state
-            .chat_state
-            .messages
-            .push(crate::chat::Message::system(format!(
-                "Remote session selected: {} ({})",
-                record.session_id, record.base_url
-            )));
-        self.state.chat_state.stick_to_bottom = true;
+            system_message,
+        )
+        .await;
     }
 
     async fn create_new_remote_session(&mut self, base_url: String) {

@@ -56,6 +56,13 @@ pub struct RemoteSessionDialog {
     pub mode: RemoteSessionDialogMode,
     pub url_input: Input,
     pub error: Option<String>,
+    /// When `true`, the dialog is used for switching between sessions on the
+    /// currently connected daemon: the "New remote session..." entry is
+    /// hidden and the row matching `current_session_id` is marked.
+    pub switch_only: bool,
+    /// Session id currently active on the connected daemon, if any. Used to
+    /// highlight the active row in switch mode.
+    pub current_session_id: Option<String>,
 }
 
 impl RemoteSessionDialog {
@@ -71,6 +78,47 @@ impl RemoteSessionDialog {
             mode: RemoteSessionDialogMode::List,
             url_input: Input::default(),
             error: None,
+            switch_only: false,
+            current_session_id: None,
+        }
+    }
+
+    /// Build a switch-mode dialog. `records` should already be filtered to
+    /// the daemon the user is currently connected to. The "New remote
+    /// session..." entry is omitted; `current_session_id` is highlighted
+    /// with a marker and pre-selected so the next/previous row is the
+    /// nearest alternative.
+    pub fn new_for_switch(
+        records: Vec<RemoteSessionRecord>,
+        current_session_id: Option<String>,
+    ) -> Self {
+        let entries = records
+            .into_iter()
+            .map(RemoteSessionDialogEntry::Existing)
+            .collect::<Vec<_>>();
+        // Default cursor to the first row that is NOT the current session, so
+        // pressing Enter immediately switches to a different session. Falls
+        // back to 0 when there is no current-session match (or only one
+        // session exists).
+        let selected = match &current_session_id {
+            Some(id) => entries
+                .iter()
+                .position(|entry| match entry {
+                    RemoteSessionDialogEntry::Existing(record) => record.session_id == *id,
+                    _ => false,
+                })
+                .map(|idx| if idx + 1 < entries.len() { idx + 1 } else { 0 })
+                .unwrap_or(0),
+            None => 0,
+        };
+        Self {
+            entries,
+            selected,
+            mode: RemoteSessionDialogMode::List,
+            url_input: Input::default(),
+            error: None,
+            switch_only: true,
+            current_session_id,
         }
     }
 
@@ -104,6 +152,14 @@ pub fn list_remote_sessions() -> Result<Vec<RemoteSessionRecord>> {
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
     Ok(registry.sessions)
+}
+
+/// Public wrapper around the same normalization the registry uses when
+/// storing records. Callers (e.g. the `/sessions` switch dialog) need it to
+/// match `RemoteSessionRecord.base_url` regardless of trailing slashes the
+/// daemon URL was configured with.
+pub fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
 }
 
 pub fn record_remote_session(
@@ -211,10 +267,6 @@ fn save_registry(registry: &RemoteSessionRegistry) -> Result<()> {
 fn registry_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("unable to resolve home directory for ~/.xiaoo")?;
     Ok(home.join(".xiaoo").join("remote_sessions.json"))
-}
-
-fn normalize_base_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_string()
 }
 
 fn current_time_ms() -> u64 {

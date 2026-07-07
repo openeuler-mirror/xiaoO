@@ -1,5 +1,6 @@
 //! Slash-command completion for the TUI chat input. Must stay in sync with dispatch in
-//! `app.rs` (`/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/sandbox`, `/save`, `/skills`).
+//! `app.rs` (`/connect`, `/delete`, `/dir`, `/load`, `/new`, `/remote`, `/sandbox`, `/save`,
+//! `/sessions`, `/skills`).
 
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
@@ -47,6 +48,10 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "/sandbox",
         summary: "切换本地 sandbox backend，例如 Local 或 macOS Seatbelt。",
+    },
+    SlashCommandSpec {
+        name: "/sessions",
+        summary: "切换到当前远端 daemon 上的其它 session。可带 session_id 直接切换。",
     },
     SlashCommandSpec {
         name: "/skills",
@@ -237,7 +242,15 @@ mod tests {
         assert_eq!(
             candidates_for_prefix("/", NO_EXT),
             vec![
-                "/connect", "/dir", "/delete", "/load", "/new", "/save", "/remote", "/sandbox",
+                "/connect",
+                "/dir",
+                "/delete",
+                "/load",
+                "/new",
+                "/save",
+                "/remote",
+                "/sandbox",
+                "/sessions",
                 "/skills"
             ]
         );
@@ -253,7 +266,7 @@ mod tests {
         );
         assert_eq!(
             candidates_for_prefix("/s", NO_EXT),
-            vec!["/save", "/sandbox", "/skills"]
+            vec!["/save", "/sandbox", "/sessions", "/skills"]
         );
     }
 

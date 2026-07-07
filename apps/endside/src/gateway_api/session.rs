@@ -45,6 +45,7 @@ pub enum SessionTurnUpdate {
         estimated_input_tokens: u64,
         messages: Vec<llm_client::ChatMessage>,
     },
+    HookActions(Vec<agent_types::hook::HookAction>),
     Err(String),
 }
 

@@ -36,6 +36,7 @@ pub struct GatewayAppState {
     channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
     channel_processor: ChannelRuntimeProcessor,
     remote_interactions: Arc<RemoteInteractionStore>,
+    action_sink: Option<Arc<dyn agent_contracts::HookActionSink>>,
 }
 
 impl GatewayAppState {
@@ -46,6 +47,7 @@ impl GatewayAppState {
             session_control_plane: None,
             channel_runtimes: Arc::new(HashMap::new()),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
+            action_sink: None,
         }
     }
 
@@ -54,7 +56,10 @@ impl GatewayAppState {
         session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
     ) -> Self {
         let mut state = Self::new(session_service);
-        state.session_control_plane = Some(session_control_plane);
+        state.session_control_plane = Some(session_control_plane.clone());
+        state.action_sink = Some(Arc::new(crate::httpserver::DaemonHookActionSink::new(
+            session_control_plane,
+        )));
         state
     }
 
@@ -71,6 +76,7 @@ impl GatewayAppState {
             session_control_plane: None,
             channel_runtimes: Arc::new(runtimes),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
+            action_sink: None,
         }
     }
 
@@ -95,6 +101,7 @@ impl GatewayAppState {
             session_control_plane: None,
             channel_runtimes: Arc::new(runtime_map),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
+            action_sink: None,
         })
     }
 
@@ -104,6 +111,9 @@ impl GatewayAppState {
         runtimes: Vec<ChannelRuntime>,
     ) -> ChannelResult<Self> {
         let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
+        state.action_sink = Some(Arc::new(crate::httpserver::DaemonHookActionSink::new(
+            session_control_plane.clone(),
+        )));
         state.session_control_plane = Some(session_control_plane);
         Ok(state)
     }
@@ -413,6 +423,19 @@ async fn stream_session_input(
             Ok(result) => {
                 let summary = sink.take_loop_summary();
                 let filtered_messages = filter_messages_for_display(&result.messages);
+                // Execute plugin-requested actions daemon-side (e.g.
+                // open_session for create/switch). The router owns the
+                // DaemonHookActionSink because it has access to the session
+                // control plane; CoreBackedSessionService's action_sink is
+                // None (avoids the Arc self-reference chicken-and-egg).
+                let actions = if result.hook_actions.is_empty() {
+                    Vec::new()
+                } else {
+                    match state.action_sink.as_ref() {
+                        Some(sink) => sink.execute_on_daemon(result.hook_actions).await,
+                        None => result.hook_actions,
+                    }
+                };
                 let _ = tx.send(SseStreamEvent::Done {
                     reply: result.visible_reply.clone(),
                     raw_reply: result.raw_reply,
@@ -425,6 +448,7 @@ async fn stream_session_input(
                     estimated_input_tokens: result.estimated_input_tokens,
                     messages: filtered_messages,
                     stop_reason: summary.map(|s| s.stop_reason).unwrap_or_default(),
+                    actions,
                 });
             }
             Err(error) => {
@@ -1118,6 +1142,7 @@ mod tests {
                 total_tokens: 0,
                 estimated_input_tokens: 0,
                 outcome: TurnOutcome::Complete,
+                hook_actions: Vec::new(),
             })
         }
     }

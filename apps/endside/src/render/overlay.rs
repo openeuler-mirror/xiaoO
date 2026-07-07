@@ -604,8 +604,13 @@ impl App {
         };
 
         render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        let title = if dialog.switch_only {
+            " Switch Session "
+        } else {
+            " Remote Sessions "
+        };
         let block = Block::default()
-            .title(" Remote Sessions ")
+            .title(title)
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(self.state.theme.border_style(true))
@@ -628,12 +633,23 @@ impl App {
                     width: inner.width,
                     height: 1,
                 };
-                let daemon_width = (list_area.width / 3).clamp(16, 28) as usize;
+                // In switch mode every row belongs to the same daemon, so
+                // drop the daemon column and show a session_id tail instead.
+                // Reserve 2 cols for the current-session marker (`* ` / `  `).
+                let marker_width = 2usize;
                 let time_width = 12usize;
+                let daemon_width = if dialog.switch_only {
+                    0usize
+                } else {
+                    (list_area.width / 3).clamp(16, 28) as usize
+                };
+                let id_width = if dialog.switch_only { 14usize } else { 0usize };
                 let preview_width = list_area
                     .width
                     .saturating_sub(daemon_width as u16)
+                    .saturating_sub(id_width as u16)
                     .saturating_sub(time_width as u16)
+                    .saturating_sub(marker_width as u16)
                     .saturating_sub(6) as usize;
                 let items: Vec<ListItem> = dialog
                     .entries
@@ -651,22 +667,51 @@ impl App {
                         };
                         match entry {
                             RemoteSessionDialogEntry::Existing(record) => {
-                                let daemon =
-                                    truncate_chars(&daemon_display(&record.base_url), daemon_width);
+                                let is_current = dialog
+                                    .current_session_id
+                                    .as_deref()
+                                    .map(|id| id == record.session_id.as_str())
+                                    .unwrap_or(false);
+                                let marker = if is_current { "* " } else { "  " };
+                                let marker_style = if is_current {
+                                    Style::default().fg(self.state.theme.accent)
+                                } else {
+                                    style
+                                };
+                                let mut spans = Vec::with_capacity(
+                                    1 + 2 * ((daemon_width > 0) as usize)
+                                        + 2 * ((id_width > 0) as usize)
+                                        + 3,
+                                );
+                                spans.push(Span::styled(marker, marker_style));
+                                if daemon_width > 0 {
+                                    let daemon = truncate_chars(
+                                        &daemon_display(&record.base_url),
+                                        daemon_width,
+                                    );
+                                    spans.push(Span::styled(
+                                        format!("{daemon:<daemon_width$}"),
+                                        style,
+                                    ));
+                                    spans.push(Span::styled("  ", style));
+                                }
+                                if id_width > 0 {
+                                    let id_tail = truncate_chars(&record.session_id, id_width);
+                                    spans
+                                        .push(Span::styled(format!("{id_tail:<id_width$}"), style));
+                                    spans.push(Span::styled("  ", style));
+                                }
                                 let time = format_remote_time(record.last_active_at_ms);
+                                spans.push(Span::styled(format!("{time:<time_width$}"), style));
+                                spans.push(Span::styled("  ", style));
                                 let preview = record
                                     .first_message_preview
                                     .as_deref()
                                     .filter(|value| !value.trim().is_empty())
                                     .unwrap_or("No messages yet");
                                 let preview = truncate_chars(preview, preview_width.max(8));
-                                ListItem::new(Line::from(vec![
-                                    Span::styled(format!("{daemon:<daemon_width$}"), style),
-                                    Span::styled("  ", style),
-                                    Span::styled(format!("{time:<time_width$}"), style),
-                                    Span::styled("  ", style),
-                                    Span::styled(preview, style),
-                                ]))
+                                spans.push(Span::styled(preview, style));
+                                ListItem::new(Line::from(spans))
                             }
                             RemoteSessionDialogEntry::New => ListItem::new(Line::from(vec![
                                 Span::styled("New remote session...", style),
@@ -682,8 +727,13 @@ impl App {
                 list_state.select(Some(dialog.selected));
                 frame.render_stateful_widget(List::new(items), list_area, &mut list_state);
 
-                let hint = Paragraph::new("Enter 继续/新建  Esc 取消")
-                    .style(Style::default().fg(self.state.theme.muted));
+                let hint_text = if dialog.switch_only {
+                    "* 当前 session  Enter 切换  Esc 取消"
+                } else {
+                    "Enter 继续/新建  Esc 取消"
+                };
+                let hint =
+                    Paragraph::new(hint_text).style(Style::default().fg(self.state.theme.muted));
                 frame.render_widget(hint, hint_area);
             }
             RemoteSessionDialogMode::NewUrl => {

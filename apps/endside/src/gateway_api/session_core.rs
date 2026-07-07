@@ -149,6 +149,7 @@ impl SessionGateway {
                     completion_tokens,
                     total_tokens,
                     estimated_input_tokens,
+                    hook_actions,
                     ..
                 }) => {
                     let total_tokens = if total_tokens == 0 {
@@ -160,6 +161,27 @@ impl SessionGateway {
                     } else {
                         total_tokens
                     };
+                    // Send HookActions BEFORE Done so the TUI's receive
+                    // loop (which exits on `Done` by setting
+                    // `stream_rx = None`) drains the actions into
+                    // `pending_hook_actions` on the same tick.
+                    //
+                    // NOTE: this is the local (non-daemon) path. The
+                    // actions here have only been *collected* by
+                    // `run_turn_inner` (`fire_session_state_hook_and_collect_actions`)
+                    // — daemon-side effects (open_session) are NOT
+                    // executed, because there is no daemon. The TUI's
+                    // `execute_hook_action` → `switch_to_remote_session`
+                    // therefore drops them: `remote_base_url()` is None
+                    // in local mode, so create_session/switch_session are
+                    // no-ops (logged via tracing::warn!). This matches
+                    // the documented contract that create/switch actions
+                    // only take effect in remote (daemon) mode, where
+                    // the HTTP router runs `DaemonHookActionSink` between
+                    // `run_turn` and the SSE `Done` event.
+                    if !hook_actions.is_empty() {
+                        let _ = updates_tx.send(SessionTurnUpdate::HookActions(hook_actions));
+                    }
                     let _ = updates_tx.send(SessionTurnUpdate::Done {
                         prompt_tokens,
                         completion_tokens,

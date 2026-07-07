@@ -31,10 +31,28 @@ impl App {
         let theme_button_text = format!(" {} ", self.state.theme.toggle_button_label());
         let theme_button_width = theme_button_text.chars().count() as u16;
 
+        // Session id short form: first 8 chars of `state.session_id` (UUIDs
+        // are random, so this is enough to tell apart the small handful of
+        // sessions a user juggles). The full id is still shown in the
+        // `/sessions` switch dialog. Read live from `state.session_id` so
+        // hook-driven switches (Create/SwitchSession) and `/sessions`
+        // update the header on the next redraw without any extra plumbing.
+        let session_short: String = self
+            .state
+            .session_id
+            .chars()
+            .take(8)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        let session_text = format!(" Sess {session_short} ");
+        let session_chunk_width = session_text.chars().count() as u16;
+
         let inner_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(14),
+                Constraint::Length(session_chunk_width),
                 Constraint::Min(1),
                 Constraint::Length(theme_button_width),
                 Constraint::Length(20),
@@ -49,6 +67,17 @@ impl App {
         )]));
         frame.render_widget(title, inner_chunks[0]);
 
+        let session_widget = Paragraph::new(Line::from(vec![
+            Span::styled("Sess ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                sanitize_terminal_text(&session_short),
+                Style::default()
+                    .fg(self.state.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        frame.render_widget(session_widget, inner_chunks[1]);
+
         let all_labels = self.state.agent_tab_labels();
         let active_label = self.state.active_agent_tab_label().to_string();
         let active_index = all_labels
@@ -56,7 +85,7 @@ impl App {
             .position(|label| label == &active_label)
             .unwrap_or(0);
 
-        let available_width = inner_chunks[1].width as usize;
+        let available_width = inner_chunks[2].width as usize;
 
         let tab_widths: Vec<usize> = all_labels
             .iter()
@@ -140,7 +169,7 @@ impl App {
                 }
             }
         }
-        frame.render_widget(Paragraph::new(Line::from(tabs)), inner_chunks[1]);
+        frame.render_widget(Paragraph::new(Line::from(tabs)), inner_chunks[2]);
 
         let theme_button_style = Style::default()
             .fg(self.state.theme.primary)
@@ -149,11 +178,11 @@ impl App {
             theme_button_text.clone(),
             theme_button_style,
         )]));
-        frame.render_widget(theme_button, inner_chunks[2]);
+        frame.render_widget(theme_button, inner_chunks[3]);
         self.state.render_state.theme_toggle_area = Some(Rect {
-            x: inner_chunks[2].x,
-            y: inner_chunks[2].y,
-            width: theme_button_width.min(inner_chunks[2].width),
+            x: inner_chunks[3].x,
+            y: inner_chunks[3].y,
+            width: theme_button_width.min(inner_chunks[3].width),
             height: 1,
         });
 
@@ -199,7 +228,7 @@ impl App {
             Span::styled(now_text, Style::default().fg(self.state.theme.muted)),
         ]))
         .alignment(Alignment::Right);
-        frame.render_widget(status, inner_chunks[3]);
+        frame.render_widget(status, inner_chunks[4]);
     }
 
     pub(crate) fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
@@ -234,6 +263,10 @@ impl App {
         } else {
             self.state.status_panel.workspace_display.clone()
         };
+        // Session id is shown in the header (next to the XiaoO title) so it
+        // stays visible at all times and updates live when hooks or
+        // `/sessions` switch the active session. The bottom status bar only
+        // carries backend / provider / workspace / token telemetry.
         let summary = Line::from(vec![
             Span::styled(
                 self.state.status_panel.backend_display.clone(),
