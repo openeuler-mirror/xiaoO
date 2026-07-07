@@ -104,8 +104,7 @@ impl GatewayRuntime {
         // when the cache is already equal to the persisted state.
         if let Some(record) = self.session_snapshot(&state.session_id).await {
             if let Some(loop_state) = record.loop_state.as_ref() {
-                if !loop_state.messages.is_empty()
-                    && state.session_messages != loop_state.messages
+                if !loop_state.messages.is_empty() && state.session_messages != loop_state.messages
                 {
                     state.session_messages = loop_state.messages.clone();
                 }
