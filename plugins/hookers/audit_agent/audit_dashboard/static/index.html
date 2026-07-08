@@ -1246,7 +1246,7 @@
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
             <span class="status-text ${r.enabled ? 'status-on' : 'status-off'}">${r.enabled ? '已启用' : '已禁用'}</span>
-            <div class="toggle" onclick="${toggleFn}; searchRules()">
+            <div class="toggle" onclick="${toggleFn}">
               <div class="toggle-track ${r.enabled ? 'on' : ''}">
                 <div class="toggle-knob"></div>
               </div>
@@ -1278,6 +1278,7 @@
       try {
         runtimeConfig = await api("PUT", "/api/rules/enabled", { layer, category, rule_id: ruleId, enabled: newEnabled });
         renderAll();
+        searchRules(); // 刷新搜索结果，使开关状态即时更新
         showToast(`规则 ${ruleId} 已${newEnabled ? '启用' : '禁用'}`, "success");
       } catch (e) {
         showToast("操作失败: " + e.message, "error");
@@ -1299,6 +1300,7 @@
       try {
         runtimeConfig = await api("PUT", "/api/skills/enabled", { skill_id: skillId, enabled: newEnabled });
         renderAll();
+        searchRules(); // 刷新搜索结果，使开关状态即时更新
         showToast(`Skill ${skillId} 已${newEnabled ? '启用' : '禁用'}`, "success");
       } catch (e) {
         showToast("操作失败: " + e.message, "error");
@@ -1976,7 +1978,7 @@
         lineStyle: { width: 2 },
         itemStyle: { color: TREND_COLORS[i % TREND_COLORS.length] },
         label: { show: true, position: "top", fontSize: 11, formatter: ({ value }) => value[1] == null ? "" : fmtTokens(value[1]) },
-        connectNulls: false,    // 无数据的日子不连 0，线条断开
+        connectNulls: true,     // 同一模型跨过无数据的日子直接连线（数据稀疏时仍可见趋势）
         data: dates.map(d => {
           const v = series[m] && series[m][d];
           return [d, v == null ? null : v];   // 无数据用 null，不画 0 点

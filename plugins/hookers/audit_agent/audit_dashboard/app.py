@@ -202,16 +202,14 @@ async def get_rules(layer: str | None = None, category: str | None = None):
 async def toggle_rule(body: RuleToggle):
     """开关单条规则"""
     runtime = update_rule_enabled(body.layer, body.category, body.rule_id, body.enabled)
-    # 返回更新后的该分类规则
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    # 返回完整 runtimeConfig，避免前端全局状态被部分数据覆盖（曾导致搜索失效）
+    return runtime
 
 @app.put("/api/categories/enabled", dependencies=[Depends(auth_dependency)])
 async def toggle_category(body: CategoryToggle):
     """开关整个分类"""
     runtime = update_category_enabled(body.layer, body.category, body.enabled)
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    return runtime
 
 @app.post("/api/rules", dependencies=[Depends(auth_dependency)])
 async def create_rule(body: NewRule):
@@ -237,8 +235,7 @@ async def create_rule(body: NewRule):
         rule_dict["credential"] = body.credential
 
     runtime = add_custom_rule(body.layer, body.category, rule_dict)
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    return runtime
 
 @app.delete("/api/rules", dependencies=[Depends(auth_dependency)])
 async def remove_rule(body: DeleteRule):
@@ -259,19 +256,19 @@ async def get_skills():
 async def toggle_skill(body: SkillToggle):
     """开关单个 skill"""
     runtime = update_skill_enabled(body.skill_id, body.enabled)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.put("/api/skill-categories/enabled", dependencies=[Depends(auth_dependency)])
 async def toggle_skill_category(body: SkillCategoryToggle):
     """开关 skill 分类"""
     runtime = update_skill_category_enabled(body.category, body.enabled)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.post("/api/skills", dependencies=[Depends(auth_dependency)])
 async def create_skill(body: NewSkill):
     """新增自定义 skill"""
     runtime = add_custom_skill(body.skill_id, body.category, body.keywords, body.content)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.delete("/api/skills", dependencies=[Depends(auth_dependency)])
 async def remove_skill(body: DeleteSkill):
