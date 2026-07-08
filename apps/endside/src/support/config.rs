@@ -4,6 +4,7 @@ use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
 use llm_client::ProtocolFamily;
 use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
+use mcp::McpSection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use skill::SkillsConfig as ResolvedSkillsConfig;
@@ -61,6 +62,8 @@ pub struct Config {
     pub lsp: Option<LspConfig>,
     #[serde(default)]
     pub tui: TuiConfig,
+    #[serde(default)]
+    pub mcp: McpSection,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

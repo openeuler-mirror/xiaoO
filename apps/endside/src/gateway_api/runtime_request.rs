@@ -270,6 +270,7 @@ impl GatewayRuntime {
                     )
                 })
                 .collect(),
+            mcp_servers: state.agent_config.mcp.servers.clone(),
         })
     }
 

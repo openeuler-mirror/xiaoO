@@ -199,6 +199,7 @@ where
                 operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
+                mcp_servers: file_cfg.mcp.servers.clone(),
             };
 
             run_once(config, prompt, debug).await;
@@ -871,6 +872,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
                 )
             })
             .collect(),
+        mcp_servers: config.mcp_servers.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)

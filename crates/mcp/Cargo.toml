@@ -1,0 +1,19 @@
+[package]
+name = "mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time", "macros"] }
+tracing.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures-util.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

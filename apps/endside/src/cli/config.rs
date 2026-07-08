@@ -1,5 +1,6 @@
 use crate::backend::GatewayBackendConfig;
 use agent_types::hook::HookerRegistryConfig;
+use mcp::McpSection;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,6 +22,8 @@ pub struct FileConfig {
     pub operation_backend: Option<GatewayBackendConfig>,
     #[serde(default)]
     pub subagent: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default)]
+    pub mcp: McpSection,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -111,6 +114,7 @@ impl FileConfig {
                         ),
                         subagent: parse_optional_section(&root, "subagent", &path, debug)
                             .unwrap_or_default(),
+                        mcp: parse_optional_section(&root, "mcp", &path, debug).unwrap_or_default(),
                     }
                 }
                 Err(e) => {
