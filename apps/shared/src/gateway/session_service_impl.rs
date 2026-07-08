@@ -879,18 +879,49 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
-        if let Some(existing) = self.session_store.load(&request.session_id).await {
+        let existing_record = self.session_store.load(&request.session_id).await;
+        if let Some(existing) = &existing_record {
             if existing.status == SessionLifecycleStatus::Paused {
-                return Ok(existing);
+                return Ok(existing.clone());
             }
         }
-        if let Some(handle) = self.handle_for_session(&request.session_id).await {
+        // Reuse an already-running in-memory handle if present. We
+        // intentionally do NOT fall back to the store here: doing so via
+        // `handle_for_session` would silently create a handle from a
+        // stale/imported record (e.g. from `/load`) without leasing a
+        // backend or running the state-preservation logic below, which
+        // loses the LLM's context on the next turn. Records without a live
+        // handle fall through to the build path, which properly preserves
+        // imported state and leases a backend.
+        if let Some(handle) = self
+            .sessions_handler
+            .lock()
+            .await
+            .get(&request.session_id)
+            .cloned()
+        {
             return handle.snapshot().await;
         }
 
         let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
         let resolved = self.runtime_resolver.resolve(&runtime_input, None).await?;
         let mut session = Self::build_session_for_open(&request, &resolved);
+        // Preserve state from any pre-existing store record (e.g. imported
+        // via `/load`). Without this, `build_session_for_open` would
+        // initialise `loop_state`/`memory_snapshot` to `None` and the
+        // subsequent `session_store.save` below would overwrite the imported
+        // record — silently erasing the LLM's message history and leaving
+        // the model with no prior context even though the TUI still echoes
+        // the old chat messages.
+        if let Some(existing) = existing_record {
+            session.loop_state = existing.loop_state;
+            session.memory_snapshot = existing.memory_snapshot;
+            session.agents = existing.agents;
+            session.subagent_state = existing.subagent_state;
+            session.parent_runtime_id = existing.parent_runtime_id;
+            session.forked_from_checkpoint_id = existing.forked_from_checkpoint_id;
+            session.created_at_ms = existing.created_at_ms;
+        }
         let backend_lease = lease_session_backend(
             self.backend_manager.as_ref(),
             &session,
@@ -1262,6 +1293,7 @@ mod tests {
     use llm_client::LlmProviderWrapper;
     use serde_json::{json, Value};
     use tempfile::TempDir;
+    use xiaoo_core::LoopStateSnapshot;
 
     struct StubLlmProvider {
         capabilities: ProviderCapabilities,
@@ -1423,6 +1455,126 @@ mod tests {
         let saved_instance = saved.backend_instance.expect("saved backend instance");
         assert_eq!(saved_instance.state, BackendLifecycleState::Active);
         assert_eq!(saved_instance.backend_id, instance.backend_id);
+    }
+
+    #[tokio::test]
+    async fn open_session_preserves_imported_loop_state() {
+        // Regression: `/load` imports a SessionRecord (with loop_state
+        // containing the LLM's prior message history) into the in-memory
+        // store, then the next turn calls `ensure_session_open` ->
+        // `open_session`. Before the fix, `open_session` built a fresh
+        // SessionRecord via `build_session_for_open` (which sets
+        // `loop_state: None`) and overwrote the imported record, so the
+        // LLM lost all context even though the TUI still echoed the old
+        // chat messages.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver.clone(),
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        // Simulate `/load`: seed the store with an Idle record carrying a
+        // non-empty loop_state (two ChatMessages).
+        let imported_messages = vec![
+            agent_types::ChatMessage {
+                role: agent_types::MessageRole::User,
+                blocks: vec![agent_types::ContentBlock::Text {
+                    text: "earlier user prompt".to_string(),
+                }],
+                message_id: None,
+                timestamp_ms: 0,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+            agent_types::ChatMessage {
+                role: agent_types::MessageRole::Assistant,
+                blocks: vec![agent_types::ContentBlock::Text {
+                    text: "earlier assistant reply".to_string(),
+                }],
+                message_id: None,
+                timestamp_ms: 0,
+                api_usage_tokens: None,
+                reasoning_content: None,
+                estimated_tokens: None,
+            },
+        ];
+        let mut seeded = save_session_without_backend(
+            &store,
+            &resolver,
+            "s-import",
+            SessionLifecycleStatus::Idle,
+        )
+        .await;
+        seeded.loop_state = Some(LoopStateSnapshot {
+            session_id: uuid::Uuid::new_v4(),
+            messages: imported_messages.clone(),
+            turn_count: 1,
+            token_usage: Default::default(),
+            compression_meta: Default::default(),
+            kv_cache_map: Default::default(),
+        });
+        store.save(seeded.clone()).await;
+
+        // Now the user sends a new prompt -> `open_session` runs.
+        let opened = dependencies
+            .session_control_plane
+            .open_session(SessionOpenRequest {
+                session_id: "s-import".to_string(),
+                conversation_id: "c-import".to_string(),
+                sender_id: "u1".to_string(),
+                entry: GatewayEntryContext::tui(None),
+                channel: None,
+                channel_instance_id: None,
+                llm: None,
+            })
+            .await
+            .expect("open imported session");
+
+        let retained = opened
+            .loop_state
+            .as_ref()
+            .expect("loop_state must be preserved across open_session");
+        assert_eq!(retained.messages, imported_messages);
+        assert_eq!(retained.turn_count, 1);
+
+        // The build path (not the `handle_for_session` shortcut) must have
+        // run: a backend instance is leased and persisted, proving the
+        // state-preservation block above was actually executed.
+        let leased_instance = opened
+            .backend_instance
+            .as_ref()
+            .expect("open_session must lease a backend for imported records");
+        assert_eq!(leased_instance.session_id, "s-import");
+        assert_eq!(leased_instance.state, BackendLifecycleState::Active);
+
+        // And the store must keep the preserved state, not a wiped record.
+        let stored = store
+            .load("s-import")
+            .await
+            .expect("store must retain record");
+        assert_eq!(
+            stored
+                .loop_state
+                .as_ref()
+                .expect("stored loop_state must be preserved")
+                .messages,
+            imported_messages
+        );
+        let stored_instance = stored
+            .backend_instance
+            .as_ref()
+            .expect("store must retain leased backend instance");
+        assert_eq!(stored_instance.backend_id, leased_instance.backend_id);
     }
 
     #[tokio::test]
