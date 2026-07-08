@@ -19,12 +19,13 @@ CLI is the simplest running mode, supporting all common configuration items, but
 | `[trace]` | ✅ | Tracing configuration |
 | `[hooker]` | ✅ | Hooker configuration |
 | `[operation_backend]` | ✅ | Operation backend configuration |
+| `[vault]` | ✅ | Encrypted secrets storage (see vault_secrets_design.md) |
 | `[agent]` | ❌ | Agent roles (TUI/Daemon only) |
 | `[lsp]` | ❌ | LSP configuration (TUI only) |
 | `[tui.remote]` | ❌ | Remote TUI (TUI only) |
 | `[channels]` | ❌ | Channel integration (Daemon only) |
 | `[http]` | ❌ | HTTP API (Daemon only) |
-| `[agents]` | ❌ | Multi-agent management (Daemon only) |
+| `[agents]` | ❌ | Multi-agent management (Daemon only; TUI reads a limited subset for default-agent validation only) |
 
 ---
 
@@ -39,7 +40,6 @@ CLI configuration is concise and clear. Here is a complete example:
 provider = "anthropic"
 model = "claude-sonnet-4-20250514"
 api_key_env = "ANTHROPIC_API_KEY"
-context_window = 200000
 
 # Predefined subagent roles (CLI supported) ⭐
 [subagent.code_reviewer]
@@ -70,6 +70,8 @@ storage_backend = "stdout"
 default = "audit_agent"
 ```
 
+> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field).
+
 ---
 
 ## CLI Usage
@@ -95,16 +97,22 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 | Parameter | Description | Default |
 |------|------|--------|
 | `-p, --prompt` | Prompt to send to agent | Required |
-| `--config` | Configuration file path | `~/.config/xiaoo/config.toml` |
+| `--config` | Configuration file path (also accepts `XIAOO_CONFIG` env var) | `~/.config/xiaoo/config.toml` |
 | `--debug` | Show intermediate process (turns, tool calls, etc.) | false |
 | `--provider` | Override provider in configuration file | - |
 | `--model` | Override model in configuration file | - |
-| `--api-key` | Override API key in configuration file | - |
+| `--api-key` | Override API key in configuration file / env | - |
 | `--api-base` | Override API base URL in configuration file | - |
-| `--system` | Override default system prompt | - |
+| `--system` | Override default system prompt | built-in `cli_default_system_prompt.txt` |
 | `--max-turns` | Maximum number of turns | 10 |
 | `--no-tools` | Disable tool execution | false |
+| `--tools` | Comma-separated allowlist of tool names; empty/unset = all tools | - |
 | `--reasoning-effort` | Reasoning effort: off, high, max | off |
+
+> `--config` and `--debug` are `global = true` clap args, so they can appear
+> before or after the `run` subcommand. `XIAOO_CONFIG` env var falls back to
+> the default `~/.config/xiaoo/config.toml` when neither `--config` nor the env
+> var is set.
 
 ---
 

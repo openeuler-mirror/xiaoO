@@ -26,7 +26,7 @@ To install hookers, run:
 
 ```bash
 cd <your_xiaoO>/plugins/hookers
-./config.sh
+./install.sh
 ```
 
 You can also develop your own hookers and place them in `<your_xiaoO>/plugins/hookers`. See `how-to-develop-a-plugin-hooker.md` for details.

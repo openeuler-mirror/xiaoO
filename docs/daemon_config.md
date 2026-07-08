@@ -47,9 +47,10 @@ Detailed deployment guides:
 [channels.feishu]
 enabled = true
 channel_instance_id = "ops-feishu"   # Optional, defaults to "feishu"
+transport = "webhook"                # webhook (default) | websocket
 app_id = "cli_..."
 app_secret_env = "FEISHU_APP_SECRET"
-verification_token = "your-token"
+verification_token = "your-token"    # Required for webhook mode; optional for websocket
 base_url = "https://open.feishu.cn"  # Optional, default value
 ```
 
@@ -124,11 +125,14 @@ with a reverse proxy if you need access control.
 
 ```toml
 [agents]
-id = "main"                          # Agent ID
-default = true                       # Mark as default agent
-model = "z-ai/glm-5"                 # Optional, override global model
-system_prompt = "You are..."         # Optional, override default system prompt
-workspace = "/path/to/workspace"     # Optional, workspace directory
+default_agent_id = "main"             # Optional, default agent id
+
+[[agents.list]]
+id = "main"                           # Agent ID
+default = true                        # Mark as default agent
+model = "z-ai/glm-5"                  # Optional, override global model
+system_prompt = "You are..."          # Optional, override default system prompt
+workspace = "/path/to/workspace"      # Optional, workspace directory
 ```
 
 ---
@@ -196,12 +200,14 @@ Here is a complete example containing both common configuration and Daemon-speci
 ```toml
 # Common configuration (applies to CLI/TUI/Daemon)
 [llm]
-provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan
+provider = "openrouter"              # openai, anthropic, gemini, ollama, openrouter, deepseek, zai, groq, mistral, together, xai, minimax, kimi, gitcode, local, ... (see config_file_guide.md)
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
-context_window = 128000
+max_tokens = 128000
+# Note: daemon's [llm] does NOT read reasoning_effort; pass it per-turn via the
+# HTTP API `reasoning_effort` field in RuntimeTurnRequest.
 
-# Predefined subagent roles (common configuration) ⭐
+# Predefined subagent roles (common configuration)
 # Note: Tools configuration supports two formats. See config_file_guide.md for details.
 [subagent.code_reviewer]
 description = "Code review specialist"
@@ -214,7 +220,7 @@ read = true
 glob = true
 grep = true
 
-# Context compression (common configuration)
+# Context compression (CLI/Daemon only; TUI ignores [compact])
 [compact]
 auto_compact_ratio = 0.75
 
@@ -231,8 +237,16 @@ dirs = ["~/.xiaoo/skills"]
 [hooker]
 default = "audit_agent"
 
+# Encrypted secrets storage (common configuration; read via xiaoo_shared::llm_secrets)
+[vault]
+enabled = false
+use_sdf = false
+
 # Daemon-specific configuration
 [agents]
+default_agent_id = "main"
+
+[[agents.list]]
 id = "main"
 default = true
 model = "z-ai/glm-5"
@@ -250,6 +264,7 @@ burst = 10
 [channels.feishu]
 enabled = true
 channel_instance_id = "ops-feishu"
+transport = "webhook"
 app_id = "cli_..."
 app_secret_env = "FEISHU_APP_SECRET"
 verification_token = "your-token"
@@ -315,6 +330,11 @@ config. The daemon does not require the LLM API key at process startup.
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint using `RuntimeCheckpointRequest` |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot/template referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint using `RuntimeCheckoutRequest` |
+| `POST /api/v1/runtimes/pause` | Snapshot an idle runtime and release its live backend (`RuntimePauseRequest`) |
+| `POST /api/v1/runtimes/resume` | Restore a paused runtime with the same runtime id (`RuntimeResumeRequest`) |
+| `POST /api/v1/runtimes/exec` | Run a shell command inside the runtime's backend (`RuntimeExecRequest`) |
+| `POST /api/v1/runtimes/read-file` | Read a file from the runtime's backend (`RuntimeReadFileRequest`) |
+| `POST /api/v1/runtimes/write-file` | Write a file inside the runtime's backend (`RuntimeWriteFileRequest`) |
 
 Runtime APIs use `runtime_id` and `checkpoint_id` as the public vocabulary. In
 the current v1 implementation, `runtime_id` is backed by the same value as the
@@ -593,16 +613,22 @@ backend release, which deletes the corresponding E2B sandbox.
 
 **SSE Event Types:**
 
+All events are tagged with `type` and emit a matching SSE `event:` name. `agent_id` is included on streaming events so multi-agent runtimes can be rendered separately.
+
 | Event | Fields | Description |
 |-------|--------|-------------|
 | `turn_start` | `agent_id`, `turn` | Emitted at the start of each agent loop turn |
-| `text_delta` | `delta`, `snapshot` | Emitted for assistant text updates |
-| `thinking_delta` | `delta`, `snapshot` | Emitted for assistant reasoning updates |
-| `tool_result` | `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
+| `text_delta` | `agent_id`, `delta`, `snapshot` | Emitted for assistant text updates |
+| `thinking_delta` | `agent_id`, `delta`, `snapshot` | Emitted for assistant reasoning updates |
+| `tool_result` | `agent_id`, `call_id`, `tool_name`, `output_preview`, `is_error` | Emitted after each tool execution completes |
 | `interaction_requested` | `request` | Emitted when the daemon needs a user confirmation/input/choice |
-| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
+| `done` | `reply`, `raw_reply`, `conversation_id`, `runtime_id`, `turn_count`, `total_tokens`, `prompt_tokens`, `completion_tokens`, `estimated_input_tokens`, `messages`, `stop_reason` | Emitted when the agent loop finishes |
 | `error` | `error` | Emitted on failure |
 | `cancelled` | `runtime_id` | Emitted as cancellation acknowledgement |
+
+> The `done` and `cancelled` events serialize the runtime handle as `runtime_id`
+> in the JSON body even though the internal field is `session_id`; this is the
+> public vocabulary used by `RuntimeRecord`.
 
 **Common Error Responses:**
 

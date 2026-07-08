@@ -694,7 +694,6 @@ default_agent_id = "main"
 id = "main"
 default = true
 workspace = "/opt/xiaoo/app"
-agent_dir = "/var/lib/xiaoo/agents/main"
 
 [skills]
 dirs = ["/opt/xiaoo/adt/skills"]
@@ -724,7 +723,6 @@ default_agent_id = "main"
 id = "main"
 default = true
 workspace = "/opt/xiaoo/app"
-agent_dir = "/var/lib/xiaoo/agents/main"
 
 [skills]
 dirs = ["/opt/xiaoo/adt/skills"]
