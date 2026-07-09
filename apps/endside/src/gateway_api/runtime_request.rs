@@ -279,7 +279,7 @@ impl GatewayRuntime {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
-            entry: tui_entry_context(state),
+            entry: tui_entry_context(state, None),
             channel: None,
             channel_instance_id: None,
             llm: None,
@@ -295,7 +295,7 @@ impl GatewayRuntime {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
         Ok(AppTurnRequest {
             session_id: state.session_id.clone(),
-            entry: tui_entry_context(state),
+            entry: tui_entry_context(state, None),
             channel: None,
             message_id: None,
             conversation_id: state.session_id.clone(),
@@ -324,8 +324,16 @@ pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfi
     }
 }
 
-fn tui_entry_context(state: &AppState) -> GatewayEntryContext {
-    let mut entry = GatewayEntryContext::tui(None);
+/// Build a TUI entry context that carries the active agent role as
+/// `runtime_profile_id`. This is shared by the local TUI path (passing
+/// `instance_id = None`) and the remote TUI path (passing the remote
+/// `base_url` as `instance_id`) so the daemon can resolve `[agent.<name>]`
+/// — including `max_turns` — in both modes.
+pub(crate) fn tui_entry_context(
+    state: &AppState,
+    instance_id: Option<String>,
+) -> GatewayEntryContext {
+    let mut entry = GatewayEntryContext::tui(instance_id);
     entry.runtime_profile_id = state.active_agent_role.clone();
     entry
 }
@@ -449,8 +457,24 @@ mod tests {
                 .expect("app state should initialize");
         state.active_agent_role = Some("plan".to_string());
 
-        let entry = tui_entry_context(&state);
+        let entry = tui_entry_context(&state, None);
 
         assert_eq!(entry.runtime_profile_id.as_deref(), Some("plan"));
+    }
+
+    #[test]
+    fn tui_entry_context_carries_instance_id_for_remote() {
+        let config = Config::default();
+        let mut state =
+            AppState::new_with_config(&config, PathBuf::from("config.toml"), PathBuf::from("."))
+                .expect("app state should initialize");
+        state.active_agent_role = Some("plan".to_string());
+
+        let entry = tui_entry_context(&state, Some("http://127.0.0.1:18080".to_string()));
+
+        // Both the role and the remote instance_id must be set so the
+        // daemon can resolve [agent.<name>] (max_turns) in remote mode.
+        assert_eq!(entry.runtime_profile_id.as_deref(), Some("plan"));
+        assert_eq!(entry.instance_id.as_deref(), Some("http://127.0.0.1:18080"));
     }
 }

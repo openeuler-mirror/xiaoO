@@ -8,8 +8,8 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{
-    GatewayEntryContext, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest,
-    RuntimeOpenRequest, RuntimeTurnRequest,
+    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest, RuntimeOpenRequest,
+    RuntimeTurnRequest,
 };
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 use crate::remote_sessions_service::record_remote_session;
@@ -76,6 +76,8 @@ enum RemoteSseEvent {
         messages: Vec<llm_client::ChatMessage>,
         #[allow(dead_code)]
         stop_reason: String,
+        #[serde(default)]
+        actions: Vec<agent_types::hook::HookAction>,
     },
     Error {
         error: String,
@@ -271,6 +273,48 @@ impl GatewayRuntime {
         self.remote_session_open = false;
     }
 
+    /// Calls `/api/v1/runtimes/open` for the current `state.session_id` and
+    /// returns the parsed `SessionRecord`. Idempotent on the daemon side:
+    /// if the session already exists in the daemon's store, the daemon
+    /// returns the existing record (with `loop_state.messages` intact) so
+    /// the TUI can restore the conversation context after a switch.
+    ///
+    /// Sets `remote_session_open = true` on success so the next turn skips
+    /// the open call. Errors are surfaced to the caller so they can be
+    /// shown in the transcript instead of being silently swallowed.
+    pub async fn open_remote_session_with_record(
+        &mut self,
+        state: &mut crate::app_state::AppState,
+    ) -> Result<crate::gateway::SessionRecord, String> {
+        let remote = self
+            .remote
+            .clone()
+            .ok_or_else(|| "remote backend is not configured".to_string())?;
+        let token = resolve_bearer_token(remote.bearer_token_env.as_deref())?;
+        let client = reqwest::Client::new();
+        let open_request = self.remote_session_open_request(state)?;
+        let url = format!("{}/api/v1/runtimes/open", remote.base_url);
+        let mut request = client.post(url).json(&open_request);
+        if let Some(token) = token.as_ref() {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("remote open failed: {error}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("remote open failed: HTTP {status} {body}"));
+        }
+        let record: crate::gateway::SessionRecord = response
+            .json()
+            .await
+            .map_err(|error| format!("failed to parse session record: {error}"))?;
+        self.remote_session_open = true;
+        Ok(record)
+    }
+
     pub fn cancel_remote_turn(&self, session_id: String) {
         let Some(remote) = self.remote.clone() else {
             return;
@@ -307,7 +351,7 @@ impl GatewayRuntime {
             session_id: state.session_id.clone(),
             conversation_id: state.session_id.clone(),
             sender_id,
-            entry: GatewayEntryContext::tui(base_url),
+            entry: super::runtime_request::tui_entry_context(state, base_url),
             channel: None,
             channel_instance_id: None,
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
@@ -323,7 +367,10 @@ impl GatewayRuntime {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
         Ok(RuntimeTurnRequest {
             session_id: state.session_id.clone(),
-            entry: GatewayEntryContext::tui(self.remote.as_ref().map(|r| r.base_url.clone())),
+            entry: super::runtime_request::tui_entry_context(
+                state,
+                self.remote.as_ref().map(|r| r.base_url.clone()),
+            ),
             channel: None,
             message_id: None,
             conversation_id: state.session_id.clone(),
@@ -498,8 +545,23 @@ async fn handle_remote_event(
             completion_tokens,
             estimated_input_tokens,
             messages,
+            actions,
             ..
         } => {
+            // IMPORTANT: send HookActions BEFORE Done. The TUI's
+            // `poll_stream_updates` sets `self.stream_rx = None` when it
+            // processes `Done` (to stop draining the now-closed SSE
+            // stream), which immediately exits the receive loop. Any
+            // update sent after `Done` would still be sitting in the
+            // channel buffer but never get drained, so the actions
+            // (create_session / switch_session) would be
+            // silently dropped and the user would never see the session
+            // switch. Sending actions first guarantees they're drained
+            // into `pending_hook_actions` on the same poll tick, then
+            // `Done` cleanly terminates the stream.
+            if !actions.is_empty() {
+                let _ = updates_tx.send(SessionTurnUpdate::HookActions(actions));
+            }
             let _ = updates_tx.send(SessionTurnUpdate::Done {
                 prompt_tokens,
                 completion_tokens,

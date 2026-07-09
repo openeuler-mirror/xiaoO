@@ -74,12 +74,20 @@ impl SessionWorker {
             );
         }
 
-        // Create LoopState first to get shared message storage
+        // Create LoopState first to get shared message storage.
+        // Derive the LoopState session_id from the session's actual id so the
+        // chat hooks (*.Chat.command.before / message.received /
+        // system.transform) report the same id as the TUI's session_id and the
+        // *.Session.lifecycle.state / *.Tool.*.pre hook payloads. A prior
+        // loop_state snapshot (subsequent turns) keeps carrying its id; the
+        // first turn falls back to the session's real id. Both UUID-shaped and
+        // non-UUID ids (e.g. `cont-...` created by session hooks, or channel
+        // sessions like `ops-feishu:conv-1`) are preserved as-is.
         let loop_session_id = input
             .loop_state
             .as_ref()
-            .map(|snapshot| snapshot.session_id)
-            .unwrap_or_else(uuid::Uuid::new_v4);
+            .map(|snapshot| snapshot.session_id.clone())
+            .unwrap_or_else(|| input.session.session_id.clone());
         let cancel = input
             .cancellation_token
             .clone()

@@ -118,6 +118,11 @@ impl GatewayRuntime {
                     });
                     self.stream_rx = None;
                 }
+                SessionTurnUpdate::HookActions(actions) => {
+                    if !actions.is_empty() {
+                        self.pending_hook_actions.extend(actions);
+                    }
+                }
                 SessionTurnUpdate::Err(error) => {
                     let display_error = crate::error_log::record_tui_error("remote_input", &error);
                     self.stream_reveal_buffer.clear();

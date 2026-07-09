@@ -12,7 +12,9 @@ use agent_types::chat::{ChatSystemTransformInput, ChatSystemTransformResult, Mod
 use agent_types::compression::CompressedView;
 use agent_types::context::prompt::result::PromptBuildResult;
 use agent_types::events::ToolResultEvent;
-use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookPointId};
+use agent_types::hook::{
+    HookInvokeInput, HookInvokeMetadata, HookInvokeOutput, HookInvokePrimary, HookPointId,
+};
 use agent_types::outcome::{AgentError, AgentOutcome};
 use agent_types::tool::{EffectProfile, RawToolCall, RawToolOutcome, ToolExecutionResult};
 use agent_types::{
@@ -99,7 +101,7 @@ pub async fn run_agent_loop(
             if let Some(runtime_view) = input.runtime_view.as_ref() {
                 let (body, deny) = run_command_execute_before_hook(
                     runtime_view,
-                    &state.session_id.to_string(),
+                    &state.session_id,
                     input.agent_id.as_ref(),
                     &cmd_ctx.command,
                     &cmd_ctx.arguments,
@@ -391,7 +393,7 @@ async fn drain_pending_user_messages(ctx: &mut LoopContext<'_>) {
         let candidate = ChatMessage::text(MessageRole::User, &message, now_ms());
         let final_message = apply_chat_message_hook(
             ctx.input.runtime_view.as_ref(),
-            &ctx.state.session_id.to_string(),
+            &ctx.state.session_id,
             ctx.input.agent_id.as_ref(),
             candidate,
         )
@@ -963,16 +965,18 @@ fn enabled_hookers_for<'a>(
     hookers
 }
 
-/// Extracts the inner payload of a [`HookInvokeOutput`] variant, or returns
-/// an error string naming the expected variant when the output is any other
-/// variant. Used inside `apply` closures to keep the downcast terse.
+/// Extracts the inner payload of a [`HookInvokeOutput`] primary variant, or
+/// returns an error string naming the expected variant when the output's
+/// primary is any other variant. Used inside `apply` closures to keep the
+/// downcast terse. Actions on the output are ignored here; the dispatcher
+/// drains them separately.
 macro_rules! downcast_hook_output {
     ($output:expr, $variant:ident) => {
-        match $output {
-            HookInvokeOutput::$variant(r) => r,
+        match $output.primary {
+            HookInvokePrimary::$variant(r) => r,
             other => {
                 return Err(format!(
-                    "expected {} output, got {other:?}",
+                    "expected {} primary, got {other:?}",
                     stringify!($variant)
                 ));
             }
@@ -1095,7 +1099,7 @@ async fn run_chat_system_transform_sequence(ctx: &LoopContext<'_>, result: &mut 
     let agent_segment = chat_agent_segment(ctx.input.agent_id.as_ref());
     let hook_point = HookPointId(format!("{}.Chat.system.transform", agent_segment));
 
-    let session_id = ctx.state.session_id.to_string();
+    let session_id = ctx.state.session_id.clone();
     // xiaoo's RuntimeSnapshot does not currently expose provider/model ids
     // at the loop level; pass an empty ModelRef so plugins that key on
     // model still receive the field. Populate when model metadata lands.
@@ -1432,7 +1436,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                 })
                 .collect();
             let debug_entry = serde_json::json!({
-                "session_id": ctx.state.session_id.to_string(),
+                "session_id": ctx.state.session_id.clone(),
                 "turn": cumulative_turn,
                 "messages": messages,
                 "chunk_hashes": response.kv_cache_chunk_hashes,
@@ -2198,17 +2202,28 @@ fn decide(ctx: &mut LoopContext<'_>) {
     // Context window pressure is handled by the compression pipeline
     // (compress/microcompact) at the start of each turn.
 
+    // If we've reached the max_turns limit, end the loop now regardless of
+    // whether the assistant produced tool calls. On the final turn, tools
+    // are withheld during prompt building (see `build_messages`) so the
+    // model commits a text-only final answer rather than a cut-off tool
+    // call; we still must surface `MaxTurnsReached` here so downstream
+    // consumers (e.g. the `*.Session.lifecycle.state` plugin hook) see the
+    // soft-termination outcome instead of a normal `Complete`. Without
+    // this guard the loop would fall through to `ReturnComplete` whenever
+    // the model complied with the no-tools final turn, making the
+    // `max_turns_reached` outcome unreachable for any agent whose limit
+    // is hit on a turn that yields text.
+    if ctx.snapshot.max_turns > 0 && ctx.turn.turn_number >= ctx.snapshot.max_turns {
+        ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
+        return;
+    }
+
     if let Some(ref msg) = ctx.turn.assistant_message {
         let can_execute_tool_calls = ctx.snapshot.feature_flags.tool_execution
             && !ctx.input.visible_tools.is_empty()
             && ctx.input.runtime_view.is_some();
 
         if msg.has_tool_calls() && can_execute_tool_calls {
-            if ctx.turn.turn_number >= ctx.snapshot.max_turns {
-                ctx.turn.decision = Some(LoopDecision::ReturnMaxTurns);
-                return;
-            }
-
             ctx.turn.decision = Some(LoopDecision::Continue);
             return;
         }
@@ -3048,7 +3063,7 @@ mod tests {
         let input = AgentLoopInput::new("hello")
             .with_agent_id(AgentId("test-agent".to_string()))
             .with_event_sink(sink.clone());
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await
@@ -3081,7 +3096,7 @@ mod tests {
             None,
         ));
         let runtime = test_runtime_with_max_turns(provider, 2);
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
         loop_state.turn_count = 10;
 
         let outcome = run_agent_loop(
@@ -3099,6 +3114,36 @@ mod tests {
         assert_eq!(loop_state.turn_count, 11);
     }
 
+    #[tokio::test]
+    async fn run_agent_loop_surfaces_max_turns_when_final_turn_yields_text() {
+        // Regression: with `max_turns = 1`, `build_messages` withholds tools
+        // on turn 1 (the final turn) so the model replies with text only.
+        // `decide` must still return `MaxTurnsReached` — not `Complete` — so
+        // the `*.Session.lifecycle.state` hook payload carries
+        // `outcome = "max_turns_reached"`. Previously the `MaxTurnsReached`
+        // branch was only reachable when the assistant emitted tool calls,
+        // which the no-tools final turn makes impossible.
+        let provider = Arc::new(LlmProviderWrapper::new(
+            Arc::new(StreamingTestProvider::new()),
+            None,
+            None,
+        ));
+        let runtime = test_runtime_with_max_turns(provider, 1);
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
+
+        let outcome = run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("hi"))
+            .await
+            .expect("loop should terminate at max_turns");
+
+        match outcome {
+            LoopRunResult::Complete(AgentOutcome::MaxTurnsReached { partial_reply, .. }) => {
+                assert_eq!(partial_reply.as_deref(), Some("Hello world"));
+                assert_eq!(loop_state.turn_count, 1);
+            }
+            _ => panic!("expected MaxTurnsReached, got a different outcome"),
+        }
+    }
+
     #[test]
     fn loop_stop_rule_matches_only_configured_successful_tool() {
         let provider = Arc::new(LlmProviderWrapper::new(
@@ -3107,7 +3152,7 @@ mod tests {
             None,
         ));
         let runtime = test_runtime(provider);
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
         let input =
             AgentLoopInput::new("plan").with_stop_rules([LoopStopRule::AfterSuccessfulTool {
                 tool_name: "todo_write".to_string(),
@@ -3156,7 +3201,7 @@ mod tests {
             None,
         ));
         let runtime = test_runtime(provider);
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
         run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("first"))
             .await
@@ -3284,7 +3329,7 @@ mod tests {
             .with_agent_id(AgentId("test-agent".to_string()))
             .with_visible_tools(dummy_visible_tools())
             .with_runtime_view(Arc::new(NoopRuntimeView::new()));
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await
@@ -3560,7 +3605,7 @@ mod tests {
             .with_agent_id(AgentId("test-agent".to_string()))
             .with_visible_tools(dummy_visible_tools())
             .with_runtime_view(Arc::new(NoopRuntimeView::new()));
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await
@@ -3758,7 +3803,7 @@ mod tests {
             .with_stop_rules([LoopStopRule::AfterSuccessfulTool {
                 tool_name: "peek".to_string(),
             }]);
-        let mut loop_state = LoopState::new(uuid::Uuid::new_v4());
+        let mut loop_state = LoopState::new(uuid::Uuid::new_v4().to_string());
 
         let outcome = run_agent_loop(&runtime, &mut loop_state, input)
             .await

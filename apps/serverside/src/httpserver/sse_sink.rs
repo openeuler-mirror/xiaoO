@@ -52,6 +52,8 @@ pub enum SseStreamEvent {
         estimated_input_tokens: u64,
         messages: Vec<llm_client::ChatMessage>,
         stop_reason: String,
+        #[serde(default)]
+        actions: Vec<agent_types::hook::HookAction>,
     },
     Error {
         error: String,

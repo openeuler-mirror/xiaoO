@@ -479,7 +479,7 @@ mod tests {
     use agent_types::common::HookerId;
     use agent_types::common::{AgentMetadata, WorkspaceRef};
     use agent_types::events::ToolLifecycleEvent;
-    use agent_types::hook::HookPointId;
+    use agent_types::hook::{HookInvokePrimary, HookPointId};
     use agent_types::tool::execution_types::ToolExecutionError;
     use agent_types::tool::FinalToolCall;
     use agent_types::{ContentBlock, MessageRole};
@@ -700,8 +700,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::ChatSystemTransform(ChatSystemTransformResult::Allow) => {}
+        match output.primary {
+            HookInvokePrimary::ChatSystemTransform(ChatSystemTransformResult::Allow) => {}
             other => panic!("expected Allow, got {:?}", other),
         }
     }
@@ -723,8 +723,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::ChatSystemTransform(ChatSystemTransformResult::Transform {
+        match output.primary {
+            HookInvokePrimary::ChatSystemTransform(ChatSystemTransformResult::Transform {
                 system,
             }) => {
                 assert_eq!(system, vec!["new".to_string(), "parts".to_string()]);
@@ -754,8 +754,8 @@ mod tests {
         let output =
             block_on(adaptor.invoke_chat_message(&input, &HookInvokeMetadata::default(), &runtime))
                 .unwrap();
-        match output {
-            HookInvokeOutput::ChatMessage(ChatMessageHookResult::Accept) => {}
+        match output.primary {
+            HookInvokePrimary::ChatMessage(ChatMessageHookResult::Accept) => {}
             other => panic!("expected Accept, got {:?}", other),
         }
     }
@@ -781,8 +781,8 @@ mod tests {
         let output =
             block_on(adaptor.invoke_chat_message(&input, &HookInvokeMetadata::default(), &runtime))
                 .unwrap();
-        match output {
-            HookInvokeOutput::ChatMessage(ChatMessageHookResult::Transform { message }) => {
+        match output.primary {
+            HookInvokePrimary::ChatMessage(ChatMessageHookResult::Transform { message }) => {
                 assert_eq!(message.blocks.len(), 1);
                 match &message.blocks[0] {
                     ContentBlock::Text { text } => assert_eq!(text, "redacted"),
@@ -814,8 +814,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::CommandExecuteBefore(CommandExecuteBeforeResult::Allow) => {}
+        match output.primary {
+            HookInvokePrimary::CommandExecuteBefore(CommandExecuteBeforeResult::Allow) => {}
             other => panic!("expected Allow, got {:?}", other),
         }
     }
@@ -841,8 +841,8 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::CommandExecuteBefore(CommandExecuteBeforeResult::Transform {
+        match output.primary {
+            HookInvokePrimary::CommandExecuteBefore(CommandExecuteBeforeResult::Transform {
                 body,
             }) => {
                 assert_eq!(body, "rewritten body");
@@ -872,8 +872,10 @@ mod tests {
             &runtime,
         ))
         .unwrap();
-        match output {
-            HookInvokeOutput::CommandExecuteBefore(CommandExecuteBeforeResult::Deny { reason }) => {
+        match output.primary {
+            HookInvokePrimary::CommandExecuteBefore(CommandExecuteBeforeResult::Deny {
+                reason,
+            }) => {
                 assert_eq!(reason, "blocked by policy");
             }
             other => panic!("expected Deny, got {:?}", other),

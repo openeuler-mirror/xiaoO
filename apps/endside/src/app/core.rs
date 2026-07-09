@@ -175,6 +175,29 @@ impl App {
                 break;
             }
 
+            // Drain and execute any hook actions received from the daemon
+            // (create/switch session, set title).
+            //
+            // Remote (daemon) mode: actions arrive via the SSE `Done`
+            // event's `actions` field after the daemon has already run
+            // daemon-side effects (open_session) via
+            // `DaemonHookActionSink`; the TUI only needs to switch UI
+            // focus and sync its local registry.
+            //
+            // Local (non-daemon) mode: actions arrive via
+            // `SessionTurnUpdate::HookActions` (no SSE, no daemon).
+            // `execute_hook_action` → `switch_to_remote_session` checks
+            // `remote_base_url()`, finds None, and drops each action with
+            // a `tracing::warn!`. This is intentional: create_session /
+            // switch_session are not supported in local mode.
+            let pending_actions = self.gateway.take_pending_hook_actions();
+            if !pending_actions.is_empty() {
+                for action in pending_actions {
+                    self.execute_hook_action(action).await;
+                }
+                needs_redraw = true;
+            }
+
             if !self.state.chat_state.is_loading && self.state.chat_state.has_pending_turns() {
                 match self.gateway.start_next_queued_turn(&mut self.state).await {
                     Ok(started) => {
@@ -221,6 +244,154 @@ impl App {
             let models = fetch_models_from_local_api(&api_base).await;
             let _ = tx.send(models);
         });
+    }
+
+    /// Execute a single hook action received after a turn terminates.
+    ///
+    /// Remote (daemon) mode: the daemon has already executed daemon-side
+    /// effects (open_session for create/switch) via `DaemonHookActionSink`
+    /// before forwarding; the TUI only needs to switch UI focus.
+    ///
+    /// Local (non-daemon) mode: there is no daemon, so no `open_session`
+    /// has run. `switch_to_remote_session` checks `remote_base_url()`,
+    /// finds None, and drops the action with a `tracing::warn!`. This is
+    /// intentional — create_session / switch_session are not supported in
+    /// local mode. See [`switch_to_remote_session`].
+    async fn execute_hook_action(&mut self, action: agent_types::hook::HookAction) {
+        match action {
+            agent_types::hook::HookAction::CreateSession { session_id } => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "TUI: hook action create_session — switching focus"
+                );
+                self.switch_to_remote_session(session_id).await;
+            }
+            agent_types::hook::HookAction::SwitchSession { session_id } => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "TUI: hook action switch_session — switching focus"
+                );
+                self.switch_to_remote_session(session_id).await;
+            }
+        }
+    }
+
+    /// Switch the TUI focus to a remote session. The daemon has already
+    /// called `/runtimes/open` for the target session; the TUI resets its
+    /// state, sets the new session_id, and configures remote mode so the
+    /// next turn uses the existing session on the daemon.
+    ///
+    /// Invoked both by hook actions (Create/SwitchSession received from the
+    /// daemon after a turn ends) and by the TUI's `/sessions` built-in
+    /// command for manual switching. In local (non-daemon) mode there is no
+    /// remote backend to switch to, so the action is dropped with a
+    /// `tracing::warn` — daemon-side effects (open_session) cannot be
+    /// reproduced locally by this path.
+    pub(crate) async fn switch_to_remote_session(&mut self, session_id: String) {
+        let Some(base_url) = self.gateway.remote_base_url().map(str::to_string) else {
+            tracing::warn!(
+                session_id = %session_id,
+                "switch_to_remote_session called without remote backend; \
+                 hook action dropped (local mode does not execute daemon-side actions)"
+            );
+            return;
+        };
+        let token_env = self
+            .state
+            .agent_config
+            .tui
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.bearer_token_env.clone());
+
+        self.apply_remote_session_switch(
+            session_id.clone(),
+            base_url,
+            token_env,
+            format!("Switched to session: {session_id}"),
+        )
+        .await;
+    }
+
+    /// Shared body of [`switch_to_remote_session`] and
+    /// [`activate_remote_session`]: reset local state for `session_id`,
+    /// configure the remote backend, restore the prior transcript from the
+    /// daemon, persist the remote-session record, and push `system_message`.
+    ///
+    /// The daemon's `open_session` call is wrapped in a `tokio::time::timeout`
+    /// so an unreachable daemon cannot block the TUI event loop
+    /// indefinitely — on timeout we log and continue with an empty
+    /// transcript rather than hanging the UI.
+    pub(crate) async fn apply_remote_session_switch(
+        &mut self,
+        session_id: String,
+        base_url: String,
+        bearer_token_env: Option<String>,
+        system_message: String,
+    ) {
+        self.gateway.reset_for_new_session(&mut self.state);
+        self.state.reset_for_new_session();
+        self.state.session_id = session_id.clone();
+        self.gateway
+            .configure_remote(&mut self.state, base_url.clone(), bearer_token_env.clone());
+
+        // Restore conversation context from the daemon. `open_session` is
+        // idempotent on the daemon side; calling it here both ensures the
+        // session is opened on the daemon (so `remote_session_open` becomes
+        // true and the next turn skips the open call) and gives us back
+        // the stored `SessionRecord` so we can repopulate local state.
+        // Bound the wait so a dead/unreachable daemon does not freeze the
+        // TUI event loop.
+        let restored_messages = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.gateway
+                .open_remote_session_with_record(&mut self.state),
+        )
+        .await
+        {
+            Ok(Ok(record)) => {
+                let loop_messages = record.loop_state.map(|ls| ls.messages).unwrap_or_default();
+                let display_messages =
+                    crate::chat::messages_from_chat_messages(loop_messages.clone());
+                self.state.session_messages = loop_messages;
+                display_messages
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "remote session switch: failed to fetch session record from daemon; \
+                     transcript will be empty until the next turn"
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "remote session switch: open_session timed out after 10 seconds; \
+                     transcript will be empty until the next turn"
+                );
+                Vec::new()
+            }
+        };
+
+        if !restored_messages.is_empty() {
+            self.state.chat_state.messages.extend(restored_messages);
+            self.state.chat_state.stick_to_bottom = true;
+        }
+
+        let _ = crate::remote_sessions_service::record_remote_session(
+            &session_id,
+            &base_url,
+            bearer_token_env,
+            None,
+        );
+
+        self.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(system_message));
+        self.state.chat_state.stick_to_bottom = true;
     }
 }
 
