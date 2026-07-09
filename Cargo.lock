@@ -4899,6 +4899,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "shellexpand",
  "skill",
  "tempfile",
  "textwrap",
