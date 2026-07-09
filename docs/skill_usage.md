@@ -132,13 +132,15 @@ rm -rf ~/.xiaoo/skills
 
 ### Security Audit
 
-A security audit is automatically performed before installation, checking for:
+A security audit can be run manually on a skill directory before installation. The audit checks for:
 
 - Symbolic links
 - Script files (`.sh` / `.bash`, etc., unless `allow_scripts = true` is configured)
 - High-risk command patterns (`rm -rf /`, `sudo`, `curl | sh`, etc.)
 - Shell chaining operators (`&&`, `||`, `;`)
 - Oversized files
+
+> **Note**: The audit is **not** run automatically during `skill install`. Run it manually first with `xiaoo --cli skill audit <path>` if you want to review a skill before installing.
 
 ### Runtime Behavior
 

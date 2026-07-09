@@ -128,7 +128,21 @@ runtime state.
 | `POST /api/v1/runtimes/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/runtimes/close` | Close the runtime, remove its record, and fire lifecycle hooks |
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint |
+| `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint |
+| `POST /api/v1/runtimes/pause` | Snapshot an idle runtime and release its live backend |
+| `POST /api/v1/runtimes/resume` | Restore a paused runtime with the same runtime id |
+| `POST /api/v1/runtimes/exec` | Run a shell command inside the runtime's backend |
+| `POST /api/v1/runtimes/read-file` | Read a file from the runtime's backend |
+| `POST /api/v1/runtimes/write-file` | Write a file inside the runtime's backend |
+
+Remote TUI only consumes the `open` / `input` / `interaction` / `cancel` /
+`close` endpoints directly; `checkpoint`, `checkout`, `pause`, `resume`,
+`exec`, `read-file`, and `write-file` are programmatic control-plane endpoints
+exposed on the same protected route group for other clients. See
+[runtime_checkpoint.md](./runtime_checkpoint.md) for the checkpoint/pause/resume
+semantics and `apps/serverside/src/httpserver/router.rs` for the authoritative
+route list.
 
 Runtime control payloads use `runtime_id` and `checkpoint_id` as their public
 vocabulary.

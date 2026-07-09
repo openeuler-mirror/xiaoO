@@ -74,6 +74,17 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 
 ### 技能目录优先级（四层 - 仅运行时搜索）
 
+技能在运行时按四个目录层级搜索（优先级从高到低）：
+
+1. **项目级**：`./.xiaoo/skills/`
+2. **配置级**：`[skills].dirs` 中指定的目录
+3. **用户级**：`~/.xiaoo/skills/`
+4. **系统级**：`/usr/lib/.xiaoo/skills/`（仅内置技能）
+
+详见 [docs/skill_usage.md](./docs/skill_usage.md)。
+
+### 构建
+
 ```bash
 ./build.sh --release
 ```
@@ -89,9 +100,8 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # 从这个环境变量读取 API 密钥
-max_tokens = 128000                  # 可选，每次响应的最大输出 token 数
-context_window = 128000              # 可选，显式指定总上下文预算上限
-reasoning_effort = "off"             # 可选: off, high, 或 max
+max_tokens = 128000                  # 可选，每次响应的最大输出 token 数（仅 TUI/Daemon 支持；CLI 忽略此字段）
+reasoning_effort = "off"             # 可选: off, high, 或 max（仅 TUI 支持；CLI 使用 --reasoning-effort；Daemon 使用 HTTP API 字段）
 
 # 预定义 subagent 角色（CLI/TUI/Daemon 均支持） ⭐
 # 注意：tools 配置支持两种格式，详见 docs/config_file_guide.md
@@ -117,15 +127,17 @@ db_path = "~/.xiaoo/traces.db"       # 当 storage_backend 为 moirai-sqlite 时
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-为本地 LLM 设置自定义 API url: (以入口 http://localhost:8080/v1/chat/completions 为例)
+为本地 LLM 设置自定义 API url (以入口 `http://localhost:8080/v1/chat/completions` 为例)：
 
 ```toml
 [llm]
 provider = "local"
 model = "deepseek-v4-flash"
-api_base = "http://localhost:8000"
+api_base = "http://localhost:8080/v1"
 api_key_env = "LLM_API_KEY"
 ```
+
+> `local` provider 默认 base url 即为 `http://localhost:8080/v1`，仅在端口或路径不同时才需要设置 `api_base`。如果不写 `/v1`，OpenAI-compatible 客户端在 `/chat/completions` 失败 (404) 后仍会回退探测 `/v1/chat/completions`，但显式写明可避免多余的失败请求。
 
 运行 xiaoO：
 
@@ -151,11 +163,10 @@ CLI 输出示例：
 
 ## 上下文窗口
 
-`[llm].context_window` 是可选项，用于显式设置 token 预算和上下文压缩使用的总上下文大小。xiaoO 会按以下顺序解析最终值：
+上下文窗口大小由运行时动态解析。xiaoO 会按以下顺序解析最终值：
 
-1. 用户显式配置：`[llm].context_window`
-2. 动态模型查询，目前支持 `gemini`、`anthropic` 和 `ollama`
-3. 本地兜底默认值：
+1. 动态模型查询：调用 provider 的模型目录接口（`/models` 或等价接口）。只要 provider profile 中 `supports_model_catalog = true` 即可，包括 `openai`、`anthropic`、`gemini`、`ollama`、`zai`/`zhipu`、`deepseek`、`openrouter`、`kimi`、`kimi-coding-plan`、`minimax-coding-plan`、`gitcode`、`local`、`other` 等；`supports_model_catalog = false` 的 provider（如 `minimax`、`minimax-anthropic`）跳过此步。
+2. 本地兜底默认值（按 provider 协议族）：
    - OpenAI-compatible、Ollama 和智谱系列默认为 `128000`
    - Anthropic 默认为 `200000`
    - Gemini 默认为 `1000000`
@@ -207,7 +218,7 @@ xiaoo-daemon
 xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
-HTTP 请求可在 JSON body 中通过 `agent` 选择 Agent 角色预设：
+HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选择 Agent 角色预设：
 
 ```json
 {
@@ -215,7 +226,10 @@ HTTP 请求可在 JSON body 中通过 `agent` 选择 Agent 角色预设：
   "channel": "http",
   "sender_id": "demo-user",
   "conversation_id": "demo-conv",
-  "agent": "code-reviewer"
+  "entry": {
+    "kind": "http_api",
+    "runtime_profile_id": "code-reviewer"
+  }
 }
 ```
 

@@ -74,6 +74,17 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 
 ### Skill Directory Priority (Four Levels - Runtime Search Only)
 
+Skills are searched at runtime across four directory levels (highest to lowest priority):
+
+1. **Project level**: `./.xiaoo/skills/`
+2. **Config level**: directories specified in `[skills].dirs`
+3. **User level**: `~/.xiaoo/skills/`
+4. **System level**: `/usr/lib/.xiaoo/skills/` (built-in skills only)
+
+See [docs/skill_usage.md](./docs/skill_usage.md) for details.
+
+### Build
+
 ```bash
 ./build.sh --release
 ```
@@ -89,9 +100,8 @@ Create `~/.config/xiaoo/config.toml`:
 provider = "openrouter"              # openai, anthropic, ollama, openrouter, deepseek, zai, minimax, kimi, minimax-coding-plan, kimi-coding-plan, ...
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"   # Read the API key from this environment variable
-max_tokens = 128000                  # Optional, max output tokens per response
-context_window = 128000              # Optional, explicit total context budget override
-reasoning_effort = "off"             # Optional: off, high, or max
+max_tokens = 128000                  # Optional, max output tokens per response (TUI/Daemon only; CLI ignores this field)
+reasoning_effort = "off"             # Optional: off, high, or max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
 
 # Predefined subagent roles (CLI/TUI/Daemon all support) ⭐
 # Note: tools configuration supports two formats - see docs/config_file_guide.md
@@ -117,15 +127,21 @@ Set your provider credential:
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-Setup custom api url for local LLM: (e.g. entry point is http://localhost:8080/v1/chat/completions)
+Setup custom api url for local LLM (entry point `http://localhost:8080/v1/chat/completions`):
 
 ```toml
 [llm]
 provider = "local"
 model = "deepseek-v4-flash"
-api_base = "http://localhost:8080"
+api_base = "http://localhost:8080/v1"
 api_key_env = "LLM_API_KEY"
 ```
+
+> The `local` provider defaults to `http://localhost:8080/v1` already; set
+> `api_base` only when your server lives on a different port or path. If you
+> omit `/v1`, the OpenAI-compatible client still probes `/v1/chat/completions`
+> as a fallback after `/chat/completions` fails with a 404, but specifying it
+> directly avoids the extra failed request.
 
 Run xiaoO:
 
@@ -151,11 +167,10 @@ Example CLI output:
 
 ## Context Window
 
-`[llm].context_window` is optional. It sets an explicit total context budget used by token budgeting and context compression. xiaoO resolves the effective value in this order:
+The effective context window is resolved dynamically. xiaoO resolves the effective value in this order:
 
-1. Explicit user config: `[llm].context_window`
-2. Dynamic model lookup, currently supported for `gemini`, `anthropic`, and `ollama`
-3. Local fallback defaults:
+1. Dynamic model lookup against the provider's model catalog (`/models` or equivalent). Available for any provider whose profile has `supports_model_catalog = true`, including `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`, `deepseek`, `openrouter`, `kimi`, `kimi-coding-plan`, `minimax-coding-plan`, `gitcode`, `local`, and `other`. Providers marked `supports_model_catalog = false` (e.g. `minimax`, `minimax-anthropic`) skip this step.
+2. Local fallback defaults keyed off the provider's protocol family:
    - OpenAI-compatible, Ollama, and Zhipu families default to `128000`
    - Anthropic defaults to `200000`
    - Gemini defaults to `1000000`
@@ -207,7 +222,7 @@ xiaoo-daemon
 xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
 
-HTTP requests can select an agent role preset by passing `agent` in the JSON body:
+HTTP requests can select an agent role preset by passing `runtime_profile_id` inside the `entry` object of the JSON body:
 
 ```json
 {
@@ -215,7 +230,10 @@ HTTP requests can select an agent role preset by passing `agent` in the JSON bod
   "channel": "http",
   "sender_id": "demo-user",
   "conversation_id": "demo-conv",
-  "agent": "code-reviewer"
+  "entry": {
+    "kind": "http_api",
+    "runtime_profile_id": "code-reviewer"
+  }
 }
 ```
 
