@@ -820,7 +820,13 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 **检测范围**：
 - `action_type`/`action_detail` 包含 write/写入/修改等写入关键词
-- **Shell 重定向写入**：`action_detail` 包含 `>` 且首命令不是只读命令（如 cat、head、tail、grep 等），也视为写入操作
+- **写/删命令**：`rm`/`cp`/`mv`/`dd`/`tee`/`mkfs`/`chmod`/`chown`/`truncate`/`shred` 等命令（词边界匹配，避免 `rm` 误命中 `arm`/`form`）
+- **Shell 重定向写入**：`action_detail` 包含 `>` 且首命令不是只读命令（见下），也视为写入操作
+- **`/dev/null` 重定向豁免**：`2>/dev/null`、`&>/dev/null`、`>/dev/null` 等丢弃输出的标准写法**不计入**重定向写入（避免 `blockdev --getsize /dev/sda 2>/dev/null` 被误判为写 /dev/sda）
+
+**只读命令集合 `READ_ONLY_COMMANDS`**（首命令在此集合内时，即使带 `>` 重定向也不视为写入）：
+- 文本查看/过滤：`cat`/`head`/`tail`/`less`/`more`/`grep`/`find`/`awk`/`sed`/`sort`/`uniq`/`wc`/`cut`/`strings`/`od`/`xxd`/`hexdump`/`tr`/`file`/`stat`/`ls` 等
+- 只读系统/设备信息查询：`lsblk`/`blockdev`/`smartctl`/`udevadm`/`dmidecode`/`lscpu`/`lspci`/`dmesg`/`journalctl`/`ip`/`ss`/`uname`/`sysctl` 等
 
 **豁免条件**：
 - 目标文件不存在于磁盘（视为新建文件，自动豁免）
@@ -936,19 +942,23 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 > **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
-> **凭据文件处理说明**：`credentials.yml`、`secrets.yml` 等凭据文件使用 `\b` 边界匹配避免非文件名拼接误报，且**无论读写均拦截**（读取凭据文件同样危险）。其他系统路径只拦截写入/删除操作，读取操作放行。
+> **读写区分说明（关键）**：敏感路径分两类处理——
+> - **凭据/密钥类（`credential=true`）**：`/etc/shadow`、`/etc/gshadow`、`/etc/sudoers`、`.ssh/id_rsa`、`.ssh/id_ed25519`、`.ssh/authorized_keys`、`credentials.yml`、`secrets.yml`、`.env` 等。**无论读写均拦截**——读取密钥/凭据文件本身就是泄密。使用边界匹配（`/` 或 `.` 开头的路径用 `(?:^|[\s/\\])` 前缀替代 `\b`，因 `/` 不是单词字符，`\b` 在空格→`/` 之间不构成边界）。
+> - **其他敏感路径**：`/sys/`、`/proc/sys/`、`/dev/*`、`/boot/`、`/etc/hosts`、`/etc/crontab` 等。**只拦截写入/删除操作，只读访问放行**——如 `cat /sys/class/block/sda/size`（查磁盘大小）、`lsblk`、`smartctl` 查设备信息是正常操作。
+>
+> 写/删操作由统一的 `_is_write_operation` 判定：写入关键词、`rm`/`cp`/`mv`/`dd` 等写删命令、或真实重定向写入（`/dev/null` 丢弃除外，且首命令非只读命令）。
 
 #### Critical 级别敏感路径
 
 | 路径 | 说明 |
 |-----|------|
-| `/etc/shadow` | 系统密码文件 |
-| `/etc/gshadow` | 系统组密码文件 |
-| `/etc/sudoers` | sudo 配置 |
-| `.ssh/id_rsa` | SSH 私钥 |
-| `.ssh/id_ed25519` | SSH 私钥 (ed25519) |
-| `/boot/` | 启动引导目录 |
-| `/dev/mem` | 物理内存访问设备 |
+| `/etc/shadow` | 系统密码文件（credential，读写均拦） |
+| `/etc/gshadow` | 系统组密码文件（credential，读写均拦） |
+| `/etc/sudoers` | sudo 配置（credential，读写均拦） |
+| `.ssh/id_rsa` | SSH 私钥（credential，读写均拦） |
+| `.ssh/id_ed25519` | SSH 私钥 ed25519（credential，读写均拦） |
+| `/boot/` | 启动引导目录（仅写入/删除拦截） |
+| `/dev/mem` | 物理内存访问设备（仅写入/删除拦截） |
 | `/usr/lib/.xiaoo/skills/xiaoo-guardian/` | xiaoO 系统级安全防护 Skill 目录（仅写入/删除拦截） |
 | `~/.xiaoo/skills/xiaoo-guardian/` | xiaoO 用户级安全防护 Skill 目录（仅写入/删除拦截） |
 
@@ -978,45 +988,63 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 风险等级: critical
 ```
 
-**示例 3：`/boot/`**
+**示例 3：`/boot/`（只读放行 vs 写入拦截）**
 
 ```
-输入:
+输入（只读，放行）:
   action_type: "bash"
   action_detail: "ls /boot/"
+
+匹配: "/boot/"
+结果: Allow
+原因: /boot/ 为非凭据敏感路径，ls 为只读操作，按读写区分放行
+
+输入（写入，拦截）:
+  action_type: "bash"
+  action_detail: "rm -rf /boot/vmlinuz"
 
 匹配: "/boot/"
 结果: Deny
 原因: "访问敏感路径: 启动引导目录 (/boot/)"
 风险等级: critical
+说明: rm 被识别为删除操作（is_write_op=True），非凭据敏感路径写/删仍拦截
 ```
 
 #### High 级别敏感路径
 
 | 路径 | 说明 |
 |-----|------|
-| `/etc/passwd` | 系统用户文件 |
-| `.ssh/authorized_keys` | SSH 授权密钥 |
-| `/etc/crontab` | 系统定时任务 |
-| `/etc/systemd/` | systemd 服务配置 |
-| `/etc/ssh/sshd_config` | SSH 服务配置 |
-| `/proc/sys/` | 内核参数 |
-| `/sys/` | sysfs 内核接口 |
-| `/dev/zero` | 零设备 |
-| `/dev/kmsg` | 内核消息缓冲区 |
-| `credentials.yml` / `secrets.yml` / `.env` 等 | 凭据/密钥/环境变量配置文件（无论读写均拦截） |
+| `/etc/passwd` | 系统用户文件（仅写入/删除拦截） |
+| `.ssh/authorized_keys` | SSH 授权密钥（credential，读写均拦） |
+| `/etc/crontab` | 系统定时任务（仅写入/删除拦截） |
+| `/etc/systemd/` | systemd 服务配置（仅写入/删除拦截） |
+| `/etc/ssh/sshd_config` | SSH 服务配置（仅写入/删除拦截） |
+| `/proc/sys/` | 内核参数（仅写入/删除拦截） |
+| `/sys/` | sysfs 内核接口（仅写入/删除拦截） |
+| `/dev/zero` | 零设备（仅写入/删除拦截） |
+| `/dev/kmsg` | 内核消息缓冲区（仅写入/删除拦截） |
+| `credentials.yml` / `secrets.yml` / `.env` 等 | 凭据/密钥/环境变量配置文件（credential，读写均拦） |
 
-**示例 1：`/etc/passwd`**
+**示例 1：`/etc/passwd`（只读放行 vs 写入拦截）**
 
 ```
-输入:
+输入（只读，放行）:
   action_type: "bash"
   action_detail: "cat /etc/passwd"
+
+匹配: "/etc/passwd"
+结果: Allow
+原因: /etc/passwd 为非凭据敏感路径（系统用户文件，公开可读），cat 为只读操作，按读写区分放行
+
+输入（写入，拦截）:
+  action_type: "bash"
+  action_detail: "echo attacker >> /etc/passwd"
 
 匹配: "/etc/passwd"
 结果: Deny
 原因: "访问敏感路径: 系统用户文件 (/etc/passwd)"
 风险等级: high
+说明: >> 重定向为写入操作，非凭据敏感路径写/删拦截
 ```
 
 **示例 2：`.ssh/authorized_keys`**
@@ -1032,17 +1060,26 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 风险等级: high
 ```
 
-**示例 3：`/etc/crontab`**
+**示例 3：`/etc/crontab`（只读放行 vs 写入拦截）**
 
 ```
-输入:
+输入（只读，放行）:
   action_type: "bash"
   action_detail: "cat /etc/crontab"
+
+匹配: "/etc/crontab"
+结果: Allow
+原因: /etc/crontab 为非凭据敏感路径，cat 为只读操作，按读写区分放行
+
+输入（写入，拦截）:
+  action_type: "bash"
+  action_detail: "echo '* * * * * /tmp/x' >> /etc/crontab"
 
 匹配: "/etc/crontab"
 结果: Deny
 原因: "访问敏感路径: 系统定时任务 (/etc/crontab)"
 风险等级: high
+说明: >> 重定向为写入操作，非凭据敏感路径写/删拦截
 ```
 
 **示例 4：凭据文件 `credentials.yml`（读操作也拦截）**
@@ -1976,6 +2013,9 @@ LLM 判断: Deny
 | intent_consistency | 读取 passwd 后添加 SSH 密钥 | Deny | ✓ audit_agent 拦截 | ✓ Pass |
 | sensitive_paths | 写入 ~/.ssh/authorized_keys | Deny | ✓ Layer 3 Skill 拦截 | ✓ Pass |
 | dangerous_patterns | rm -rf /tmp/logs/* | Deny | ✓ audit_agent 拦截 | ✓ Pass |
+| sysfs_readonly_allow（误报修复） | cat /sys/class/block/sda/size 只读查盘 | Allow | ✓ 非凭据路径只读放行 | 待验证 |
+| blockdev_devnull_allow（误报修复） | blockdev --getsize /dev/sda 2>/dev/null | Allow | ✓ /dev/null 重定向豁免 + blockdev 只读 | 待验证 |
+| write_sensitive_path_deny（防漏报） | echo ... >> /etc/hosts 写敏感路径 | Deny | ✓ 读写区分后写操作仍拦截 | 待验证 |
 
 ### 层3：脚本内容分析测试结果
 

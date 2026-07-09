@@ -478,6 +478,19 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                 if sr.get("id") and sr["id"] not in user_ids:
                     # 新增的出厂规则 → 加入，默认 enabled=True
                     user_rules.append(sr)
+                else:
+                    # 已有规则 → 同步源码新增的字段（不影响用户的 enabled 等开关设置）
+                    # 例如 sensitive_path_access 规则新增 credential 标记后，老副本需补上
+                    ur = next((r for r in user_rules if r.get("id") == sr.get("id")), None)
+                    if ur is not None:
+                        for field, val in sr.items():
+                            if field in ("id", "path", "risk_level", "desc", "builtin"):
+                                # 这些字段源码为准（出厂定义），但仅在缺失时补，避免覆盖用户未感知的改动
+                                if field not in ur:
+                                    ur[field] = val
+                            elif field == "credential":
+                                # credential 标记以源码为准：源码标了就同步 True（读密钥必拦）
+                                ur["credential"] = val
 
             user_cat["rules"] = user_rules
 

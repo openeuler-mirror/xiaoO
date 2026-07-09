@@ -30,14 +30,14 @@ from ..runtime_config import (
 
 # ==================== 敏感路径列表 ====================
 SENSITIVE_PATHS: list[dict] = [
-    # 认证与密钥
-    {"path": "/etc/shadow", "risk_level": "critical", "desc": "系统密码文件"},
-    {"path": "/etc/gshadow", "risk_level": "critical", "desc": "系统组密码文件"},
+    # 认证与密钥（credential=True — 只读也算泄密，无论读写都拦截）
+    {"path": "/etc/shadow", "risk_level": "critical", "desc": "系统密码文件", "credential": True},
+    {"path": "/etc/gshadow", "risk_level": "critical", "desc": "系统组密码文件", "credential": True},
     {"path": "/etc/passwd", "risk_level": "high", "desc": "系统用户文件"},
-    {"path": "/etc/sudoers", "risk_level": "critical", "desc": "sudo 配置"},
-    {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥"},
-    {"path": ".ssh/id_ed25519", "risk_level": "critical", "desc": "SSH 私钥 (ed25519)"},
-    {"path": ".ssh/authorized_keys", "risk_level": "high", "desc": "SSH 授权密钥"},
+    {"path": "/etc/sudoers", "risk_level": "critical", "desc": "sudo 配置", "credential": True},
+    {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥", "credential": True},
+    {"path": ".ssh/id_ed25519", "risk_level": "critical", "desc": "SSH 私钥 (ed25519)", "credential": True},
+    {"path": ".ssh/authorized_keys", "risk_level": "high", "desc": "SSH 授权密钥", "credential": True},
     # 系统配置
     {"path": "/etc/hosts", "risk_level": "medium", "desc": "DNS 解析配置"},
     {"path": "/etc/crontab", "risk_level": "high", "desc": "系统定时任务"},
@@ -80,6 +80,71 @@ READ_KEYWORDS = [
     "view", "查看", "open", "打开", "load", "加载",
     "grep", "search", "搜索", "find", "查找",
 ]
+
+# ==================== 只读命令集合（用于重定向写判定与敏感路径读写区分）====================
+# 这些命令本身只读，即使带 `>` 重定向也不应判为写文件意图。
+# 1) 传统文本查看/过滤命令
+# 2) 只读系统信息查询命令（lsblk/blockdev/smartctl/udevadm/dmidecode 等，常配 2>/dev/null 查设备信息）
+# 注：sed/awk 虽能原地编辑(-i)，此处仍按只读看待——原地改写由其他规则另行覆盖。
+READ_ONLY_COMMANDS: set[str] = {
+    # 传统文本查看/过滤
+    "cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
+    "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump", "tr",
+    "file", "stat", "du", "df", "ls", "dir", "tree", "nl", "tac", "rev",
+    # 只读系统/设备信息查询
+    "lsblk", "blockdev", "smartctl", "udevadm", "dmidecode", "lscpu", "lspci",
+    "lsusb", "lsmem", "lsns", "lsof", "hwinfo", "inxi", "fdisk", "parted",
+    "dmesg", "journalctl", "systemctl", "hostnamectl", "localectl", "timedatectl",
+    "ps", "top", "free", "vmstat", "iostat", "mpstat", "pidof", "pgrep",
+    "ip", "ifconfig", "route", "ss", "netstat", "arp", "ethtool", "nmcli",
+    "uname", "arch", "nproc", "getconf", "getent", "id", "whoami", "who",
+    "w", "last", "uptime", "lsmod", "modinfo", "sysctl",
+}
+
+# 重定向到 /dev/null 的丢弃写法（2>/dev/null、&>/dev/null、>/dev/null）——这是丢弃输出的标准
+# shell 实践，不是写文件意图，不应计入"写操作"判定。
+_DEVNULL_REDIRECT_RE = re.compile(r"(?:2|&|1)?\s*>\s*/dev/null\b")
+
+# ==================== 写/删命令模式（用于写操作判定）====================
+# WRITE_KEYWORDS 走子串匹配，无法可靠识别 `rm`/`cp`/`dd` 等命令（"rm" 会误命中 arm/form），
+# 故单独用词边界正则识别这些命令出现即视为写/删意图。覆盖：删除、复制写入、重定向写入、
+# 块设备写入、文件系统格式化等。
+_WRITE_COMMAND_RES = [
+    re.compile(r"\brm\b"),          # 删除文件
+    re.compile(r"\bunlink\b"),      # 删除文件
+    re.compile(r"\brmdir\b"),       # 删除目录
+    re.compile(r"\bshred\b"),       # 安全擦除
+    re.compile(r"\bcp\b"),          # 复制（会写目标）
+    re.compile(r"\bmv\b"),          # 移动（覆盖目标）
+    re.compile(r"\binstall\b"),     # 复制并设置属性
+    re.compile(r"\btee\b"),         # 从 stdin 写文件
+    re.compile(r"\bdd\b"),          # 块复制（常写块设备）
+    re.compile(r"\bmkfs\b"),        # 格式化文件系统
+    re.compile(r"\b(fdisk|parted|cfdisk|sfdisk)\b"),  # 分区表写入
+    re.compile(r"\bchmod\b"),       # 改权限
+    re.compile(r"\bchown\b"),       # 改属主
+    re.compile(r"\btruncate\b"),    # 截断文件
+    # 任意重定向写入（> file、>> file）由 _is_write_operation 末尾的重定向分支处理，
+    # 那里会先排除 /dev/null 丢弃并跳过只读命令，避免在此误判 2>/dev/null。
+]
+
+
+def _is_write_operation(action_type: str, action_detail: str) -> bool:
+    """综合判定是否为写/删操作：关键词命中 或 写/删命令命中 或（真实重定向且非只读命令）。
+    统一供 _check_read_before_write 与 _check_sensitive_path_access 使用，避免两处逻辑漂移。
+    """
+    if any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS):
+        return True
+    if any(rx.search(action_detail) for rx in _WRITE_COMMAND_RES):
+        return True
+    # 重定向写入：先排除 /dev/null 丢弃，再看是否还有真实重定向且首命令非只读
+    if ">" in action_detail:
+        detail_without_devnull = _DEVNULL_REDIRECT_RE.sub("", action_detail)
+        if ">" in detail_without_devnull:
+            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
+            if first_word not in READ_ONLY_COMMANDS:
+                return True
+    return False
 
 # ==================== 非交互式密码修改命令模式 ====================
 PASSWORD_MODIFY_PATTERNS: list[str] = [
@@ -212,17 +277,8 @@ class LogicRulesChecker:
         if any(t in action_type or t in action_detail for t in non_write_tools):
             return LogicRuleResult(hit=False)
 
-        # 判断是否为写入操作
-        is_write = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
-
-        # 补充检测 shell 重定向写入（>、>>）
-        # 排除只读命令后的重定向（如 cat file > /dev/null 不是写入意图）
-        if not is_write and ">" in action_detail:
-            read_only_cmds = {"cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
-                              "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump"}
-            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
-            if first_word not in read_only_cmds:
-                is_write = True
+        # 判断是否为写入操作（统一用 _is_write_operation，含关键词/写删命令/重定向）
+        is_write = _is_write_operation(action_type, action_detail)
 
         if not is_write:
             return LogicRuleResult(hit=False)
@@ -316,8 +372,8 @@ class LogicRulesChecker:
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
 
-        # 判断是否为写入/删除操作
-        is_write_op = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
+        # 判断是否为写入/删除操作（统一用 _is_write_operation，与 read_before_write 对齐）
+        is_write_op = _is_write_operation(action_type, action_detail)
 
         for sp in self._sensitive_paths:
             raw_path = sp["path"]
@@ -327,9 +383,10 @@ class LogicRulesChecker:
             # 检查路径是否在操作中出现
             if is_credential:
                 # 凭据文件使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
-                # 以 . 开头的文件（如 .env）在 . 前 \b 不匹配，用 (?:^|[\s/\\]) 替代
+                # 以 . 或 / 开头的路径，其首字符不是单词字符，\b 在它前面不构成边界
+                # （空格→/ 之间没有 \b），故用 (?:^|[\s/\\]) 替代前导 \b。
                 escaped = re.escape(path)
-                if path.startswith("."):
+                if path.startswith(".") or path.startswith("/"):
                     path_match = bool(re.search(rf"(?:^|[\s/\\]){escaped}\b", action_detail))
                 else:
                     path_match = bool(re.search(rf"\b{escaped}\b", action_detail))
@@ -359,10 +416,12 @@ class LogicRulesChecker:
                         reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
                         risk_type="file_access",
                     )
-                # 对于 xiaoo-guardian 保护目录：只拦截写入/删除操作，读取操作放行
-                if raw_path.startswith("~") and not is_write_op:
+                # 非凭据路径：只拦截写入/删除操作，只读访问（如 cat /sys/class/block/sda/size、
+                # lsblk、smartctl 查设备信息）放行。修复历史误报：只读访问 /sys/、/proc/sys/、
+                # /dev/* 被一刀切拦截。
+                if not is_write_op:
                     continue  # 允许读取操作
-                # 对于其他敏感路径，所有访问都拦截（保持原有逻辑）
+                # 写入/删除敏感路径 → 拦截
                 return LogicRuleResult(
                     hit=True,
                     violated_rule="sensitive_path_access",
