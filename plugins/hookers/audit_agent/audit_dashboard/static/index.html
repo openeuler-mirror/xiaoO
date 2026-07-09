@@ -505,6 +505,16 @@
       color: white;
     }
 
+    /* 凭据/密钥类敏感路径：读写均拦截（cat /etc/shadow 也拦） */
+    .credential-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #f3e8ff;
+      color: #7c3aed;
+      font-weight: 600;
+    }
+
     /* 搜索结果：层标识、状态文字、分类 */
     .layer-badge {
       font-size: 10px;
@@ -1066,6 +1076,7 @@
                   ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
                   <span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>
                   ${rule.risk_type ? `<span class="rule-type-tag rt-${rule.risk_type}" title="风险类型: ${escapeHtml(rule.risk_type)}">${escapeHtml(riskTypeName(rule.risk_type))}</span>` : ''}
+                  ${rule.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：读取同样危险，无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
                 </div>
                 <div class="rule-pattern"><span class="rule-field-label">${patternLabel}:</span> ${escapeHtml(patternDisplay)}</div>
                 ${reasonDisplay ? `<div class="rule-reason"><span class="rule-field-label">${reasonLabel}:</span> ${escapeHtml(reasonDisplay)}</div>` : ''}
@@ -1238,6 +1249,7 @@
               ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
               ${risk ? `<span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>` : ''}
               ${r.risk_type ? `<span class="rule-type-tag rt-${r.risk_type}" title="风险类型: ${escapeHtml(r.risk_type)}">${escapeHtml(riskTypeName(r.risk_type))}</span>` : ''}
+              ${r.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
               <span class="search-cat">分类: ${escapeHtml(r.category)}</span>
             </div>
             <div class="rule-pattern"><span class="rule-field-label">规则:</span> ${escapeHtml(ruleText)}</div>
