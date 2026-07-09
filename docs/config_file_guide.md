@@ -2,7 +2,7 @@
 
 Configuration file location: `~/.config/xiaoo/config.toml`
 
-This document focuses on **common configuration items** applicable to CLI, TUI, and Daemon modes.
+This document focuses on shared configuration items plus local client runtime settings.
 
 > **Mode-specific Configuration**:
 > - CLI: [cli_config.md](./cli_config.md)
@@ -13,17 +13,18 @@ This document focuses on **common configuration items** applicable to CLI, TUI, 
 
 ## Common Configuration Items Overview
 
-Configuration items supported by all modes:
+Configuration items covered in this guide:
 
 | Configuration | Description | Details |
 |--------|------|----------|
 | `[llm]` | LLM provider configuration | [View Details](#llm---llm-provider-configuration) |
 | `[subagent]` ⭐ | Predefined subagent roles (all modes) | [View Details](#subagent---predefined-subagent-roles-new) |
 | `[skills]` | Skills configuration | [View Details](#skills---skills-configuration) |
-| `[compact]` | Context compression strategy | [View Details](#compact---context-compression-strategy) |
+| `[compact]` | Context compression strategy (CLI/Daemon only; TUI ignores this section) | [View Details](#compact---context-compression-strategy) |
 | `[trace]` | Tracing/Observability | [View Details](#trace---tracingobservability) |
 | `[hooker]` | Hooker configuration | [View Details](#hooker---hooker-configuration) |
-| `[operation_backend]` | Operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
+| `[operation_backend]` | CLI/TUI operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
+| `[vault]` | Encrypted secrets storage (all modes; read via `xiaoo_shared::llm_secrets`) | [View Details](#vault---encrypted-secrets-storage) |
 
 ---
 
@@ -47,41 +48,51 @@ api_key_env = "OPENROUTER_API_KEY"   # Recommended: read API key from environmen
 provider = "openrouter"              # Provider type (required)
 model = "z-ai/glm-5"                 # Model name (required)
 api_key_env = "OPENROUTER_API_KEY"   # API key environment variable (recommended)
-api_key = "sk-or-..."                # API key (not recommended to write directly in config)
 api_base = "https://..."             # Custom API base URL (optional)
-context_window = 128000              # Total context budget (optional)
-max_tokens = 128000                  # Maximum tokens per response (optional)
-reasoning_effort = "off"             # Reasoning effort: off, high, max (optional)
+max_tokens = 128000                  # Maximum tokens per response (TUI/Daemon only; CLI ignores this field)
+reasoning_effort = "off"             # Reasoning effort: off, high, max (TUI only; CLI uses --reasoning-effort; Daemon uses HTTP API field)
 kvcache_enabled = false              # KV cache enabled (optional)
 kvcache_debug_enabled = false        # KV cache debug (optional)
 ```
 
 ### Configuration Priority
 
-`context_window` resolution priority:
-1. Explicit configuration `[llm].context_window`
-2. Dynamic model query (supported for gemini, anthropic, ollama)
-3. Local fallback defaults
+The effective context window is resolved dynamically:
+1. Dynamic model query (supported for gemini, anthropic, ollama)
+2. Local fallback defaults
 
 ### Provider Types
 
-Supported providers:
-- `openai` - OpenAI GPT series
-- `anthropic` - Claude series
-- `ollama` - Local models
-- `openrouter` - Multi-model aggregation platform
-- `deepseek` - DeepSeek series
-- `zai` - GLM series (Zhipu AI)
-- `minimax` - MiniMax series
-- `minimax-coding-plan` - MiniMax Coding Plan
-- `kimi` - Kimi series (Moonshot AI)
-- `kimi-coding-plan` - Kimi Coding Plan
-- `anthropic` - Claude series
-- `ollama` - Local models
-- `openrouter` - Multi-model aggregation
-- `deepseek` - DeepSeek series
-- `zai` - GLM series
-- `minimax` / `kimi` - Other models
+Supported providers (see `crates/llm-client/src/provider_registry.rs` for the
+authoritative list, including aliases). Provider names are case-insensitive.
+
+| Provider | Protocol family | Default base URL | Default API key env |
+|----------|-----------------|------------------|---------------------|
+| `openai` | OpenAI-compatible | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
+| `anthropic` (alias `claude`) | Anthropic | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
+| `gemini` (alias `google`) | Gemini | `https://generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
+| `ollama` | Ollama | `http://localhost:11434` | — (not required) |
+| `zai` (aliases `zhipu`, `glm`, `bigmodel`, `z-ai`, `z.ai`, `zai-cn`, `zai-china`, `zai-global`, `glm-cn`) | Zhipu | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` |
+| `zai-coding-plan` (aliases `zhipu-coding-plan`, `zhipuai-coding-plan`) | OpenAI-compatible | `https://api.z.ai/api/coding/paas/v4` | `ZHIPU_API_KEY` |
+| `deepseek` | OpenAI-compatible | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `openrouter` | OpenAI-compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+| `openai-compatible` | OpenAI-compatible | — (must set `api_base`) | `OPENAI_COMPATIBLE_API_KEY` |
+| `groq` | OpenAI-compatible | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
+| `mistral` | OpenAI-compatible | `https://api.mistral.ai/v1` | `MISTRAL_API_KEY` |
+| `together` | OpenAI-compatible | `https://api.together.xyz/v1` | `TOGETHER_API_KEY` |
+| `xai` (alias `xai-grok`) | OpenAI-compatible | `https://api.x.ai/v1` | `XAI_API_KEY` |
+| `minimax` (alias `minimax-openai`) | OpenAI-compatible | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
+| `minimax-anthropic` | Anthropic | `https://api.minimaxi.com/anthropic/v1` | `MINIMAX_API_KEY` |
+| `minimax-coding-plan` (aliases `minimax-code-plan`, `minimax-token-plan`) | OpenAI-compatible | `https://api.minimax.io/v1` | `MINIMAX_API_KEY` |
+| `kimi` (aliases `moonshot`, `moonshot-ai`) | OpenAI-compatible | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` |
+| `kimi-coding-plan` (aliases `kimi-code-plan`, `kimi-code`, `kimi-for-coding`) | OpenAI-compatible | `https://api.kimi.com/coding/v1` | `KIMI_API_KEY` |
+| `gitcode` | OpenAI-compatible | `https://api-ai.gitcode.com/v1` | `GITCODE_API_KEY` |
+| `local` | OpenAI-compatible | `http://localhost:8080/v1` | — (not required) |
+| `other` | OpenAI-compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
+
+> `local` is a convenience alias for OpenAI-compatible local model servers. If
+> your local server expects `/v1/chat/completions`, set `api_base` to
+> `http://localhost:<port>/v1` explicitly to skip URL fallback probing.
 
 ---
 
@@ -201,7 +212,12 @@ For detailed skills usage instructions, please refer to [skill_usage.md](./skill
 
 ## [compact] - Context Compression Strategy
 
-**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+**Applicable to**: CLI ✅ | TUI ❌ | Daemon ✅
+
+> **Note**: TUI does not read `[compact]` and always runs without a compression
+> pipeline (`compression_pipeline: None` in `apps/endside/src/gateway_api/runtime_request.rs`).
+> Long TUI conversations are not auto-compacted; rely on CLI or Daemon mode when
+> you need adaptive compression.
 
 Controls context management strategy for long conversations:
 
@@ -252,11 +268,14 @@ For detailed hooker configuration and plugin instructions, please refer to [plug
 
 ## [operation_backend] - Operation Backend Configuration
 
-**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+**Applicable to**: CLI ✅ | TUI ✅ | Daemon ❌
+
+Daemon mode reads operation backend configuration from
+`[server.operation_backend]`; see [Daemon Configuration](./daemon_config.md).
 
 ```toml
 [operation_backend]
-kind = "local"                       # Operation backend kind: local, conch
+kind = "local"                       # Operation backend kind for local clients
 options = { ... }                    # Backend-specific options
 ```
 
@@ -289,6 +308,33 @@ For details, see [Linux Bubblewrap Isolation](../crates/operation_backend/docs/b
 In the TUI, Bubblewrap Bash failures that resolve to an existing host path (or a
 write target under an existing host parent directory) can prompt for a session
 grant automatically, then retry the failed command after approval.
+
+---
+
+## [vault] - Encrypted Secrets Storage
+
+**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+
+The `[vault]` section toggles local encrypted storage of API keys and tokens in
+`llm_secrets.json` (sibling of `config.toml`). All three modes read this section
+through `xiaoo_shared::llm_secrets::init_on_demand_secret_provider`, which parses
+the raw `[vault]` table from the TOML file directly.
+
+```toml
+[vault]
+enabled = false  # true = persist secrets to llm_secrets.json encrypted with WhiteBox (use_sdf=false) or SDF (use_sdf=true)
+use_sdf = false   # false = WhiteBox + AES-256-GCM (TEST ONLY); true = SDF 国密 (Kunpeng servers only)
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Persist API keys/tokens to `llm_secrets.json` and decrypt on demand |
+| `use_sdf` | `false` | Choose WhiteBox (`false`, test only) or SDF 国密 (`true`, Kunpeng only) |
+
+> ⚠️ WhiteBox master key is currently all-zeros (test only). For production use
+> SDF (`use_sdf = true`) on a Kunpeng server, or leave `enabled = false` and
+> supply credentials through environment variables. Full design, file layout,
+> and API reference: [vault_secrets_design.md](./vault_secrets_design.md).
 
 ---
 

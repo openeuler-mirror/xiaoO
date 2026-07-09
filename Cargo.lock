@@ -711,6 +711,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1164,6 +1165,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "hook"
@@ -2198,6 +2208,16 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -4811,70 +4831,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
-name = "xiaoo-app"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "agent-contracts",
- "agent-llm",
- "agent-types",
- "anyhow",
- "arboard",
- "async-trait",
- "axum",
- "base64",
- "chrono",
- "clap",
- "compact",
- "crossterm",
- "dirs 6.0.0",
- "futures-util",
- "glob",
- "governor",
- "hex",
- "hook",
- "llm-client",
- "lsp",
- "memory",
- "mime_guess",
- "operation_backend",
- "parking_lot",
- "prompt",
- "prost",
- "protoc-bin-vendored",
- "rand 0.8.6",
- "ratatui",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "skill",
- "subagent",
- "sysinfo",
- "tempfile",
- "textwrap",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-tungstenite",
- "tokio-util",
- "toml",
- "tonic",
- "tonic-build",
- "tool",
- "tower 0.5.3",
- "tower_governor",
- "trace",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.1.14",
- "url",
- "uuid",
- "vault",
- "xiaoo-core",
-]
-
-[[package]]
 name = "xiaoo-core"
 version = "0.1.0"
 dependencies = [
@@ -4896,6 +4852,137 @@ dependencies = [
  "tool",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "xiaoo-endside"
+version = "0.1.0"
+dependencies = [
+ "agent-contracts",
+ "agent-types",
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "base64",
+ "chrono",
+ "clap",
+ "compact",
+ "crossterm",
+ "dirs 6.0.0",
+ "futures-util",
+ "llm-client",
+ "lsp",
+ "operation_backend",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skill",
+ "tempfile",
+ "textwrap",
+ "tokio",
+ "toml",
+ "tool",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.1.14",
+ "uuid",
+ "xiaoo-core",
+ "xiaoo-shared",
+]
+
+[[package]]
+name = "xiaoo-serverside"
+version = "0.1.0"
+dependencies = [
+ "agent-contracts",
+ "agent-types",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "compact",
+ "dirs 6.0.0",
+ "futures-util",
+ "governor",
+ "llm-client",
+ "lsp",
+ "mime_guess",
+ "operation_backend",
+ "prompt",
+ "prost",
+ "regex",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "skill",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml",
+ "tool",
+ "tower 0.5.3",
+ "tower_governor",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "xiaoo-shared",
+]
+
+[[package]]
+name = "xiaoo-shared"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "agent-contracts",
+ "agent-types",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "compact",
+ "dirs 5.0.1",
+ "futures",
+ "glob",
+ "hook",
+ "http",
+ "libc",
+ "llm-client",
+ "lsp",
+ "memory",
+ "once_cell",
+ "operation_backend",
+ "parking_lot",
+ "pbkdf2",
+ "prompt",
+ "prost",
+ "protoc-bin-vendored",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "skill",
+ "subagent",
+ "sysinfo",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "tool",
+ "tower 0.5.3",
+ "trace",
+ "tracing",
+ "uuid",
+ "vault",
+ "xiaoo-core",
 ]
 
 [[package]]

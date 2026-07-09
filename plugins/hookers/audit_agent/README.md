@@ -620,6 +620,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `chown root` | high | 修改文件所有者为 root |
 | `sudo` | high | 提权执行 |
 | `/etc/shadow` | critical | 访问系统密码文件 |
+| `/etc/gshadow` | critical | 访问系统组密码文件 |
 | `/etc/passwd` | high | 访问系统用户文件 |
 | `.ssh/id_rsa` | critical | 访问 SSH 私钥 |
 | `dd if=/dev/zero` | critical | 磁盘清零操作 |
@@ -634,9 +635,15 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | `\| passwd` | high | 管道方式非交互式密码修改 |
 | `passwd --stdin` | high | passwd --stdin 非交互式密码输入 |
 | `chpasswd` | high | 批量密码修改 |
+| `chgpasswd` | high | 批量修改组密码 |
 | `newusers` | high | 批量用户添加 |
+| `lnewusers` | high | 批量用户添加（libuser） |
 | `passwd -d` | high | 删除用户密码 |
 | `passwd -l` | high | 锁定用户账户 |
+| `groupadd -p` | high | 创建组时设置密码 |
+| `groupdel` | high | 删除用户组 |
+| `luserdel` | high | 删除系统用户（libuser） |
+| `lgroupdel` | high | 删除用户组（libuser） |
 
 **扫描示例**：
 ```
@@ -733,7 +740,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 检查 `a_next.action_detail` 中是否包含对系统关键文件/目录的访问。对 `file_write`/`file_edit`/`file_read` 工具，`action_detail` 仅包含 `file_path` 字段，不包含文件内容，避免内容中提及敏感路径触发误报。
 
-- **认证与密钥**（critical）：`/etc/shadow`、`/etc/sudoers`、`.ssh/id_rsa`、`.ssh/id_ed25519`
+- **认证与密钥**（critical）：`/etc/shadow`、`/etc/gshadow`、`/etc/sudoers`、`.ssh/id_rsa`、`.ssh/id_ed25519`
 - **认证与密钥**（high）：`.ssh/authorized_keys`
 - **系统配置**（high/medium）：`/etc/passwd`、`/etc/hosts`、`/etc/crontab`、`/etc/systemd/`、`/etc/ssh/sshd_config`
 - **危险目录**（critical/high）：`/boot/`、`/proc/sys/`、`/sys/`
@@ -766,12 +773,14 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 | 管道 passwd | `\| passwd` | 管道方式调用 passwd |
 | passwd 参数 | `passwd --stdin` | passwd --stdin 非交互式输入 |
 | 批量命令 | `chpasswd` | 批量密码修改 |
+| 批量命令 | `chgpasswd` | 批量修改组密码 |
 | 批量命令 | `newusers` | 批量用户添加 |
+| libuser | `lnewusers` | 批量用户添加（libuser） |
 | passwd 参数 | `passwd -d` | 删除密码 |
 | passwd 参数 | `passwd -l` | 锁定账户 |
 | libuser | `lpasswd` | lpasswd（libuser 版 passwd） |
 | 组密码 | `gpasswd`（非 -a/-d/-A） | 组密码管理 |
-| 通用命令 -p | `useradd/usermod/groupmod -p` | 通过 -p 参数设置密码 |
+| 通用命令 -p | `useradd/usermod/groupadd/groupmod -p` | 通过 -p 参数设置密码 |
 
 **扫描示例**：
 ```
@@ -799,7 +808,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 #### 2.6 用户删除授权检测
 
-删除系统用户的命令（`userdel`/`deluser`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作，否则拦截。
+删除系统用户/组的命令（`userdel`/`deluser`/`luserdel`/`groupdel`/`lgroupdel`）必须在 `action_history` 中存在 `ask_user_question` 操作且用户确认了操作，否则拦截。
 
 **扫描示例**：
 ```

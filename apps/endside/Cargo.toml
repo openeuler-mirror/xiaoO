@@ -1,0 +1,50 @@
+[package]
+name = "xiaoo-endside"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+tee_sdf = ["xiaoo-shared/tee_sdf"]
+
+[[bin]]
+name = "xiaoo"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+arboard = { workspace = true }
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap = { version = "4", features = ["derive"] }
+crossterm.workspace = true
+dirs = "6"
+futures-util.workspace = true
+llm-client = { path = "../../crates/llm-client" }
+lsp = { path = "../../crates/lsp" }
+operation_backend = { path = "../../crates/operation_backend" }
+ratatui.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+skill = { path = "../../crates/skill" }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio-util.workspace = true
+toml.workspace = true
+tool = { path = "../../crates/tool" }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-width = "0.1.14"
+uuid.workspace = true
+textwrap = "0.16"
+
+agent-contracts = { path = "../../crates/agent-contracts" }
+agent-types = { path = "../../crates/agent-types" }
+compact = { path = "../../crates/compact" }
+xiaoo-core = { path = "../../crates/core" }
+xiaoo-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile.workspace = true

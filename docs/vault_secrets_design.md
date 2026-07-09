@@ -269,12 +269,14 @@ pub fn init_secret_provider(secrets_path: PathBuf, use_sdf: bool)
 ### 3.5 API Key 解析优先级
 
 ```
-1. config.api_key (直接配置)
-       ↓
-2. llm_secrets.json (按需解密获取)
-       ↓
-3. 环境变量 (fallback)
+1. HTTP 请求 / CLI 参数中的 api_key 覆盖（仅 Daemon HTTP API 的 llm.api_key 字段或 CLI 的 --api-key 参数）
+        ↓
+2. llm_secrets.json (按需解密获取，通过 api_key_env 解析)
+        ↓
+3. 环境变量 (fallback，通过 api_key_env 解析)
 ```
+
+> **Note**: `[llm]` 配置段中没有 `api_key` 直接配置字段。API key 只能通过 `api_key_env` 指向环境变量或加密文件，或通过 HTTP 请求 / CLI 参数临时覆盖。
 
 ---
 
@@ -295,35 +297,45 @@ apps/vault/src/
 └── hsm.rs                          # HSM PKCS#11 接口（预留）
 ```
 
-### 4.2 apps/xiaoo-app
+### 4.2 apps/shared (Secrets 存储与按需解密)
 
-Secrets 存储和加载逻辑。
+Secrets 存储和按需解密逻辑在 `xiaoo-shared` crate 中，CLI/TUI/Daemon 共用。
 
 ```
-apps/xiaoo-app/src/
-├── llm_secrets.rs                 # 本地加密存储管理
-│                                 # - auto_save_from_env()
-│                                 # - load_llm_secrets_to_memory()
-│                                 # - encrypt_aes_gcm() / decrypt_aes_gcm()
-├── secrets.rs                     # SecretsManager (Daemon 使用)
-├── gateway/
-│   ├── mod.rs                    # 导出
-│   ├── decrypted_api_keys.rs     # SecretProvider 按需解密
-│   └── ...                      # 其他 gateway 模块
-└── tui/support/
-    └── config.rs                 # TUI 配置集成
+apps/shared/src/
+├── llm_secrets.rs                  # 本地加密存储管理
+│                                   # - auto_save_from_env()
+│                                   # - load_llm_secrets_to_memory()
+│                                   # - encrypt_aes_gcm() / decrypt_aes_gcm()
+│                                   # - init_on_demand_secret_provider()
+│                                   # - llm_secrets_path()
+└── gateway/
+    ├── mod.rs                      # 导出
+    └── decrypted_api_keys.rs       # SecretProvider 按需解密
+                                    # - init_secret_provider()
+                                    # - get_decrypted_api_key()
 ```
 
-### 4.3 各文件作用
+### 4.3 apps/endside (TUI 配置入口)
+
+```
+apps/endside/src/
+├── main.rs                         # TUI 启动入口，调用 config::load_llm_secrets_to_memory
+└── support/
+    └── config.rs                   # TUI 配置集成，重新导出 save_llm_secret /
+                                    # load_llm_secrets_to_memory，并读取 [vault] 段
+```
+
+### 4.4 各文件作用
 
 | 文件 | 作用 |
 |------|------|
-| `vault/src/whitebox.rs` | 白盒密钥，从代码碎片重建 master key |
-| `vault/src/sdf.rs` | SDF 国密接口封装，包含 `encrypt_secret`/`decrypt_secret` |
-| `vault/src/hsm.rs` | HSM PKCS#11 接口（预留） |
-| `llm_secrets.rs` | 加密/解密，加密文件读写 |
-| `decrypted_api_keys.rs` | `SecretProvider` 按需解密机制 |
-| `config.rs` | TUI 启动时初始化 `SecretProvider` |
+| `apps/vault/src/whitebox.rs` | 白盒密钥，从代码碎片重建 master key |
+| `apps/vault/src/sdf.rs` | SDF 国密接口封装，包含 `encrypt_secret`/`decrypt_secret` |
+| `apps/vault/src/hsm.rs` | HSM PKCS#11 接口（预留） |
+| `apps/shared/src/llm_secrets.rs` | 加密/解密、加密文件读写、按需 provider 初始化 |
+| `apps/shared/src/gateway/decrypted_api_keys.rs` | `SecretProvider` 按需解密机制 |
+| `apps/endside/src/support/config.rs` | TUI 启动时初始化 `SecretProvider`、读取 `[vault]` 配置 |
 
 ---
 
@@ -339,7 +351,7 @@ apps/xiaoo-app/src/
 │  ┌─────────────────────────────────────────────────────────────┐    │
 │  │                      xiaoo 进程                              │    │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  │    │
-│  │  │  xiaoo-tui   │  │  xiaoo       │  │ xiaoo-app    │  │    │
+│  │  │    xiaoo     │  │ xiaoo --cli  │  │ xiaoo-daemon │  │    │
 │  │  └───────────────┘  └───────────────┘  └───────────────┘  │    │
 │  │           │                │                  │          │    │
 │  │           └────────────────┼──────────────────┘          │    │
@@ -448,17 +460,17 @@ api_key_env = "OPENROUTER_API_KEY"
 
 ```bash
 # 默认编译 (WhiteBox + AES-GCM，仅测试环境)
-cargo build --release --bin xiaoo-tui
+cargo build --release -p xiaoo-endside --bin xiaoo
 
 # 启用 SDF 国密 (仅鲲鹏服务器)
-cargo build --release --bin xiaoo-tui --features tee_sdf
+cargo build --release -p xiaoo-endside --bin xiaoo --features tee_sdf
 ```
 
 #### 单元测试
 
 ```bash
 cargo test --package vault
-cargo test --package xiaoo-app
+cargo test --package xiaoo-shared
 ```
 
 #### 功能验证
@@ -469,7 +481,7 @@ export OPENROUTER_API_KEY='sk-or-v1-xxx'
 export USE_SDF=false
 
 # 运行 TUI (vault.enabled=true 时自动保存)
-./target/release/xiaoo-tui --config config.toml
+./target/release/xiaoo --config config.toml
 
 # 检查加密文件
 hexdump -C ~/.xiaoo/config/llm_secrets.json | head

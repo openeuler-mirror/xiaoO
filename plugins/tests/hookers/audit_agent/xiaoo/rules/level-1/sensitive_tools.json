@@ -12,5 +12,9 @@
     "intercepted_by": null,
     "reason": "xiaoo 无 eval/exec/system 类工具，无法测试"
   },
-  "notes": "规则待验证：xiaoo 框架中没有名为 eval、exec、system 的工具，这些规则适用于其他集成场景"
+  "notes": "规则待验证：xiaoo 框架中没有名为 eval、exec、system 的工具，这些规则适用于其他集成场景",
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "N/A"
+  }
 }

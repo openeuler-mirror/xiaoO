@@ -32,6 +32,11 @@ pub struct AgentLoopInput {
     pub stop_rules: Vec<LoopStopRule>,
     // User messages from gateway.
     pub pending_user_messages: Option<Arc<dyn PendingUserMessageSource>>,
+    /// When the turn originated from a slash command
+    /// (`~/.xiaoo/commands/<name>.md`), carries the command name + raw
+    /// arguments so the `*.Chat.command.before` hooker can fire with full
+    /// command metadata. `None` for free-form user input.
+    pub command_context: Option<agent_types::chat::CommandContext>,
 }
 
 impl AgentLoopInput {
@@ -47,6 +52,7 @@ impl AgentLoopInput {
             reasoning_effort: ReasoningEffort::Off,
             stop_rules: Vec::new(),
             pending_user_messages: None,
+            command_context: None,
         }
     }
 

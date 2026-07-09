@@ -1,0 +1,965 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::cli::config::FileConfig;
+use crate::cli::{
+    build_compression_pipeline, build_llm_provider, resolve_effective_context_window, CliConfig,
+    CliEventSink,
+};
+use agent_contracts::{LoopEventSink, SkillRegistry};
+use clap::Parser;
+use operation_backend::process_group::ProcessGroupCleanupGuard;
+use serde_json::Value;
+use skill::audit::{audit_skill_directory, SkillAuditOptions};
+use skill::registry::FileSkillRegistry;
+use skill::types::config::SkillsConfig;
+use xiaoo_shared::gateway::{
+    session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
+    HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
+    LlmRuntimeConfig, SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver,
+    SessionStore,
+};
+
+use agent_types::common::ids::AgentId;
+use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+use agent_types::hook::{HookerDefaultMode, HookerRegistryConfig};
+use agent_types::ReasoningEffort;
+
+const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/cli_default_system_prompt.txt");
+
+#[derive(Parser)]
+#[command(name = "xiaoo --cli", about = "XiaoO AgentLoop CLI")]
+struct Args {
+    /// Path to config file (default: ~/.config/xiaoo/config.toml)
+    #[arg(long, global = true)]
+    config: Option<String>,
+
+    /// Show intermediate results (turns, tool calls, tokens)
+    #[arg(long, global = true)]
+    debug: bool,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Run a single prompt through the AgentLoop
+    Run {
+        /// The prompt to send to the agent
+        #[arg(short, long)]
+        prompt: String,
+
+        /// LLM provider (overrides config file)
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Model name (overrides config file)
+        #[arg(long)]
+        model: Option<String>,
+
+        /// API key (overrides config file / env)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Custom API base URL (overrides config file)
+        #[arg(long)]
+        api_base: Option<String>,
+
+        /// System prompt
+        #[arg(
+            long,
+            default_value_t = DEFAULT_SYSTEM_PROMPT.trim_end_matches(['\r', '\n']).to_string()
+        )]
+        system: String,
+
+        /// Max turns per agent loop invocation
+        #[arg(long, default_value_t = 10)]
+        max_turns: u32,
+
+        /// Disable tool execution
+        #[arg(long)]
+        no_tools: bool,
+
+        /// Restrict to a comma-separated allowlist of tools
+        #[arg(long, value_delimiter = ',')]
+        tools: Option<Vec<String>>,
+
+        /// Reasoning effort: off, high, or max
+        #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
+        reasoning_effort: Option<ReasoningEffort>,
+    },
+    /// Manage skills
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommands,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum SkillCommands {
+    /// List all installed skills
+    List,
+    /// Show details of a specific skill
+    Show { name: String },
+    /// Run security audit on a skill directory
+    Audit { path: String },
+    /// Install a skill from a local directory or git URL
+    Install { source: String },
+    /// Remove an installed skill
+    Remove { name: String },
+}
+
+pub async fn run_cli_from_args<I, T>(args: I)
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let _cleanup_guard = ProcessGroupCleanupGuard;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+
+    let args = Args::parse_from(args);
+    let debug = args.debug;
+    let config_path = FileConfig::resolve_path(args.config.as_deref());
+
+    match args.command {
+        Command::Run {
+            prompt,
+            provider,
+            model,
+            api_key,
+            api_base,
+            system,
+            max_turns,
+            no_tools,
+            tools,
+            reasoning_effort,
+        } => {
+            if let Some(path) = config_path.as_ref() {
+                if let Err(error) = xiaoo_shared::llm_secrets::init_on_demand_secret_provider(path)
+                {
+                    eprintln!(
+                        "Failed to initialize LLM secrets from {}: {}",
+                        path.display(),
+                        error
+                    );
+                    std::process::exit(1);
+                }
+            }
+            let file_cfg = config_path
+                .as_ref()
+                .map(|path| FileConfig::load_from_path(path, debug))
+                .unwrap_or_default();
+            let llm = file_cfg.llm.as_ref();
+
+            let provider = provider
+                .or_else(|| llm.and_then(|l| l.provider.clone()))
+                .unwrap_or_else(|| "anthropic".into());
+            let model = model
+                .or_else(|| llm.and_then(|l| l.model.clone()))
+                .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+            let api_key = api_key.or_else(|| {
+                llm.and_then(|l| l.api_key_env.clone())
+                    .and_then(|env_name| {
+                        xiaoo_shared::gateway::get_decrypted_api_key(env_name.as_str())
+                    })
+            });
+            let api_key_env = llm.and_then(|l| l.api_key_env.clone());
+            let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
+            let reasoning_effort = reasoning_effort.unwrap_or_default();
+
+            let skills_config = resolve_skills_config_from_file(&file_cfg);
+
+            let config = CliConfig {
+                provider,
+                model,
+                api_key,
+                api_key_env,
+                api_base,
+                trace: file_cfg
+                    .trace
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+                system_prompt: system,
+                max_turns,
+                enable_tools: !no_tools,
+                visible_tools: tools.filter(|t| !t.is_empty()),
+                reasoning_effort,
+                kvcache_enabled: llm.and_then(|l| l.kvcache_enabled).unwrap_or(false),
+                kvcache_debug_enabled: llm.and_then(|l| l.kvcache_debug_enabled).unwrap_or(false),
+                compact: file_cfg.compact.unwrap_or_default(),
+                hooker: file_cfg.hooker.clone().unwrap_or(HookerRegistryConfig {
+                    default: HookerDefaultMode::None,
+                    ..HookerRegistryConfig::default()
+                }),
+                operation_backend: file_cfg.operation_backend.clone(),
+                skills_config,
+                subagent: file_cfg.subagent.clone(),
+            };
+
+            run_once(config, prompt, debug).await;
+        }
+        Command::Skill { command } => {
+            handle_skill_command(command);
+        }
+    }
+}
+
+fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> skill::SkillsConfig {
+    // Build complete skills_dirs with four levels
+    let mut skills_dirs = Vec::new();
+
+    // Priority 1: Project level (highest)
+    skills_dirs.push(PathBuf::from(".xiaoo/skills"));
+
+    // Priority 2: Config file user dirs (medium)
+    if let Some(skills_section) = file_cfg.skills.as_ref() {
+        if let Some(extra_dirs) = skills_section.dirs.as_ref() {
+            for dir in extra_dirs {
+                let path = PathBuf::from(dir);
+                // Avoid duplicates with default dirs
+                let dir_str = path.to_string_lossy();
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                    && dir_str != "/usr/lib/.xiaoo/skills"
+                {
+                    skills_dirs.push(path);
+                }
+            }
+        }
+    }
+
+    // Priority 3: User level
+    if let Some(home) = dirs::home_dir() {
+        skills_dirs.push(home.join(".xiaoo").join("skills"));
+    }
+
+    // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+    skills_dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
+
+    skill::SkillsConfig {
+        skills_dirs,
+        allow_scripts: file_cfg
+            .skills
+            .as_ref()
+            .and_then(|s| s.allow_scripts)
+            .unwrap_or(false),
+        ..skill::SkillsConfig::default()
+    }
+}
+
+fn resolve_all_skills_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    // Priority 1: Project level (highest)
+    dirs.push(PathBuf::from(".xiaoo/skills"));
+
+    // Priority 2: Config file user dirs (medium)
+    let file_cfg = FileConfig::load(None, false);
+    if let Some(skills) = file_cfg.skills.as_ref() {
+        if let Some(extra_dirs) = skills.dirs.as_ref() {
+            for dir in extra_dirs {
+                let path = PathBuf::from(dir);
+                // Avoid duplicates with project/user/system dirs
+                let dir_str = path.to_string_lossy();
+                if dir_str != ".xiaoo/skills"
+                    && !dir_str.ends_with("/.xiaoo/skills")
+                    && !dir_str.ends_with("\\.xiaoo\\skills")
+                    && dir_str != "/usr/lib/.xiaoo/skills"
+                {
+                    dirs.push(path);
+                }
+            }
+        }
+    }
+
+    // Priority 3: User level
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".xiaoo").join("skills"));
+    }
+
+    // Priority 4: System level (lowest) - for built-in skills like xiaoo-guardian
+    dirs.push(PathBuf::from("/usr/lib/.xiaoo/skills"));
+
+    dirs
+}
+
+fn build_skills_config() -> SkillsConfig {
+    let skills_dirs = resolve_all_skills_dirs();
+
+    // Get allow_scripts from config file
+    let file_cfg = FileConfig::load(None, false);
+    let allow_scripts = file_cfg
+        .skills
+        .as_ref()
+        .and_then(|s| s.allow_scripts)
+        .unwrap_or(false);
+
+    SkillsConfig {
+        skills_dirs,
+        allow_scripts,
+        ..SkillsConfig::default()
+    }
+}
+
+fn project_skills_dir() -> PathBuf {
+    PathBuf::from(".xiaoo/skills")
+}
+
+fn user_skills_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".xiaoo").join("skills"))
+}
+
+fn system_skills_dir() -> PathBuf {
+    PathBuf::from("/usr/lib/.xiaoo/skills")
+}
+
+fn default_skills_config() -> SkillsConfig {
+    build_skills_config()
+}
+
+fn handle_skill_command(command: SkillCommands) {
+    match command {
+        SkillCommands::List => {
+            let registry = FileSkillRegistry::new(&default_skills_config());
+            let skills = registry.list_skills();
+            if skills.is_empty() {
+                println!("No skills installed.");
+                let dirs = resolve_all_skills_dirs();
+                for d in &dirs {
+                    println!("  Skills directory: {}", d.display());
+                }
+                return;
+            }
+            println!("{:<20} {}", "NAME", "DESCRIPTION");
+            println!("{:<20} {}", "----", "-----------");
+            for s in &skills {
+                println!("{:<20} {}", s.skill_id, s.description);
+            }
+            println!("\n{} skill(s) found.", skills.len());
+        }
+        SkillCommands::Show { name } => {
+            let registry = FileSkillRegistry::new(&default_skills_config());
+            match registry.get_skill(&name) {
+                Some(spec) => {
+                    println!("Skill: {}", spec.skill_id());
+                    println!("Description: {}", spec.description());
+                    if !spec.arguments().is_empty() {
+                        println!("Arguments: {}", spec.arguments().join(", "));
+                    }
+                    if let Some(hint) = spec.argument_hint() {
+                        println!("Argument hint: {}", hint);
+                    }
+                    println!("Context: {:?}", spec.context());
+                    println!("User invocable: {}", spec.user_invocable());
+                    if let Some(loc) = spec.location() {
+                        println!("Location: {}", loc.display());
+                    }
+                    println!("\n--- Prompt ---\n{}", spec.full_prompt());
+                }
+                None => {
+                    eprintln!("Skill '{}' not found.", name);
+                    std::process::exit(1);
+                }
+            }
+        }
+        SkillCommands::Audit { path } => {
+            let dir = PathBuf::from(&path);
+            if !dir.is_dir() {
+                eprintln!("Not a directory: {}", path);
+                std::process::exit(1);
+            }
+            let report = audit_skill_directory(&dir, &SkillAuditOptions::default());
+            println!("Audited: {}", dir.display());
+            println!("Files scanned: {}", report.files_scanned);
+            if report.is_clean() {
+                println!("Result: CLEAN");
+            } else {
+                println!("Result: {} issue(s) found:", report.findings.len());
+                for (i, f) in report.findings.iter().enumerate() {
+                    println!("  {}. {}", i + 1, f);
+                }
+                std::process::exit(1);
+            }
+        }
+        SkillCommands::Install { source } => {
+            let is_git = source.ends_with(".git")
+                || source.starts_with("https://")
+                || source.starts_with("http://")
+                || source.starts_with("git@")
+                || source.starts_with("file://");
+
+            // Extract skill name first (before cloning/downloading)
+            let skill_name = if is_git {
+                extract_repo_name(&source)
+            } else {
+                let p = PathBuf::from(&source);
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .strip_suffix(".git")
+                    .unwrap_or(p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"))
+                    .to_string()
+            };
+
+            if skill_name.contains("..") || skill_name.contains('/') || skill_name.contains('\\') {
+                eprintln!("Invalid skill name: {}", skill_name);
+                std::process::exit(1);
+            }
+
+            // Check all skill directories for existing skill BEFORE cloning
+            let project_dest = project_skills_dir().join(&skill_name);
+            let user_dest = user_skills_dir().as_ref().map(|d| d.join(&skill_name));
+            let system_dest = system_skills_dir().join(&skill_name);
+
+            // Check config file directories
+            let config_dests = {
+                let file_cfg = FileConfig::load(None, false);
+                file_cfg
+                    .skills
+                    .as_ref()
+                    .and_then(|s| s.dirs.as_ref())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&skill_name))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+
+            // Check project level first (highest priority)
+            if project_dest.exists() {
+                eprintln!(
+                    "Skill '{}' already installed at {} (project level, highest priority)",
+                    skill_name,
+                    project_dest.display()
+                );
+                std::process::exit(1);
+            }
+
+            // Check config file directories (medium priority)
+            for config_dest in &config_dests {
+                if config_dest.exists() {
+                    eprintln!(
+                        "Skill '{}' already installed at {} (config directory, medium priority)",
+                        skill_name,
+                        config_dest.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            // Check user level
+            if let Some(ref user_d) = user_dest {
+                if user_d.exists() {
+                    eprintln!(
+                        "Skill '{}' already installed at {} (user level)",
+                        skill_name,
+                        user_d.display()
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            // Check system level (lowest priority, for built-in skills only)
+            if system_dest.exists() {
+                eprintln!(
+                    "Skill '{}' already installed at {} (system level, built-in skill)",
+                    skill_name,
+                    system_dest.display()
+                );
+                std::process::exit(1);
+            }
+
+            // Now clone/copy the source
+            let src_dir = if is_git {
+                let tmp = std::env::temp_dir().join(&skill_name);
+                let _ = std::fs::remove_dir_all(&tmp);
+                println!("Cloning {} ...", source);
+                let status = std::process::Command::new("git")
+                    .args([
+                        "clone",
+                        "--depth",
+                        "1",
+                        &source,
+                        tmp.to_str().unwrap_or("."),
+                    ])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        eprintln!("git clone failed: {}", s);
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to run git: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                let _ = std::fs::remove_dir_all(tmp.join(".git"));
+                tmp
+            } else {
+                let p = PathBuf::from(&source);
+                if !p.is_dir() {
+                    eprintln!("Not a directory: {}", source);
+                    std::process::exit(1);
+                }
+                p
+            };
+
+            // Validate that source directory contains a valid skill (SKILL.md or SKILL.toml)
+            let has_manifest =
+                src_dir.join("SKILL.md").exists() || src_dir.join("SKILL.toml").exists();
+            if !has_manifest {
+                eprintln!("Error: Source directory is not a valid skill directory.");
+                eprintln!("A valid skill directory must contain either SKILL.md or SKILL.toml.");
+                if is_git {
+                    let _ = std::fs::remove_dir_all(&src_dir);
+                }
+                std::process::exit(1);
+            }
+
+            // Install to user directory by default
+            // Users can manually copy to project level or config directories to override
+            // System level (/usr/lib/.xiaoo/skills) is reserved for built-in skills only
+            let dest = user_dest.unwrap_or_else(|| project_skills_dir().join(&skill_name));
+
+            // Audit is currently disabled by default; use `xiaoo skill audit <path>` for manual checks.
+
+            if let Err(e) = copy_dir_recursive(&src_dir, &dest) {
+                eprintln!("Failed to install: {}", e);
+                if is_git {
+                    let _ = std::fs::remove_dir_all(&src_dir);
+                }
+                std::process::exit(1);
+            }
+            if is_git {
+                let _ = std::fs::remove_dir_all(&src_dir);
+            }
+            println!("Installed skill '{}' to {}", skill_name, dest.display());
+        }
+        SkillCommands::Remove { name } => {
+            if name.contains("..") || name.contains('/') || name.contains('\\') {
+                eprintln!("Invalid skill name: {}", name);
+                std::process::exit(1);
+            }
+
+            let project_dir = project_skills_dir().join(&name);
+            let user_dir = user_skills_dir().as_ref().map(|d| d.join(&name));
+            let system_dir = system_skills_dir().join(&name);
+
+            // Get config file directories
+            let config_dirs = {
+                let file_cfg = FileConfig::load(None, false);
+                file_cfg
+                    .skills
+                    .as_ref()
+                    .and_then(|s| s.dirs.as_ref())
+                    .map(|dirs| {
+                        dirs.iter()
+                            .map(|d| PathBuf::from(d).join(&name))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+
+            // Priority: remove from highest priority level first
+            // 1. Project level (highest)
+            if project_dir.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(&project_dir) {
+                    eprintln!("Failed to remove from project: {}", e);
+                    std::process::exit(1);
+                }
+                println!(
+                    "Removed skill '{}' from {} (project level, highest priority).",
+                    name,
+                    project_dir.display()
+                );
+
+                // Warn if config dirs still exist
+                for config_dir in &config_dirs {
+                    if config_dir.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (config directory).",
+                            name,
+                            config_dir.display()
+                        );
+                    }
+                }
+
+                // Warn if user level still exists
+                if let Some(ref user_d) = user_dir {
+                    if user_d.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (user level).",
+                            name,
+                            user_d.display()
+                        );
+                    }
+                }
+
+                // Warn if system level still exists
+                if system_dir.is_dir() {
+                    eprintln!(
+                        "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                        name,
+                        system_dir.display()
+                    );
+                }
+                return;
+            }
+
+            // 2. Config directories (medium)
+            for config_dir in &config_dirs {
+                if config_dir.is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(config_dir) {
+                        eprintln!("Failed to remove from config directory: {}", e);
+                        std::process::exit(1);
+                    }
+                    println!(
+                        "Removed skill '{}' from {} (config directory).",
+                        name,
+                        config_dir.display()
+                    );
+
+                    // Warn if other config dirs or user/system still exist
+                    for other_config_dir in &config_dirs {
+                        if other_config_dir != config_dir && other_config_dir.is_dir() {
+                            eprintln!(
+                                "Warning: Skill '{}' still exists at {} (other config directory).",
+                                name,
+                                other_config_dir.display()
+                            );
+                        }
+                    }
+
+                    if let Some(ref user_d) = user_dir {
+                        if user_d.is_dir() {
+                            eprintln!(
+                                "Warning: Skill '{}' still exists at {} (user level).",
+                                name,
+                                user_d.display()
+                            );
+                        }
+                    }
+
+                    if system_dir.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                            name,
+                            system_dir.display()
+                        );
+                    }
+                    return;
+                }
+            }
+
+            // 3. User level
+            if let Some(ref user_d) = user_dir {
+                if user_d.is_dir() {
+                    if let Err(e) = std::fs::remove_dir_all(user_d) {
+                        eprintln!("Failed to remove from user directory: {}", e);
+                        std::process::exit(1);
+                    }
+                    println!(
+                        "Removed skill '{}' from {} (user level).",
+                        name,
+                        user_d.display()
+                    );
+
+                    // Warn if system level still exists
+                    if system_dir.is_dir() {
+                        eprintln!(
+                            "Warning: Skill '{}' still exists at {} (system level, built-in skill).",
+                            name,
+                            system_dir.display()
+                        );
+                    }
+                    return;
+                }
+            }
+
+            // 4. System level (built-in skills only - requires root privileges to remove)
+            if system_dir.is_dir() {
+                eprintln!(
+                    "Skill '{}' is a built-in skill at {} (system level).",
+                    name,
+                    system_dir.display()
+                );
+                eprintln!("Built-in skills require root privileges to remove.");
+                eprintln!("To remove: sudo rm -rf {}", system_dir.display());
+                std::process::exit(1);
+            }
+
+            // Skill not found anywhere
+            eprintln!("Skill '{}' not found in any skills directory.", name);
+            eprintln!("Checked directories:");
+            eprintln!(
+                "  - {} (project level, highest priority)",
+                project_dir.display()
+            );
+            for config_dir in &config_dirs {
+                eprintln!("  - {} (config directory)", config_dir.display());
+            }
+            if let Some(ref user_d) = user_dir {
+                eprintln!("  - {} (user level)", user_d.display());
+            }
+            eprintln!(
+                "  - {} (system level, built-in skills)",
+                system_dir.display()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn extract_repo_name(url: &str) -> String {
+    let name = url.trim_end_matches('/').rsplit('/').next().unwrap_or(url);
+    let name = name.rsplit(':').next().unwrap_or(name);
+    let name = name.rsplit('/').next().unwrap_or(name);
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    if name.is_empty() {
+        format!("skill-{}", std::process::id())
+    } else {
+        name.to_string()
+    }
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    reject_nested_copy(src, dest)?;
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dst = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst)?;
+        } else {
+            std::fs::copy(entry.path(), dst)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_nested_copy(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    let src = src.canonicalize()?;
+    let dest_parent = dest.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let dest_name = dest.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no name")
+    })?;
+    let dest_abs = dest_parent
+        .canonicalize()
+        .unwrap_or_else(|_| dest_parent.to_path_buf())
+        .join(dest_name);
+
+    if dest_abs.starts_with(&src) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination must not be inside source directory",
+        ));
+    }
+    Ok(())
+}
+
+async fn run_once(config: CliConfig, prompt: String, debug: bool) {
+    if debug {
+        eprintln!(
+            "[config] provider={}, model={}, max_turns={}",
+            config.provider, config.model, config.max_turns
+        );
+    }
+
+    // 1. LLM provider (shared with compression pipeline)
+    let llm_provider = match build_llm_provider(&config, Some("defaultagent".into())) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to create LLM provider: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // 2. Compression pipeline
+    let compression_pipeline = match build_compression_pipeline(&config, &llm_provider) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to build compression pipeline: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // 3. Session runtime config
+    let total_budget = resolve_effective_context_window(&config, &llm_provider).await;
+    let reserved_for_output = total_budget / 10;
+    let reserved_for_system = total_budget / 20;
+
+    let runtime_config = HostedSessionRuntimeConfig {
+        descriptor: SessionRuntimeDescriptor {
+            agent_id: AgentId("defaultagent".into()),
+            model: config.model.clone(),
+            llm: Some(LlmRuntimeConfig {
+                provider: Some(config.provider.clone()),
+                model: Some(config.model.clone()),
+                api_base: config.api_base.clone(),
+                api_key_env: config.api_key_env.clone(),
+                api_key: None,
+            }),
+            system_prompt: config.system_prompt.clone(),
+            feature_flags: FeatureFlags {
+                tool_execution: config.enable_tools,
+                kvcache_enabled: config.kvcache_enabled,
+                kvcache_debug_enabled: config.kvcache_debug_enabled,
+                ..FeatureFlags::default()
+            },
+            token_budget: TokenBudgetConfig {
+                total_budget,
+                reserved_for_output,
+                reserved_for_system,
+                hard_limit_ratio: 0.9,
+            },
+            workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            max_turns: Some(config.max_turns),
+            subagent_roles: config
+                .subagent
+                .iter()
+                .map(|(role_id, cfg)| {
+                    (
+                        role_id.clone(),
+                        SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: cfg.description.clone(),
+                            prompt: cfg.prompt.clone(),
+                            max_turns: cfg.max_turns,
+                            tools: cfg.tools.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        },
+        trace: config.trace.clone(),
+        provider: config.provider.clone(),
+        model: config.model.clone(),
+        api_key: config.api_key.clone(),
+        api_key_env: config.api_key_env.clone(),
+        api_base: config.api_base.clone(),
+        visible_tool_names: if !config.enable_tools {
+            Some(Vec::new())
+        } else {
+            config.visible_tools.clone()
+        },
+        compression_pipeline: Some(compression_pipeline),
+        llm_provider: Some(llm_provider),
+        hooker: config.hooker.clone(),
+        lsp_registry: None,
+        operation_backend: config.operation_backend.clone(),
+        skills_config: config.skills_config.clone(),
+        subagent_roles: config
+            .subagent
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    xiaoo_shared::gateway::SubagentRoleConfigEntry {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
+            })
+            .collect(),
+    };
+
+    // 4. Bindings (CliEventSink for debug output)
+    let loop_event_sink: Option<Arc<dyn LoopEventSink>> =
+        debug.then(|| Arc::new(CliEventSink::new()) as Arc<dyn LoopEventSink>);
+    let bindings = SessionRuntimeBindings {
+        loop_event_sink,
+        tool_event_sink: None,
+        interaction_handle: None,
+        channel_file_sender: None,
+        pending_user_messages: None,
+        cancel_token: None,
+    };
+
+    // 5. Bootstrap gateway
+    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let resolver: Arc<dyn SessionRuntimeResolver> =
+        Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
+    let deps = match AppBootstrap::from_session_components_with_hooks(
+        store,
+        resolver,
+        config.hooker.clone(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Failed to bootstrap session: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // 6. Turn request
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let request = AppTurnRequest {
+        session_id: session_id.clone(),
+        entry: GatewayEntryContext::cli(),
+        channel: None,
+        message_id: None,
+        conversation_id: session_id.clone(),
+        sender_id: "cli-user".into(),
+        text: prompt,
+        channel_instance_id: None,
+        channel_identity_prompt: None,
+        reply_to_message_id: None,
+        root_message_id: None,
+        mentions: Vec::new(),
+        reasoning_effort: config.reasoning_effort,
+        llm: None,
+        command_context: None,
+    };
+
+    // 7. Run turn via gateway session service, then explicitly close the
+    // session so SessionClosed lifecycle hookers fire in CLI mode as well.
+    let turn_result = deps.session_service.run_turn(request).await;
+    if let Err(err) = deps
+        .session_control_plane
+        .force_close_session(&session_id)
+        .await
+    {
+        eprintln!("[warn] failed to close session: {}", err);
+    }
+
+    match turn_result {
+        Ok(result) => {
+            if !result.raw_reply.is_empty() {
+                println!("{}", result.raw_reply);
+            }
+        }
+        Err(e) => {
+            eprintln!("[error] {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_dir_recursive;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn copy_dir_rejects_destination_inside_source() {
+        let temp = tempdir().unwrap();
+        let src = temp.path().join("skills");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("SKILL.md"), "test").unwrap();
+
+        let err = copy_dir_recursive(&src, &src.join("nested")).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+}

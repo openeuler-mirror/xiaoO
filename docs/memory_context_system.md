@@ -126,7 +126,6 @@ Compression-related options are also described in [daemon_config.md](./daemon_co
 
 | Config | Meaning |
 | --- | --- |
-| `[llm].context_window` | optional explicit total context budget override for runtime token budgeting and compression |
 | `[compact].warning_ratio` | warning threshold |
 | `[compact].auto_compact_ratio` | context-collapse threshold |
 | `[compact].blocking_ratio` | final pre-overflow threshold |
@@ -144,7 +143,6 @@ Example:
 provider = "openrouter"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
-context_window = 128000
 max_tokens = 8192
 
 [compact]
@@ -168,10 +166,10 @@ Important boundary:
 
 ### 1. Enable adaptive compression
 
-If you only need the built-in context-management path, configure `[compact]` and optionally `[llm].context_window`. This is already wired into:
+If you only need the built-in context-management path, configure `[compact]`. The context window is resolved dynamically (no explicit config field). This is already wired into:
 
-- `apps/xiaoo-app/src/daemon_runtime.rs`
-- `apps/xiaoo-app/src/cli/mod.rs`
+- `apps/serverside/src/daemon_runtime.rs`
+- `apps/endside/src/cli/mod.rs`
 - `crates/core/src/agent_loop.rs`
 
 Once configured, compression runs automatically before each turn.

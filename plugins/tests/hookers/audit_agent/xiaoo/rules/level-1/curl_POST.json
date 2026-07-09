@@ -11,5 +11,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent",
     "reason": "命中用户敏感动作规则: 使用 curl POST 请求发送数据到外部服务器"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "curl"
   }
 }

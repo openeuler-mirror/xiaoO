@@ -278,23 +278,31 @@ mod wrapper_tests {
         fn new(registry: MockHookerRegistry) -> Arc<Self> {
             Arc::new(Self {
                 registry,
-                trace_recorder: TestTraceRecorder,
+                trace_recorder: TestTraceRecorder::default(),
                 agent_context: TestAgentContext::default(),
             })
         }
+
+        fn trace_kinds(&self) -> Vec<agent_contracts::TraceSpanKind> {
+            self.trace_recorder.kinds.lock().unwrap().clone()
+        }
     }
 
-    struct TestTraceRecorder;
+    #[derive(Default)]
+    struct TestTraceRecorder {
+        kinds: Mutex<Vec<agent_contracts::TraceSpanKind>>,
+    }
 
     #[async_trait]
     impl agent_contracts::TraceRecorder for TestTraceRecorder {
         async fn begin_span(
             &self,
-            _kind: agent_contracts::TraceSpanKind,
+            kind: agent_contracts::TraceSpanKind,
             _name: std::borrow::Cow<'static, str>,
             _fields: serde_json::Value,
         ) -> agent_contracts::TraceSpanHandle {
-            agent_contracts::TraceSpanHandle::new("", "", None)
+            self.kinds.lock().unwrap().push(kind);
+            agent_contracts::TraceSpanHandle::new("trace", "span", None)
         }
 
         async fn update_span(
@@ -698,6 +706,32 @@ mod wrapper_tests {
         assert_eq!(result.message.text.as_deref(), Some("direct"));
         let captured = mock.last_request().unwrap();
         assert_eq!(extract_text(&captured), "hello");
+    }
+
+    #[tokio::test]
+    async fn scoped_runtime_view_records_llm_call_on_each_runtime() {
+        let mock = MockLlmProvider::ok(make_response("ok"));
+        let wrapper = wrapper_without_runtime(mock);
+        let runtime_a = TestRuntimeView::new(MockHookerRegistry::with_hookers(vec![]));
+        let runtime_b = TestRuntimeView::new(MockHookerRegistry::with_hookers(vec![]));
+
+        wrapper
+            .complete_scoped(Some(runtime_a.as_ref()), &make_request("a"))
+            .await
+            .unwrap();
+        wrapper
+            .complete_scoped(Some(runtime_b.as_ref()), &make_request("b"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            runtime_a.trace_kinds(),
+            vec![agent_contracts::TraceSpanKind::LlmCall]
+        );
+        assert_eq!(
+            runtime_b.trace_kinds(),
+            vec![agent_contracts::TraceSpanKind::LlmCall]
+        );
     }
 
     /// An empty registry means no hooks fire; provider receives the original request.

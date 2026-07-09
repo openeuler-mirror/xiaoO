@@ -14,7 +14,10 @@ pub mod trace;
 pub use compression::{CompressionError, CompressionPipeline};
 pub use context::{PromptBuildInput, PromptBuilder, TokenBudgetPolicy, TokenEstimator};
 pub use events::{LoopEventSink, ToolEventSink};
-pub use hook::{HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder};
+pub use hook::{
+    HookActionSink, HookInput, HookResult, Hooker, HookerRegistry, HookerRegistryBuilder,
+    MAX_ACTION_DEPTH,
+};
 pub use interaction::InteractionHandle;
 pub use llm::{LlmProvider, ProviderCapabilities};
 pub use lsp::LspProvider;

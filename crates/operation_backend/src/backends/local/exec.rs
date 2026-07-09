@@ -8,7 +8,7 @@ use agent_contracts::backend::{
     OperationError,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -77,27 +77,33 @@ impl OperationExec for LocalExec {
             crate::process_group::register_pgid(pgid);
         }
 
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| OperationError::ExecutionFailed {
                 message: "failed to capture stdout".to_string(),
             })?;
-        let mut stderr = child
+        let stderr = child
             .stderr
             .take()
             .ok_or_else(|| OperationError::ExecutionFailed {
                 message: "failed to capture stderr".to_string(),
             })?;
 
-        let stdout_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).await.map(|_| bytes)
-        });
-        let stderr_task = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).await.map(|_| bytes)
-        });
+        // Drain stdout/stderr into shared buffers while the child runs. We use
+        // incremental chunked reads into an `Arc<Mutex<Vec<u8>>>` (rather than
+        // `read_to_end` into a task-owned `Vec`) so that any output captured
+        // *before* a reader task is aborted is preserved. This matters when a
+        // background process spawned by the command (e.g. `foo &`) inherits the
+        // bash stdout pipe: that process keeps the pipe's write end open, so
+        // `read_to_end` would never observe EOF and the reader task would hang
+        // forever. The shared buffer lets us return the output captured up to
+        // that point instead of dropping it (or deadlocking) when we abort the
+        // reader below.
+        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut stdout_task = spawn_pipe_drainer(stdout, stdout_buf.clone());
+        let mut stderr_task = spawn_pipe_drainer(stderr, stderr_buf.clone());
 
         let (exit_code, timed_out) = if let Some(timeout_ms) = request.timeout_ms {
             match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
@@ -136,22 +142,28 @@ impl OperationExec for LocalExec {
             (status.code(), false)
         };
 
-        let stdout = stdout_task
-            .await
-            .map_err(|error| OperationError::ExecutionFailed {
-                message: error.to_string(),
-            })?
-            .map_err(|error| OperationError::ExecutionFailed {
-                message: error.to_string(),
-            })?;
-        let stderr = stderr_task
-            .await
-            .map_err(|error| OperationError::ExecutionFailed {
-                message: error.to_string(),
-            })?
-            .map_err(|error| OperationError::ExecutionFailed {
-                message: error.to_string(),
-            })?;
+        // After the child has exited (or the overall timeout fired and we
+        // killed the process group), give the reader tasks a short, bounded
+        // grace period to drain any remaining buffered output and reach EOF.
+        // On timeout, the group kill ensures lingering background processes
+        // release the pipe, so EOF arrives quickly. On a normal exit where a
+        // background process still holds the pipe, the grace bounds the wait so
+        // we never hang forever; whatever was captured into the shared buffers
+        // is returned as partial output. Previously the reader `.await`s here
+        // were unbounded, which deadlocked in the lingering-background-process
+        // case described above.
+        let _ = timeout(DRAIN_GRACE, async {
+            let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        })
+        .await;
+        // Stop the reader tasks regardless of whether the grace drain finished,
+        // so they cannot keep a background writer's pipe open or outlive the
+        // request. Any output already captured remains in the shared buffers.
+        stdout_task.abort();
+        stderr_task.abort();
+
+        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|e| e.into_inner()));
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|e| e.into_inner()));
 
         Ok(ExecResult {
             stdout,
@@ -160,6 +172,60 @@ impl OperationExec for LocalExec {
             timed_out,
         })
     }
+}
+
+/// Maximum time to wait for the stdout/stderr reader tasks to finish after the
+/// child process has exited (or been killed).
+///
+/// This is a safety bound only: in the common case the readers observe EOF as
+/// soon as the child exits and complete immediately, adding no latency. The
+/// bound exists for the case where a background process spawned by the command
+/// (`foo &`) inherited the pipe and keeps its write end open, which would
+/// otherwise cause the readers to block forever waiting for an EOF that never
+/// arrives. One second is enough to drain anything already buffered in the
+/// kernel pipe (typically 64 KiB) while still failing fast when the pipe is
+/// genuinely held open by a lingering background writer.
+const DRAIN_GRACE: Duration = Duration::from_millis(1000);
+
+/// Spawn a task that copies a child process pipe (`ChildStdout`/
+/// `ChildStderr`) into a shared buffer using incremental reads.
+///
+/// Using incremental chunked reads into an `Arc<Mutex<Vec<u8>>>` (rather than
+/// `read_to_end` into a task-owned `Vec`) means that if the task is aborted
+/// while still running, any output already captured survives in the shared
+/// buffer and can be returned as partial output. With `read_to_end` the buffer
+/// is owned by the task and is lost on abort, which would discard the entire
+/// captured stream when a lingering background writer forces us to abort.
+fn spawn_pipe_drainer<R>(reader: R, sink: Arc<Mutex<Vec<u8>>>) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut reader = reader;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut guard = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.extend_from_slice(&chunk[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    })
+}
+
+#[cfg(all(test, unix))]
+fn test_workspace_root(prefix: &str, name: &str) -> std::path::PathBuf {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let root = std::env::temp_dir().join(format!("{prefix}{name}-{}-{millis}", std::process::id()));
+    let _ = std::fs::remove_dir_all(root.as_path());
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    root
 }
 
 struct LocalCommandSpec {
@@ -239,7 +305,13 @@ mod linux_bubblewrap_tests {
         if !has_bwrap() {
             return;
         }
-        let root = test_root("fs");
+        // Serialize against the process-group unit tests: `exec` registers real
+        // child pgids in the shared global registry, and `kill_all_process_groups`
+        // would otherwise clear it (and signal our children) mid-test.
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-bubblewrap-", "fs");
         let workspace = root.join("workspace");
         let writable = workspace.join("tmp");
         let outside = root.join("outside");
@@ -320,7 +392,10 @@ mod linux_bubblewrap_tests {
         if !has_bwrap() {
             return;
         }
-        let root = test_root("net");
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-bubblewrap-", "net");
         let workspace = root.join("workspace");
         let writable = workspace.join("tmp");
         std::fs::create_dir_all(writable.as_path()).unwrap();
@@ -393,21 +468,116 @@ mod linux_bubblewrap_tests {
             .unwrap_or(false)
     }
 
-    fn test_root(name: &str) -> PathBuf {
-        let millis = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let root = std::env::temp_dir().join(format!(
-            "xiaoo-bubblewrap-{name}-{}-{millis}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(root.as_path());
-        std::fs::create_dir_all(root.join("workspace")).unwrap();
-        root
-    }
-
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pipe_drain_tests {
+    use crate::backends::local::factory::local_backend;
+    use agent_contracts::backend::{capability::exec::ExecRequest, BackendPath};
+    use std::time::{Duration, Instant};
+
+    // Regression test for the stdout-pipe deadlock: a background process spawned
+    // by the script (`sleep 3 &`) inherits bash's piped stdout and keeps its
+    // write end open for longer than the exec timeout. The old implementation
+    // only wrapped `child.wait()` in the timeout; bash exits almost instantly,
+    // then the subsequent unbounded `stdout_task.await` blocked until the
+    // background `sleep` finally exited (~3s) and released the pipe. With the
+    // fix, the post-exit drain is bounded by `DRAIN_GRACE` (1s), so exec returns
+    // promptly with the partial output captured before the drain gave up.
+    #[test]
+    fn exec_returns_promptly_when_background_process_holds_stdout_pipe() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-pipe-", "pipe");
+        let workspace = root.join("workspace");
+
+        let backend =
+            local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let command = "echo main-output; sleep 3 &";
+        let start = Instant::now();
+        let result = runtime.block_on(async {
+            backend
+                .exec()
+                .exec(ExecRequest {
+                    command: command.to_string(),
+                    args: vec![],
+                    shell: Some("bash".to_string()),
+                    cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                    timeout_ms: Some(2_000),
+                    env: None,
+                })
+                .await
+                .unwrap()
+        });
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.timed_out, "should not hit the overall timeout");
+        let out = String::from_utf8_lossy(result.stdout.as_slice());
+        assert!(out.contains("main-output"), "captured stdout was: {out:?}");
+        // The background `sleep 3` keeps the pipe open for 3s. The fix must
+        // return within the ~1s drain grace, well before that — the old impl
+        // returned only after ~3s.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "exec took {elapsed:?}, expected to return within the drain grace (~1s)"
+        );
+
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    // When the background writer releases the pipe on its own *before* the
+    // drain grace elapses, the reader observes EOF normally and we capture the
+    // full stream including the background writer's output.
+    #[test]
+    fn exec_captures_background_output_when_writer_exits_within_grace() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-pipe-", "bg");
+        let workspace = root.join("workspace");
+
+        let backend =
+            local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // The background subshell writes three lines over ~0.3s then exits,
+        // releasing the inherited stdout pipe. All of it should be captured.
+        let command = "echo main; ( for i in 1 2 3; do echo bg-$i; sleep 0.1; done ) & echo done";
+        let result = runtime.block_on(async {
+            backend
+                .exec()
+                .exec(ExecRequest {
+                    command: command.to_string(),
+                    args: vec![],
+                    shell: Some("bash".to_string()),
+                    cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                    timeout_ms: Some(5_000),
+                    env: None,
+                })
+                .await
+                .unwrap()
+        });
+
+        assert_eq!(result.exit_code, Some(0));
+        let out = String::from_utf8_lossy(result.stdout.as_slice());
+        assert!(out.contains("main"), "stdout was: {out:?}");
+        assert!(out.contains("done"), "stdout was: {out:?}");
+        assert!(out.contains("bg-1"), "stdout was: {out:?}");
+        assert!(out.contains("bg-3"), "stdout was: {out:?}");
+
+        let _ = std::fs::remove_dir_all(root.as_path());
     }
 }

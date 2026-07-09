@@ -1,11 +1,11 @@
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_types::hook::HookPointId;
-use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
+use agent_types::hook::{HookInvokeInput, HookInvokeMetadata, HookInvokePrimary};
 use agent_types::llm::{
     ErrorLlmHookInput, ErrorLlmHookResult, LlmError, LlmRequest, LlmResponse, PostLlmHookInput,
     PostLlmHookResult, PreLlmHookInput, PreLlmHookResult, StreamChunk,
@@ -25,7 +25,7 @@ pub struct LlmProviderWrapper {
     inner: Arc<dyn LlmProvider>,
     /// Present only when hooks are enabled.
     agent_id: Option<String>,
-    runtime_view: RwLock<Option<Arc<dyn RuntimeView>>>,
+    default_runtime_view: Option<Arc<dyn RuntimeView>>,
 }
 
 impl LlmProviderWrapper {
@@ -40,24 +40,15 @@ impl LlmProviderWrapper {
         Self {
             inner,
             agent_id,
-            runtime_view: RwLock::new(runtime_view),
+            default_runtime_view: runtime_view,
         }
     }
 
-    /// Injects a `RuntimeView` into this wrapper after construction, enabling
-    /// hooks.  Intended to be called once the runtime view is available (e.g.
-    /// after `AppRuntimeFactory::build`).
-    pub fn set_runtime_view(&self, runtime_view: Arc<dyn RuntimeView>) {
-        if let Ok(mut guard) = self.runtime_view.write() {
-            *guard = Some(runtime_view);
-        }
-    }
+    /// Deprecated compatibility no-op. Runtime context is now supplied per call.
+    pub fn set_runtime_view(&self, _runtime_view: Arc<dyn RuntimeView>) {}
 
-    pub fn clear_runtime_view(&self) {
-        if let Ok(mut guard) = self.runtime_view.write() {
-            *guard = None;
-        }
-    }
+    /// Deprecated compatibility no-op. Runtime context is now supplied per call.
+    pub fn clear_runtime_view(&self) {}
 
     /// Returns the raw inner provider that this wrapper delegates to.
     pub fn inner(&self) -> Arc<dyn LlmProvider> {
@@ -70,19 +61,11 @@ impl LlmProviderWrapper {
             .map(|id| HookPointId(format!("{}.Llm.complete.{}", id, stage)))
     }
 
-    fn runtime_view(&self) -> Option<Arc<dyn RuntimeView>> {
-        let guard = self.runtime_view.read().unwrap();
-        guard.as_ref().cloned()
-    }
-
     async fn run_pre_hook_sequence(
         &self,
+        runtime_view: Option<&dyn RuntimeView>,
         request: &mut LlmRequest,
     ) -> Result<Vec<PreLlmHookResult>, LlmError> {
-        let runtime_view = {
-            let guard = self.runtime_view.read().unwrap();
-            guard.as_ref().cloned()
-        };
         let runtime_view = match runtime_view {
             Some(rv) => rv,
             None => return Ok(Vec::new()),
@@ -142,7 +125,7 @@ impl LlmProviderWrapper {
                 metadata: hook_invoke_metadata(&hook_span),
             };
 
-            let output = match hooker.invoke(input, runtime_view.as_ref()).await {
+            let output = match hooker.invoke(input, runtime_view).await {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!(
@@ -163,8 +146,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let pre_result = match output {
-                HookInvokeOutput::LlmPre(r) => r,
+            let pre_result = match output.primary {
+                HookInvokePrimary::LlmPre(r) => r,
                 other => {
                     eprintln!(
                         "llm pre-hooker '{}' returned unexpected output {:?} for hook_point '{}'",
@@ -210,13 +193,10 @@ impl LlmProviderWrapper {
 
     async fn run_post_hook_sequence(
         &self,
+        runtime_view: Option<&dyn RuntimeView>,
         request: &LlmRequest,
         response: &mut LlmResponse,
     ) -> Result<Vec<PostLlmHookResult>, LlmError> {
-        let runtime_view = {
-            let guard = self.runtime_view.read().unwrap();
-            guard.as_ref().cloned()
-        };
         let runtime_view = match runtime_view {
             Some(rv) => rv,
             None => return Ok(Vec::new()),
@@ -277,17 +257,16 @@ impl LlmProviderWrapper {
                 metadata: hook_invoke_metadata(&hook_span),
             };
 
-            let output = match hooker
-                .invoke(input, runtime_view.as_ref())
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+            let output = match hooker.invoke(input, runtime_view).await.map_err(|e| {
+                LlmError::RequestFailed {
                     message: format!(
                         "llm post-hook invoke failed for hooker '{}' (hook_point='{}'): {}",
                         hooker.id(),
                         hook_point.0,
                         e
                     ),
-                }) {
+                }
+            }) {
                 Ok(o) => o,
                 Err(e) => {
                     runtime_view
@@ -302,8 +281,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let post_result = match output {
-                HookInvokeOutput::LlmPost(r) => r,
+            let post_result = match output.primary {
+                HookInvokePrimary::LlmPost(r) => r,
                 other => {
                     let err = LlmError::RequestFailed {
                         message: format!(
@@ -351,13 +330,10 @@ impl LlmProviderWrapper {
 
     async fn run_error_hook_sequence(
         &self,
+        runtime_view: Option<&dyn RuntimeView>,
         request: &LlmRequest,
         error: &LlmError,
     ) -> Result<Vec<ErrorLlmHookResult>, LlmError> {
-        let runtime_view = {
-            let guard = self.runtime_view.read().unwrap();
-            guard.as_ref().cloned()
-        };
         let runtime_view = match runtime_view {
             Some(rv) => rv,
             None => return Ok(Vec::new()),
@@ -419,17 +395,16 @@ impl LlmProviderWrapper {
                 metadata: hook_invoke_metadata(&hook_span),
             };
 
-            let output = match hooker
-                .invoke(input, runtime_view.as_ref())
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+            let output = match hooker.invoke(input, runtime_view).await.map_err(|e| {
+                LlmError::RequestFailed {
                     message: format!(
                         "llm error-hook invoke failed for hooker '{}' (hook_point='{}'): {}",
                         hooker.id(),
                         hook_point.0,
                         e
                     ),
-                }) {
+                }
+            }) {
                 Ok(o) => o,
                 Err(e) => {
                     runtime_view
@@ -444,8 +419,8 @@ impl LlmProviderWrapper {
                 }
             };
 
-            let error_result = match output {
-                HookInvokeOutput::LlmError(r) => r,
+            let error_result = match output.primary {
+                HookInvokePrimary::LlmError(r) => r,
                 other => {
                     let err = LlmError::RequestFailed {
                         message: format!(
@@ -534,12 +509,15 @@ impl LlmProviderWrapper {
         }
     }
 
-    pub async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+    pub async fn complete_scoped(
+        &self,
+        runtime_view: Option<&dyn RuntimeView>,
+        request: &LlmRequest,
+    ) -> Result<LlmResponse, LlmError> {
+        let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
         let mut effective_request = request.clone();
-        let runtime_view = self.runtime_view();
-        let runtime_ref = runtime_view.as_deref();
         let mut trace_span = begin_trace_span(
-            runtime_ref,
+            runtime_view,
             &self.capabilities().model_name,
             &effective_request,
             false,
@@ -553,7 +531,10 @@ impl LlmProviderWrapper {
         let mut error_hook_error = None;
 
         if runtime_view.is_some() {
-            match self.run_pre_hook_sequence(&mut effective_request).await {
+            match self
+                .run_pre_hook_sequence(runtime_view, &mut effective_request)
+                .await
+            {
                 Ok(results) => {
                     pre_hook_count = results.len();
                 }
@@ -564,7 +545,7 @@ impl LlmProviderWrapper {
             }
 
             update_trace_span(
-                runtime_ref,
+                runtime_view,
                 trace_span.as_ref(),
                 merge_trace_fields(
                     json!({
@@ -581,7 +562,7 @@ impl LlmProviderWrapper {
         match self.complete_with_retry(&effective_request).await {
             Ok(mut response) => {
                 update_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     trace_span.as_ref(),
                     json!({
                         "phase": "provider_completed",
@@ -591,7 +572,7 @@ impl LlmProviderWrapper {
 
                 if runtime_view.is_some() {
                     match self
-                        .run_post_hook_sequence(&effective_request, &mut response)
+                        .run_post_hook_sequence(runtime_view, &effective_request, &mut response)
                         .await
                     {
                         Ok(results) => {
@@ -605,7 +586,7 @@ impl LlmProviderWrapper {
                 }
 
                 end_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     &mut trace_span,
                     agent_contracts::TraceOutcome::Ok,
                     merge_trace_fields(
@@ -628,7 +609,7 @@ impl LlmProviderWrapper {
             Err(error) => {
                 if runtime_view.is_some() {
                     match self
-                        .run_error_hook_sequence(&effective_request, &error)
+                        .run_error_hook_sequence(runtime_view, &effective_request, &error)
                         .await
                     {
                         Ok(results) => {
@@ -636,7 +617,7 @@ impl LlmProviderWrapper {
                             for result in results {
                                 if let ErrorLlmHookResult::Recover { response } = result {
                                     end_trace_span(
-                                        runtime_ref,
+                                        runtime_view,
                                         &mut trace_span,
                                         agent_contracts::TraceOutcome::Ok,
                                         merge_trace_fields(
@@ -668,7 +649,7 @@ impl LlmProviderWrapper {
                 }
 
                 end_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     &mut trace_span,
                     trace_outcome_for_error(&error),
                     merge_trace_fields(
@@ -691,16 +672,20 @@ impl LlmProviderWrapper {
         }
     }
 
-    pub async fn complete_stream(
+    pub async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        self.complete_scoped(None, request).await
+    }
+
+    pub async fn complete_stream_scoped(
         &self,
+        runtime_view: Option<&dyn RuntimeView>,
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
         let mut effective_request = request.clone();
-        let runtime_view = self.runtime_view();
-        let runtime_ref = runtime_view.as_deref();
         let mut trace_span = begin_trace_span(
-            runtime_ref,
+            runtime_view,
             &self.capabilities().model_name,
             &effective_request,
             true,
@@ -727,7 +712,10 @@ impl LlmProviderWrapper {
         };
 
         if runtime_view.is_some() {
-            match self.run_pre_hook_sequence(&mut effective_request).await {
+            match self
+                .run_pre_hook_sequence(runtime_view, &mut effective_request)
+                .await
+            {
                 Ok(results) => {
                     pre_hook_count = results.len();
                 }
@@ -738,7 +726,7 @@ impl LlmProviderWrapper {
             }
 
             update_trace_span(
-                runtime_ref,
+                runtime_view,
                 trace_span.as_ref(),
                 merge_trace_fields(
                     json!({
@@ -758,7 +746,7 @@ impl LlmProviderWrapper {
         {
             Ok(mut response) => {
                 update_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     trace_span.as_ref(),
                     json!({
                         "phase": "provider_completed",
@@ -768,7 +756,7 @@ impl LlmProviderWrapper {
 
                 if runtime_view.is_some() {
                     match self
-                        .run_post_hook_sequence(&effective_request, &mut response)
+                        .run_post_hook_sequence(runtime_view, &effective_request, &mut response)
                         .await
                     {
                         Ok(results) => {
@@ -790,7 +778,7 @@ impl LlmProviderWrapper {
                 };
 
                 end_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     &mut trace_span,
                     agent_contracts::TraceOutcome::Ok,
                     merge_trace_fields(
@@ -816,7 +804,7 @@ impl LlmProviderWrapper {
             Err(error) => {
                 if runtime_view.is_some() {
                     match self
-                        .run_error_hook_sequence(&effective_request, &error)
+                        .run_error_hook_sequence(runtime_view, &effective_request, &error)
                         .await
                     {
                         Ok(results) => {
@@ -831,7 +819,7 @@ impl LlmProviderWrapper {
                                     };
 
                                     end_trace_span(
-                                        runtime_ref,
+                                        runtime_view,
                                         &mut trace_span,
                                         agent_contracts::TraceOutcome::Ok,
                                         merge_trace_fields(
@@ -874,7 +862,7 @@ impl LlmProviderWrapper {
                 };
 
                 end_trace_span(
-                    runtime_ref,
+                    runtime_view,
                     &mut trace_span,
                     trace_outcome_for_error(&error),
                     merge_trace_fields(
@@ -898,6 +886,14 @@ impl LlmProviderWrapper {
                 Err(error)
             }
         }
+    }
+
+    pub async fn complete_stream(
+        &self,
+        request: &LlmRequest,
+        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<LlmResponse, LlmError> {
+        self.complete_stream_scoped(None, request, on_chunk).await
     }
 
     pub fn capabilities(&self) -> &ProviderCapabilities {

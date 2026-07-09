@@ -1,6 +1,4 @@
 use std::any::Any;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
@@ -18,6 +16,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 pub(crate) struct PluginLlmHookerAdaptor {
@@ -41,24 +40,17 @@ struct AskUserDirective {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[allow(dead_code)]
 enum PluginAskUserRequest {
     Confirm {
         prompt: String,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
     TextInput {
         prompt: String,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
     Choice {
         prompt: String,
         options: Vec<String>,
         allow_custom_input: bool,
-        #[serde(default)]
-        source: Option<InteractionSource>,
     },
 }
 
@@ -145,7 +137,7 @@ impl PluginLlmHookerAdaptor {
         let mut payload = initial_payload;
 
         loop {
-            let output = self.run_plugin_command(&payload)?;
+            let output = self.run_plugin_command(&payload).await?;
             match self.parse_plugin_command_response(output)? {
                 PluginCommandResponse::Final(final_output) => return Ok(final_output),
                 PluginCommandResponse::AskUser(directive) => {
@@ -323,72 +315,15 @@ impl PluginLlmHookerAdaptor {
         }
     }
 
-    fn run_plugin_command(&self, payload: &Value) -> Result<Value, LlmError> {
-        let payload_bytes =
-            serde_json::to_vec(payload).map_err(|error| LlmError::RequestFailed {
-                message: format!(
-                    "failed to serialize plugin command payload for hooker '{}': {}",
-                    self.id.0, error
-                ),
-            })?;
-
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&self.command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| LlmError::RequestFailed {
-                message: format!(
-                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
-                    self.id.0, self.command, error
-                ),
-            })?;
-
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(&payload_bytes)
-                .map_err(|error| LlmError::RequestFailed {
-                    message: format!(
-                        "failed to write stdin for plugin hooker '{}' (command='{}'): {}",
-                        self.id.0, self.command, error
-                    ),
-                })?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .map_err(|error| LlmError::RequestFailed {
-                message: format!(
-                    "failed to wait for plugin hooker '{}' (command='{}'): {}",
-                    self.id.0, self.command, error
-                ),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(LlmError::RequestFailed {
-                message: format!(
-                    "plugin hooker '{}' command '{}' exited with status {}{}",
-                    self.id.0,
-                    self.command,
-                    output.status,
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", stderr)
-                    }
-                ),
-            });
-        }
-
-        serde_json::from_slice(&output.stdout).map_err(|error| LlmError::RequestFailed {
-            message: format!(
-                "plugin hooker '{}' command '{}' returned invalid JSON: {}",
-                self.id.0, self.command, error
-            ),
-        })
+    async fn run_plugin_command(&self, payload: &Value) -> Result<Value, LlmError> {
+        run_plugin_subprocess(
+            &self.id,
+            &self.command,
+            payload,
+            |message| LlmError::RequestFailed { message },
+            Some(super::super::PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+        )
+        .await
     }
 
     fn parse_plugin_command_response(
@@ -431,10 +366,10 @@ impl PluginLlmHookerAdaptor {
         });
 
         match request {
-            PluginAskUserRequest::Confirm { prompt, source: _ } => {
+            PluginAskUserRequest::Confirm { prompt } => {
                 InteractionRequest::Confirm { prompt, source }
             }
-            PluginAskUserRequest::TextInput { prompt, source: _ } => {
+            PluginAskUserRequest::TextInput { prompt } => {
                 InteractionRequest::TextInput {
                     prompt,
                     source,
@@ -445,7 +380,6 @@ impl PluginLlmHookerAdaptor {
                 prompt,
                 options,
                 allow_custom_input,
-                source: _,
             } => InteractionRequest::Choice {
                 prompt,
                 options,

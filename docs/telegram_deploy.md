@@ -47,7 +47,7 @@ Webhook and polling are mutually exclusive for the same bot token. If a webhook 
 
 - A Telegram account
 - A Telegram bot created through `@BotFather`
-- A Linux or macOS host where you can install and run `xiaoo-app daemon`
+- A Linux or macOS host where you can install and run `xiaoo-daemon`
 - Rust toolchain and Cargo available on that host, unless you already have a built binary
 - Outbound network access from xiaoO to:
   - `https://api.telegram.org`
@@ -145,27 +145,27 @@ Example:
 git clone <your-repo-url> /opt/xiaoo/src
 cd /opt/xiaoo/src
 git checkout telegram
-cargo build -p xiaoo-app
+cargo build -p xiaoo-serverside
 ```
 
 After a successful build, the binary will usually be created at:
 
 ```text
-target/debug/xiaoo-app
+target/debug/xiaoo-daemon
 ```
 
 For a long-running service, install that binary to a stable runtime path:
 
 ```bash
 mkdir -p /opt/xiaoo/bin
-install -m 755 target/debug/xiaoo-app /opt/xiaoo/bin/xiaoo-app
+install -m 755 target/debug/xiaoo-daemon /opt/xiaoo/bin/xiaoo-daemon
 ```
 
 If you prefer release builds:
 
 ```bash
-cargo build -p xiaoo-app --release
-install -m 755 target/release/xiaoo-app /opt/xiaoo/bin/xiaoo-app
+cargo build -p xiaoo-serverside --release
+install -m 755 target/release/xiaoo-daemon /opt/xiaoo/bin/xiaoo-daemon
 ```
 
 ## 5. Prepare Runtime Directories
@@ -185,7 +185,7 @@ mkdir -p /var/lib/xiaoo/agents/main
 Recommended layout:
 
 ```text
-/opt/xiaoo/bin/xiaoo-app
+/opt/xiaoo/bin/xiaoo-daemon
 /opt/xiaoo/config/config.toml
 /opt/xiaoo/config/xiaoo.env
 /opt/xiaoo/app
@@ -274,7 +274,6 @@ default_agent_id = "main"
 id = "main"
 default = true
 workspace = "/opt/xiaoo/app"
-agent_dir = "/var/lib/xiaoo/agents/main"
 
 [skills]
 dirs = ["/opt/xiaoo/adt/skills"]
@@ -492,7 +491,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/xiaoo
 EnvironmentFile=/opt/xiaoo/config/xiaoo.env
-ExecStart=/opt/xiaoo/bin/xiaoo-app daemon --config /opt/xiaoo/config/config.toml --host 127.0.0.1 --port 18080
+ExecStart=/opt/xiaoo/bin/xiaoo-daemon --config /opt/xiaoo/config/config.toml --host 127.0.0.1 --port 18080
 Restart=always
 RestartSec=5
 
@@ -558,7 +557,7 @@ PY
 )"
 
 cd "/path/to/xiaoO"
-exec cargo run -p xiaoo-app --bin xiaoo-app -- daemon \
+exec cargo run -p xiaoo-serverside --bin xiaoo-daemon -- \
   --config "$HOME/.config/xiaoo/config.toml" \
   --host 127.0.0.1 \
   --port 18080
@@ -748,7 +747,7 @@ Non-text updates are ignored.
 For a clean webhook production deployment, use this structure:
 
 ```text
-/opt/xiaoo/bin/xiaoo-app
+/opt/xiaoo/bin/xiaoo-daemon
 /opt/xiaoo/config/config.toml
 /opt/xiaoo/config/xiaoo.env
 /opt/xiaoo/app

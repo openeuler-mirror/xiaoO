@@ -7,7 +7,7 @@ use agent_types::{
 };
 use async_trait::async_trait;
 
-use crate::compose::compose_system_parts;
+use crate::compose::compose_system_sections;
 use crate::context::collect_prompt_context;
 use crate::decision::decide_prompt;
 
@@ -31,8 +31,13 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        let (stable_system, volatile_system) =
-            compose_system_parts(&input.system_prompt, &context);
+        // Compose the system prompt once: stable prefix parts (base, workspace,
+        // skills) un-joined, plus the per-turn-volatile `# Context` tail. The
+        // stable parts feed both the joined `stable_system` string and the
+        // `system_parts` array exposed to the `*.Chat.system.transform` hooker.
+        let (stable_parts, volatile_system) =
+            compose_system_sections(&input.system_prompt, &context);
+        let stable_system = stable_parts.join("\n\n");
 
         if stable_system.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
@@ -40,10 +45,14 @@ impl PromptBuilderImpl {
             });
         }
 
-        let system_text = match volatile_system {
-            Some(v) if !v.trim().is_empty() => format!("{stable_system}\n\n{v}"),
-            _ => stable_system,
-        };
+        // `system_parts` carries the volatile tail (when non-empty) so the
+        // `*.Chat.system.transform` hooker sees the full prompt; `system_text`
+        // is the same array joined, matching `compose_system_text` byte-for-byte.
+        let mut system_parts = stable_parts;
+        if let Some(v) = volatile_system.as_ref().filter(|v| !v.trim().is_empty()) {
+            system_parts.push(v.clone());
+        }
+        let system_text = system_parts.join("\n\n");
         let mut messages = Vec::with_capacity(input.messages.len() + 1);
         messages.push(ChatMessage::system(system_text));
 
@@ -68,6 +77,7 @@ impl PromptBuilderImpl {
         Ok(PromptBuildResult {
             estimated_input_tokens: estimate_request_size(&request),
             request,
+            system_parts,
         })
     }
 }
@@ -362,7 +372,10 @@ mod tests {
         let system_text = result.request.messages[0].text_content().unwrap();
         assert!(system_text.contains("New system prompt"));
         assert!(system_text.contains("Environment"));
-        assert!(!system_text.contains("Old system prompt"), "Old system messages should be filtered out");
+        assert!(
+            !system_text.contains("Old system prompt"),
+            "Old system messages should be filtered out"
+        );
 
         assert_eq!(
             result.request.messages[1].role,

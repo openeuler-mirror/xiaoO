@@ -1,0 +1,540 @@
+use anyhow::Result;
+use crossterm::cursor::SetCursorStyle;
+use crossterm::event::{Event, EventStream, MouseEventKind};
+use crossterm::execute;
+use futures_util::{FutureExt, StreamExt};
+use ratatui::Terminal;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+
+use crate::app_state::AppState;
+use crate::config::Config;
+use crate::gateway_runtime::GatewayRuntime;
+
+pub struct App {
+    pub(crate) state: AppState,
+    pub(crate) gateway: GatewayRuntime,
+    pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+}
+
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+impl App {
+    pub fn new_with_config(
+        config: &Config,
+        config_path: PathBuf,
+        workspace: PathBuf,
+    ) -> Result<Self, anyhow::Error> {
+        Ok(Self {
+            state: AppState::new_with_config(config, config_path, workspace)?,
+            gateway: GatewayRuntime::new(),
+            pending_local_model_fetch: None,
+        })
+    }
+
+    pub async fn run(
+        &mut self,
+        terminal: &mut Terminal<impl ratatui::backend::Backend>,
+    ) -> Result<()> {
+        let mut event_stream = EventStream::new();
+        let mut pending_event: Option<Event> = None;
+        let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
+        set_cursor_color(self.state.theme.border_active);
+        let mut cursor_visible = true;
+        let mut last_cursor_blink_toggle = Instant::now();
+        let mut needs_redraw = true;
+
+        #[cfg(unix)]
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        #[cfg(unix)]
+        if sigterm.is_none() {
+            tracing::warn!(
+                "Failed to register SIGTERM handler, graceful shutdown on SIGTERM unavailable"
+            );
+        }
+
+        loop {
+            if needs_redraw {
+                terminal.draw(|frame| self.ui(frame))?;
+                needs_redraw = false;
+            }
+            if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
+                cursor_visible = !cursor_visible;
+                last_cursor_blink_toggle = Instant::now();
+                if cursor_visible {
+                    terminal.show_cursor()?;
+                } else {
+                    terminal.hide_cursor()?;
+                }
+            }
+
+            let active_refresh =
+                self.state.chat_state.is_loading || self.gateway.needs_active_refresh();
+            let tick_duration = if active_refresh {
+                Duration::from_millis(16)
+            } else {
+                Duration::from_millis(250)
+            };
+
+            let mut handled_event = None;
+            if let Some(event) = pending_event.take() {
+                self.handle_event(event.clone()).await?;
+                needs_redraw = true;
+                handled_event = Some(event);
+            } else {
+                #[cfg(unix)]
+                {
+                    tokio::select! {
+                        _ = sleep(tick_duration) => {
+                            if self.state.chat_state.is_loading {
+                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+                                needs_redraw = true;
+                            }
+                        }
+                        maybe_event = event_stream.next().fuse() => {
+                            if let Some(Ok(event)) = maybe_event {
+                                self.handle_event(event.clone()).await?;
+                                needs_redraw = true;
+                                handled_event = Some(event);
+                            }
+                        }
+                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
+                            self.pending_local_model_fetch = None;
+                            if let Some(models) = models {
+                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
+                                    dialog.apply_fetched_local_models(models);
+                                }
+                            }
+                            needs_redraw = true;
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                            self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
+                        }
+                        _ = async {
+                            match &mut sigterm {
+                                Some(s) => s.recv().await,
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            tracing::info!("Received SIGTERM, initiating graceful shutdown");
+                            self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    tokio::select! {
+                        _ = sleep(tick_duration) => {
+                            if self.state.chat_state.is_loading {
+                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
+                                needs_redraw = true;
+                            }
+                        }
+                        maybe_event = event_stream.next().fuse() => {
+                            if let Some(Ok(event)) = maybe_event {
+                                self.handle_event(event.clone()).await?;
+                                needs_redraw = true;
+                                handled_event = Some(event);
+                            }
+                        }
+                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
+                            self.pending_local_model_fetch = None;
+                            if let Some(models) = models {
+                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
+                                    dialog.apply_fetched_local_models(models);
+                                }
+                            }
+                            needs_redraw = true;
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+                            self.state.should_quit = true;
+                            self.state.quit_via_interrupt = true;
+                        }
+                    }
+                }
+            }
+
+            if let Some(event) = handled_event.as_ref() {
+                discard_redundant_boundary_scrolls(
+                    event,
+                    &self.state,
+                    &mut event_stream,
+                    &mut pending_event,
+                );
+            }
+
+            needs_redraw |= self.gateway.poll_stream_updates(&mut self.state);
+            if self.state.should_quit {
+                break;
+            }
+
+            // Drain and execute any hook actions received from the daemon
+            // (create/switch session, set title).
+            //
+            // Remote (daemon) mode: actions arrive via the SSE `Done`
+            // event's `actions` field after the daemon has already run
+            // daemon-side effects (open_session) via
+            // `DaemonHookActionSink`; the TUI only needs to switch UI
+            // focus and sync its local registry.
+            //
+            // Local (non-daemon) mode: actions arrive via
+            // `SessionTurnUpdate::HookActions` (no SSE, no daemon).
+            // `execute_hook_action` → `switch_to_remote_session` checks
+            // `remote_base_url()`, finds None, and drops each action with
+            // a `tracing::warn!`. This is intentional: create_session /
+            // switch_session are not supported in local mode.
+            let pending_actions = self.gateway.take_pending_hook_actions();
+            if !pending_actions.is_empty() {
+                for action in pending_actions {
+                    self.execute_hook_action(action).await;
+                }
+                needs_redraw = true;
+            }
+
+            if !self.state.chat_state.is_loading && self.state.chat_state.has_pending_turns() {
+                match self.gateway.start_next_queued_turn(&mut self.state).await {
+                    Ok(started) => {
+                        needs_redraw |= started;
+                    }
+                    Err(error) => {
+                        self.state
+                            .chat_state
+                            .messages
+                            .push(crate::chat::Message::error(error));
+                        self.state.chat_state.stick_to_bottom = true;
+                        needs_redraw = true;
+                    }
+                }
+            }
+        }
+        // If the user interrupted the runtime (Ctrl+C / SIGINT / SIGTERM),
+        // persist the session so it can be resumed later. This mirrors the
+        // `/save` command but derives the name automatically as
+        // `{date}-{topic}` (date to the second, topic = first prompt summary).
+        if self.state.quit_via_interrupt {
+            let record = self.gateway.session_snapshot(&self.state.session_id).await;
+            match crate::session_snapshot_service::autosave_on_interrupt(&self.state, record) {
+                Ok(Some(path)) => {
+                    tracing::info!("Auto-saved session on interrupt to {}", path.display());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!("Failed to auto-save session on interrupt: {error:#}");
+                }
+            }
+        }
+
+        self.gateway.close_sessions(&self.state.session_id).await;
+        reset_cursor_color();
+        terminal.show_cursor()?;
+        Ok(())
+    }
+
+    pub fn start_local_model_fetch(&mut self, api_base: String) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_local_model_fetch = Some(rx);
+        tokio::spawn(async move {
+            let models = fetch_models_from_local_api(&api_base).await;
+            let _ = tx.send(models);
+        });
+    }
+
+    /// Execute a single hook action received after a turn terminates.
+    ///
+    /// Remote (daemon) mode: the daemon has already executed daemon-side
+    /// effects (open_session for create/switch) via `DaemonHookActionSink`
+    /// before forwarding; the TUI only needs to switch UI focus.
+    ///
+    /// Local (non-daemon) mode: there is no daemon, so no `open_session`
+    /// has run. `switch_to_remote_session` checks `remote_base_url()`,
+    /// finds None, and drops the action with a `tracing::warn!`. This is
+    /// intentional — create_session / switch_session are not supported in
+    /// local mode. See [`switch_to_remote_session`].
+    async fn execute_hook_action(&mut self, action: agent_types::hook::HookAction) {
+        match action {
+            agent_types::hook::HookAction::CreateSession { session_id } => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "TUI: hook action create_session — switching focus"
+                );
+                self.switch_to_remote_session(session_id).await;
+            }
+            agent_types::hook::HookAction::SwitchSession { session_id } => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "TUI: hook action switch_session — switching focus"
+                );
+                self.switch_to_remote_session(session_id).await;
+            }
+        }
+    }
+
+    /// Switch the TUI focus to a remote session. The daemon has already
+    /// called `/runtimes/open` for the target session; the TUI resets its
+    /// state, sets the new session_id, and configures remote mode so the
+    /// next turn uses the existing session on the daemon.
+    ///
+    /// Invoked both by hook actions (Create/SwitchSession received from the
+    /// daemon after a turn ends) and by the TUI's `/sessions` built-in
+    /// command for manual switching. In local (non-daemon) mode there is no
+    /// remote backend to switch to, so the action is dropped with a
+    /// `tracing::warn` — daemon-side effects (open_session) cannot be
+    /// reproduced locally by this path.
+    pub(crate) async fn switch_to_remote_session(&mut self, session_id: String) {
+        let Some(base_url) = self.gateway.remote_base_url().map(str::to_string) else {
+            tracing::warn!(
+                session_id = %session_id,
+                "switch_to_remote_session called without remote backend; \
+                 hook action dropped (local mode does not execute daemon-side actions)"
+            );
+            return;
+        };
+        let token_env = self
+            .state
+            .agent_config
+            .tui
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.bearer_token_env.clone());
+
+        self.apply_remote_session_switch(
+            session_id.clone(),
+            base_url,
+            token_env,
+            format!("Switched to session: {session_id}"),
+        )
+        .await;
+    }
+
+    /// Shared body of [`switch_to_remote_session`] and
+    /// [`activate_remote_session`]: reset local state for `session_id`,
+    /// configure the remote backend, restore the prior transcript from the
+    /// daemon, persist the remote-session record, and push `system_message`.
+    ///
+    /// The daemon's `open_session` call is wrapped in a `tokio::time::timeout`
+    /// so an unreachable daemon cannot block the TUI event loop
+    /// indefinitely — on timeout we log and continue with an empty
+    /// transcript rather than hanging the UI.
+    pub(crate) async fn apply_remote_session_switch(
+        &mut self,
+        session_id: String,
+        base_url: String,
+        bearer_token_env: Option<String>,
+        system_message: String,
+    ) {
+        self.gateway.reset_for_new_session(&mut self.state);
+        self.state.reset_for_new_session();
+        self.state.session_id = session_id.clone();
+        self.gateway
+            .configure_remote(&mut self.state, base_url.clone(), bearer_token_env.clone());
+
+        // Restore conversation context from the daemon. `open_session` is
+        // idempotent on the daemon side; calling it here both ensures the
+        // session is opened on the daemon (so `remote_session_open` becomes
+        // true and the next turn skips the open call) and gives us back
+        // the stored `SessionRecord` so we can repopulate local state.
+        // Bound the wait so a dead/unreachable daemon does not freeze the
+        // TUI event loop.
+        let restored_messages = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.gateway
+                .open_remote_session_with_record(&mut self.state),
+        )
+        .await
+        {
+            Ok(Ok(record)) => {
+                let loop_messages = record.loop_state.map(|ls| ls.messages).unwrap_or_default();
+                let display_messages =
+                    crate::chat::messages_from_chat_messages(loop_messages.clone());
+                self.state.session_messages = loop_messages;
+                display_messages
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "remote session switch: failed to fetch session record from daemon; \
+                     transcript will be empty until the next turn"
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    "remote session switch: open_session timed out after 10 seconds; \
+                     transcript will be empty until the next turn"
+                );
+                Vec::new()
+            }
+        };
+
+        if !restored_messages.is_empty() {
+            self.state.chat_state.messages.extend(restored_messages);
+            self.state.chat_state.stick_to_bottom = true;
+        }
+
+        let _ = crate::remote_sessions_service::record_remote_session(
+            &session_id,
+            &base_url,
+            bearer_token_env,
+            None,
+        );
+
+        self.state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system(system_message));
+        self.state.chat_state.stick_to_bottom = true;
+    }
+}
+
+async fn wait_for_local_models(
+    rx: &mut Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+) -> Option<Vec<crate::chat::ModelInfo>> {
+    match rx {
+        Some(inner) => match inner.await {
+            Ok(models) => models.into(),
+            Err(_) => None,
+        },
+        None => std::future::pending().await,
+    }
+}
+
+async fn fetch_models_from_local_api(api_base: &str) -> Vec<crate::chat::ModelInfo> {
+    let url = format!("{}/models", api_base.trim_end_matches('/'));
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let body: serde_json::Value = match response.json().await {
+        Ok(b) => b,
+        Err(_) => return vec![],
+    };
+    let models = body["data"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|model| {
+                    model["id"].as_str().map(|id| crate::chat::ModelInfo {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if models.is_empty() {
+        return vec![];
+    }
+    models
+}
+
+fn discard_redundant_boundary_scrolls(
+    handled_event: &Event,
+    state: &AppState,
+    event_stream: &mut EventStream,
+    pending_event: &mut Option<Event>,
+) {
+    let boundary_kind = match handled_event {
+        Event::Mouse(mouse)
+            if mouse.kind == MouseEventKind::ScrollDown
+                && state.active_transcript_scroll_offset()
+                    >= state.active_transcript_max_scroll_offset() =>
+        {
+            Some(MouseEventKind::ScrollDown)
+        }
+        Event::Mouse(mouse)
+            if mouse.kind == MouseEventKind::ScrollUp
+                && state.active_transcript_scroll_offset() == 0 =>
+        {
+            Some(MouseEventKind::ScrollUp)
+        }
+        _ => None,
+    };
+
+    let Some(boundary_kind) = boundary_kind else {
+        return;
+    };
+    let opposite_kind = match boundary_kind {
+        MouseEventKind::ScrollDown => MouseEventKind::ScrollUp,
+        MouseEventKind::ScrollUp => MouseEventKind::ScrollDown,
+        _ => return,
+    };
+
+    for _ in 0..128 {
+        let Some(ready) = event_stream.next().now_or_never() else {
+            break;
+        };
+        let Some(Ok(event)) = ready else {
+            break;
+        };
+
+        match &event {
+            Event::Mouse(mouse) if mouse.kind == boundary_kind => {
+                continue;
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
+                continue;
+            }
+            Event::Mouse(mouse) if mouse.kind == opposite_kind => {
+                *pending_event = Some(event);
+                return;
+            }
+            _ => {
+                *pending_event = Some(event);
+                return;
+            }
+        }
+    }
+}
+
+fn set_cursor_color(color: ratatui::style::Color) {
+    let Some(value) = color_to_ansi(color) else {
+        return;
+    };
+    let _ = io::stdout().write_all(format!("\x1b]12;{value}\x07").as_bytes());
+    let _ = io::stdout().flush();
+}
+
+fn reset_cursor_color() {
+    let _ = io::stdout().write_all(b"\x1b]112\x07");
+    let _ = io::stdout().flush();
+}
+
+fn color_to_ansi(color: ratatui::style::Color) -> Option<String> {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        ratatui::style::Color::Black => Some("black".to_string()),
+        ratatui::style::Color::Red => Some("red".to_string()),
+        ratatui::style::Color::Green => Some("green".to_string()),
+        ratatui::style::Color::Yellow => Some("yellow".to_string()),
+        ratatui::style::Color::Blue => Some("blue".to_string()),
+        ratatui::style::Color::Magenta => Some("magenta".to_string()),
+        ratatui::style::Color::Cyan => Some("cyan".to_string()),
+        ratatui::style::Color::Gray => Some("gray".to_string()),
+        ratatui::style::Color::DarkGray => Some("darkgray".to_string()),
+        ratatui::style::Color::LightRed => Some("lightred".to_string()),
+        ratatui::style::Color::LightGreen => Some("lightgreen".to_string()),
+        ratatui::style::Color::LightYellow => Some("lightyellow".to_string()),
+        ratatui::style::Color::LightBlue => Some("lightblue".to_string()),
+        ratatui::style::Color::LightMagenta => Some("lightmagenta".to_string()),
+        ratatui::style::Color::LightCyan => Some("lightcyan".to_string()),
+        ratatui::style::Color::White => Some("white".to_string()),
+        ratatui::style::Color::Indexed(index) => Some(index.to_string()),
+        ratatui::style::Color::Reset => None,
+    }
+}

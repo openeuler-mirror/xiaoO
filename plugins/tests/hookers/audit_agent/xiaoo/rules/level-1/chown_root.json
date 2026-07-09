@@ -11,5 +11,9 @@
     "status": "pass",
     "intercepted_by": "audit_agent",
     "reason": "pre_hook_deny"
+  },
+  "target_audit_check": {
+    "tool": "bash",
+    "action_pattern": "chown root"
   }
 }

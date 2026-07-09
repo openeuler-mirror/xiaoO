@@ -11,6 +11,10 @@ pub enum HookPointCategory {
     LlmError,
     SessionCreated,
     SessionClosed,
+    SessionState,
+    ChatSystemTransform,
+    ChatMessage,
+    CommandExecuteBefore,
 }
 
 pub fn resolve_hook_point_category(
@@ -50,6 +54,12 @@ pub fn resolve_hook_point_category(
         ("llm", "error") => Ok(HookPointCategory::LlmError),
         ("session", "created") => Ok(HookPointCategory::SessionCreated),
         ("session", "closed") => Ok(HookPointCategory::SessionClosed),
+        ("session", "state") => Ok(HookPointCategory::SessionState),
+        // Chat-level hooks. The `detail` segment is free-form (e.g.
+        // `system` / `message` / `command`) and disambiguated by `stage`.
+        ("chat", "transform") => Ok(HookPointCategory::ChatSystemTransform),
+        ("chat", "received") => Ok(HookPointCategory::ChatMessage),
+        ("chat", "before") => Ok(HookPointCategory::CommandExecuteBefore),
         (action, stage) => Err(BuildError::InvalidConfig {
             message: format!(
                 "unsupported hook_point category for action='{}' stage='{}': {}",

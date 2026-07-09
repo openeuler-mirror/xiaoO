@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod common;
 pub mod compression;
 pub mod context;
@@ -10,12 +11,17 @@ pub mod outcome;
 pub mod session;
 pub mod tool;
 
+pub use chat::{
+    ChatHookError, ChatMessageHookInput, ChatMessageHookResult, ChatSystemTransformInput,
+    ChatSystemTransformResult, CommandContext, CommandExecuteBeforeInput,
+    CommandExecuteBeforeResult, ModelRef,
+};
 pub use common::{AgentId, AgentMetadata, BuildError, HookerId, ToolId, ToolName, WorkspaceRef};
 pub use compression::CompressionMeta;
 pub use context::{
     BudgetError, FeatureFlags, PromptBuildError, PromptBuildResult, TokenBudgetConfig,
 };
-pub use hook::{HookPointId, HookerDescriptor, HookerRegistryConfig};
+pub use hook::{HookAction, HookPointId, HookerDescriptor, HookerRegistryConfig};
 pub use llm::{
     AssistantMessage, ChatMessage, CompletionConfig, ContentBlock, LlmError, LlmRequest,
     LlmResponse, MessageRole, ReasoningEffort, ResponseFormat, StopReason, StreamChunk, Tool,
@@ -23,5 +29,8 @@ pub use llm::{
 };
 pub use lsp::{LspDiagnostic, LspError, LspLocation, LspPosition, LspSymbol, Severity};
 pub use outcome::{AgentError, AgentOutcome, TokenUsage};
-pub use session::{SessionClosedHookInput, SessionCreatedHookInput, SessionHookResult};
+pub use session::{
+    SessionClosedHookInput, SessionCreatedHookInput, SessionHookError, SessionHookResult,
+    SessionStateHookInput,
+};
 pub use tool::{ToolRegistryConfig, ToolStateStoreConfig, ToolVisibilityConfig};

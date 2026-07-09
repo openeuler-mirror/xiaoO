@@ -30,7 +30,7 @@ tracing.workspace = true
 clap = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
-rust-embed = { workspace = true, optional = true }
+rust-embed = { workspace = true, optional = true, features = ["debug-embed"] }
 mime_guess = { workspace = true, optional = true }
 
 [dev-dependencies]

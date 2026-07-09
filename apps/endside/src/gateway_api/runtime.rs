@@ -1,0 +1,154 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
+
+use super::remote::RemoteRuntimeConfig;
+use crate::interaction_prompt::UserPromptResult;
+use crate::session_gateway::{SessionGateway, SessionTurnUpdate};
+
+pub(super) const STREAM_REVEAL_CHARS_PER_TICK: usize = 1;
+
+pub(super) struct PendingStreamDone {
+    pub(super) prompt_tokens: u64,
+    pub(super) completion_tokens: u64,
+    pub(super) total_tokens: u64,
+    pub(super) estimated_input_tokens: u64,
+    pub(super) messages: Vec<llm_client::ChatMessage>,
+}
+
+pub struct GatewayRuntime {
+    pub(super) session_gateway: SessionGateway,
+    pub(super) stream_rx: Option<UnboundedReceiver<SessionTurnUpdate>>,
+    pub(crate) stream_message_index: Option<usize>,
+    pub(super) stream_reveal_buffer: String,
+    pub(super) pending_stream_done: Option<PendingStreamDone>,
+    /// Cancellation token shared with the backend turn. The TUI holds a clone
+    /// so `cancel_streaming` can fire `.cancel()`; the original is passed into
+    /// `spawn_turn` via `SessionRuntimeBindings` so the session actor uses it
+    /// instead of creating its own token.
+    pub(super) cancel_token: Option<CancellationToken>,
+    pub(super) request_start: Option<Instant>,
+    pub(super) first_token_latency_recorded: bool,
+    pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
+    pub(super) pending_user_messages: Arc<Mutex<VecDeque<String>>>,
+    pub(super) remote: Option<RemoteRuntimeConfig>,
+    pub(super) remote_session_open: bool,
+    /// Hook actions received from the daemon (via SSE `Done` event) that
+    /// the TUI needs to execute (switch session, set title). Drained by the
+    /// App's event loop after `poll_stream_updates` returns.
+    pub(crate) pending_hook_actions: Vec<agent_types::hook::HookAction>,
+}
+
+impl GatewayRuntime {
+    pub fn new() -> Self {
+        Self {
+            session_gateway: SessionGateway::new(),
+            stream_rx: None,
+            stream_message_index: None,
+            stream_reveal_buffer: String::new(),
+            pending_stream_done: None,
+            cancel_token: None,
+            request_start: None,
+            first_token_latency_recorded: false,
+            interaction_reply_tx: None,
+            pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
+            remote: None,
+            remote_session_open: false,
+            pending_hook_actions: Vec::new(),
+        }
+    }
+
+    pub fn reset_for_new_session(&mut self, state: &mut crate::app_state::AppState) {
+        if state.chat_state.is_loading
+            || self.stream_rx.is_some()
+            || self.pending_stream_done.is_some()
+        {
+            self.cancel_streaming(state);
+        }
+        self.stream_rx = None;
+        self.stream_message_index = None;
+        self.stream_reveal_buffer.clear();
+        self.pending_stream_done = None;
+        self.cancel_token = None;
+        self.request_start = None;
+        self.first_token_latency_recorded = false;
+        self.interaction_reply_tx = None;
+        if let Ok(mut pending) = self.pending_user_messages.lock() {
+            pending.clear();
+        }
+        self.remote_session_open = false;
+    }
+
+    pub fn needs_active_refresh(&self) -> bool {
+        self.stream_rx.is_some()
+            || !self.stream_reveal_buffer.is_empty()
+            || self.pending_stream_done.is_some()
+    }
+
+    pub async fn session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::gateway::SessionRecord> {
+        self.session_gateway.session_snapshot(session_id).await
+    }
+
+    pub async fn import_session_snapshot(&self, record: crate::gateway::SessionRecord) {
+        self.session_gateway.import_session_snapshot(record).await;
+    }
+
+    pub fn session_store_handle(&self) -> Arc<crate::gateway::InMemorySessionStore> {
+        self.session_gateway.session_store.clone()
+    }
+
+    /// Closes sessions before exit.
+    /// - Remote mode: calls daemon API to delete E2B/Conch sandbox
+    /// - Local mode: shutdown_all() cleans up backends
+    ///   - For local backend: delete is noop (no sandbox to delete)
+    ///   - For E2B/Conch backend: calls delete API to remove sandbox
+    pub async fn close_sessions(&mut self, session_id: &str) {
+        self.session_gateway.close_all_sessions().await;
+
+        if self.remote.is_some() && self.remote_session_open {
+            tracing::info!(session_id = %session_id, "Closing remote session on daemon");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.close_remote_session(session_id),
+            )
+            .await;
+            if let Err(_) = result {
+                tracing::warn!("Remote session close timed out after 5 seconds during exit");
+            }
+        } else {
+            tracing::info!("Shutting down local backends");
+            if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {
+                tracing::warn!(error = %error, "failed to shutdown TUI backend manager");
+            }
+        }
+    }
+
+    /// Releases the backend for a specific session (used by /new command).
+    /// - For local backend: no-op (just updates state, no sandbox to delete)
+    /// - For E2B/Conch backend: calls delete API if no other sessions share it
+    pub async fn release_session_backend(&self, session_id: &str) -> Result<(), String> {
+        self.session_gateway
+            .backend_manager
+            .release_session(session_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Returns whether remote mode is active
+    pub fn is_remote_mode(&self) -> bool {
+        self.remote.is_some() && self.remote_session_open
+    }
+
+    /// Drain and return any hook actions collected from the SSE stream.
+    /// Called by the App's event loop after `poll_stream_updates`. The App
+    /// executes each action (switch session, set title) asynchronously.
+    pub fn take_pending_hook_actions(&mut self) -> Vec<agent_types::hook::HookAction> {
+        std::mem::take(&mut self.pending_hook_actions)
+    }
+}

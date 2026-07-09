@@ -333,6 +333,7 @@ pub struct BackendSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendCreateRequest {
+    pub requested_backend_id: Option<BackendId>,
     pub session_id: String,
     pub conversation_id: Option<String>,
     pub workspace_root: BackendPath,

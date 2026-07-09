@@ -21,6 +21,7 @@ use super::utils::{
     apply_edit_to_file, find_actual_string, get_patch_for_edit, preserve_quote_style,
 };
 use crate::r#impl::builtin::file_read::dedup::{system_time_to_timestamp, DedupStateStore};
+use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::ToolRuntimeServices;
 
@@ -90,37 +91,45 @@ impl ToolExecutor for FileEditExecutor {
 
         let dedup_store = self.get_dedup_store().await;
 
-        let resolved = backend
-            .paths()
-            .resolve_path(
+        let resolved = timed(
+            "file_edit resolve_path",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.paths().resolve_path(
                 agent_contracts::backend::capability::path::ResolvePathRequest {
                     raw_path: input.file_path.trim().to_string(),
                     base: ResolveBase::WorkspaceRoot,
                 },
-            )
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to resolve path: {}", e),
-            })?;
+            ),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to resolve path: {}", e),
+        })?;
 
         let resolved_str = resolved.to_string();
 
-        let stat = backend.files().stat(&resolved).await.map_err(|e| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to stat file: {}", e),
-            }
+        let stat = timed(
+            "file_edit stat",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().stat(&resolved),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to stat file: {}", e),
         })?;
 
         let file_content = if stat.exists {
-            let bytes = backend
-                .files()
-                .read_bytes(ReadBytesRequest {
+            let bytes = timed(
+                "file_edit read_bytes",
+                DEFAULT_FS_TIMEOUT_MS,
+                backend.files().read_bytes(ReadBytesRequest {
                     path: resolved.clone(),
-                })
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed {
-                    message: format!("Failed to read file: {}", e),
-                })?;
+                }),
+            )
+            .await
+            .map_err(|e| ToolExecutionError::ExecutionFailed {
+                message: format!("Failed to read file: {}", e),
+            })?;
             Some(String::from_utf8_lossy(&bytes).into_owned())
         } else {
             None
@@ -162,17 +171,19 @@ impl ToolExecutor for FileEditExecutor {
                 });
             };
 
-            backend
-                .files()
-                .write_bytes(WriteBytesRequest {
+            timed(
+                "file_edit write_bytes",
+                DEFAULT_FS_TIMEOUT_MS,
+                backend.files().write_bytes(WriteBytesRequest {
                     path: resolved,
                     content: input.new_string.as_bytes().to_vec(),
                     mode: write_mode,
-                })
-                .await
-                .map_err(|e| ToolExecutionError::ExecutionFailed {
-                    message: format!("Failed to write file: {}", e),
-                })?;
+                }),
+            )
+            .await
+            .map_err(|e| ToolExecutionError::ExecutionFailed {
+                message: format!("Failed to write file: {}", e),
+            })?;
 
             if let Some(ref lsp) = lsp {
                 spawn_touch_file(lsp, std::path::Path::new(&resolved_str));
@@ -250,17 +261,19 @@ impl ToolExecutor for FileEditExecutor {
             });
         };
 
-        backend
-            .files()
-            .write_bytes(WriteBytesRequest {
+        timed(
+            "file_edit write_bytes",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().write_bytes(WriteBytesRequest {
                 path: resolved,
                 content: updated_content.as_bytes().to_vec(),
                 mode: write_mode,
-            })
-            .await
-            .map_err(|e| ToolExecutionError::ExecutionFailed {
-                message: format!("Failed to write file: {}", e),
-            })?;
+            }),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to write file: {}", e),
+        })?;
 
         if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, std::path::Path::new(&resolved_str));

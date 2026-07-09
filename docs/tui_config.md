@@ -1,6 +1,6 @@
 # TUI Configuration Guide
 
-> **Note**: This document focuses on TUI (`xiaoo-tui`) specific configuration items.
+> **Note**: This document focuses on TUI (`xiaoo`) specific configuration items.
 >
 > For **common configuration items** (llm, subagent, skills, compact, trace, hooker, etc.), please refer to [Configuration File Guide](./config_file_guide.md).
 
@@ -15,6 +15,11 @@ TUI supports all common configurations and has the following specific configurat
 | `[tui.remote]` | Remote TUI configuration (connect to remote daemon) |
 | `[lsp]` | LSP server configuration (real-time diagnostics) |
 | `[agent]` | Agent role configuration (Tab key multi-role switching) |
+
+> **Note**: TUI does not read the `[compact]` section. Adaptive context
+> compression is only wired into CLI and Daemon. If a TUI conversation grows
+> past the provider context window, switch to CLI/Daemon or start a new
+> session. See `config_file_guide.md` for details.
 
 ---
 
@@ -214,7 +219,8 @@ Here is a complete example containing both common configuration and TUI-specific
 provider = "openrouter"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
-context_window = 128000
+max_tokens = 128000
+reasoning_effort = "off"
 
 # Predefined subagent roles (common configuration)
 # Note: Tools configuration supports two formats. See config_file_guide.md for details.
@@ -229,9 +235,9 @@ read = true
 glob = true
 grep = true
 
-# Context compression (common configuration)
-[compact]
-auto_compact_ratio = 0.75
+# Context compression (common configuration, CLI/Daemon only — TUI ignores [compact])
+# [compact]
+# auto_compact_ratio = 0.75
 
 # Tracing (common configuration)
 [trace]
@@ -293,13 +299,13 @@ write = true
 
 ```bash
 # Local mode
-xiaoo-tui
+xiaoo
 
 # Use specific configuration file
-xiaoo-tui --config /path/to/config.toml
+xiaoo --config /path/to/config.toml
 
 # Debug mode
-xiaoo-tui --debug
+xiaoo --debug
 ```
 
 ---
