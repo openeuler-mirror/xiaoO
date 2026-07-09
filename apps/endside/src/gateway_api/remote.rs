@@ -182,6 +182,7 @@ impl GatewayRuntime {
         prompt: String,
         append_user_message: bool,
         command_context: Option<agent_types::chat::CommandContext>,
+        chain_depth: usize,
     ) -> Result<(), String> {
         let remote = self
             .remote
@@ -203,7 +204,8 @@ impl GatewayRuntime {
             self.remote_session_open = true;
         }
 
-        let turn_request = self.remote_turn_request(state, prompt.clone(), command_context)?;
+        let turn_request =
+            self.remote_turn_request(state, prompt.clone(), command_context, chain_depth)?;
 
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(std::time::Instant::now());
@@ -363,6 +365,7 @@ impl GatewayRuntime {
         state: &AppState,
         text: String,
         command_context: Option<agent_types::chat::CommandContext>,
+        chain_depth: usize,
     ) -> Result<RuntimeTurnRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
         Ok(RuntimeTurnRequest {
@@ -384,6 +387,7 @@ impl GatewayRuntime {
             reasoning_effort: state.reasoning_effort,
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
             command_context,
+            chain_depth,
         })
     }
 }

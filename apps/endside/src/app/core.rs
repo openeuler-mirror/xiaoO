@@ -267,11 +267,88 @@ impl App {
                 self.switch_to_remote_session(session_id).await;
             }
             agent_types::hook::HookAction::SwitchSession { session_id } => {
+                // Skip the switch (and the transcript reload + "Switched to
+                // session" system message it inserts) when the TUI is already
+                // focused on the target. This commonly happens when a plugin
+                // emits `[create_session X, switch_session X, send_prompt X]`
+                // in one batch: create already moved focus to X, so the
+                // following switch_session would no-op on the daemon
+                // (idempotent `open_session`) but still churn the TUI side.
+                if self.state.session_id == session_id {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "TUI: hook action switch_session — already focused, skipping"
+                    );
+                    return;
+                }
                 tracing::info!(
                     session_id = %session_id,
                     "TUI: hook action switch_session — switching focus"
                 );
                 self.switch_to_remote_session(session_id).await;
+            }
+            agent_types::hook::HookAction::SendPrompt {
+                session_id,
+                text,
+                chain_depth,
+            } => {
+                // Only takes effect in remote (daemon) mode, matching
+                // create_session / switch_session: the action's visible
+                // execution (echo + streaming) requires a remote backend the
+                // TUI can POST `/runtimes/input` to. In local mode the action
+                // is dropped with a warning.
+                if self.gateway.remote_base_url().is_none() {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "send_prompt hook action dropped (local mode does not execute daemon-side actions)"
+                    );
+                    return;
+                }
+                if text.trim().is_empty() {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "send_prompt hook action dropped (empty text)"
+                    );
+                    return;
+                }
+                // Switch focus only if not already on the target session;
+                // skipping avoids a transcript reload and a redundant
+                // "Switched to session" system message. The daemon has
+                // already called `open_session` for the target (idempotent)
+                // in `DaemonHookActionSink::execute_on_daemon`.
+                if self.state.session_id != session_id {
+                    tracing::info!(
+                        session_id = %session_id,
+                        chain_depth,
+                        "TUI: hook action send_prompt — switching focus"
+                    );
+                    self.switch_to_remote_session(session_id).await;
+                }
+                // After a switch, `apply_remote_session_switch` resets
+                // `is_loading` (via `reset_for_new_session`), so the start_turn
+                // branch below runs. If the switch was skipped and a turn is
+                // still running (e.g. turn A's reveal buffer hasn't fully
+                // drained when Done arrived), enqueue so `start_next_queued_turn`
+                // drains it once idle — same behavior as a user typing while
+                // a turn is running.
+                if self.state.chat_state.is_loading {
+                    tracing::info!(
+                        chain_depth,
+                        "TUI: hook action send_prompt — turn in progress, enqueueing"
+                    );
+                    self.state
+                        .chat_state
+                        .enqueue_pending_turn(text, None, chain_depth);
+                } else if let Err(error) = self
+                    .gateway
+                    .start_turn_for_hook_prompt(&mut self.state, text, chain_depth)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %error,
+                        "TUI: hook action send_prompt — start_turn failed"
+                    );
+                }
             }
         }
     }

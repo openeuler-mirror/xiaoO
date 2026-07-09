@@ -144,6 +144,14 @@ pub struct AppTurnRequest {
     /// command metadata. `None` for free-form user input.
     #[serde(default)]
     pub command_context: Option<agent_types::chat::CommandContext>,
+    /// Cross-turn `send_prompt` chain depth. `0` for normal user-typed /
+    /// HTTP API turns (resets the chain). When the TUI executes a
+    /// `SendPrompt` hook action, it relays the daemon-stamped
+    /// `action.chain_depth` here so the daemon tracks the resulting turn's
+    /// depth and can enforce the cap (`[hooker].max_prompt_chain_depth`,
+    /// default 128). Set by the host; plugins cannot influence it directly.
+    #[serde(default)]
+    pub chain_depth: usize,
 }
 
 pub type RuntimeTurnRequest = AppTurnRequest;
@@ -170,6 +178,7 @@ mod tests {
             reasoning_effort: ReasoningEffort::default(),
             llm: None,
             command_context: None,
+            chain_depth: 0,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");

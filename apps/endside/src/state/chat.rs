@@ -90,6 +90,12 @@ pub struct QueuedTurn {
     /// Carried through the queue so `*.Chat.command.before` still fires when
     /// the turn is dequeued after the running turn finishes.
     pub command_context: Option<agent_types::chat::CommandContext>,
+    /// Cross-turn `send_prompt` chain depth. `0` for user-typed turns
+    /// (resets the chain). When a `SendPrompt` hook action is enqueued
+    /// because a turn is already running, the daemon-stamped
+    /// `action.chain_depth` is carried here so `start_next_queued_turn`
+    /// relays it back to the daemon via `RuntimeTurnRequest.chain_depth`.
+    pub chain_depth: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -869,10 +875,12 @@ impl ChatState {
         &mut self,
         prompt: String,
         command_context: Option<agent_types::chat::CommandContext>,
+        chain_depth: usize,
     ) {
         self.pending_turns.push_back(QueuedTurn {
             prompt,
             command_context,
+            chain_depth,
         });
         self.input.reset();
         self.stick_to_bottom = true;
@@ -1133,7 +1141,7 @@ mod tests {
         chat.messages.clear();
         chat.input = Input::from("queued");
 
-        chat.enqueue_pending_turn("queued".to_string(), None);
+        chat.enqueue_pending_turn("queued".to_string(), None, 0);
 
         assert_eq!(chat.input.value(), "");
         assert!(chat.stick_to_bottom);
