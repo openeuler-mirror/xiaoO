@@ -38,34 +38,44 @@ SENSITIVE_PATHS: list[dict] = [
     {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥", "credential": True},
     {"path": ".ssh/id_ed25519", "risk_level": "critical", "desc": "SSH 私钥 (ed25519)", "credential": True},
     {"path": ".ssh/authorized_keys", "risk_level": "high", "desc": "SSH 授权密钥", "credential": True},
-    # 系统配置
+    # 系统配置（仅拦截写入）
     {"path": "/etc/hosts", "risk_level": "medium", "desc": "DNS 解析配置"},
     {"path": "/etc/crontab", "risk_level": "high", "desc": "系统定时任务"},
+    {"path": "/etc/cron.d/", "risk_level": "high", "desc": "系统定时任务目录（拆分式 crontab）"},
+    {"path": "/var/spool/cron/", "risk_level": "high", "desc": "用户级定时任务目录"},
     {"path": "/etc/systemd/", "risk_level": "high", "desc": "systemd 服务配置"},
     {"path": "/etc/ssh/sshd_config", "risk_level": "high", "desc": "SSH 服务配置"},
-    # 危险目录
+    {"path": "/etc/pam.d/", "risk_level": "high", "desc": "PAM 可插拔认证模块配置"},
+    # 危险目录（仅拦截写入）
     {"path": "/boot/", "risk_level": "critical", "desc": "启动引导目录"},
     {"path": "/proc/sys/", "risk_level": "high", "desc": "内核参数"},
     {"path": "/sys/", "risk_level": "high", "desc": "sysfs 内核接口"},
     # 设备文件
-    {"path": "/dev/zero", "risk_level": "high", "desc": "零设备（无限空字节输出）"},
-    {"path": "/dev/null", "risk_level": "medium", "desc": "空设备（丢弃所有写入）"},
-    {"path": "/dev/random", "risk_level": "medium", "desc": "随机数设备"},
-    {"path": "/dev/urandom", "risk_level": "medium", "desc": "伪随机数设备"},
-    {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备"},
+    # /dev/null、/dev/zero、/dev/urandom 已移除（误报率极高，详见 docs/l2_sensitive_paths_audit.md）
+    # /dev/random 保留但改为 read_only=True：读取可耗尽熵池导致 TLS 阻塞（攻击向量），
+    #   写入是投喂熵（增强安全），不应拦截
+    {"path": "/dev/random", "risk_level": "high", "desc": "阻塞式随机数设备（读取耗尽熵池）", "read_only": True},
+    {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备（读写均危险）", "credential": True},
     {"path": "/dev/kmsg", "risk_level": "high", "desc": "内核消息缓冲区"},
+    # 持久化与命令劫持（仅拦截写入）
+    {"path": "~/.bashrc", "risk_level": "high", "desc": "用户 Shell 初始化脚本"},
+    {"path": "~/.bash_profile", "risk_level": "high", "desc": "用户 Shell 登录脚本"},
+    {"path": "~/.profile", "risk_level": "high", "desc": "用户通用登录脚本"},
+    # SSH 主机私钥（credential=True — 泄露可 MITM 劫持所有 SSH 连接）
+    {"path": "/etc/ssh/ssh_host_rsa_key", "risk_level": "critical", "desc": "SSH 主机 RSA 私钥", "credential": True},
+    {"path": "/etc/ssh/ssh_host_ed25519_key", "risk_level": "critical", "desc": "SSH 主机 Ed25519 私钥", "credential": True},
+    {"path": "/etc/ssh/ssh_host_ecdsa_key", "risk_level": "critical", "desc": "SSH 主机 ECDSA 私钥", "credential": True},
     # xiaoO 系统级安全 Skill（系统级路径 - 所有用户共享的内置 skill）
     {"path": "/usr/lib/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 系统级安全防护 Skill 目录"},
     # xiaoO 用户级安全 Skill（用户级路径 - 兼容旧版本）
     {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 用户级安全防护 Skill 目录"},
-    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免部分匹配误报）
+    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免非文件名拼接误报）
     {"path": "credentials.yml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
     {"path": "credentials.yaml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
     {"path": "secrets.yml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
     {"path": "secrets.yaml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
     {"path": ".env", "risk_level": "high", "desc": "环境变量/凭据配置文件", "credential": True},
 ]
-
 # ==================== 写入操作关键词 ====================
 WRITE_KEYWORDS = [
     "write", "写入", "save", "保存", "modify", "修改",
@@ -379,6 +389,7 @@ class LogicRulesChecker:
             raw_path = sp["path"]
             path = raw_path.lower()
             is_credential = sp.get("credential", False)
+            is_read_only = sp.get("read_only", False)
 
             # 检查路径是否在操作中出现
             if is_credential:
@@ -416,7 +427,19 @@ class LogicRulesChecker:
                         reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
                         risk_type="file_access",
                     )
-                # 非凭据路径：只拦截写入/删除操作，只读访问（如 cat /sys/class/block/sda/size、
+                # read_only 路径：只拦截读取操作，写入/删除放行（如 /dev/random：
+                #   读取可耗尽熵池导致 TLS 阻塞（攻击向量），写入是投喂熵（增强安全））
+                if is_read_only:
+                    if is_write_op:
+                        continue  # 允许写入操作（如投喂熵池）
+                    return LogicRuleResult(
+                        hit=True,
+                        violated_rule="sensitive_path_access",
+                        risk_level=sp["risk_level"],
+                        reason=f"读取敏感路径: {sp['desc']} ({sp['path']})",
+                        risk_type="file_access",
+                    )
+                # 默认（无特殊标记）：只拦截写入/删除操作，只读访问放行
                 # lsblk、smartctl 查设备信息）放行。修复历史误报：只读访问 /sys/、/proc/sys/、
                 # /dev/* 被一刀切拦截。
                 if not is_write_op:

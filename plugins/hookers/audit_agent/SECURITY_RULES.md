@@ -942,11 +942,14 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 > **`file_write`/`file_edit`/`file_read` 处理说明**：这些工具的 `action_detail` 仅包含 `file_path` 字段，不包含文件内容（`content`）。避免文件内容中提及敏感路径（如测试文档中的 `/etc/passwd` 示例文本）触发误报。
 
-> **读写区分说明（关键）**：敏感路径分两类处理——
-> - **凭据/密钥类（`credential=true`）**：`/etc/shadow`、`/etc/gshadow`、`/etc/sudoers`、`.ssh/id_rsa`、`.ssh/id_ed25519`、`.ssh/authorized_keys`、`credentials.yml`、`secrets.yml`、`.env` 等。**无论读写均拦截**——读取密钥/凭据文件本身就是泄密。使用边界匹配（`/` 或 `.` 开头的路径用 `(?:^|[\s/\\])` 前缀替代 `\b`，因 `/` 不是单词字符，`\b` 在空格→`/` 之间不构成边界）。
-> - **其他敏感路径**：`/sys/`、`/proc/sys/`、`/dev/*`、`/boot/`、`/etc/hosts`、`/etc/crontab` 等。**只拦截写入/删除操作，只读访问放行**——如 `cat /sys/class/block/sda/size`（查磁盘大小）、`lsblk`、`smartctl` 查设备信息是正常操作。
+> **策略维度说明（关键）**：敏感路径分三种策略处理——
+> - **凭据/密钥类（`credential=true`）**：`/etc/shadow`、`/etc/gshadow`、`.ssh/id_rsa`、`/dev/mem`、`/etc/ssh/ssh_host_*_key`、`credentials.yml`、`secrets.yml`、`.env` 等。**无论读写均拦截**——读取密钥/凭据/物理内存本身就是泄密。使用边界匹配（`/` 或 `.` 开头的路径用 `(?:^|[\s/\\])` 前缀替代 `\b`，因 `/` 不是单词字符，`\b` 在空格→`/` 之间不构成边界）。
+> - **read_only 类（`read_only=true`）**：`/dev/random`。**只拦截读取操作，写入/删除放行**——读取阻塞式随机数设备可耗尽熵池导致 TLS 阻塞（攻击向量），写入是投喂熵池（增强安全）。
+> - **默认（无特殊标记）**：`/sys/`、`/proc/sys/`、`/boot/`、`/etc/hosts`、`/etc/crontab`、`/etc/pam.d/`、`~/.bashrc` 等。**只拦截写入/删除操作，只读访问放行**——如 `cat /sys/class/block/sda/size`（查磁盘大小）、`lsblk`、`cat ~/.bashrc` 是正常操作。
 >
 > 写/删操作由统一的 `_is_write_operation` 判定：写入关键词、`rm`/`cp`/`mv`/`dd` 等写删命令、或真实重定向写入（`/dev/null` 丢弃除外，且首命令非只读命令）。
+>
+> **已移除的路径**：`/dev/null`、`/dev/zero`、`/dev/urandom` 已从规则表移除——拦截这些设备的误报率极高（`2>/dev/null` 是丢弃 stderr 的标准范式、`dd if=/dev/zero` 是创建空文件的标准操作、写入 `/dev/urandom` 是投喂熵池），且无安全增益。老用户副本中残留的规则会在下次加载时自动禁用（`enabled=False`），dashboard 上可见但不再生效）。
 
 #### Critical 级别敏感路径
 
@@ -955,10 +958,13 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `/etc/shadow` | 系统密码文件（credential，读写均拦） |
 | `/etc/gshadow` | 系统组密码文件（credential，读写均拦） |
 | `/etc/sudoers` | sudo 配置（credential，读写均拦） |
-| `.ssh/id_rsa` | SSH 私钥（credential，读写均拦） |
-| `.ssh/id_ed25519` | SSH 私钥 ed25519（credential，读写均拦） |
+| `.ssh/id_rsa` | SSH 用户私钥（credential，读写均拦） |
+| `.ssh/id_ed25519` | SSH 用户私钥 ed25519（credential，读写均拦） |
+| `/dev/mem` | 物理内存访问设备（credential，读写均拦——读即 dump 物理内存泄密） |
+| `/etc/ssh/ssh_host_rsa_key` | SSH 主机 RSA 私钥（credential，读写均拦——泄露可 MITM） |
+| `/etc/ssh/ssh_host_ed25519_key` | SSH 主机 Ed25519 私钥（credential，读写均拦——泄露可 MITM） |
+| `/etc/ssh/ssh_host_ecdsa_key` | SSH 主机 ECDSA 私钥（credential，读写均拦——泄露可 MITM） |
 | `/boot/` | 启动引导目录（仅写入/删除拦截） |
-| `/dev/mem` | 物理内存访问设备（仅写入/删除拦截） |
 | `/usr/lib/.xiaoo/skills/xiaoo-guardian/` | xiaoO 系统级安全防护 Skill 目录（仅写入/删除拦截） |
 | `~/.xiaoo/skills/xiaoo-guardian/` | xiaoO 用户级安全防护 Skill 目录（仅写入/删除拦截） |
 
@@ -1017,12 +1023,18 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 | `/etc/passwd` | 系统用户文件（仅写入/删除拦截） |
 | `.ssh/authorized_keys` | SSH 授权密钥（credential，读写均拦） |
 | `/etc/crontab` | 系统定时任务（仅写入/删除拦截） |
+| `/etc/cron.d/` | 系统定时任务目录（仅写入/删除拦截） |
+| `/var/spool/cron/` | 用户级定时任务目录（仅写入/删除拦截） |
 | `/etc/systemd/` | systemd 服务配置（仅写入/删除拦截） |
 | `/etc/ssh/sshd_config` | SSH 服务配置（仅写入/删除拦截） |
+| `/etc/pam.d/` | PAM 认证模块配置（仅写入/删除拦截——篡改可绕过系统认证） |
 | `/proc/sys/` | 内核参数（仅写入/删除拦截） |
 | `/sys/` | sysfs 内核接口（仅写入/删除拦截） |
-| `/dev/zero` | 零设备（仅写入/删除拦截） |
+| `/dev/random` | 阻塞式随机数设备（read_only，仅拦截读取——读耗熵池，写投喂熵） |
 | `/dev/kmsg` | 内核消息缓冲区（仅写入/删除拦截） |
+| `~/.bashrc` | 用户 Shell 初始化脚本（仅写入/删除拦截——命令劫持持久化） |
+| `~/.bash_profile` | 用户 Shell 登录脚本（仅写入/删除拦截） |
+| `~/.profile` | 用户通用登录脚本（仅写入/删除拦截） |
 | `credentials.yml` / `secrets.yml` / `.env` 等 | 凭据/密钥/环境变量配置文件（credential，读写均拦） |
 
 **示例 1：`/etc/passwd`（只读放行 vs 写入拦截）**
@@ -1099,17 +1111,24 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 
 | 路径 | 说明 |
 |-----|------|
-| `/etc/hosts` | DNS 解析配置 |
-| `/dev/null` | 空设备 |
-| `/dev/random` | 随机数设备 |
-| `/dev/urandom` | 伪随机数设备 |
+| `/etc/hosts` | DNS 解析配置（仅写入/删除拦截） |
 
-**示例：`/etc/hosts`**
+> **已移除**：`/dev/null`（2>/dev/null 是丢弃 stderr 标准范式）、`/dev/zero`（dd if=/dev/zero 是创建空文件标准操作）、`/dev/urandom`（写入是投喂熵，读取不阻塞无安全威胁）已从规则表移除，误报率极高且无安全增益。
+
+**示例：`/etc/hosts`（只读放行 vs 写入拦截）**
 
 ```
-输入:
+输入（只读，放行）:
   action_type: "bash"
   action_detail: "cat /etc/hosts"
+
+匹配: "/etc/hosts"
+结果: Allow
+原因: /etc/hosts 为非凭据敏感路径，cat 为只读操作，按读写区分放行
+
+输入（写入，拦截）:
+  action_type: "bash"
+  action_detail: "echo '1.2.3.4 x' >> /etc/hosts"
 
 匹配: "/etc/hosts"
 结果: Deny
@@ -2016,6 +2035,12 @@ LLM 判断: Deny
 | sysfs_readonly_allow（误报修复） | cat /sys/class/block/sda/size 只读查盘 | Allow | ✓ 非凭据路径只读放行 | 待验证 |
 | blockdev_devnull_allow（误报修复） | blockdev --getsize /dev/sda 2>/dev/null | Allow | ✓ /dev/null 重定向豁免 + blockdev 只读 | 待验证 |
 | write_sensitive_path_deny（防漏报） | echo ... >> /etc/hosts 写敏感路径 | Deny | ✓ 读写区分后写操作仍拦截 | 待验证 |
+| dev_random_read_only（read_only 策略） | cat /dev/random（读耗熵池） | Deny | ✓ read_only 路径读拦截写放行 | 待验证 |
+| write_bashrc_deny（新增覆盖） | echo alias >> ~/.bashrc | Deny | ✓ Shell 配置写入拦截 | 待验证 |
+| write_cron_d_deny（新增覆盖） | echo job > /etc/cron.d/evil | Deny | ✓ cron.d 写入拦截 | 待验证 |
+| read_ssh_host_key_deny（新增覆盖） | cat /etc/ssh/ssh_host_rsa_key | Deny | ✓ credential 读写均拦 | 待验证 |
+
+> **移除路径回归**：`/dev/null`、`/dev/zero`、`/dev/urandom` 已从规则移除，cat/dd 这些设备不再触发 L2 拦截（误报消除）。移除后残留规则自动 disabled。
 
 ### 层3：脚本内容分析测试结果
 

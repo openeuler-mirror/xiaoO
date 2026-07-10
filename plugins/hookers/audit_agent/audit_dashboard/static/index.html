@@ -525,6 +525,16 @@
       font-weight: 500;
     }
 
+    /* read_only 路径：只拦截读取，写入放行（如 /dev/random：读耗熵池，写投喂熵） */
+    .read-only-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #fef3c7;
+      color: #d97706;
+      font-weight: 600;
+    }
+
     /* 搜索结果：层标识、状态文字、分类 */
     .layer-badge {
       font-size: 10px;
@@ -1088,6 +1098,7 @@
                   ${rule.risk_type ? `<span class="rule-type-tag rt-${rule.risk_type}" title="风险类型: ${escapeHtml(rule.risk_type)}">${escapeHtml(riskTypeName(rule.risk_type))}</span>` : ''}
                   ${rule.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：读取同样危险，无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
                   ${(layerKey === "L2_rules" && catName === "sensitive_path_access" && !rule.credential) ? '<span class="write-only-badge" title="非凭据敏感路径：只拦截写入/删除操作，只读访问放行（如 cat /sys/...、lsblk 查设备信息）">仅拦截写入</span>' : ''}
+                  ${(layerKey === "L2_rules" && catName === "sensitive_path_access" && rule.read_only) ? '<span class="read-only-badge" title="read_only 路径：只拦截读取操作，写入/删除放行（如 /dev/random：读取耗尽熵池导致 TLS 阻塞，写入是投喂熵）">仅拦截读取</span>' : ''}
                 </div>
                 <div class="rule-pattern"><span class="rule-field-label">${patternLabel}:</span> ${escapeHtml(patternDisplay)}</div>
                 ${reasonDisplay ? `<div class="rule-reason"><span class="rule-field-label">${reasonLabel}:</span> ${escapeHtml(reasonDisplay)}</div>` : ''}
@@ -1262,6 +1273,7 @@
               ${r.risk_type ? `<span class="rule-type-tag rt-${r.risk_type}" title="风险类型: ${escapeHtml(r.risk_type)}">${escapeHtml(riskTypeName(r.risk_type))}</span>` : ''}
               ${r.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
               ${(r.isSkill !== true && r.layer === "L2_rules" && !r.credential) ? '<span class="write-only-badge" title="非凭据敏感路径：只拦截写入/删除，只读放行">仅拦截写入</span>' : ''}
+              ${(r.isSkill !== true && r.layer === "L2_rules" && r.read_only) ? '<span class="read-only-badge" title="read_only 路径：只拦截读取，写入放行">仅拦截读取</span>' : ''}
               <span class="search-cat">分类: ${escapeHtml(r.category)}</span>
             </div>
             <div class="rule-pattern"><span class="rule-field-label">规则:</span> ${escapeHtml(ruleText)}</div>

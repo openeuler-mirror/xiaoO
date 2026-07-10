@@ -156,6 +156,8 @@ def _l2_sensitive_paths_to_rules() -> list[dict]:
         }
         if sp.get("credential"):
             rule["credential"] = True
+        if sp.get("read_only"):
+            rule["read_only"] = True
         rules.append(rule)
     return rules
 
@@ -491,6 +493,22 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                             elif field == "credential":
                                 # credential 标记以源码为准：源码标了就同步 True（读密钥必拦）
                                 ur["credential"] = val
+                            elif field == "read_only":
+                                # read_only 标记以源码为准：源码标了就同步 True（仅拦截读取）
+                                ur["read_only"] = val
+
+            # 源码已移除的内置规则 → 禁用（保留在列表中但 enabled=False）
+            # 例如 /dev/null、/dev/zero、/dev/urandom 从 SENSITIVE_PATHS 移除后，
+            # 老用户副本里还残留，继续拦截会产生误报。禁用而非删除，让用户在
+            # dashboard 上能看到这些规则（标注为已禁用），还能手动启用。
+            source_ids = {sr.get("id") for sr in source_rules if sr.get("id")}
+            for ur in user_rules:
+                if ur.get("id") and ur.get("builtin") and ur["id"] not in source_ids and ur.get("enabled", True):
+                    ur["enabled"] = False
+                    logger.info(
+                        "内置规则 %s 已从源码移除，在用户副本中禁用（category=%s）",
+                        ur["id"], cat_name,
+                    )
 
             user_cat["rules"] = user_rules
 
@@ -642,6 +660,7 @@ def get_enabled_l2_sensitive_paths(runtime: dict) -> list[dict]:
             "risk_level": r["risk_level"],
             "desc": r["desc"],
             **({"credential": True} if r.get("credential") else {}),
+            **({"read_only": True} if r.get("read_only") else {}),
         }
         for r in rules
     ]
