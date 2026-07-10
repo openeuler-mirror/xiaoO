@@ -526,7 +526,7 @@ impl App {
                 // running turn ends.
                 self.state
                     .chat_state
-                    .enqueue_pending_turn(body, Some(command_context));
+                    .enqueue_pending_turn(body, Some(command_context), 0);
                 return Ok(());
             }
 
@@ -550,7 +550,9 @@ impl App {
                 // any `Transform` would be applied twice (e.g. a prefix
                 // added twice). Queue it once so it is processed once, after
                 // the running turn ends.
-                self.state.chat_state.enqueue_pending_turn(user_input, None);
+                self.state
+                    .chat_state
+                    .enqueue_pending_turn(user_input, None, 0);
             }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());

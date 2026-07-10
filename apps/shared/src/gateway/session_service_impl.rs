@@ -65,6 +65,20 @@ pub struct CoreBackedSessionService {
     hooker_registry: Arc<dyn HookerRegistry>,
     backend_manager: Arc<BackendManager>,
     runtime_checkpoints: InMemoryRuntimeCheckpointStore,
+    /// Cross-turn `send_prompt` chain depth cap (exclusive upper bound on
+    /// `chain_depth`). Stamped onto each `SendPrompt` action
+    /// (`emitting turn depth + 1`) by
+    /// [`fire_session_state_hook_and_collect_actions`]; actions whose
+    /// stamped `chain_depth` would **reach** this value
+    /// (`next_depth >= max_prompt_chain_depth`) are dropped before
+    /// forwarding. Semantics: `N` permits **N turns total** in a chain —
+    /// the user-initiated turn (depth `0`) plus `N - 1`
+    /// `send_prompt`-triggered turns (depths `1..=N-1`); a `send_prompt`
+    /// that would start the `N`-th-turn-after-user (depth `N`) is dropped.
+    /// Defaults to
+    /// [`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`](agent_types::hook::DEFAULT_MAX_PROMPT_CHAIN_DEPTH)
+    /// (128); configurable via `[hooker].max_prompt_chain_depth`.
+    max_prompt_chain_depth: usize,
 }
 
 impl CoreBackedSessionService {
@@ -73,6 +87,7 @@ impl CoreBackedSessionService {
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
         backend_manager: Arc<BackendManager>,
+        max_prompt_chain_depth: usize,
     ) -> Self {
         Self {
             session_store,
@@ -81,6 +96,7 @@ impl CoreBackedSessionService {
             hooker_registry,
             backend_manager,
             runtime_checkpoints: InMemoryRuntimeCheckpointStore::default(),
+            max_prompt_chain_depth,
         }
     }
 
@@ -139,6 +155,7 @@ impl CoreBackedSessionService {
         agent_id: String,
         state: String,
         outcome: String,
+        emitting_turn_chain_depth: usize,
     ) -> Vec<HookAction> {
         let hook_point = session_lifecycle_hook_point(&agent_id, "state");
         let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
@@ -146,6 +163,7 @@ impl CoreBackedSessionService {
             return Vec::new();
         }
 
+        let max_depth = self.max_prompt_chain_depth;
         let registry = Arc::clone(&self.hooker_registry);
         let mut hook_task = tokio::spawn(async move {
             let noop_runtime = NoopRuntimeView::new();
@@ -184,7 +202,7 @@ impl CoreBackedSessionService {
 
         let deadline_sleep = tokio::time::sleep(SESSION_STATE_HOOK_OVERALL_DEADLINE);
         tokio::pin!(deadline_sleep);
-        tokio::select! {
+        let collected: Vec<HookAction> = tokio::select! {
             task_result = &mut hook_task => match task_result {
                 Ok(actions) => actions,
                 Err(join_error) => {
@@ -207,7 +225,18 @@ impl CoreBackedSessionService {
                 hook_task.abort();
                 Vec::new()
             }
-        }
+        };
+
+        // Stamp and cap `SendPrompt` actions before forwarding. The emitting
+        // turn's depth is known here (the turn just finished); each surviving
+        // `SendPrompt` carries `chain_depth = emitting_turn_depth + 1` so the
+        // TUI can relay it back via `RuntimeTurnRequest.chain_depth`, letting
+        // the daemon track the resulting turn's depth and re-enforce the cap
+        // when that turn ends. Plugin-supplied `chain_depth` values are
+        // overwritten unconditionally — plugins cannot forge a low depth to
+        // bypass the cap. A normal user-typed turn carries `chain_depth = 0`,
+        // which resets the chain.
+        stamp_and_cap_send_prompt_actions(collected, emitting_turn_chain_depth, max_depth)
     }
 
     /// Collect the (id)s of enabled hookers registered for `hook_point`,
@@ -853,6 +882,7 @@ impl CoreBackedSessionService {
         let idle_session_id = request.session_id.clone();
         let idle_sender_id = request.sender_id.clone();
         let idle_agent_id = resolved.descriptor.agent_id.0.clone();
+        let idle_chain_depth = request.chain_depth;
 
         let handle = self.get_or_create_session_handle(seed_session).await;
         let mut turn_result = handle
@@ -877,8 +907,13 @@ impl CoreBackedSessionService {
         // `state`.
         //
         // Actions requested by the hookers are collected into
-        // `AppTurnResult.hook_actions` and returned raw. Daemon-side
-        // execution (e.g. `open_session` for `CreateSession`/`SwitchSession`)
+        // `AppTurnResult.hook_actions`. Before they are returned, `SendPrompt`
+        // entries are stamped with `chain_depth = idle_chain_depth + 1` and
+        // dropped if that value **reaches** `max_prompt_chain_depth`
+        // (`next_depth >= max`, an exclusive upper bound — the chain may run
+        // `max_prompt_chain_depth` turns total: depth `0` (user-initiated)
+        // plus `max - 1` `send_prompt`-triggered turns). Daemon-side execution
+        // (e.g. `open_session` for `CreateSession`/`SwitchSession`/`SendPrompt`)
         // is performed by the HTTP router via its own `DaemonHookActionSink`
         // after `run_turn` returns, before forwarding to the TUI via the SSE
         // `Done` event. The trade-off vs a fire-and-forget design is that the
@@ -893,6 +928,7 @@ impl CoreBackedSessionService {
                     idle_agent_id,
                     "idle".to_string(),
                     turn.outcome.as_tag().to_string(),
+                    idle_chain_depth,
                 )
                 .await;
             turn.hook_actions = actions;
@@ -1334,6 +1370,58 @@ fn session_lifecycle_hook_point(agent_id: &str, stage: &str) -> HookPointId {
     HookPointId(format!("{}.Session.lifecycle.{}", agent_id, stage))
 }
 
+/// Stamp each `SendPrompt` action with `chain_depth = emitting_turn_depth
+/// + 1` (overwriting any plugin-supplied value) and drop it once the
+/// stamped value **reaches** `max_depth` (i.e., `next_depth >= max_depth`
+/// — exclusive upper bound). Other action kinds pass through unchanged.
+/// Pure (no I/O) so it can be unit-tested directly.
+///
+/// Semantics: `max_depth = N` permits a chain of **N turns total** — the
+/// user-initiated turn at depth `0` plus `N - 1` `send_prompt`-triggered
+/// turns at depths `1..=N-1`. A `send_prompt` that would start a turn at
+/// depth `N` is dropped, so the chain stops after the depth-`N-1` turn.
+/// The cap is the cross-turn `send_prompt` chain depth limit (default
+/// `DEFAULT_MAX_PROMPT_CHAIN_DEPTH` = 128, configurable via
+/// `[hooker].max_prompt_chain_depth`).
+///
+/// Called by [`CoreBackedSessionService::fire_session_state_hook_and_collect_actions`]
+/// after the hookers return, before the actions are forwarded to the TUI.
+/// The stamped `chain_depth` rides along on the forwarded action so the
+/// TUI can relay it back via `RuntimeTurnRequest.chain_depth`, letting the
+/// daemon track the resulting turn's depth and re-enforce the cap when
+/// that turn ends.
+fn stamp_and_cap_send_prompt_actions(
+    actions: Vec<HookAction>,
+    emitting_turn_depth: usize,
+    max_depth: usize,
+) -> Vec<HookAction> {
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            HookAction::SendPrompt {
+                session_id, text, ..
+            } => {
+                let next_depth = emitting_turn_depth.saturating_add(1);
+                if next_depth >= max_depth {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        next_depth,
+                        max_depth,
+                        "send_prompt hook action dropped: chain depth reaches cap"
+                    );
+                    return None;
+                }
+                Some(HookAction::SendPrompt {
+                    session_id,
+                    text,
+                    chain_depth: next_depth,
+                })
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1352,6 +1440,134 @@ mod tests {
     use serde_json::{json, Value};
     use tempfile::TempDir;
     use xiaoo_core::LoopStateSnapshot;
+
+    #[test]
+    fn stamp_and_cap_stamps_send_prompt_with_next_depth() {
+        // A plugin omits `chain_depth` (parses to 0); the daemon overwrites
+        // it with `emitting_turn_depth + 1` regardless of the plugin value.
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0,
+        }];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 5, 128);
+        assert_eq!(stamped.len(), 1);
+        match &stamped[0] {
+            HookAction::SendPrompt { chain_depth, .. } => assert_eq!(*chain_depth, 6),
+            _ => panic!("expected SendPrompt"),
+        }
+    }
+
+    #[test]
+    fn stamp_and_cap_overwrites_plugin_supplied_depth() {
+        // A plugin cannot forge a low depth to bypass the cap: the daemon
+        // ignores any plugin-supplied value and stamps the real next depth.
+        // Here `next_depth = 129 >= 128` → dropped regardless of the plugin
+        // value (emitting depth 128 is itself only reachable if the cap were
+        // higher; the point of this test is the override + drop, not the
+        // reachability of the emitting depth).
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0, // plugin tries to look like a depth-0 turn
+        }];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 128, 128);
+        // next = 129 >= 128 cap → dropped, not forwarded.
+        assert!(stamped.is_empty());
+    }
+
+    #[test]
+    fn stamp_and_cap_drops_send_prompt_above_cap() {
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0,
+        }];
+        // emitting depth = cap (3) → next = 4 >= 3 → dropped (way above cap).
+        assert!(stamp_and_cap_send_prompt_actions(actions, 3, 3).is_empty());
+    }
+
+    #[test]
+    fn stamp_and_cap_drops_send_prompt_at_boundary() {
+        // Cap is an EXCLUSIVE upper bound: a `send_prompt` whose next-turn
+        // depth would equal `max_depth` is dropped. `max_depth = N` permits
+        // turns at depths `0..=N-1` (N turns total); the `N`-th-turn-after-
+        // user (depth `N`) must not start.
+        //
+        // emitting depth = cap - 1 = 2 → next = 3 == cap → dropped.
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0,
+        }];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 2, 3);
+        assert!(
+            stamped.is_empty(),
+            "next_depth == max_depth must be dropped (exclusive cap)"
+        );
+    }
+
+    #[test]
+    fn stamp_and_cap_keeps_send_prompt_just_below_boundary() {
+        // emitting depth = cap - 2 = 1 → next = 2 = cap - 1 < cap → the
+        // last allowed turn (depth `max - 1`) is permitted to run. With
+        // max=3 this is the 3rd turn in the chain (depths 0, 1, 2).
+        let actions = vec![HookAction::SendPrompt {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            chain_depth: 0,
+        }];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 1, 3);
+        assert_eq!(stamped.len(), 1);
+        match &stamped[0] {
+            HookAction::SendPrompt { chain_depth, .. } => assert_eq!(*chain_depth, 2),
+            _ => panic!("expected SendPrompt"),
+        }
+    }
+
+    #[test]
+    fn stamp_and_cap_passes_other_action_kinds_through_unchanged() {
+        let actions = vec![
+            HookAction::CreateSession {
+                session_id: "a".into(),
+            },
+            HookAction::SwitchSession {
+                session_id: "a".into(),
+            },
+        ];
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 999, 1);
+        assert_eq!(stamped.len(), 2);
+        assert!(matches!(stamped[0], HookAction::CreateSession { .. }));
+        assert!(matches!(stamped[1], HookAction::SwitchSession { .. }));
+    }
+
+    #[test]
+    fn stamp_and_cap_mixed_batch_keeps_non_send_and_caps_send() {
+        let actions = vec![
+            HookAction::CreateSession {
+                session_id: "a".into(),
+            },
+            HookAction::SendPrompt {
+                session_id: "a".into(),
+                text: "x".into(),
+                chain_depth: 0,
+            },
+            HookAction::SwitchSession {
+                session_id: "a".into(),
+            },
+            HookAction::SendPrompt {
+                session_id: "b".into(),
+                text: "y".into(),
+                chain_depth: 0,
+            },
+        ];
+        // emitting depth 3, cap 3: first send_prompt → next 4 >= 3 dropped;
+        // second send_prompt also dropped; create/switch pass through.
+        let stamped = stamp_and_cap_send_prompt_actions(actions, 3, 3);
+        assert_eq!(stamped.len(), 2);
+        assert!(matches!(stamped[0], HookAction::CreateSession { .. }));
+        assert!(matches!(stamped[1], HookAction::SwitchSession { .. }));
+    }
 
     struct StubLlmProvider {
         capabilities: ProviderCapabilities,

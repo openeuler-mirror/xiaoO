@@ -642,7 +642,10 @@ Field rules:
 | `kind` | Required fields | Daemon-side effect | TUI-side effect |
 |---|---|---|---|
 | `create_session` | `session_id: String` | Calls `open_session` (idempotent resume — opens a new session or resumes an existing one with the same id). | Switches focus to that session (transcript restored from daemon state). |
-| `switch_session` | `session_id: String` | Calls `open_session` (idempotent resume — ensures the target session exists before the TUI tries to switch to it). | Switches focus to that session (transcript restored from daemon state). |
+| `switch_session` | `session_id: String` | Calls `open_session` (idempotent resume — ensures the target session exists before the TUI tries to switch to it). | Switches focus to that session (transcript restored from daemon state); no-op if already focused. |
+| `send_prompt` | `session_id: String`, `text: String` | Calls `open_session` (idempotent resume — ensures the target session exists); stamps `chain_depth = emitting_turn_depth + 1` (overwriting any plugin-supplied value) so the cross-turn depth cap can be enforced. | Switches focus to that session (no-op if already focused), echoes `text` locally as a user message, and submits the turn via `POST /api/v1/runtimes/input` so the daemon runs the agent loop and the TUI streams the response. **Remote-mode only** — in local mode the action is dropped by the TUI. |
+
+`send_prompt` also accepts a `chain_depth` field, but it is **host-controlled**: plugins must not set it. The daemon overwrites any plugin-supplied value with `emitting_turn_depth + 1` before forwarding, so a plugin cannot forge a low depth to bypass the cross-turn cap (see 16.9). The TUI relays the stamped value back via `RuntimeTurnRequest.chain_depth` so the resulting turn's depth is tracked.
 
 Both kinds collapse to the same daemon call today (`open_session` is idempotent), but the two variants exist so future xiaoo versions can distinguish "create a brand-new session and seed it" from "switch the TUI to an existing session" without breaking the JSON contract.
 
@@ -650,17 +653,19 @@ Both kinds collapse to the same daemon call today (`open_session` is idempotent)
 
 The dispatcher changed from fire-and-forget to **awaited** for the session state hook specifically so actions can be collected before the turn result is returned.
 
-> **Mode-dependent contract**: `create_session` / `switch_session` actions **only take effect in remote (daemon) mode**. In local (non-daemon) mode the hooker is still invoked and its actions are still collected (so the hooker can use `session_state` for logging/auditing), but the actions are dropped at the TUI's `switch_to_remote_session` step because `remote_base_url()` is None — no session is created, no focus switch happens. See step 5 below.
+> **Mode-dependent contract**: `create_session` / `switch_session` / `send_prompt` actions **only take effect in remote (daemon) mode**. In local (non-daemon) mode the hooker is still invoked and its actions are still collected (so the hooker can use `session_state` for logging/auditing), but the actions are dropped at the TUI's `execute_hook_action` step because `remote_base_url()` is None — no session is created, no focus switch happens, no turn is submitted. See step 5 below.
 
 The full flow:
 
 1. `run_turn` returns `Ok(turn_result)`. The session is back in `idle`.
-2. `CoreBackedSessionService::fire_session_state_hook_and_collect_actions` invokes every registered `*.Session.lifecycle.state` hooker **sequentially** (sorted by id), awaiting each one. The `actions` arrays returned by all hookers are concatenated into `AppTurnResult.hook_actions`. The whole collection is bounded by an overall deadline of 30s (`SESSION_STATE_HOOK_OVERALL_DEADLINE`, equal to one hooker's per-subprocess cap): a single legitimately slow hooker is unaffected, but the sum across N hookers is capped at 30s instead of N × 30s. On timeout the spawned task is aborted (the in-flight subprocess is reaped via `kill_on_drop`) and **no actions are returned** — best-effort. This step is identical in local and remote mode.
-3. **Remote mode only**: The HTTP router (`apps/serverside/src/httpserver/router.rs`) calls `DaemonHookActionSink::execute_on_daemon(hook_actions)`. For each action the daemon runs the daemon-side effect (currently `open_session` for both kinds). Actions that fail daemon-side execution are **filtered out** and logged via `tracing::warn!`; they are not forwarded to the TUI. (In local mode this step does not exist — there is no daemon, so no `open_session` runs.)
+2. `CoreBackedSessionService::fire_session_state_hook_and_collect_actions` invokes every registered `*.Session.lifecycle.state` hooker **sequentially** (sorted by id), awaiting each one. The `actions` arrays returned by all hookers are concatenated, then each `send_prompt` is **stamped** with `chain_depth = emitting_turn_depth + 1` (overwriting any plugin-supplied value) and **dropped** if that value **reaches** `max_prompt_chain_depth` (`next_depth >= max`, an exclusive upper bound — `N` permits N turns total in a chain; see 16.9). The surviving actions are concatenated into `AppTurnResult.hook_actions`. The whole collection is bounded by an overall deadline of 30s (`SESSION_STATE_HOOK_OVERALL_DEADLINE`, equal to one hooker's per-subprocess cap): a single legitimately slow hooker is unaffected, but the sum across N hookers is capped at 30s instead of N × 30s. On timeout the spawned task is aborted (the in-flight subprocess is reaped via `kill_on_drop`) and **no actions are returned** — best-effort. This step is identical in local and remote mode.
+3. **Remote mode only**: The HTTP router (`apps/serverside/src/httpserver/router.rs`) calls `DaemonHookActionSink::execute_on_daemon(hook_actions)`. For each action the daemon runs the daemon-side effect (currently `open_session` for all three kinds — idempotent resume, ensuring the target session exists). For `send_prompt`, the `text` and daemon-stamped `chain_depth` ride along on the forwarded action; the daemon does **not** run the turn itself here (the SSE stream for the new turn can only be obtained by the TUI POSTing `/runtimes/input`). Actions that fail daemon-side execution are **filtered out** and logged via `tracing::warn!`; they are not forwarded to the TUI. (In local mode this step does not exist — there is no daemon, so no `open_session` runs.)
 4. **Remote mode only**: The surviving actions are bundled into the SSE `Done` event's `actions` field and sent to the TUI. They are emitted **before** the `Done` event itself — the TUI's receive loop exits as soon as it sees `Done` (it sets `stream_rx = None`), so any update sent after `Done` would never be drained. (In local mode actions travel via `SessionTurnUpdate::HookActions` on the in-process channel, not via SSE.)
-5. The TUI buffers the actions in `pending_hook_actions`, then the App event loop drains them via `take_pending_hook_actions()` and calls `switch_to_remote_session(session_id)` for each.
-   - **Remote mode**: switching focus re-calls `open_session` (idempotent) to fetch the target session's `SessionRecord` and reconstructs the local transcript from `loop_state.messages` so the user sees the prior turns instead of a blank transcript.
-   - **Local mode**: `switch_to_remote_session` checks `remote_base_url()`, finds `None`, logs `tracing::warn!("switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)")`, and returns without switching. The action is a no-op.
+5. The TUI buffers the actions in `pending_hook_actions`, then the App event loop drains them via `take_pending_hook_actions()` and dispatches each via `execute_hook_action`:
+   - `create_session` / `switch_session`: calls `switch_to_remote_session(session_id)`. (`switch_session` skips if already focused on the target, avoiding a redundant transcript reload + system message.)
+     - **Remote mode**: switching focus re-calls `open_session` (idempotent) to fetch the target session's `SessionRecord` and reconstructs the local transcript from `loop_state.messages` so the user sees the prior turns instead of a blank transcript.
+     - **Local mode**: `switch_to_remote_session` checks `remote_base_url()`, finds `None`, logs `tracing::warn!("switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)")`, and returns without switching. The action is a no-op.
+   - `send_prompt`: if `remote_base_url()` is None (local mode), drops the action with `tracing::warn!("send_prompt hook action dropped (local mode does not execute daemon-side actions)")`. Otherwise: switches focus to `session_id` (skipped if already focused), then — if a turn is already running (`is_loading = true`) — enqueues the `text` (carrying `chain_depth`) into `pending_turns` for `start_next_queued_turn` to drain once idle; else calls `start_turn_for_hook_prompt(text, chain_depth)`, which echoes `text` as a user message (`Message::user(prompt)`) and POSTs `/api/v1/runtimes/input` with `chain_depth` set on the request. The daemon runs the agent loop; the TUI streams the SSE response. When that turn ends, step 2 repeats with the new `emitting_turn_depth = chain_depth`, re-enforcing the cap (16.9).
 
 > **Trade-off vs the previous fire-and-forget design**: the user sees the turn result *after* the session state hookers finish (or time out). This is acceptable because session lifecycle hooks only fire after turn termination anyway — there is no LLM streaming to interrupt — and most setups register zero or fast hookers. If your hooker script is slow (e.g. calls an external audit service), it will delay the `Done` event proportionally; keep `actions`-emitting hookers fast.
 
@@ -677,11 +682,16 @@ No action failure is propagated back to the caller of the hook. A plugin that re
 
 ### 16.6 Depth limiting
 
-The host enforces a max action depth of 3 (see `agent_contracts::MAX_ACTION_DEPTH`) to prevent recursive `hook → action → hook` loops (a `create_session` action that opens a session whose first turn immediately fires another state hook that requests another `create_session`, ...). `DaemonHookActionSink::execute_on_daemon` truncates any batch longer than the limit: only the first `MAX_ACTION_DEPTH` entries are processed, the trailing actions are dropped and logged via `tracing::warn!` with `requested` and `max` fields. Do not rely on chaining actions across multiple turns or batching more than three actions in a single hook response.
+Two distinct depth limits apply to actions:
+
+- **Per-batch cap (`MAX_ACTION_DEPTH = 3`)**: prevents a single hook response from chaining too many actions in one batch. `DaemonHookActionSink::execute_on_daemon` truncates any batch longer than the limit: only the first `MAX_ACTION_DEPTH` entries are processed, the trailing actions are dropped and logged via `tracing::warn!` with `requested` and `max` fields. The canonical `create_session + switch_session + send_prompt` triple exactly fills this budget; do not batch more than three actions in a single response.
+- **Cross-turn cap (`max_prompt_chain_depth`, default 128)**: prevents a `send_prompt`-triggered turn from firing another `send_prompt` indefinitely across turns. See 16.9 for the round-trip and enforcement details.
+
+Do not rely on chaining actions across multiple turns beyond the cross-turn cap, or batching more than three actions in a single hook response.
 
 ### 16.7 Minimal example
 
-A `*.Session.lifecycle.state` hooker that opens a debug session whenever a turn ends with the `budget_exhausted` outcome, then switches the user's focus to it:
+A `*.Session.lifecycle.state` hooker that opens a debug session whenever a turn ends with the `budget_exhausted` outcome, switches the user's focus to it, and sends a follow-up prompt so the agent continues investigating on the new session:
 
 ```js
 #!/usr/bin/env node
@@ -695,16 +705,22 @@ if (payload.stage === "session_state" && payload.state === "idle") {
     `[${new Date().toISOString()}] idle: session=${payload.session_id} outcome=${payload.outcome}\n`);
 
   if (payload.outcome === "budget_exhausted") {
-    // Spawn a debug session on the daemon and switch the TUI to it.
-    // The daemon calls open_session (idempotent resume) first, so a
-    // second budget_exhausted on the same source session won't create
-    // a duplicate debug session — it'll just re-focus the existing one.
+    // Spawn a debug session on the daemon, switch the TUI to it, and send
+    // a follow-up prompt. The daemon calls open_session (idempotent resume)
+    // for all three actions first; the TUI then switches focus and submits
+    // the prompt so the agent auto-continues on the new session.
+    //
+    // Order matters: send_prompt MUST come last (see 16.8) — a following
+    // switch_session would reset TUI state and interrupt the just-started
+    // turn's stream. The create+switch+send_prompt triple exactly fills
+    // the max action depth of 3.
     const debugId = `debug-${payload.session_id}`;
     result = {
       result: "ack",
       actions: [
         { kind: "create_session", session_id: debugId },
-        { kind: "switch_session", session_id: debugId }
+        { kind: "switch_session", session_id: debugId },
+        { kind: "send_prompt", session_id: debugId, text: "Continue investigating the failure you were working on." }
       ]
     };
   }
@@ -715,15 +731,51 @@ process.stdout.write(JSON.stringify(result));
 
 Notes on this example:
 
-- The two actions are dispatched **in order**: the daemon opens `debug-<src>` first (or no-ops if it already exists), then ensures the same id exists again (idempotent), then forwards both actions to the TUI. The TUI switches focus once per forwarded action — both target the same `session_id`, so the net effect is one switch.
-- If `open_session` fails on the daemon (e.g. the daemon's session store is unhealthy), both actions are filtered out and the TUI never sees them; the user stays on the original session.
+- The three actions are dispatched **in order**: the daemon opens `debug-<src>` first (or no-ops if it already exists), then ensures the same id exists again (idempotent), then ensures it exists once more for the `send_prompt` and stamps its `chain_depth`. The TUI switches focus once (create), skips the redundant switch (already focused), then echoes the prompt and starts the turn.
+- If `open_session` fails on the daemon (e.g. the daemon's session store is unhealthy), all three actions are filtered out and the TUI never sees them; the user stays on the original session.
 - Combining `actions` with `ask_user` is **not** supported — the session state hook does not implement the `ask_user` interaction protocol (section 14.6). If you need user confirmation before opening a debug session, return `actions` unconditionally and let the user dismiss the new session manually, or move that logic into a `*.Chat.command.before` hooker instead.
+- The `text` of `send_prompt` will pass through the daemon's `*.Chat.message.received` hook on the resulting turn (see 16.8 re-entrancy). If the same hooker handles `chat_message`, do not re-emit `send_prompt` from there.
 
-### 16.8 Checklist before you say "my actions don't fire"
+### 16.8 Cross-turn re-entrancy and ordering constraints
+
+`send_prompt` triggers a normal turn on the target session. That turn's lifecycle (`*.Chat.message.received` at start, `*.Session.lifecycle.state` at end) fires again, so plugin authors must be aware of two re-entrancy surfaces:
+
+- **`chat_message` sees the plugin's own `text`**: the daemon's `agent_loop` fires `*.Chat.message.received` for the `send_prompt` text exactly as for a user-typed message. If the same plugin handles both `chat_message` and `session_state`, its `chat_message` branch will observe the `text` it itself emitted. Do not re-emit `send_prompt` (or otherwise mutate) from `chat_message` based on this self-generated input — it would form a second amplification path on top of the `session_state` chain.
+- **`prior_message_count` semantics**: for a freshly created session, the `send_prompt` text is the first message, so `chat_message` sees `prior_message_count = 0` and any "first message" logic (context injection, memory load, etc.) fires for it. This may or may not be desired; design accordingly.
+- **Echo vs transform**: if a `chat_message` hooker transforms the `send_prompt` text, the TUI echoes the original text locally while the daemon runs the turn with the transformed text. On the next transcript restore the TUI fetches the transformed version. This is inherited from remote + `chat_message` transform behavior, not new to `send_prompt`.
+
+Ordering within a single `actions` batch:
+
+- The TUI processes actions sequentially in the order they appear. `send_prompt` **must be last** and at most one per batch: a `switch_session` (or `create_session`) after a `send_prompt` would reset TUI state (transcript reload, `is_loading` cleared) and orphan the just-started turn's SSE stream. The `max action depth = 3` plus the canonical `create + switch + send_prompt` triple naturally enforces this.
+- If the TUI is already focused on the `send_prompt`'s target session, the switch step is skipped (no transcript reload, no "Switched to session" system message); the prompt is echoed and the turn submitted directly.
+- If a turn is already running when `send_prompt` is processed (`is_loading = true`, e.g. the previous turn's reveal buffer hasn't fully drained), the prompt is enqueued in `pending_turns` and drained by `start_next_queued_turn` once idle — identical to a user typing while a turn runs.
+
+### 16.9 Cross-turn `send_prompt` depth cap
+
+A `send_prompt`-triggered turn ends by firing `*.Session.lifecycle.state` again, which may emit another `send_prompt`, forming a cross-turn chain. xiaoo does **not** impose semantic termination conditions on chains (that is the plugin's responsibility), but provides a host-side hard depth cap so a runaway plugin cannot loop forever:
+
+- **Config**: `[hooker].max_prompt_chain_depth`, default `128`.
+- **Semantics**: `N` is an **exclusive upper bound** on `chain_depth`. A chain may run **N turns total** — the user-initiated turn at depth `0` plus `N - 1` `send_prompt`-triggered turns at depths `1..=N-1`. A `send_prompt` that would start the turn at depth `N` is dropped.
+- **Enforcement point**: the daemon's `fire_session_state_hook_and_collect_actions` stamps each collected `send_prompt` with `chain_depth = emitting_turn_depth + 1` (overwriting any plugin-supplied value). If the stamped value **reaches** `max_prompt_chain_depth` (`next_depth >= max_prompt_chain_depth`), the action is **dropped** (not forwarded to the TUI) and `tracing::warn!` records it; the chain terminates there.
+- **Round-trip**: daemon stamps → TUI relays the stamped `chain_depth` back via `RuntimeTurnRequest.chain_depth` → daemon records the new turn's depth → on that turn's end, stamps `+1` and re-checks. The cap is re-evaluated every turn, so there is no escape via the enqueue path or session switching.
+- **Reset**: a normal user-typed turn carries `chain_depth = 0`, which immediately resets the chain. Human input always breaks an in-progress chain.
+- **No forgery**: plugins cannot set `chain_depth` to bypass the cap — the daemon overwrites it unconditionally. The TUI is host code (not a plugin), so trusting it to relay the value is within the threat model.
+
+```toml
+[hooker]
+max_prompt_chain_depth = 128   # default; lower it for debugging
+```
+
+The cap is exclusive on `chain_depth`: the daemon allows `next = N + 1` while `next < max`, and drops at `next >= max`. So with the default of 128, a chain may run **128 turns total** (1 user-initiated + 127 `send_prompt`-triggered) before being cut off. Setting `N = 3` yields exactly 3 sessions: the user turn (depth 0) plus 2 `send_prompt`-triggered turns (depths 1 and 2); the `send_prompt` that would have started depth 3 is dropped.
+
+### 16.10 Checklist before you say "my actions don't fire"
 
 - is your hooker registered under `*.Session.lifecycle.state` (the only hook point whose adaptor parses `actions` today)?
 - does your response JSON include both `"result": "ack"` **and** a top-level `"actions"` array? (`actions` nested inside `result` is silently ignored.)
-- is every entry an object with a `kind` field equal to `create_session` or `switch_session` (snake_case)? Unknown kinds are skipped.
-- does every entry carry its required `session_id` field as a string?
+- is every entry an object with a `kind` field equal to `create_session`, `switch_session`, or `send_prompt` (snake_case)? Unknown kinds are skipped.
+- does every entry carry its required `session_id` field as a string? `send_prompt` additionally requires `text`.
+- did you **not** set `chain_depth` on `send_prompt`? It is host-controlled; the daemon overwrites it anyway.
+- is `send_prompt` the **last** entry in your `actions` array, and at most one per batch? A following `switch_session`/`create_session` would interrupt the just-started turn.
 - in remote/daemon mode, are you checking the daemon logs for `daemon-side create_session action failed; not forwarding to TUI` warnings? A failing `open_session` filters the action out before it reaches the TUI.
-- in local (non-daemon) mode, are you aware that `create_session` / `switch_session` are **no-ops**? The hooker still runs (so your logging side-effects still happen), but the actions are dropped at the TUI's `switch_to_remote_session` because `remote_base_url()` is None — you will see a `tracing::warn!` reading `switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)`. To exercise create/switch actions, run the daemon and connect the TUI in remote mode (see `docs/remote_tui.md`).
+- if your `send_prompt` chain seems to stop early, check the daemon logs for `send_prompt hook action dropped: chain depth reaches cap` — you may have hit `max_prompt_chain_depth` (default 128, exclusive upper bound on `chain_depth`; `N` permits N turns total in a chain). Raise the cap or fix the plugin's termination logic.
+- in local (non-daemon) mode, are you aware that `create_session` / `switch_session` / `send_prompt` are **no-ops**? The hooker still runs (so your logging side-effects still happen), but the actions are dropped at the TUI's `switch_to_remote_session` because `remote_base_url()` is None — you will see a `tracing::warn!` reading `switch_to_remote_session called without remote backend; hook action dropped (local mode does not execute daemon-side actions)` (for create/switch) or `send_prompt hook action dropped (local mode does not execute daemon-side actions)` (for send_prompt). To exercise these actions, run the daemon and connect the TUI in remote mode (see `docs/remote_tui.md`).

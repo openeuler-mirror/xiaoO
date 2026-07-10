@@ -919,6 +919,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         reasoning_effort: config.reasoning_effort,
         llm: None,
         command_context: None,
+        chain_depth: 0,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

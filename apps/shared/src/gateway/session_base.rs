@@ -46,6 +46,7 @@ impl SessionOpenRequest {
             reasoning_effort: Default::default(),
             llm: self.llm,
             command_context: None,
+            chain_depth: 0,
         }
     }
 }
