@@ -16,6 +16,10 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/connect",
         summary: "打开 provider / model 选择窗口并连接当前后端。",
     },
+    SlashCommandSpec {
+        name: "/cron",
+        summary: "管理 cron 定时任务：查看、配置、删除、启用/禁用。",
+    },
     // NOTE: /create-skill is not yet implemented; hidden from TUI until ready.
     // SlashCommandSpec {
     //     name: "/create-skill",
@@ -224,10 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn c_completes_to_connect() {
+    fn c_has_multiple_matches() {
         let mut i: Input = "/c".into();
-        assert!(apply_slash_tab(&mut i, NO_EXT));
-        assert_eq!(i.value(), "/connect");
+        // /c now matches both /connect and /cron, so tab cannot expand uniquely
+        assert!(!apply_slash_tab(&mut i, NO_EXT));
+        assert_eq!(i.value(), "/c");
     }
 
     #[test]
@@ -243,6 +248,7 @@ mod tests {
             candidates_for_prefix("/", NO_EXT),
             vec![
                 "/connect",
+                "/cron",
                 "/dir",
                 "/delete",
                 "/load",
@@ -254,7 +260,7 @@ mod tests {
                 "/skills"
             ]
         );
-        assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect"]);
+        assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect", "/cron"]);
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
         assert_eq!(candidates_for_prefix("/l", NO_EXT), vec!["/load"]);
