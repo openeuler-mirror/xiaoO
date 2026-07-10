@@ -88,6 +88,41 @@ fn normalize_url_duplicates(url: &str) -> String {
     url.to_string()
 }
 
+// Add each model provider's URL path error phrase as a separate entry.
+const URL_PATH_ERROR_KEYWORDS: &[&str] = &[
+    // Alibaba Cloud Model Studio Token Plan
+    "url error",
+];
+
+fn is_url_path_error_response(message: &str) -> bool {
+    if !message.contains("HTTP 400") {
+        return false;
+    }
+
+    let Some(json_start) = message.find('{') else {
+        return false;
+    };
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&message[json_start..]) else {
+        return false;
+    };
+    let error_message = body
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            body.pointer("/error/message")
+                .and_then(serde_json::Value::as_str)
+        });
+
+    let Some(error_message) = error_message else {
+        return false;
+    };
+    let normalized_message = error_message.trim().to_ascii_lowercase();
+
+    URL_PATH_ERROR_KEYWORDS
+        .iter()
+        .any(|keyword| normalized_message.contains(keyword))
+}
+
 pub fn is_endpoint_path_error(error: &LlmError) -> bool {
     match error {
         LlmError::HttpError(msg) => {
@@ -97,8 +132,7 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
                 || msg.contains("connect")
         }
         LlmError::ApiError(msg) => {
-            // Only endpoint path errors should trigger URL fallback
-            // HTTP 400/403 are configuration/parameter errors - should stop immediately
+            // Some APIs report an incomplete endpoint as HTTP 400 instead of 404/405.
             msg.contains("HTTP 404")
                 || msg.contains("HTTP 405")
                 || msg.contains("Not Found")
@@ -106,6 +140,7 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
                 || msg.contains("route not found")
                 || msg.contains("unexpected content type")
                 || msg.contains("empty stream response")
+                || is_url_path_error_response(msg)
         }
         LlmError::StreamError { .. }
         | LlmError::ParseError(_)
@@ -119,30 +154,23 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
 pub fn is_configuration_error(error: &LlmError) -> bool {
     match error {
         LlmError::ApiError(msg) => {
-            // Priority: HTTP status code > message keywords
+            // Priority: endpoint path errors > configuration error markers
             //
-            // HTTP status codes indicate clear error categories:
-            // - 404/405: Endpoint path errors → try other URLs
-            // - 400/403: Configuration errors → stop immediately
+            // Endpoint path failures can be reported in different ways:
+            // - HTTP 404/405: Endpoint path errors → try other URLs
+            // - HTTP 400 with a recognized URL error message → try other URLs
+            // - Other HTTP 400/403 responses → stop immediately
             //
-            // Message keywords may be misleading:
-            // Example: "HTTP 404 Not Found: Invalid URL (POST /v1)"
-            // - Contains "Invalid" → could be mistaken as config error
-            // - But HTTP 404 indicates endpoint path error → should try other URLs
+            // Configuration keywords may overlap with endpoint errors:
+            // - "HTTP 404 Not Found: Invalid URL" contains "Invalid"
+            // - Token Plan returns HTTP 400 with message "url error"
             //
-            // Therefore, check HTTP status codes FIRST, before checking keywords
-
-            // If HTTP status indicates endpoint path error, it's NOT a configuration error
-            if msg.contains("HTTP 404")
-                || msg.contains("HTTP 405")
-                || msg.contains("Not Found")
-                || msg.contains("endpoint not found")
-                || msg.contains("route not found")
-            {
-                return false; // Endpoint path error, NOT configuration error
+            // Therefore, classify endpoint path errors FIRST, before checking
+            // broad configuration markers such as HTTP 400/403 or "Invalid".
+            if is_endpoint_path_error(error) {
+                return false;
             }
 
-            // Only after excluding endpoint path errors, check for configuration errors
             msg.contains("HTTP 400")
                 || msg.contains("HTTP 403")
                 || msg.contains("Bad Request")
@@ -182,12 +210,6 @@ pub fn is_retryable_network_error(error: &LlmError) -> bool {
 }
 
 pub fn should_try_next_candidate(error: &LlmError) -> bool {
-    // Stop immediately for configuration/parameter errors
-    if is_configuration_error(error) {
-        return false;
-    }
-
-    // Try next candidate only for endpoint path errors
     is_endpoint_path_error(error)
 }
 
@@ -457,6 +479,32 @@ mod tests {
 
         // Should NOT try next candidate
         assert!(!should_try_next_candidate(&error));
+    }
+
+    #[test]
+    fn test_http_400_url_error_is_endpoint_error() {
+        // Some APIs report an incomplete endpoint as HTTP 400 rather than 404.
+        for message in [
+            "url error",
+            "url error, please check url!",
+            "request failed: url error",
+        ] {
+            let response_body = serde_json::json!({
+                "code": "InvalidParameter",
+                "message": message,
+            })
+            .to_string();
+            let error = crate::error::map_api_status_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                &response_body,
+                "",
+                None,
+            );
+
+            assert!(is_endpoint_path_error(&error));
+            assert!(!is_configuration_error(&error));
+            assert!(should_try_next_candidate(&error));
+        }
     }
 
     #[test]
