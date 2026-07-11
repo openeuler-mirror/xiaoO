@@ -24,3 +24,27 @@ __pycache__/
 .idea/
 .opencode/
 CLAUDE.md
+
+# Python virtual environments
+venv/
+**/venv/
+
+# Build artifacts
+**/build/
+
+# Python egg info
+**/*.egg-info/
+
+# Node modules
+**/node_modules/
+
+# AI tool caches
+.mimocode/
+**/.atomcode/
+**/.mimocode/
+
+# Generated files
+AUDIT_AGENT_REPLY.md
+create_ppt.py
+test.json
+*.tar.gz
