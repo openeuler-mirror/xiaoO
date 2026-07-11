@@ -140,24 +140,60 @@ def _l1_injection_keywords_to_rules() -> list[dict]:
     return rules
 
 
+def _derive_deny_mode(rule: dict) -> str:
+    """从 credential / read_only 推导 deny_mode（向后兼容）
+
+    优先使用已有的 deny_mode 字段；若无则从传统字段推导。
+    """
+    if "deny_mode" in rule and rule["deny_mode"]:
+        return rule["deny_mode"]
+    if rule.get("credential"):
+        return "deny_both"
+    if rule.get("read_only"):
+        return "deny_read"
+    return "deny_write"
+
+
+def _sync_deny_mode_fields(rule: dict) -> None:
+    """根据 deny_mode 同步 credential / read_only 字段（保持底层逻辑兼容）"""
+    dm = rule.get("deny_mode", "deny_write")
+    if dm == "deny_both":
+        rule["credential"] = True
+        rule.pop("read_only", None)
+    elif dm == "deny_read":
+        rule.pop("credential", None)
+        rule["read_only"] = True
+    elif dm == "deny_write":
+        rule.pop("credential", None)
+        rule.pop("read_only", None)
+
+
+DENY_MODE_LABELS = {
+    "deny_write": "仅拦截写入",
+    "deny_read": "仅拦截读取",
+    "deny_both": "读写均拦截",
+}
+
+
 def _l2_sensitive_paths_to_rules() -> list[dict]:
     """将 SENSITIVE_PATHS 转换为规则列表"""
     from .security.logic_rules import SENSITIVE_PATHS
     rules = []
     for sp in SENSITIVE_PATHS:
         id_str = f"path_{_slugify(sp['path'])}"
+        deny_mode = _derive_deny_mode(sp)
         rule = {
             "id": id_str,
             "path": sp["path"],
             "risk_level": sp["risk_level"],
             "desc": sp["desc"],
+            "deny_mode": deny_mode,
+            "source_deny_mode": deny_mode,  # 记录代码仓原始拦截模式
             "enabled": True,
             "builtin": True,
         }
-        if sp.get("credential"):
-            rule["credential"] = True
-        if sp.get("read_only"):
-            rule["read_only"] = True
+        # 保留传统字段以兼容底层检测逻辑
+        _sync_deny_mode_fields(rule)
         rules.append(rule)
     return rules
 
@@ -490,6 +526,13 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                                 # 这些字段源码为准（出厂定义），但仅在缺失时补，避免覆盖用户未感知的改动
                                 if field not in ur:
                                     ur[field] = val
+                            elif field == "deny_mode":
+                                # source_deny_mode 以源码为准（代码仓原始值）；deny_mode 保留用户值
+                                ur["source_deny_mode"] = val
+                                if "deny_mode" not in ur:
+                                    ur["deny_mode"] = val
+                            elif field == "source_deny_mode":
+                                pass  # 由 deny_mode 同步处理
                             elif field == "credential":
                                 # credential 标记以源码为准：源码标了就同步 True（读密钥必拦）
                                 ur["credential"] = val
@@ -509,6 +552,14 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                         "内置规则 %s 已从源码移除，在用户副本中禁用（category=%s）",
                         ur["id"], cat_name,
                     )
+
+            # 敏感路径规则：确保 deny_mode 字段与 credential/read_only 一致
+            # 向后兼容：老配置没有 deny_mode，从传统字段推导
+            if cat_name == "sensitive_path_access":
+                for ur in user_rules:
+                    if "deny_mode" not in ur:
+                        ur["deny_mode"] = _derive_deny_mode(ur)
+                    _sync_deny_mode_fields(ur)
 
             user_cat["rules"] = user_rules
 
@@ -659,6 +710,7 @@ def get_enabled_l2_sensitive_paths(runtime: dict) -> list[dict]:
             "path": r["path"],
             "risk_level": r["risk_level"],
             "desc": r["desc"],
+            "deny_mode": r.get("deny_mode", _derive_deny_mode(r)),
             **({"credential": True} if r.get("credential") else {}),
             **({"read_only": True} if r.get("read_only") else {}),
         }
@@ -832,6 +884,19 @@ def update_rule_enabled(layer: str, category: str, rule_id: str, enabled: bool) 
     return runtime
 
 
+def update_rule_deny_mode(layer: str, category: str, rule_id: str, deny_mode: str) -> dict:
+    """更新单条敏感路径规则的拦截模式并保存"""
+    runtime = load_runtime_config()
+    rules = runtime.get(layer, {}).get(category, {}).get("rules", [])
+    for r in rules:
+        if r.get("id") == rule_id:
+            r["deny_mode"] = deny_mode
+            _sync_deny_mode_fields(r)
+            break
+    save_runtime_config(runtime)
+    return runtime
+
+
 def update_category_enabled(layer: str, category: str, enabled: bool) -> dict:
     """更新整个分类的启用状态并保存"""
     runtime = load_runtime_config()
@@ -851,6 +916,9 @@ def add_custom_rule(layer: str, category: str, rule: dict) -> dict:
     if not rule.get("id"):
         import time
         rule["id"] = f"custom_{int(time.time())}_{_slugify(str(rule)[:30])}"
+    # 如果指定了 deny_mode，同步 credential/read_only 以兼容底层检测
+    if "deny_mode" in rule:
+        _sync_deny_mode_fields(rule)
     rules.append(rule)
     save_runtime_config(runtime)
     return runtime

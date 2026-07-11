@@ -378,6 +378,9 @@ class LogicRulesChecker:
         敏感路径访问检测：
         检查 a_next 中是否包含对敏感路径的修改/删除操作（读取操作放行）。
         支持 ~ 路径展开，同时检查原始模式和展开后的绝对路径。
+
+        拦截模式由 deny_mode 控制（deny_write / deny_read / deny_both），
+        向后兼容：无 deny_mode 时从 credential / read_only 推导。
         """
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
@@ -388,12 +391,20 @@ class LogicRulesChecker:
         for sp in self._sensitive_paths:
             raw_path = sp["path"]
             path = raw_path.lower()
-            is_credential = sp.get("credential", False)
-            is_read_only = sp.get("read_only", False)
+
+            # 确定拦截模式：优先 deny_mode，向后兼容 credential / read_only
+            deny_mode = sp.get("deny_mode", "")
+            if not deny_mode:
+                if sp.get("credential"):
+                    deny_mode = "deny_both"
+                elif sp.get("read_only"):
+                    deny_mode = "deny_read"
+                else:
+                    deny_mode = "deny_write"
 
             # 检查路径是否在操作中出现
-            if is_credential:
-                # 凭据文件使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
+            # deny_both 路径使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
+            if deny_mode == "deny_both":
                 # 以 . 或 / 开头的路径，其首字符不是单词字符，\b 在它前面不构成边界
                 # （空格→/ 之间没有 \b），故用 (?:^|[\s/\\]) 替代前导 \b。
                 escaped = re.escape(path)
@@ -418,8 +429,8 @@ class LogicRulesChecker:
                             path_match = True
 
             if path_match:
-                # 凭据文件：无论读写都拦截（读凭据文件同样危险）
-                if is_credential:
+                if deny_mode == "deny_both":
+                    # 读写均拦截（凭据/密钥类：cat /etc/shadow 也拦）
                     return LogicRuleResult(
                         hit=True,
                         violated_rule="sensitive_path_access",
@@ -427,11 +438,10 @@ class LogicRulesChecker:
                         reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
                         risk_type="file_access",
                     )
-                # read_only 路径：只拦截读取操作，写入/删除放行（如 /dev/random：
-                #   读取可耗尽熵池导致 TLS 阻塞（攻击向量），写入是投喂熵（增强安全））
-                if is_read_only:
+                if deny_mode == "deny_read":
+                    # 仅拦截读取，写入/删除放行（如 /dev/random：读耗熵池，写投喂熵）
                     if is_write_op:
-                        continue  # 允许写入操作（如投喂熵池）
+                        continue  # 允许写入操作
                     return LogicRuleResult(
                         hit=True,
                         violated_rule="sensitive_path_access",
@@ -439,12 +449,11 @@ class LogicRulesChecker:
                         reason=f"读取敏感路径: {sp['desc']} ({sp['path']})",
                         risk_type="file_access",
                     )
-                # 默认（无特殊标记）：只拦截写入/删除操作，只读访问放行
-                # lsblk、smartctl 查设备信息）放行。修复历史误报：只读访问 /sys/、/proc/sys/、
+                # deny_write（默认）：仅拦截写入/删除，只读访问放行
+                # lsblk、smartctl 查设备信息放行。修复历史误报：只读访问 /sys/、/proc/sys/、
                 # /dev/* 被一刀切拦截。
                 if not is_write_op:
                     continue  # 允许读取操作
-                # 写入/删除敏感路径 → 拦截
                 return LogicRuleResult(
                     hit=True,
                     violated_rule="sensitive_path_access",

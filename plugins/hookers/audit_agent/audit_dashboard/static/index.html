@@ -505,34 +505,55 @@
       color: white;
     }
 
-    /* 凭据/密钥类敏感路径：读写均拦截（cat /etc/shadow 也拦） */
-    .credential-badge {
+    /* 敏感路径拦截模式 badge（统一三种模式为 deny-mode-badge） */
+    .deny-mode-badge {
       font-size: 10px;
       padding: 1px 6px;
       border-radius: 3px;
+      font-weight: 600;
+    }
+    .deny-mode-badge.deny-both {
       background: #f3e8ff;
       color: #7c3aed;
-      font-weight: 600;
     }
-
-    /* 非凭据敏感路径：只拦截写入/删除，只读访问放行（如 ls /boot、cat /etc/hosts） */
-    .write-only-badge {
-      font-size: 10px;
-      padding: 1px 6px;
-      border-radius: 3px;
+    .deny-mode-badge.deny-write {
       background: #ecfdf5;
       color: #059669;
-      font-weight: 500;
+    }
+    .deny-mode-badge.deny-read {
+      background: #fef3c7;
+      color: #d97706;
     }
 
-    /* read_only 路径：只拦截读取，写入放行（如 /dev/random：读耗熵池，写投喂熵） */
-    .read-only-badge {
+    /* 拦截模式下拉选择器（规则卡片右侧小控件） */
+    .deny-mode-select {
+      font-size: 11px;
+      padding: 2px 4px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      background: var(--bg);
+      color: var(--text);
+      cursor: pointer;
+      max-width: 100px;
+    }
+    .deny-mode-select:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    /* 来源标注：显示代码仓原始的拦截模式 */
+    .source-badge {
       font-size: 10px;
       padding: 1px 6px;
       border-radius: 3px;
-      background: #fef3c7;
-      color: #d97706;
-      font-weight: 600;
+      background: #e8f4fd;
+      color: #0284c7;
+      font-weight: 500;
+    }
+    .overridden-hint {
+      font-size: 10px;
+      color: #dc2626;
+      font-weight: 500;
     }
 
     /* 搜索结果：层标识、状态文字、分类 */
@@ -939,6 +960,16 @@
       return RISK_TYPE_NAMES[t] || t;   // 未知类型原样显示（兼容自定义）
     }
 
+    function denyModeLabel(mode) {
+      const labels = { "deny_write": "仅拦截写入", "deny_read": "仅拦截读取", "deny_both": "读写均拦截" };
+      return labels[mode] || mode;
+    }
+
+    function denyModeClass(mode) {
+      const cls = { "deny_write": "deny-write", "deny_read": "deny-read", "deny_both": "deny-both" };
+      return cls[mode] || "";
+    }
+
     const L3_CATEGORY_NAMES = {
       "file_operations": "📁 文件操作",
       "network_security": "🌐 网络安全",
@@ -1096,14 +1127,25 @@
                   ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
                   <span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>
                   ${rule.risk_type ? `<span class="rule-type-tag rt-${rule.risk_type}" title="风险类型: ${escapeHtml(rule.risk_type)}">${escapeHtml(riskTypeName(rule.risk_type))}</span>` : ''}
-                  ${rule.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：读取同样危险，无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
-                  ${(layerKey === "L2_rules" && catName === "sensitive_path_access" && !rule.credential) ? '<span class="write-only-badge" title="非凭据敏感路径：只拦截写入/删除操作，只读访问放行（如 cat /sys/...、lsblk 查设备信息）">仅拦截写入</span>' : ''}
-                  ${(layerKey === "L2_rules" && catName === "sensitive_path_access" && rule.read_only) ? '<span class="read-only-badge" title="read_only 路径：只拦截读取操作，写入/删除放行（如 /dev/random：读取耗尽熵池导致 TLS 阻塞，写入是投喂熵）">仅拦截读取</span>' : ''}
+                  ${(layerKey === "L2_rules" && catName === "sensitive_path_access") ? `
+                    <span class="deny-mode-badge ${denyModeClass(rule.deny_mode || 'deny_write')}" title="拦截模式: ${denyModeLabel(rule.deny_mode || 'deny_write')}">${denyModeLabel(rule.deny_mode || 'deny_write')}</span>
+                    ${rule.builtin !== false && rule.source_deny_mode ? `
+                      <span class="source-badge">原始: ${denyModeLabel(rule.source_deny_mode)}</span>
+                      ${rule.deny_mode && rule.deny_mode !== rule.source_deny_mode ? '<span class="overridden-hint">(已覆盖)</span>' : ''}
+                    ` : ''}
+                  ` : ''}
                 </div>
                 <div class="rule-pattern"><span class="rule-field-label">${patternLabel}:</span> ${escapeHtml(patternDisplay)}</div>
                 ${reasonDisplay ? `<div class="rule-reason"><span class="rule-field-label">${reasonLabel}:</span> ${escapeHtml(reasonDisplay)}</div>` : ''}
               </div>
               <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+                ${(layerKey === "L2_rules" && catName === "sensitive_path_access") ? `
+                  <select class="deny-mode-select" onchange="updateDenyMode('${layerKey}','${catName}','${rule.id}',this.value)" ${rule.enabled ? '' : 'disabled'}>
+                    <option value="deny_write" ${(rule.deny_mode || 'deny_write') === 'deny_write' ? 'selected' : ''}>仅拦截写入</option>
+                    <option value="deny_read" ${(rule.deny_mode || 'deny_write') === 'deny_read' ? 'selected' : ''}>仅拦截读取</option>
+                    <option value="deny_both" ${(rule.deny_mode || 'deny_write') === 'deny_both' ? 'selected' : ''}>读写均拦截</option>
+                  </select>
+                ` : ''}
                 <div class="toggle" onclick="toggleRule('${layerKey}','${catName}','${rule.id}',${!rule.enabled})">
                   <div class="toggle-track ${rule.enabled ? 'on' : ''}">
                     <div class="toggle-knob"></div>
@@ -1271,9 +1313,13 @@
               ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
               ${risk ? `<span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>` : ''}
               ${r.risk_type ? `<span class="rule-type-tag rt-${r.risk_type}" title="风险类型: ${escapeHtml(r.risk_type)}">${escapeHtml(riskTypeName(r.risk_type))}</span>` : ''}
-              ${r.credential ? '<span class="credential-badge" title="凭据/密钥类敏感路径：无论读写均拦截（如 /etc/shadow、SSH 私钥）">读写均拦</span>' : ''}
-              ${(r.isSkill !== true && r.layer === "L2_rules" && !r.credential) ? '<span class="write-only-badge" title="非凭据敏感路径：只拦截写入/删除，只读放行">仅拦截写入</span>' : ''}
-              ${(r.isSkill !== true && r.layer === "L2_rules" && r.read_only) ? '<span class="read-only-badge" title="read_only 路径：只拦截读取，写入放行">仅拦截读取</span>' : ''}
+              ${(r.isSkill !== true && r.layer === "L2_rules" && r.category === "sensitive_path_access") ? `
+                <span class="deny-mode-badge ${denyModeClass(r.deny_mode || 'deny_write')}" title="拦截模式: ${denyModeLabel(r.deny_mode || 'deny_write')}">${denyModeLabel(r.deny_mode || 'deny_write')}</span>
+                ${r.builtin !== false && r.source_deny_mode ? `
+                  <span class="source-badge">原始: ${denyModeLabel(r.source_deny_mode)}</span>
+                  ${r.deny_mode && r.deny_mode !== r.source_deny_mode ? '<span class="overridden-hint">(已覆盖)</span>' : ''}
+                ` : ''}
+              ` : ''}
               <span class="search-cat">分类: ${escapeHtml(r.category)}</span>
             </div>
             <div class="rule-pattern"><span class="rule-field-label">规则:</span> ${escapeHtml(ruleText)}</div>
@@ -1281,6 +1327,13 @@
             <div class="rule-id">ID: ${escapeHtml(r.id)}</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            ${(r.isSkill !== true && r.layer === "L2_rules" && r.category === "sensitive_path_access") ? `
+              <select class="deny-mode-select" onchange="updateDenyMode('${r.layer}','${r.category}','${r.id}',this.value)" ${r.enabled ? '' : 'disabled'}>
+                <option value="deny_write" ${(r.deny_mode || 'deny_write') === 'deny_write' ? 'selected' : ''}>仅拦截写入</option>
+                <option value="deny_read" ${(r.deny_mode || 'deny_write') === 'deny_read' ? 'selected' : ''}>仅拦截读取</option>
+                <option value="deny_both" ${(r.deny_mode || 'deny_write') === 'deny_both' ? 'selected' : ''}>读写均拦截</option>
+              </select>
+            ` : ''}
             <span class="status-text ${r.enabled ? 'status-on' : 'status-off'}">${r.enabled ? '已启用' : '已禁用'}</span>
             <div class="toggle" onclick="${toggleFn}">
               <div class="toggle-track ${r.enabled ? 'on' : ''}">
@@ -1316,6 +1369,17 @@
         renderAll();
         searchRules(); // 刷新搜索结果，使开关状态即时更新
         showToast(`规则 ${ruleId} 已${newEnabled ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function updateDenyMode(layer, category, ruleId, denyMode) {
+      try {
+        runtimeConfig = await api("PUT", "/api/rules/deny_mode", { layer, category, rule_id: ruleId, deny_mode: denyMode });
+        renderAll();
+        searchRules();
+        showToast(`拦截模式已更新为 ${denyModeLabel(denyMode)}`, "success");
       } catch (e) {
         showToast("操作失败: " + e.message, "error");
       }
@@ -1498,9 +1562,13 @@
             </div>
           </div>
           <div class="form-group">
-            <div class="form-label">凭据文件（无论读写都拦截）</div>
-            <input type="checkbox" id="input-l2-credential">
-            <div class="form-hint">勾选后，该路径无论是读还是写都在 L2 直接拦截（凭据文件不应被任何操作触碰）。</div>
+            <div class="form-label">拦截模式</div>
+            <select class="form-select" id="input-l2-deny-mode">
+              <option value="deny_write">仅拦截写入</option>
+              <option value="deny_read">仅拦截读取</option>
+              <option value="deny_both">读写均拦截</option>
+            </select>
+            <div class="form-hint">选择该路径的拦截模式：仅拦截写入（默认）、仅拦截读取（如 /dev/random）、读写均拦截（凭据文件）。</div>
           </div>
           <div class="form-group">
             <div class="form-label">所属分类</div>
@@ -1665,8 +1733,8 @@
             body.category = document.getElementById("input-l2-category").value;
             body.risk_level = document.getElementById("input-l2-risk-level").value;
             body.desc = document.getElementById("input-l2-desc").value;
-            const credential = document.getElementById("input-l2-credential").checked;
-            if (credential) body.credential = true;
+            const denyMode = document.getElementById("input-l2-deny-mode").value;
+            if (denyMode) body.deny_mode = denyMode;
             if (ruleType === "path") {
               body.path = document.getElementById("input-l2-path").value;
             } else {

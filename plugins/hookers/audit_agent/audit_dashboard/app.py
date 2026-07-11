@@ -36,6 +36,7 @@ from audit_policy_checker.runtime_config import (
     save_runtime_config,
     update_layer_enabled,
     update_rule_enabled,
+    update_rule_deny_mode,
     update_category_enabled,
     add_custom_rule,
     delete_custom_rule,
@@ -120,6 +121,14 @@ class NewRule(BaseModel):
     path: str | None = None
     desc: str | None = None
     credential: bool | None = None
+    deny_mode: str | None = None  # 敏感路径拦截模式：deny_write / deny_read / deny_both
+
+
+class DenyModeUpdate(BaseModel):
+    layer: str
+    category: str
+    rule_id: str
+    deny_mode: str
 
 class DeleteRule(BaseModel):
     layer: str
@@ -205,6 +214,16 @@ async def toggle_rule(body: RuleToggle):
     # 返回完整 runtimeConfig，避免前端全局状态被部分数据覆盖（曾导致搜索失效）
     return runtime
 
+
+@app.put("/api/rules/deny_mode", dependencies=[Depends(auth_dependency)])
+async def change_rule_deny_mode(body: DenyModeUpdate):
+    """修改敏感路径规则的拦截模式"""
+    if body.deny_mode not in ("deny_write", "deny_read", "deny_both"):
+        raise HTTPException(status_code=400, detail=f"无效的 deny_mode: {body.deny_mode}")
+    runtime = update_rule_deny_mode(body.layer, body.category, body.rule_id, body.deny_mode)
+    return runtime
+
+
 @app.put("/api/categories/enabled", dependencies=[Depends(auth_dependency)])
 async def toggle_category(body: CategoryToggle):
     """开关整个分类"""
@@ -233,6 +252,8 @@ async def create_rule(body: NewRule):
         rule_dict["desc"] = body.desc
     if body.credential:
         rule_dict["credential"] = body.credential
+    if body.deny_mode:
+        rule_dict["deny_mode"] = body.deny_mode
 
     runtime = add_custom_rule(body.layer, body.category, rule_dict)
     return runtime
