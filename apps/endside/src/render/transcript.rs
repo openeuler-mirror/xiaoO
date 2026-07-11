@@ -20,7 +20,7 @@ use crate::markdown::{contains_markdown_table, render_markdown};
 use crate::theme::Theme;
 
 use super::utils::{
-    render_tool_detail_text, rendered_line_count, sanitize_terminal_text, truncate_display_width,
+    find_substring_from, render_tool_detail_text, sanitize_terminal_text, truncate_display_width,
 };
 
 impl App {
@@ -142,8 +142,6 @@ impl App {
                     }
                 }
                 let transcript_cache = build_transcript_cache(&current_renders);
-                render_state.line_texts = transcript_cache.line_texts.clone();
-                render_state.line_is_header = transcript_cache.line_is_header.clone();
                 render_state.transcript_cache = Some(transcript_cache);
             }
         }
@@ -411,7 +409,9 @@ fn render_message_entry(
     }
 }
 
-fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> TranscriptRenderCache {
+pub(crate) fn build_transcript_cache(
+    message_renders: &[CachedMessageRender],
+) -> TranscriptRenderCache {
     let mut all_lines = Vec::new();
     let mut visual_lines = Vec::new();
     let mut visual_line_backgrounds = Vec::new();
@@ -422,16 +422,30 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
     let mut absolute_visual_row = 0usize;
 
     for (message_index, render) in message_renders.iter().enumerate() {
+        // Pre-wrap each logical line once and reuse the result both for
+        // `absolute_visual_row` (which becomes `total_lines` / `max_scroll`)
+        // and for `visual_lines`. Previously `total_lines` was derived from a
+        // character-based `div_ceil` predictor while `visual_lines` came from
+        // `wrap_line_to_visual_lines` (textwrap word-aware); for lines whose
+        // words do not pack neatly into `width` (long paths/URLs) the two
+        // disagreed, leaving the last visual line(s) stuck below the
+        // stick-to-bottom viewport until the user typed something to push them
+        // into view.
+        let wrapped_lines: Vec<Vec<Line<'static>>> = render
+            .lines
+            .iter()
+            .map(|line| wrap_line_to_visual_lines(line, render.width))
+            .collect();
+
         message_layouts.push(CachedMessageLayout {
             message_index,
             start_visual_row: absolute_visual_row,
             tool_toggle_row_offset: render.tool_toggle_row_offset,
             subagent_open_target: render.subagent_open_target.as_ref().map(|target| {
-                let visual_offset = render
-                    .lines
+                let visual_offset = wrapped_lines
                     .iter()
                     .take(target.row_offset)
-                    .map(|line| rendered_line_count(std::slice::from_ref(line), render.width))
+                    .map(|wrapped| wrapped.len())
                     .sum();
                 SubagentOpenTarget {
                     agent_id: target.agent_id.clone(),
@@ -440,11 +454,10 @@ fn build_transcript_cache(message_renders: &[CachedMessageRender]) -> Transcript
             }),
         });
 
-        for (line_index, line) in render.lines.iter().enumerate() {
-            let visual_count = rendered_line_count(std::slice::from_ref(line), render.width);
+        for (line_index, (line, wrapped)) in render.lines.iter().zip(wrapped_lines).enumerate() {
+            let visual_count = wrapped.len();
             logical_line_visual_starts.push(absolute_visual_row);
             absolute_visual_row += visual_count;
-            let wrapped = wrap_line_to_visual_lines(line, render.width);
             visual_line_backgrounds.extend(wrapped.iter().map(|line| line.style.bg));
             visual_lines.extend(wrapped);
 
@@ -542,6 +555,7 @@ fn find_style_at_position(style_ranges: &[StyleRange], pos: usize) -> Style {
 fn rebuild_lines_with_styles(
     wrapped_lines: Vec<std::borrow::Cow<'_, str>>,
     style_ranges: &[StyleRange],
+    full_text: &str,
     original_line: &Line<'static>,
 ) -> Vec<Line<'static>> {
     let mut result = Vec::new();
@@ -550,6 +564,19 @@ fn rebuild_lines_with_styles(
     for wrapped_text in wrapped_lines {
         let line_text = wrapped_text.into_owned();
         let line_char_count = line_text.chars().count();
+
+        // Align `global_char_offset` to the actual position of this visual
+        // line's text within `full_text`. textwrap strips inter-word
+        // whitespace at wrap boundaries, so each visual line's text is a
+        // contiguous substring of `full_text` but not necessarily at
+        // `global_char_offset` (the running count of chars in prior visual
+        // lines). Without this alignment, style lookup via
+        // `find_style_at_position(style_ranges, global_pos)` would drift by
+        // the number of stripped whitespace chars, mis-coloring chars at span
+        // boundaries.
+        if let Some(pos) = find_substring_from(full_text, &line_text, global_char_offset) {
+            global_char_offset = pos;
+        }
 
         let mut spans = Vec::new();
         let mut current_style: Option<Style> = None;
@@ -679,7 +706,7 @@ fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'stat
         .word_separator(word_separator);
     let wrapped_lines = wrap(&full_text, &options);
 
-    rebuild_lines_with_styles(wrapped_lines, &style_ranges, line)
+    rebuild_lines_with_styles(wrapped_lines, &style_ranges, &full_text, line)
 }
 
 fn preserve_line_metadata(mut rebuilt: Line<'static>, original: &Line<'static>) -> Line<'static> {
@@ -2033,12 +2060,134 @@ mod tests {
     use crate::theme::Theme;
 
     use super::{
-        apply_expanded_tool_panel, build_side_by_side_diff_rows, diff_change_counts,
-        expanded_tool_background, highlight_line_selection, line_display_width,
+        apply_expanded_tool_panel, build_side_by_side_diff_rows, build_transcript_cache,
+        diff_change_counts, expanded_tool_background, highlight_line_selection, line_display_width,
         parse_file_edit_args, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
         render_file_edit_tool_lines, render_message_entry, render_tool_message_lines,
         wrap_line_to_visual_lines,
     };
+    use crate::app_state::CachedMessageRender;
+
+    /// Regression test for the "missing last line" bug. `build_transcript_cache`
+    /// must derive `total_lines` from the same `wrap_line_to_visual_lines` call
+    /// that produces `visual_lines`, so the two stay in lock-step and the
+    /// stick-to-bottom viewport never slices off the trailing visual line(s).
+    /// Long paths/URLs force textwrap to emit more visual lines than a naive
+    /// character-based `div_ceil` predictor would, which previously left the
+    /// trailing line stuck below the viewport.
+    #[test]
+    fn build_transcript_cache_keeps_total_lines_in_sync_with_visual_lines() {
+        let theme = Theme::for_test();
+        // Content that triggers the predictor/wrap mismatch at width 40: the
+        // long synthetic path (45 chars in parens, > width 40) forces textwrap
+        // to emit 3 visual lines while a character-based predictor only sees 2.
+        let mismatch_text =
+            "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
+        let mismatch_line = Line::from(mismatch_text);
+        let render = CachedMessageRender {
+            revision: 0,
+            width: 40,
+            theme,
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            lines: vec![Line::from("System header"), mismatch_line, Line::raw("")],
+        };
+
+        let cache = build_transcript_cache(&[render]);
+
+        assert_eq!(
+            cache.total_lines,
+            cache.visual_lines.len(),
+            "total_lines must match visual_lines.len() so stick_to_bottom \
+             scroll_offset (= total_lines - inner_height) never points past \
+             the last actual visual line"
+        );
+        // The last non-empty visual line (before the trailing spacer) must be
+        // the path tail that textwrap split off — the exact line that used to
+        // be hidden below the viewport.
+        let last_content_visual: String = cache
+            .visual_lines
+            .iter()
+            .rev()
+            .skip(1) // skip the trailing empty spacer
+            .next()
+            .expect("cache should have at least one content line")
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        // The tail must be a substring of the original text, proving it
+        // wasn't dropped.
+        assert!(
+            mismatch_text.contains(&last_content_visual),
+            "last content visual line {last_content_visual:?} must be a substring of the original text"
+        );
+    }
+
+    /// Regression test for the `rebuild_lines_with_styles` style-offset bug.
+    ///
+    /// textwrap strips inter-word whitespace at wrap boundaries, so each
+    /// visual line's text is a contiguous substring of the original but not
+    /// necessarily at a contiguous running offset. Before the fix,
+    /// `global_char_offset` was advanced by `line_char_count` only, drifting
+    /// past the stripped spaces and looking up the wrong style for chars at
+    /// span boundaries. After the fix, `find_substring_from` realigns
+    /// `global_char_offset` to each visual line's actual position in the
+    /// original text.
+    #[test]
+    fn rebuild_lines_with_styles_preserves_style_positions_after_whitespace_stripping() {
+        // Three styled spans separated by single spaces: "AAA BBB CCC".
+        // At width 4, textwrap emits ["AAA", "BBB", "CCC"] (spaces stripped).
+        // Without the fix, BBB's chars would get the style at offsets 3/4/5
+        // (space + first two italic chars) instead of 4/5/6 (italic ×3).
+        let bold = Style::default().fg(Color::Red);
+        let italic = Style::default().fg(Color::Green);
+        let underline = Style::default().fg(Color::Blue);
+
+        let line = Line::from(vec![
+            Span::styled("AAA", bold),
+            Span::raw(" "),
+            Span::styled("BBB", italic),
+            Span::raw(" "),
+            Span::styled("CCC", underline),
+        ]);
+
+        let wrapped = wrap_line_to_visual_lines(&line, 4);
+        assert_eq!(
+            wrapped.len(),
+            3,
+            "textwrap at width 4 must split into 3 visual lines"
+        );
+
+        // Collect (char, style.fg) pairs from each visual line.
+        let collect_fg = |l: &Line<'_>| -> Vec<Option<Color>> {
+            l.spans
+                .iter()
+                .flat_map(|span| span.content.chars().map(move |_| span.style.fg))
+                .collect()
+        };
+
+        // v0 = "AAA" — all red (bold).
+        assert_eq!(
+            collect_fg(&wrapped[0]),
+            vec![Some(Color::Red), Some(Color::Red), Some(Color::Red)],
+            "v0 must be entirely red"
+        );
+        // v1 = "BBB" — all green (italic). Before the fix, the first char
+        // would inherit the previous span's style (None from the raw space)
+        // or shift forward by one.
+        assert_eq!(
+            collect_fg(&wrapped[1]),
+            vec![Some(Color::Green), Some(Color::Green), Some(Color::Green)],
+            "v1 must be entirely green — proves global_char_offset was realigned"
+        );
+        // v2 = "CCC" — all blue (underline).
+        assert_eq!(
+            collect_fg(&wrapped[2]),
+            vec![Some(Color::Blue), Some(Color::Blue), Some(Color::Blue)],
+            "v2 must be entirely blue"
+        );
+    }
 
     #[test]
     fn spawn_subagent_detail_parses_agent_id() {
