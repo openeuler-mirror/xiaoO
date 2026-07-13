@@ -23,6 +23,7 @@ futures-util.workspace = true
 governor = "0.6"
 llm-client = { path = "../../crates/llm-client" }
 lsp = { path = "../../crates/lsp" }
+mcp = { path = "../../crates/mcp" }
 mime_guess.workspace = true
 operation_backend = { path = "../../crates/operation_backend" }
 prompt = { path = "../../crates/prompt" }
@@ -33,7 +34,7 @@ rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 skill = { path = "../../crates/skill" }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 tokio-util.workspace = true

@@ -17,5 +17,6 @@ pub use invocation_context::{
 pub use r#impl::open_todo_lines;
 pub use r#impl::reqwest_util;
 pub use r#impl::{
-    load_tool_sources, load_tool_sources_with_services, SubagentRoleConfig, ToolRuntimeServices,
+    load_tool_sources, load_tool_sources_with_services, McpToolSource, SubagentRoleConfig,
+    ToolRuntimeServices,
 };

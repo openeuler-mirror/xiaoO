@@ -21,6 +21,7 @@ members = [
     "crates/trace/src/moirai",
     "crates/operation_backend",
     "crates/lsp",
+    "crates/mcp",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
     # "crates/cerberus/cerberus-core",
     # "crates/cerberus/cerberus-cli",
@@ -68,6 +69,7 @@ dirs = "5"
 aes-gcm = "0.10"
 rand = "0.8"
 hex = "0.4"
+url = "2.5"
 # Cerberus dependencies (disabled by default)
 # cerberus-core = { path = "crates/cerberus/cerberus-core" }
 

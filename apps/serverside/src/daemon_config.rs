@@ -6,6 +6,7 @@ use crate::httpserver::rate_limit::RateLimitConfig;
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
+use mcp::McpSection;
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -47,6 +48,8 @@ pub struct AppConfig {
     pub lsp: Option<LspConfig>,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub mcp: McpSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]

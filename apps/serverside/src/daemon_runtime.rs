@@ -115,6 +115,9 @@ pub struct ConfiguredRuntimeResolver {
     skills_dirs: Vec<PathBuf>,
     lsp_registry: Option<Arc<LspServiceRegistry>>,
     operation_backend: Option<GatewayBackendConfig>,
+    mcp_servers: Vec<mcp::McpServerConfig>,
+    mcp_tools: Arc<RwLock<Option<Vec<mcp::McpServerWithTools>>>>,
+    mcp_init: tokio::sync::Mutex<()>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -184,6 +187,9 @@ impl ConfiguredRuntimeResolver {
             skills_dirs: skills_config.skills_dirs.clone(),
             operation_backend: config.server_operation_backend(),
             lsp_registry,
+            mcp_servers: config.app.mcp.servers.clone(),
+            mcp_tools: Arc::new(RwLock::new(None)),
+            mcp_init: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -350,6 +356,11 @@ impl ConfiguredRuntimeResolver {
             lsp_registry: self.lsp_registry.clone(),
             workspace_root: Some(self.agent.workspace_root.clone()),
             subagent_roles,
+            mcp_servers: self
+                .mcp_tools
+                .read()
+                .expect("mcp tools lock should not be poisoned")
+                .clone(),
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
@@ -489,6 +500,35 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
             .unwrap_or(false);
         let llm_runtime = self.resolve_llm_runtime(request, existing).await?;
+
+        // Lazily initialise MCP servers (connect + initialize + list_tools)
+        // once, then cache the live connections for all subsequent resolves.
+        // `None` = not yet initialised; `Some(vec)` = init completed (even if
+        // the vec is empty, e.g. all servers were unreachable). Using `None`
+        // as the sentinel prevents re-running the expensive init on every
+        // resolve() when no servers are reachable.
+        let needs_init = !self.mcp_servers.is_empty()
+            && self
+                .mcp_tools
+                .read()
+                .expect("mcp tools lock should not be poisoned")
+                .is_none();
+        if needs_init {
+            let _init_guard = self.mcp_init.lock().await;
+            let still_uninit = self
+                .mcp_tools
+                .read()
+                .expect("mcp tools lock should not be poisoned")
+                .is_none();
+            if still_uninit {
+                let tools = mcp::init_mcp_tools(&self.mcp_servers).await;
+                let mut cache = self
+                    .mcp_tools
+                    .write()
+                    .expect("mcp tools lock should not be poisoned");
+                *cache = Some(tools);
+            }
+        }
 
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {

@@ -64,12 +64,14 @@ pub struct HostedSessionRuntimeConfig {
     pub operation_backend: Option<GatewayBackendConfig>,
     pub skills_config: SkillsConfig,
     pub subagent_roles: BTreeMap<String, SubagentRoleConfigEntry>,
+    pub mcp_servers: Vec<mcp::McpServerConfig>,
 }
 
 pub struct HostedSessionRuntimeResolver {
     config: HostedSessionRuntimeConfig,
     bindings: SessionRuntimeBindings,
     tool_runtime_services: Arc<RwLock<ToolRuntimeServices>>,
+    mcp_init: tokio::sync::Mutex<()>,
 }
 
 impl HostedSessionRuntimeResolver {
@@ -99,6 +101,7 @@ impl HostedSessionRuntimeResolver {
             config,
             bindings,
             tool_runtime_services: Arc::new(RwLock::new(initial_services)),
+            mcp_init: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -261,6 +264,34 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             .expect("tool runtime services lock should not be poisoned")
             .clone();
         services.workspace_root = Some(self.config.descriptor.workspace_root.clone());
+
+        // Lazily initialise MCP servers (connect + initialize + list_tools)
+        // once, then cache the result in the shared services so subsequent
+        // resolves reuse the live connections. `None` = not yet initialised;
+        // `Some(vec)` = init completed (even if the vec is empty, e.g. all
+        // servers were unreachable). Using `None` as the sentinel prevents
+        // re-running the expensive init on every resolve() when no servers
+        // are reachable.
+        if services.mcp_servers.is_none() && !self.config.mcp_servers.is_empty() {
+            let _init_guard = self.mcp_init.lock().await;
+            let shared = self
+                .tool_runtime_services
+                .read()
+                .expect("tool runtime services lock should not be poisoned")
+                .mcp_servers
+                .clone();
+            if shared.is_none() {
+                let mcp_servers = mcp::init_mcp_tools(&self.config.mcp_servers).await;
+                services.mcp_servers = Some(mcp_servers.clone());
+                let mut write_guard = self
+                    .tool_runtime_services
+                    .write()
+                    .expect("tool runtime services lock should not be poisoned");
+                write_guard.mcp_servers = Some(mcp_servers);
+            } else {
+                services.mcp_servers = shared;
+            }
+        }
         let mut descriptor = self.config.descriptor.clone();
         descriptor.agent_id = agent_id.clone();
 
