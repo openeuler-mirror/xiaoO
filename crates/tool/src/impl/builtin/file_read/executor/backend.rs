@@ -30,15 +30,23 @@ use crate::r#impl::ToolRuntimeServices;
 
 pub struct FileReadExecutor {
     spec: Arc<FileReadToolSpec>,
-    dedup_store: Mutex<DedupStateStore>,
+    dedup_store: Arc<Mutex<DedupStateStore>>,
     services: ToolRuntimeServices,
 }
 
 impl FileReadExecutor {
     pub fn new(spec: Arc<FileReadToolSpec>, services: ToolRuntimeServices) -> Self {
+        Self::new_with_state(spec, services, Arc::new(Mutex::new(DedupStateStore::new())))
+    }
+
+    pub(crate) fn new_with_state(
+        spec: Arc<FileReadToolSpec>,
+        services: ToolRuntimeServices,
+        dedup_store: Arc<Mutex<DedupStateStore>>,
+    ) -> Self {
         Self {
             spec,
-            dedup_store: Mutex::new(DedupStateStore::new()),
+            dedup_store,
             services,
         }
     }

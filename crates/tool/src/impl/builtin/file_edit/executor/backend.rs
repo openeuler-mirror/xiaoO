@@ -29,15 +29,23 @@ const LSP_DIAG_TIMEOUT_SECS: u64 = 15;
 
 pub struct FileEditExecutor {
     spec: Arc<FileEditToolSpec>,
-    dedup_store: Mutex<DedupStateStore>,
+    dedup_store: Arc<Mutex<DedupStateStore>>,
     services: ToolRuntimeServices,
 }
 
 impl FileEditExecutor {
     pub fn new(spec: Arc<FileEditToolSpec>, services: ToolRuntimeServices) -> Self {
+        Self::new_with_state(spec, services, Arc::new(Mutex::new(DedupStateStore::new())))
+    }
+
+    pub(crate) fn new_with_state(
+        spec: Arc<FileEditToolSpec>,
+        services: ToolRuntimeServices,
+        dedup_store: Arc<Mutex<DedupStateStore>>,
+    ) -> Self {
         Self {
             spec,
-            dedup_store: Mutex::new(DedupStateStore::new()),
+            dedup_store,
             services,
         }
     }
@@ -89,8 +97,6 @@ impl ToolExecutor for FileEditExecutor {
             .as_ref()
             .and_then(|reg| reg.get_or_create(Arc::clone(&backend)));
 
-        let dedup_store = self.get_dedup_store().await;
-
         let resolved = timed(
             "file_edit resolve_path",
             DEFAULT_FS_TIMEOUT_MS,
@@ -137,14 +143,17 @@ impl ToolExecutor for FileEditExecutor {
 
         let mtime = system_time_to_timestamp(stat.modified_at);
 
-        let validation_result = validation::validate_input_backend(
-            &input,
-            file_content.as_deref(),
-            &dedup_store,
-            &resolved_str,
-            &stat,
-            mtime,
-        );
+        let validation_result = {
+            let dedup_store = self.get_dedup_store().await;
+            validation::validate_input_backend(
+                &input,
+                file_content.as_deref(),
+                &dedup_store,
+                &resolved_str,
+                &stat,
+                mtime,
+            )
+        };
         if !validation_result.result {
             let error_message = validation_result
                 .message
@@ -310,5 +319,149 @@ impl ToolExecutor for FileEditExecutor {
                 output: json_output,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use agent_contracts::backend::OperationBackend;
+    use agent_contracts::{
+        AgentContext, HookerRegistry, InteractionHandle, RuntimeView, ToolEventSink, ToolSource,
+        ToolStateStore, TraceRecorder,
+    };
+    use agent_types::tool::{FinalToolCall, RawToolOutcome, ToolExecutorOutput};
+    use serde_json::json;
+
+    use crate::r#impl::builtin::BuiltinToolSource;
+    use crate::r#impl::ToolRuntimeServices;
+
+    struct TestRuntime(Arc<dyn OperationBackend>);
+
+    // File tools only require an operation backend. Panic on any unexpected
+    // runtime dependency so the fixture stays minimal and fails loudly.
+    impl RuntimeView for TestRuntime {
+        fn state_store(&self) -> &dyn ToolStateStore {
+            panic!("not used in file tool tests")
+        }
+
+        fn tool_events(&self) -> &dyn ToolEventSink {
+            panic!("not used in file tool tests")
+        }
+
+        fn trace_recorder(&self) -> &dyn TraceRecorder {
+            panic!("not used in file tool tests")
+        }
+
+        fn agent_context(&self) -> &dyn AgentContext {
+            panic!("not used in file tool tests")
+        }
+
+        fn interaction(&self) -> &dyn InteractionHandle {
+            panic!("not used in file tool tests")
+        }
+
+        fn hookers(&self) -> &dyn HookerRegistry {
+            panic!("not used in file tool tests")
+        }
+
+        fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    fn call(tool_name: &str, input: serde_json::Value) -> FinalToolCall {
+        FinalToolCall {
+            call_id: format!("{tool_name}-call"),
+            tool_name: tool_name.to_string(),
+            input,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_edit_when_file_changed_after_read() {
+        const ORIGINAL: &str = "fn main() {\n    let timeout = 30;\n}\n";
+        const USER_EDIT: &str = "fn main() {\n    let timeout = 30;\n    enable_tls();\n}\n";
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join("sample.rs");
+        std::fs::write(&file_path, ORIGINAL).expect("write initial file");
+        let read_mtime = std::fs::metadata(&file_path)
+            .and_then(|metadata| metadata.modified())
+            .expect("initial mtime");
+
+        let backend = operation_backend::local_backend(temp.path().to_path_buf(), None, None, None)
+            .expect("local backend");
+        let runtime = TestRuntime(backend);
+
+        // Use the production source so both executors receive its private state.
+        let tools = BuiltinToolSource::new(ToolRuntimeServices::default()).discover();
+        let read_executor = tools
+            .iter()
+            .find(|tool| tool.spec.name().0 == "file_read")
+            .expect("file_read tool");
+        let edit_executor = tools
+            .iter()
+            .find(|tool| tool.spec.name().0 == "file_edit")
+            .expect("file_edit tool");
+
+        let read_output = read_executor
+            .executor
+            .invoke(
+                &call("file_read", json!({ "file_path": "sample.rs" })),
+                &runtime,
+            )
+            .await
+            .expect("file_read execution");
+        assert!(matches!(
+            read_output,
+            ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Success { .. }
+            }
+        ));
+
+        // Simulate a user edit while keeping old_string present. This isolates
+        // the stale-read guard from the ordinary "old_string not found" check.
+        std::fs::write(&file_path, USER_EDIT).expect("modify file after read");
+
+        // Advance mtime explicitly instead of sleeping for the filesystem clock.
+        std::fs::File::options()
+            .write(true)
+            .open(&file_path)
+            .and_then(|file| file.set_modified(read_mtime + Duration::from_secs(1)))
+            .expect("advance modified time");
+
+        let edit_output = edit_executor
+            .executor
+            .invoke(
+                &call(
+                    "file_edit",
+                    json!({
+                        "file_path": "sample.rs",
+                        "old_string": "let timeout = 30;",
+                        "new_string": "let timeout = 60;"
+                    }),
+                ),
+                &runtime,
+            )
+            .await
+            .expect("file_edit execution");
+
+        match edit_output {
+            ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Error { message },
+            } => assert!(
+                message.starts_with("[error_code=7]"),
+                "expected FILE_MODIFIED, got: {message}"
+            ),
+            other => panic!("expected file_edit to reject stale edit, got: {other:?}"),
+        }
+
+        // A rejected edit must leave the user's version untouched.
+        assert_eq!(
+            std::fs::read_to_string(file_path).expect("read final file"),
+            USER_EDIT
+        );
     }
 }
