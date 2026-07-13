@@ -191,6 +191,15 @@ pub struct GatewayErrorResponse {
     pub error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct RuntimeExecInterruptedResponse {
+    error: String,
+    execution_state: String,
+    stdout_base64: String,
+    stderr_base64: String,
+    retryable: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpBearerAuthConfig {
     token: Arc<str>,
@@ -652,6 +661,22 @@ async fn handle_runtime_exec(
 
     match control_plane.exec_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
+        Err(xiaoo_shared::gateway::SessionServiceError::RuntimeExecInterrupted {
+            message,
+            stdout_base64,
+            stderr_base64,
+            execution_state,
+        }) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeExecInterruptedResponse {
+                error: format!("core runtime execution interrupted ({execution_state}): {message}"),
+                execution_state: execution_state.to_string(),
+                stdout_base64,
+                stderr_base64,
+                retryable: execution_state == agent_contracts::backend::ExecutionState::NotStarted,
+            }),
+        )
+            .into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -840,8 +865,8 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, handle_channel_events, GatewayAppState, GatewayErrorResponse,
-        HttpBearerAuthConfig,
+        create_router_with_auth, create_router_with_control_plane_and_auth, handle_channel_events,
+        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -859,8 +884,62 @@ mod tests {
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
     use xiaoo_shared::gateway::{
-        AppTurnRequest, AppTurnResult, SessionService, SessionServiceError, TurnOutcome,
+        AppTurnRequest, AppTurnResult, SessionControlPlane, SessionService, SessionServiceError,
+        TurnOutcome,
     };
+    use xiaoo_shared::{RuntimeExecRequest, RuntimeExecResult};
+
+    struct InterruptedExecControlPlane;
+
+    #[async_trait]
+    impl SessionControlPlane for InterruptedExecControlPlane {
+        async fn exec_runtime(
+            &self,
+            _request: RuntimeExecRequest,
+        ) -> Result<RuntimeExecResult, SessionServiceError> {
+            Err(SessionServiceError::RuntimeExecInterrupted {
+                message: "stream reset".to_string(),
+                stdout_base64: "cGFydGlhbA==".to_string(),
+                stderr_base64: String::new(),
+                execution_state: agent_contracts::backend::ExecutionState::RunningOrCompleted,
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_exec_interruption_returns_partial_output() {
+        let router = create_router_with_control_plane_and_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Arc::new(InterruptedExecControlPlane),
+            None,
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/exec")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"runtime_id":"runtime-1","command":"echo hello"}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be JSON");
+        assert_eq!(payload["execution_state"], "running_or_completed");
+        assert_eq!(payload["stdout_base64"], "cGFydGlhbA==");
+        assert_eq!(payload["stderr_base64"], "");
+        assert_eq!(payload["retryable"], false);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn bearer_auth_rejects_missing_token_for_runtime_input() {
