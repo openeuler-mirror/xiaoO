@@ -57,6 +57,15 @@ impl Theme {
         Self::from_terminal_env(&env)
     }
 
+    /// Deterministic dark TrueColor theme for unit tests. Unlike
+    /// [`Theme::detect`] / [`Theme::default`] this does **not** read
+    /// `TERM`/`COLORTERM`/`COLORFGBG`/`NO_COLOR`, so tests produce the
+    /// same theme regardless of the shell or CI environment they run in.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::from_scheme(ColorSupport::TrueColor, BackgroundMode::Dark)
+    }
+
     fn from_terminal_env(env: &TerminalThemeEnv) -> Self {
         Self::from_scheme(env.color_support(), env.background_mode())
     }

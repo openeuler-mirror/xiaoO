@@ -1,6 +1,5 @@
 use std::sync::OnceLock;
 
-use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
 use crate::input::{Input, InputRequest};
@@ -136,35 +135,31 @@ pub(crate) fn render_tool_detail_text(text: &str) -> String {
         .replace('\r', "\n")
 }
 
-pub(crate) fn rendered_line_count(lines: &[Line<'_>], width: u16) -> usize {
-    lines
-        .iter()
-        .map(|line| {
-            let visual_width: usize = line
-                .spans
-                .iter()
-                .flat_map(|span| span.content.chars())
-                .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
-                .sum();
-            if width == 0 {
-                0
-            } else {
-                visual_width.max(1).div_ceil(width as usize)
-            }
-        })
-        .sum()
+/// Find the first occurrence of `needle` within `haystack` starting from the
+/// `start`-th char. Returns the char index where the match begins. Uses
+/// `str::find` (which respects UTF-8 char boundaries for valid UTF-8 needles)
+/// so no `Vec<char>` allocation is needed.
+///
+/// Used to reverse-map a wrapped visual line's text back to its position in
+/// the original logical line: textwrap strips inter-word whitespace at wrap
+/// boundaries, so each visual line's text is a contiguous substring of the
+/// original but not necessarily at a contiguous offset. Advancing via this
+/// helper skips the stripped whitespace and lands on the correct char offset.
+pub(crate) fn find_substring_from(haystack: &str, needle: &str, start: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(start);
+    }
+    let start_byte = haystack
+        .char_indices()
+        .nth(start)
+        .map_or(haystack.len(), |(b, _)| b);
+    let byte_pos = haystack[start_byte..].find(needle)?;
+    Some(haystack[..start_byte + byte_pos].chars().count())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rendered_line_count_matches_paragraph_wrap_for_indented_content() {
-        let lines = vec![Line::from("               4 Indent")];
-
-        assert_eq!(rendered_line_count(&lines, 10), 3);
-    }
 
     #[test]
     fn scroll_offset_from_drag_reaches_bottom_at_last_row() {
@@ -191,5 +186,31 @@ mod tests {
             render_tool_detail_text("line1\\nline2\\r\\nline3\\rline4"),
             "line1\nline2\nline3\nline4"
         );
+    }
+
+    #[test]
+    fn find_substring_from_skips_stripped_whitespace() {
+        // Mirrors textwrap's behavior: "AAA BBB CCC" wrapped at width 4
+        // produces ["AAA", "BBB", "CCC"] (inter-word spaces stripped). Each
+        // visual line's text is a contiguous substring of the original, but
+        // the offsets jump past the stripped spaces.
+        let original = "AAA BBB CCC";
+        // First visual line "AAA" at char 0.
+        assert_eq!(find_substring_from(original, "AAA", 0), Some(0));
+        // Second visual line "BBB": searching from char 3 (past "AAA" + the
+        // space textwrap stripped) finds "BBB" at char 4, not 3.
+        assert_eq!(find_substring_from(original, "BBB", 3), Some(4));
+        // Third visual line "CCC": searching from char 7 (past "BBB" + the
+        // stripped space) finds "CCC" at char 8.
+        assert_eq!(find_substring_from(original, "CCC", 7), Some(8));
+    }
+
+    #[test]
+    fn find_substring_from_handles_empty_needle_and_missing_match() {
+        assert_eq!(find_substring_from("abc", "", 5), Some(5));
+        assert_eq!(find_substring_from("abc", "xyz", 0), None);
+        // UTF-8 char boundary safety: searching from char index 2 in "你好世界"
+        // (which is the 3rd char '世') must land on a char boundary.
+        assert_eq!(find_substring_from("你好世界", "世界", 0), Some(2));
     }
 }
