@@ -1,4 +1,5 @@
 mod backend;
+mod error;
 mod exec;
 mod filesystem;
 mod path;

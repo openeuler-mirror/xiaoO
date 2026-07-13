@@ -1217,10 +1217,28 @@ impl SessionControlPlane for CoreBackedSessionService {
                 timeout_ms: request.timeout_ms,
                 env,
             })
-            .await
-            .map_err(|error| SessionServiceError::CoreRun {
-                message: format!("runtime exec failed: {error}"),
-            })?;
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(agent_contracts::backend::OperationError::ExecutionInterrupted {
+                message,
+                stdout,
+                stderr,
+                state,
+            }) => {
+                return Err(SessionServiceError::RuntimeExecInterrupted {
+                    message: format!("runtime exec failed: {message}"),
+                    stdout_base64: base64::engine::general_purpose::STANDARD.encode(stdout),
+                    stderr_base64: base64::engine::general_purpose::STANDARD.encode(stderr),
+                    execution_state: state,
+                });
+            }
+            Err(error) => {
+                return Err(SessionServiceError::CoreRun {
+                    message: format!("runtime exec failed: {error}"),
+                });
+            }
+        };
 
         Ok(RuntimeExecResult {
             stdout_base64: base64::engine::general_purpose::STANDARD.encode(result.stdout),

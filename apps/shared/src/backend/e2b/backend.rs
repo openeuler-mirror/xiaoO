@@ -12,7 +12,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use super::error::E2bFailure;
 use super::exec::E2bExec;
 use super::filesystem::E2bFileSystem;
 use super::path::E2bPathResolver;
@@ -194,14 +196,24 @@ impl E2bBackendState {
     }
 
     pub(crate) async fn delete_sandbox(&self) -> Result<(), OperationError> {
+        let started_at = Instant::now();
         let response = self
             .http
             .delete(self.platform_url(format!("/sandboxes/{}", self.sandbox_id).as_str()))
             .header("X-API-Key", self.api_key.as_str())
             .send()
             .await
-            .map_err(|error| OperationError::Transport {
-                message: format!("failed to call e2b delete sandbox: {error}"),
+            .map_err(|error| {
+                let failure = E2bFailure::from_reqwest("failed to call e2b delete sandbox", &error);
+                failure.log(
+                    "delete_sandbox",
+                    Some(self.sandbox_id.as_str()),
+                    None,
+                    started_at.elapsed().as_millis(),
+                );
+                OperationError::Transport {
+                    message: failure.message,
+                }
             })?;
 
         if response.status() == StatusCode::NO_CONTENT || response.status() == StatusCode::NOT_FOUND
@@ -334,6 +346,7 @@ pub(crate) async fn connect_json<T: for<'de> Deserialize<'de>>(
     path: &str,
     body: Value,
 ) -> Result<T, OperationError> {
+    let started_at = Instant::now();
     let response = state
         .envd_request(Method::POST, path)
         .header("Connect-Protocol-Version", "1")
@@ -342,8 +355,20 @@ pub(crate) async fn connect_json<T: for<'de> Deserialize<'de>>(
         .json(&body)
         .send()
         .await
-        .map_err(|error| OperationError::Transport {
-            message: format!("failed to call e2b envd {path}: {error}"),
+        .map_err(|error| {
+            let failure = E2bFailure::from_reqwest(
+                format!("failed to call e2b envd {path}").as_str(),
+                &error,
+            );
+            failure.log(
+                "envd_json",
+                Some(state.sandbox_id.as_str()),
+                None,
+                started_at.elapsed().as_millis(),
+            );
+            OperationError::Transport {
+                message: failure.message,
+            }
         })?;
 
     if !response.status().is_success() {
