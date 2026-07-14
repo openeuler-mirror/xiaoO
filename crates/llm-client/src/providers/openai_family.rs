@@ -13,8 +13,8 @@ use crate::error::{
 };
 use crate::url_fallback::{
     build_base_url_candidates, build_final_candidates, is_configuration_error,
-    is_retryable_network_error, should_try_next_candidate, write_url_fallback_error_log,
-    UrlAttemptRecord,
+    is_http_unauthorized_error, is_retryable_network_error, should_try_next_candidate,
+    write_url_fallback_error_log, UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -490,6 +490,19 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
+                    // Last candidate exhausted with a uniform HTTP 401: surface
+                    // the real "Unauthorized" error so the caller gets an
+                    // actionable cause instead of the wrapped
+                    // "All N candidates failed" summary.
+                    if !has_more_candidates && is_http_unauthorized_error(&error) {
+                        tracing::error!(
+                            url,
+                            error = error.to_string(),
+                            "All candidates returned HTTP 401 - surfacing real auth error instead of wrapped URL fallback"
+                        );
+                        return Err(error);
+                    }
+
                     let error_msg = write_url_fallback_error_log(
                         &self.api_base,
                         &base_candidates,
@@ -501,26 +514,11 @@ impl LlmProvider for OpenAiFamilyProvider {
             }
         }
 
+        // Reachable only when `final_urls` is empty (no candidates generated).
         let final_error = LlmError::ApiError(format!(
             "All {} endpoint URL candidates failed",
             final_urls.len()
         ));
-
-        let last_attempt = attempts.last();
-        if let Some(attempt) = last_attempt {
-            if attempt.error.contains("HTTP 400")
-                || attempt.error.contains("HTTP 403")
-                || attempt.error.contains("Bad Request")
-                || attempt.error.contains("Invalid")
-            {
-                tracing::error!(
-                    url = attempt.url,
-                    error = attempt.error,
-                    "Last candidate failed with configuration error - returning actual error instead of wrapped URL fallback"
-                );
-                return Err(LlmError::ApiError(attempt.error.clone()));
-            }
-        }
 
         let error_msg =
             write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
@@ -696,6 +694,19 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
+                    // Last candidate exhausted with a uniform HTTP 401: surface
+                    // the real "Unauthorized" error so the caller gets an
+                    // actionable cause instead of the wrapped
+                    // "All N candidates failed" summary.
+                    if !has_more_candidates && is_http_unauthorized_error(&error) {
+                        tracing::error!(
+                            url,
+                            error = error.to_string(),
+                            "All candidates returned HTTP 401 for streaming - surfacing real auth error instead of wrapped URL fallback"
+                        );
+                        return Err(error);
+                    }
+
                     let error_msg = write_url_fallback_error_log(
                         &self.api_base,
                         &base_candidates,
@@ -707,26 +718,11 @@ impl LlmProvider for OpenAiFamilyProvider {
             }
         }
 
+        // Reachable only when `final_urls` is empty (no candidates generated).
         let final_error = LlmError::ApiError(format!(
             "All {} endpoint URL candidates failed for streaming",
             final_urls.len()
         ));
-
-        let last_attempt = attempts.last();
-        if let Some(attempt) = last_attempt {
-            if attempt.error.contains("HTTP 400")
-                || attempt.error.contains("HTTP 403")
-                || attempt.error.contains("Bad Request")
-                || attempt.error.contains("Invalid")
-            {
-                tracing::error!(
-                    url = attempt.url,
-                    error = attempt.error,
-                    "Last candidate failed with configuration error for streaming - returning actual error instead of wrapped URL fallback"
-                );
-                return Err(LlmError::ApiError(attempt.error.clone()));
-            }
-        }
 
         let error_msg =
             write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
@@ -836,6 +832,88 @@ mod tests {
         let body = provider.build_body(&request, false).unwrap();
 
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    // Regression test for the URL fallback loop: when *every* candidate URL
+    // returns HTTP 401, the provider must surface the real "Unauthorized"
+    // error to the caller instead of the wrapped "All N candidates failed"
+    // summary. (Previously the surfacing logic lived in dead post-loop code
+    // that was never reached, so callers saw the wrapped message.)
+    #[tokio::test]
+    async fn complete_surfaces_real_401_when_all_candidates_unauthorized() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(
+                r#"{"error":{"message":"Missing API key","type":"authentication_error","code":401}}"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = OpenAiFamilyProvider::new(
+            Some("bad-key".to_string()),
+            server.url(),
+            "gpt-5.4".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
+        let error = provider.complete(&request).await.unwrap_err();
+
+        assert!(
+            is_http_unauthorized_error(&error),
+            "expected raw HTTP 401, got: {error}"
+        );
+        assert!(
+            !error.to_string().contains("candidates failed"),
+            "should not be wrapped URL-fallback summary: {error}"
+        );
+        assert!(error.to_string().contains("HTTP 401"));
+    }
+
+    // Streaming counterpart of the regression above: `complete_stream` shares
+    // the same fallback loop and must also surface the real HTTP 401 when
+    // every candidate rejects the request, instead of the wrapped summary.
+    #[tokio::test]
+    async fn complete_stream_surfaces_real_401_when_all_candidates_unauthorized() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(
+                r#"{"error":{"message":"Missing API key","type":"authentication_error","code":401}}"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = OpenAiFamilyProvider::new(
+            Some("bad-key".to_string()),
+            server.url(),
+            "gpt-5.4".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
+        let on_chunk: &(dyn Fn(StreamChunk) + Send + Sync) = &|_chunk| {};
+        let error = provider
+            .complete_stream(&request, on_chunk)
+            .await
+            .unwrap_err();
+
+        assert!(
+            is_http_unauthorized_error(&error),
+            "expected raw HTTP 401, got: {error}"
+        );
+        assert!(
+            !error.to_string().contains("candidates failed"),
+            "should not be wrapped URL-fallback summary: {error}"
+        );
+        assert!(error.to_string().contains("HTTP 401"));
     }
 }
 
