@@ -740,8 +740,87 @@ fn encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_contracts::backend::capability::exec::ExecRequest;
+    use agent_contracts::backend::capability::filesystem::{WriteBytesRequest, WriteMode};
     use std::cell::Cell;
     use std::future::ready;
+
+    #[tokio::test]
+    #[ignore = "requires E2B_API_KEY and creates a real E2B sandbox"]
+    async fn live_structured_grep_executes_command_with_args() {
+        assert!(
+            std::env::var_os("E2B_API_KEY").is_some(),
+            "E2B_API_KEY must be set"
+        );
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let created = create_backend(E2bCreateBackendInput {
+            backend_id: BackendId(format!("e2b-live-grep:{suffix}")),
+            session_id_for_instance: format!("e2b-live-grep-session:{suffix}"),
+            workspace_root_text: DEFAULT_WORKSPACE_ROOT.to_string(),
+            provider_options: json!({
+                "api_key_env": "E2B_API_KEY",
+                "template_id": "base",
+                "timeout_secs": 300,
+                "default_shell": "/bin/sh"
+            }),
+            resource_limits: Default::default(),
+            metadata: json!({"purpose": "structured grep live smoke"}),
+        })
+        .await
+        .expect("create live E2B backend");
+        let backend = created.backend;
+        let smoke_path = BackendPath(format!("{DEFAULT_WORKSPACE_ROOT}/grep-smoke.py"));
+
+        let smoke_result: Result<String, String> = async {
+            backend
+                .files()
+                .write_bytes(WriteBytesRequest {
+                    path: smoke_path,
+                    content: b"watt = watts = W = Quantity(\"watt\")\n".to_vec(),
+                    mode: WriteMode::Overwrite,
+                })
+                .await
+                .map_err(|error| format!("write smoke fixture: {error}"))?;
+
+            let output = backend
+                .exec()
+                .exec(ExecRequest {
+                    command: "grep".to_string(),
+                    args: vec![
+                        "-P".to_string(),
+                        "-n".to_string(),
+                        "-e".to_string(),
+                        r"W\s*=".to_string(),
+                        "grep-smoke.py".to_string(),
+                    ],
+                    shell: None,
+                    cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
+                    timeout_ms: Some(30_000),
+                    env: None,
+                })
+                .await
+                .map_err(|error| format!("execute structured grep: {error}"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.exit_code != Some(0) {
+                return Err(format!(
+                    "grep exited with {:?}; stderr: {stderr}",
+                    output.exit_code
+                ));
+            }
+            if !stdout.contains("1:watt = watts = W = Quantity") {
+                return Err(format!("unexpected grep stdout: {stdout:?}"));
+            }
+            Ok(stdout)
+        }
+        .await;
+
+        let cleanup_result = backend.shutdown().await;
+        cleanup_result.expect("delete live E2B sandbox");
+        let stdout = smoke_result.expect("structured grep smoke");
+        eprintln!("live E2B structured grep passed: {}", stdout.trim());
+    }
 
     #[tokio::test]
     async fn workspace_initialization_retries_transient_failures() {

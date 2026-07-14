@@ -76,6 +76,67 @@ impl E2bExec {
     fn connect_timeout_ms(timeout_ms: Option<u64>) -> Option<u64> {
         timeout_ms.map(|value| value.saturating_add(10_000))
     }
+
+    fn build_start_process(
+        &self,
+        request: ExecRequest,
+    ) -> Result<(E2bStartProcess, Option<u64>), OperationError> {
+        if request.command.trim().is_empty() {
+            return Err(OperationError::ExecutionFailed {
+                message: "command cannot be empty".to_string(),
+            });
+        }
+
+        let timeout_ms = request.timeout_ms;
+        let env: HashMap<String, String> = request
+            .env
+            .as_ref()
+            .map(|pairs| pairs.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let (cmd, args) = if let Some(shell) = request.shell {
+            if !request.args.is_empty() {
+                return Err(OperationError::Unsupported {
+                    message: "shell execution does not support args".to_string(),
+                });
+            }
+            if let Some(timeout_ms) = timeout_ms {
+                (
+                    "timeout".to_string(),
+                    vec![
+                        "--signal=TERM".to_string(),
+                        Self::timeout_arg(timeout_ms),
+                        shell,
+                        "-c".to_string(),
+                        request.command,
+                    ],
+                )
+            } else {
+                (shell, vec!["-c".to_string(), request.command])
+            }
+        } else if let Some(timeout_ms) = timeout_ms {
+            let mut args = vec![
+                "--signal=TERM".to_string(),
+                Self::timeout_arg(timeout_ms),
+                request.command,
+            ];
+            args.extend(request.args);
+            ("timeout".to_string(), args)
+        } else {
+            (request.command, request.args)
+        };
+
+        Ok((
+            E2bStartProcess {
+                cmd,
+                args,
+                env,
+                cwd: request.cwd.map(|path| path.0),
+                connect_timeout_ms: Self::connect_timeout_ms(timeout_ms),
+            },
+            timeout_ms,
+        ))
+    }
 }
 
 pub(crate) struct E2bStartProcess {
@@ -167,69 +228,17 @@ impl E2bExecFailure {
 
 #[async_trait]
 impl OperationExec for E2bExec {
+    fn default_shell(&self) -> Option<&str> {
+        self.state.default_shell.as_deref()
+    }
+
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
         self.state.ensure_active()?;
-        if request.command.trim().is_empty() {
-            return Err(OperationError::ExecutionFailed {
-                message: "command cannot be empty".to_string(),
-            });
-        }
+        let (process, timeout_ms) = self.build_start_process(request)?;
 
-        let timeout_ms = request.timeout_ms;
-        let env: HashMap<String, String> = request
-            .env
-            .as_ref()
-            .map(|pairs| pairs.iter().cloned().collect())
-            .unwrap_or_default();
-
-        let (cmd, args) = if let Some(shell) = request
-            .shell
-            .clone()
-            .or_else(|| self.state.default_shell.clone())
-        {
-            if !request.args.is_empty() {
-                return Err(OperationError::Unsupported {
-                    message: "shell execution does not support args".to_string(),
-                });
-            }
-            if let Some(timeout_ms) = timeout_ms {
-                (
-                    "timeout".to_string(),
-                    vec![
-                        "--signal=TERM".to_string(),
-                        Self::timeout_arg(timeout_ms),
-                        shell,
-                        "-c".to_string(),
-                        request.command,
-                    ],
-                )
-            } else {
-                (shell, vec!["-c".to_string(), request.command])
-            }
-        } else if let Some(timeout_ms) = timeout_ms {
-            let mut args = vec![
-                "--signal=TERM".to_string(),
-                Self::timeout_arg(timeout_ms),
-                request.command,
-            ];
-            args.extend(request.args);
-            ("timeout".to_string(), args)
-        } else {
-            (request.command, request.args)
-        };
-
-        let output = start_process(
-            &self.state,
-            E2bStartProcess {
-                cmd,
-                args,
-                env,
-                cwd: request.cwd.map(|path| path.0),
-                connect_timeout_ms: Self::connect_timeout_ms(timeout_ms),
-            },
-        )
-        .await
-        .map_err(E2bExecFailure::into_operation_error)?;
+        let output = start_process(&self.state, process)
+            .await
+            .map_err(E2bExecFailure::into_operation_error)?;
         let timed_out = timeout_ms.is_some() && output.exit_code == Some(124);
 
         Ok(ExecResult {
@@ -625,8 +634,98 @@ struct EndEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::e2b::backend::E2bLifecycle;
     use crate::backend::e2b::error::E2bFailureKind;
+    use agent_contracts::backend::BackendPath;
     use base64::Engine;
+    use std::sync::Mutex;
+
+    fn exec_with_default_shell(default_shell: Option<&str>) -> E2bExec {
+        E2bExec::new(Arc::new(E2bBackendState {
+            backend_id: "e2b:test".to_string(),
+            api_base: "https://api.e2b.test".to_string(),
+            api_key: "test-key".to_string(),
+            sandbox_id: "sandbox-test".to_string(),
+            envd_access_token: None,
+            envd_port: 49_983,
+            envd_scheme: "https".to_string(),
+            workspace_root: BackendPath("/home/user/workspace".to_string()),
+            home_dir: Some(BackendPath("/home/user".to_string())),
+            temp_root: BackendPath("/tmp".to_string()),
+            default_shell: default_shell.map(str::to_string),
+            username: None,
+            http: reqwest::Client::new(),
+            lifecycle: Mutex::new(E2bLifecycle::Active),
+        }))
+    }
+
+    fn exec_request(command: &str) -> ExecRequest {
+        ExecRequest {
+            command: command.to_string(),
+            args: Vec::new(),
+            shell: None,
+            cwd: Some(BackendPath("/home/user/workspace".to_string())),
+            timeout_ms: None,
+            env: None,
+        }
+    }
+
+    #[test]
+    fn direct_process_preserves_args_despite_configured_default_shell() {
+        let exec = exec_with_default_shell(Some("/bin/sh"));
+        let mut request = exec_request("rg");
+        request.args = vec!["W\\s*=".to_string(), ".".to_string()];
+        request.timeout_ms = Some(2_500);
+        request.env = Some(vec![("LC_ALL".to_string(), "C".to_string())]);
+
+        let (process, timeout_ms) = exec
+            .build_start_process(request)
+            .expect("direct request should be supported");
+
+        assert_eq!(exec.default_shell(), Some("/bin/sh"));
+        assert_eq!(timeout_ms, Some(2_500));
+        assert_eq!(process.cmd, "timeout");
+        assert_eq!(
+            process.args,
+            ["--signal=TERM", "2.500s", "rg", "W\\s*=", "."]
+        );
+        assert_eq!(process.cwd.as_deref(), Some("/home/user/workspace"));
+        assert_eq!(process.env.get("LC_ALL").map(String::as_str), Some("C"));
+        assert_eq!(process.connect_timeout_ms, Some(12_500));
+    }
+
+    #[test]
+    fn explicit_shell_builds_shell_command() {
+        let exec = exec_with_default_shell(Some("/bin/sh"));
+        let mut request = exec_request("printf shell-ok");
+        request.shell = Some("/bin/bash".to_string());
+
+        let (process, timeout_ms) = exec
+            .build_start_process(request)
+            .expect("explicit shell request should be supported");
+
+        assert_eq!(timeout_ms, None);
+        assert_eq!(process.cmd, "/bin/bash");
+        assert_eq!(process.args, ["-c", "printf shell-ok"]);
+    }
+
+    #[test]
+    fn explicit_shell_rejects_process_args() {
+        let exec = exec_with_default_shell(Some("/bin/sh"));
+        let mut request = exec_request("printf");
+        request.shell = Some("/bin/bash".to_string());
+        request.args = vec!["shell-ok".to_string()];
+
+        let error = match exec.build_start_process(request) {
+            Ok(_) => panic!("shell request with args should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, OperationError::Unsupported { .. }));
+        assert_eq!(
+            error.to_string(),
+            "unsupported operation: shell execution does not support args"
+        );
+    }
 
     fn framed_payloads(payloads: &[&[u8]]) -> Vec<u8> {
         let mut bytes = Vec::new();
