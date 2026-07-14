@@ -15,6 +15,7 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -667,6 +668,89 @@ def is_l2_category_enabled(runtime: dict, category_key: str) -> bool:
     return cat.get("category_enabled", True)
 
 
+def has_runtime_config() -> bool:
+    """判断用户本地 runtime 配置文件是否存在且可正常读取。
+
+    用于区分两种场景：
+      - 文件不存在 → 从未通过 Dashboard 配置过，应使用源码默认值
+      - 文件存在但规则列表为空 → 用户主动逐条禁用了全部规则，不应回退
+    """
+    config_path = get_runtime_config_path()
+    if not config_path.exists():
+        return False
+    try:
+        json.loads(config_path.read_text(encoding="utf-8"))
+        return True
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def get_enabled_l1_command_patterns_or_default(runtime: dict) -> list[dict]:
+    """获取启用的 L1 命令正则模式；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l1_command_patterns(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.heuristic_detector import CRITICAL_COMMAND_PATTERNS, EXTRA_DANGEROUS_PATTERNS
+        return CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
+    return []
+
+
+def get_enabled_l1_injection_keywords_or_default(runtime: dict) -> list[dict]:
+    """获取启用的 L1 注入关键词；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l1_injection_keywords(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.heuristic_detector import INJECTION_KEYWORDS
+        return INJECTION_KEYWORDS
+    return []
+
+
+def get_enabled_l2_sensitive_paths_or_default(runtime: dict) -> list[dict]:
+    """获取启用的 L2 敏感路径；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l2_sensitive_paths(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.logic_rules import SENSITIVE_PATHS
+        return SENSITIVE_PATHS
+    return []
+
+
+def get_enabled_l2_intent_patterns_or_default(runtime: dict) -> list[dict]:
+    """获取启用的 L2 意图偏离模式；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l2_intent_patterns(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.logic_rules import INTENT_DEVIATION_PATTERNS
+        return INTENT_DEVIATION_PATTERNS
+    return []
+
+
+def get_enabled_l2_password_patterns_or_default(runtime: dict) -> list[str]:
+    """获取启用的 L2 密码修改正则模式；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l2_password_patterns(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.logic_rules import PASSWORD_MODIFY_PATTERNS
+        return PASSWORD_MODIFY_PATTERNS
+    return []
+
+
+def get_enabled_l2_user_deletion_patterns_or_default(runtime: dict) -> list[str]:
+    """获取启用的 L2 用户删除正则模式；仅在无 runtime config 时才回退到硬编码默认值"""
+    enabled = get_enabled_l2_user_deletion_patterns(runtime)
+    if enabled:
+        return enabled
+    if not has_runtime_config():
+        from .security.logic_rules import USER_DELETION_PATTERNS
+        return USER_DELETION_PATTERNS
+    return []
+
+
 def get_disabled_skill_ids(runtime: dict) -> set[str]:
     """获取所有被禁用的 skill id 集合"""
     disabled = set()
@@ -757,12 +841,25 @@ def delete_custom_rule(layer: str, category: str, rule_id: str) -> dict | None:
     return runtime
 
 
+_SKILL_ID_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _validate_skill_id(skill_id: str) -> None:
+    """校验 skill_id：只允许字母、数字、下划线、连字符，禁止路径穿越"""
+    if not skill_id or not _SKILL_ID_RE.match(skill_id):
+        raise ValueError(
+            f"skill_id '{skill_id}' 不合法：只允许字母、数字、下划线和连字符（^[a-zA-Z0-9_-]+$），"
+            "禁止路径穿越字符（如 ../）"
+        )
+
+
 def add_custom_skill(skill_id: str, category: str, keywords: list[str], content: str) -> dict:
     """新增自定义 skill：写入 markdown 文件 + 更新 runtime JSON
 
     自定义 skill 文件写入用户目录 ~/.config/xiaoo/audit_skills/，
     而非内置 skills 目录（RPM 安装后内置目录只读，普通用户无法写入）。
     """
+    _validate_skill_id(skill_id)
     runtime = load_runtime_config()
 
     # 写入用户级 skill markdown 文件（可写目录）
@@ -785,6 +882,7 @@ def add_custom_skill(skill_id: str, category: str, keywords: list[str], content:
 
 def delete_custom_skill(skill_id: str, category: str) -> dict | None:
     """删除自定义 skill（builtin=true 不允许删除）"""
+    _validate_skill_id(skill_id)
     runtime = load_runtime_config()
     cat_skills = runtime.get("L3_skills", {}).get(category, {}).get("skills", [])
     target = None

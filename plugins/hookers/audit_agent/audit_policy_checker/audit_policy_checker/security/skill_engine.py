@@ -182,7 +182,8 @@ class SkillEngine:
                 )
 
         # 如果没有匹配到任何 skill，加载 general_tool_risk_guard 作为兜底
-        if not results:
+        # （前提是该 skill 未被用户禁用）
+        if not results and "general_tool_risk_guard" not in disabled_skills:
             fallback = self._skills_cache.get("general_tool_risk_guard", "")
             if fallback:
                 results.append(

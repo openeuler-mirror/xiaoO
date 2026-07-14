@@ -19,8 +19,8 @@ from pathlib import Path
 from .types import HeuristicResult
 from ..runtime_config import (
     load_runtime_config,
-    get_enabled_l1_command_patterns,
-    get_enabled_l1_injection_keywords,
+    get_enabled_l1_command_patterns_or_default,
+    get_enabled_l1_injection_keywords_or_default,
 )
 
 # 默认用户规则文件路径
@@ -505,22 +505,15 @@ class CommandPatternScanner:
     """
 
     def __init__(self):
-        # 从 runtime config 加载启用的规则
+        # 从 runtime config 加载启用的规则；
+        # 仅在配置文件不存在时回退到源码硬编码默认值，
+        # 配置文件存在但规则列表为空（用户逐条禁用）时不回退。
         runtime = load_runtime_config()
-        enabled_patterns = get_enabled_l1_command_patterns(runtime)
-
-        if enabled_patterns:
-            self._compiled = [
-                {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
-                for p in enabled_patterns
-            ]
-        else:
-            # 回退到源码硬编码默认值
-            all_patterns = CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
-            self._compiled = [
-                {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
-                for p in all_patterns
-            ]
+        patterns = get_enabled_l1_command_patterns_or_default(runtime)
+        self._compiled = [
+            {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
+            for p in patterns
+        ]
 
     def scan(self, action_detail: str) -> HeuristicResult:
         hits = [
@@ -562,8 +555,7 @@ class InjectionKeywordChecker:
 
     def __init__(self):
         runtime = load_runtime_config()
-        enabled_keywords = get_enabled_l1_injection_keywords(runtime)
-        self._keywords = enabled_keywords if enabled_keywords else INJECTION_KEYWORDS
+        self._keywords = get_enabled_l1_injection_keywords_or_default(runtime)
 
     def check(self, text: str) -> HeuristicResult:
         hits = [p for p in self._keywords if p["keyword"].lower() in text]

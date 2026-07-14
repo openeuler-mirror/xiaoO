@@ -1292,7 +1292,7 @@
         let html = "";
         for (const [step, vals] of Object.entries(data.by_step || {})) {
           const stepName = step === "L3_security_judge" ? "L3 安全判断" :
-                           step === "step2_policy_gen" ? "策略生成" : step;
+                           step === "step2_policy_gen" ? "策略生成" : escapeHtml(step);
           const pct = data.total_tokens > 0 ? (vals.total_tokens / data.total_tokens * 100).toFixed(1) : 0;
           html += `
             <div class="token-detail-row">
@@ -1375,12 +1375,12 @@
         html += '<tr style="border-bottom:1px solid var(--border);color:var(--text-light)"><th style="padding:6px">时间</th><th>步骤</th><th>模型</th><th>输入</th><th>输出</th><th>总计</th></tr>';
         for (const r of records.reverse()) {
           const stepName = r.step === "L3_security_judge" ? "L3 安全判断" :
-                           r.step === "step2_policy_gen" ? "策略生成" : r.step;
-          const ts = r.timestamp ? r.timestamp.slice(0, 19) : "";
+                           r.step === "step2_policy_gen" ? "策略生成" : escapeHtml(r.step);
+          const ts = r.timestamp ? escapeHtml(r.timestamp.slice(0, 19)) : "";
           html += `<tr style="border-bottom:1px solid var(--border)">
             <td style="padding:6px">${ts}</td>
             <td>${stepName}</td>
-            <td style="color:var(--text-light)">${r.model || ''}</td>
+            <td style="color:var(--text-light)">${escapeHtml(r.model || '')}</td>
             <td>${r.prompt_tokens}</td>
             <td>${r.completion_tokens}</td>
             <td style="font-weight:600">${r.total_tokens}</td>

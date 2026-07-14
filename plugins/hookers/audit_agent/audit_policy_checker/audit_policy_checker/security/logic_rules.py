@@ -21,10 +21,10 @@ from pathlib import Path
 from .types import LogicRuleResult
 from ..runtime_config import (
     load_runtime_config,
-    get_enabled_l2_sensitive_paths,
-    get_enabled_l2_intent_patterns,
-    get_enabled_l2_password_patterns,
-    get_enabled_l2_user_deletion_patterns,
+    get_enabled_l2_sensitive_paths_or_default,
+    get_enabled_l2_intent_patterns_or_default,
+    get_enabled_l2_password_patterns_or_default,
+    get_enabled_l2_user_deletion_patterns_or_default,
     is_l2_category_enabled,
 )
 
@@ -129,12 +129,14 @@ class LogicRulesChecker:
     """
 
     def __init__(self):
-        # 从 runtime config 加载规则
+        # 从 runtime config 加载规则；
+        # 仅在配置文件不存在时回退到源码硬编码默认值，
+        # 配置文件存在但规则列表为空（用户逐条禁用）时不回退。
         runtime = load_runtime_config()
-        self._sensitive_paths = get_enabled_l2_sensitive_paths(runtime) or SENSITIVE_PATHS
-        self._intent_patterns = get_enabled_l2_intent_patterns(runtime) or INTENT_DEVIATION_PATTERNS
-        self._password_patterns = get_enabled_l2_password_patterns(runtime) or PASSWORD_MODIFY_PATTERNS
-        self._user_deletion_patterns = get_enabled_l2_user_deletion_patterns(runtime) or USER_DELETION_PATTERNS
+        self._sensitive_paths = get_enabled_l2_sensitive_paths_or_default(runtime)
+        self._intent_patterns = get_enabled_l2_intent_patterns_or_default(runtime)
+        self._password_patterns = get_enabled_l2_password_patterns_or_default(runtime)
+        self._user_deletion_patterns = get_enabled_l2_user_deletion_patterns_or_default(runtime)
         self._runtime = runtime
 
     def check(

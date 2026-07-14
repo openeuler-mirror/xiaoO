@@ -46,10 +46,17 @@ def _resolve_log_path() -> str:
     即可让 HOOK_INPUT/HOOK_OUTPUT 等全量日志写入指定文件。
     get_log_path 内部已实现"环境变量 > settings > 默认"，此处再兜底 /dev/null。
     """
-    path = get_log_path()
-    if not path:
-        path = os.environ.get("AUDIT_LOG_PATH", "")
-    return path or "/dev/null"
+    try:
+        path = get_log_path()
+        if not path:
+            path = os.environ.get("AUDIT_LOG_PATH", "")
+        return path or "/dev/null"
+    except (json.JSONDecodeError, OSError) as exc:
+        # audit_settings.json 损坏或不可读时，安全降级到 /dev/null，
+        # 避免 JSON 解析异常导致 audit.py 在模块导入阶段直接崩溃，
+        # 影响面从"日志路径错"扩大到"整个 hook 失效"。
+        print(f"[run_audit] audit_settings.json 读取失败，日志降级到 /dev/null: {exc}", file=sys.stderr)
+        return os.environ.get("AUDIT_LOG_PATH", "") or "/dev/null"
 
 
 _LOG_PATH = _resolve_log_path()
