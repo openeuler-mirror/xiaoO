@@ -4,9 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use similar::{ChangeTag, TextDiff};
 
-use agent_contracts::backend::capability::filesystem::{
-    ReadBytesRequest, WriteBytesRequest, WriteMode,
-};
+use agent_contracts::backend::capability::filesystem::{ReadBytesRequest, WriteBytesRequest};
 use agent_contracts::backend::capability::path::ResolveBase;
 use agent_contracts::backend::BackendPath;
 use agent_contracts::runtime::runtime_view::RuntimeView;
@@ -19,6 +17,7 @@ use super::super::validation::backend as validation;
 use super::input::FileWriteInput;
 use super::output::{CreateOutput, FileWriteOutput, Hunk, StructuredPatch, UpdateOutput};
 use super::spec::FileWriteToolSpec;
+use crate::r#impl::builtin::preferred_overwrite_mode;
 use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::ToolRuntimeServices;
@@ -184,17 +183,7 @@ impl ToolExecutor for FileWriteExecutor {
         };
 
         let capabilities = backend.capabilities();
-        let write_mode = if capabilities.supports_atomic_write {
-            WriteMode::AtomicOverwrite
-        } else {
-            return Ok(ToolExecutorOutput::Completed {
-                raw_outcome: RawToolOutcome::Error {
-                    message:
-                        "file_write requires atomic write support, but backend does not support it"
-                            .to_string(),
-                },
-            });
-        };
+        let write_mode = preferred_overwrite_mode(capabilities.supports_atomic_write);
 
         if original_content.is_none() {
             if let Some(parent) = Self::parent_backend_path(&resolved) {
