@@ -3,9 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use agent_contracts::backend::capability::filesystem::{
-    ReadBytesRequest, WriteBytesRequest, WriteMode,
-};
+use agent_contracts::backend::capability::filesystem::{ReadBytesRequest, WriteBytesRequest};
 use agent_contracts::backend::capability::path::ResolveBase;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::executor::ToolExecutor;
@@ -21,6 +19,7 @@ use super::utils::{
     apply_edit_to_file, find_actual_string, get_patch_for_edit, preserve_quote_style,
 };
 use crate::r#impl::builtin::file_read::dedup::{system_time_to_timestamp, DedupStateStore};
+use crate::r#impl::builtin::preferred_overwrite_mode;
 use crate::r#impl::fs_timeout::{timed, DEFAULT_FS_TIMEOUT_MS};
 use crate::r#impl::lsp_hooks::{fetch_diagnostics, spawn_touch_file};
 use crate::r#impl::ToolRuntimeServices;
@@ -169,16 +168,7 @@ impl ToolExecutor for FileEditExecutor {
 
         if input.old_string.is_empty() {
             let capabilities = backend.capabilities();
-            let write_mode = if capabilities.supports_atomic_write {
-                WriteMode::AtomicOverwrite
-            } else {
-                return Ok(ToolExecutorOutput::Completed {
-                    raw_outcome: RawToolOutcome::Error {
-                        message: "file_edit requires atomic write support, but backend does not support it"
-                            .to_string(),
-                    },
-                });
-            };
+            let write_mode = preferred_overwrite_mode(capabilities.supports_atomic_write);
 
             timed(
                 "file_edit write_bytes",
@@ -258,17 +248,7 @@ impl ToolExecutor for FileEditExecutor {
             get_patch_for_edit(&actual_old_string, &styled_new_string);
 
         let capabilities = backend.capabilities();
-        let write_mode = if capabilities.supports_atomic_write {
-            WriteMode::AtomicOverwrite
-        } else {
-            return Ok(ToolExecutorOutput::Completed {
-                raw_outcome: RawToolOutcome::Error {
-                    message:
-                        "file_edit requires atomic write support, but backend does not support it"
-                            .to_string(),
-                },
-            });
-        };
+        let write_mode = preferred_overwrite_mode(capabilities.supports_atomic_write);
 
         timed(
             "file_edit write_bytes",
@@ -324,52 +304,17 @@ impl ToolExecutor for FileEditExecutor {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
-    use agent_contracts::backend::OperationBackend;
-    use agent_contracts::{
-        AgentContext, HookerRegistry, InteractionHandle, RuntimeView, ToolEventSink, ToolSource,
-        ToolStateStore, TraceRecorder,
-    };
+    use agent_contracts::ToolSource;
     use agent_types::tool::{FinalToolCall, RawToolOutcome, ToolExecutorOutput};
     use serde_json::json;
 
+    use crate::r#impl::builtin::test_support::{
+        override_atomic_write_capability, BackendTestRuntime,
+    };
     use crate::r#impl::builtin::BuiltinToolSource;
     use crate::r#impl::ToolRuntimeServices;
-
-    struct TestRuntime(Arc<dyn OperationBackend>);
-
-    // File tools only require an operation backend. Panic on any unexpected
-    // runtime dependency so the fixture stays minimal and fails loudly.
-    impl RuntimeView for TestRuntime {
-        fn state_store(&self) -> &dyn ToolStateStore {
-            panic!("not used in file tool tests")
-        }
-
-        fn tool_events(&self) -> &dyn ToolEventSink {
-            panic!("not used in file tool tests")
-        }
-
-        fn trace_recorder(&self) -> &dyn TraceRecorder {
-            panic!("not used in file tool tests")
-        }
-
-        fn agent_context(&self) -> &dyn AgentContext {
-            panic!("not used in file tool tests")
-        }
-
-        fn interaction(&self) -> &dyn InteractionHandle {
-            panic!("not used in file tool tests")
-        }
-
-        fn hookers(&self) -> &dyn HookerRegistry {
-            panic!("not used in file tool tests")
-        }
-
-        fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
-            Some(Arc::clone(&self.0))
-        }
-    }
 
     fn call(tool_name: &str, input: serde_json::Value) -> FinalToolCall {
         FinalToolCall {
@@ -393,7 +338,7 @@ mod tests {
 
         let backend = operation_backend::local_backend(temp.path().to_path_buf(), None, None, None)
             .expect("local backend");
-        let runtime = TestRuntime(backend);
+        let runtime = BackendTestRuntime::new(backend);
 
         // Use the production source so both executors receive its private state.
         let tools = BuiltinToolSource::new(ToolRuntimeServices::default()).discover();
@@ -462,6 +407,73 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(file_path).expect("read final file"),
             USER_EDIT
+        );
+    }
+
+    #[tokio::test]
+    async fn creates_and_edits_files_without_atomic_write_support() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backend = operation_backend::local_backend(temp.path().to_path_buf(), None, None, None)
+            .expect("local backend");
+        let backend = override_atomic_write_capability(backend, false);
+        let runtime = BackendTestRuntime::new(backend);
+
+        let tools = BuiltinToolSource::new(ToolRuntimeServices::default()).discover();
+        let edit_executor = tools
+            .iter()
+            .find(|tool| tool.spec.name().0 == "file_edit")
+            .expect("file_edit tool");
+
+        let create_output = edit_executor
+            .executor
+            .invoke(
+                &call(
+                    "file_edit",
+                    json!({
+                        "file_path": "sample.txt",
+                        "old_string": "",
+                        "new_string": "hello\n"
+                    }),
+                ),
+                &runtime,
+            )
+            .await
+            .expect("file_edit create execution");
+        assert!(matches!(
+            create_output,
+            ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Success { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("sample.txt")).expect("read created file"),
+            "hello\n"
+        );
+
+        let edit_output = edit_executor
+            .executor
+            .invoke(
+                &call(
+                    "file_edit",
+                    json!({
+                        "file_path": "sample.txt",
+                        "old_string": "hello",
+                        "new_string": "goodbye"
+                    }),
+                ),
+                &runtime,
+            )
+            .await
+            .expect("file_edit update execution");
+        assert!(matches!(
+            edit_output,
+            ToolExecutorOutput::Completed {
+                raw_outcome: RawToolOutcome::Success { .. }
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("sample.txt")).expect("read edited file"),
+            "goodbye\n"
         );
     }
 }
