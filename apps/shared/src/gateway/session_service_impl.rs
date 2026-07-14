@@ -57,6 +57,13 @@ use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoin
 /// actions are returned.
 const SESSION_STATE_HOOK_OVERALL_DEADLINE: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
+const RUNTIME_EXEC_FALLBACK_SHELL: &str = "/bin/sh";
+
+fn resolve_runtime_exec_shell(requested: Option<String>, backend_default: Option<&str>) -> String {
+    requested
+        .or_else(|| backend_default.map(str::to_string))
+        .unwrap_or_else(|| RUNTIME_EXEC_FALLBACK_SHELL.to_string())
+}
 
 pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
@@ -1206,13 +1213,14 @@ impl SessionControlPlane for CoreBackedSessionService {
             .lease_bound_backend_for_idle_runtime(&request.runtime_id)
             .await?;
         let env = (!request.env.is_empty()).then(|| request.env.into_iter().collect());
-        let result = lease
-            .backend()
+        let backend = lease.backend();
+        let shell = resolve_runtime_exec_shell(request.shell, backend.exec().default_shell());
+        let result = backend
             .exec()
             .exec(ExecRequest {
                 command: request.command,
                 args: Vec::new(),
-                shell: request.shell,
+                shell: Some(shell),
                 cwd: request.cwd.map(BackendPath),
                 timeout_ms: request.timeout_ms,
                 env,
@@ -1458,6 +1466,27 @@ mod tests {
     use serde_json::{json, Value};
     use tempfile::TempDir;
     use xiaoo_core::LoopStateSnapshot;
+
+    #[test]
+    fn runtime_exec_shell_prefers_explicit_shell() {
+        assert_eq!(
+            resolve_runtime_exec_shell(Some("/bin/zsh".to_string()), Some("/bin/bash")),
+            "/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn runtime_exec_shell_uses_backend_default() {
+        assert_eq!(
+            resolve_runtime_exec_shell(None, Some("/bin/bash")),
+            "/bin/bash"
+        );
+    }
+
+    #[test]
+    fn runtime_exec_shell_falls_back_to_posix_shell() {
+        assert_eq!(resolve_runtime_exec_shell(None, None), "/bin/sh");
+    }
 
     #[test]
     fn stamp_and_cap_stamps_send_prompt_with_next_depth() {

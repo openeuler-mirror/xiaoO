@@ -171,6 +171,10 @@ struct DirtyTrackedExec {
 
 #[async_trait]
 impl OperationExec for DirtyTrackedExec {
+    fn default_shell(&self) -> Option<&str> {
+        self.inner.exec().default_shell()
+    }
+
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
         let result = self.inner.exec().exec(request).await?;
         self.tracker.mark_dirty();

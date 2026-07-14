@@ -216,6 +216,10 @@ impl PermissionAwareExec {
 
 #[async_trait]
 impl OperationExec for PermissionAwareExec {
+    fn default_shell(&self) -> Option<&str> {
+        self.inner.exec().default_shell()
+    }
+
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
         let mut result = run_with_permission(&self.inner, &self.interaction, || {
             let inner = Arc::clone(&self.inner);
@@ -934,6 +938,29 @@ fn is_silent_seatbelt_exec_denial(result: &ExecResult) -> bool {
 mod tests {
     use super::*;
 
+    struct UnusedInteraction;
+
+    #[async_trait]
+    impl InteractionHandle for UnusedInteraction {
+        async fn ask(&self, _request: &InteractionRequest) -> InteractionResponse {
+            panic!("interaction is not used when reading the default shell")
+        }
+    }
+
+    #[test]
+    fn permission_aware_exec_forwards_default_shell() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let inner =
+            operation_backend::local_backend(workspace, None, None, Some("/bin/bash".to_string()))
+                .expect("local backend");
+        let wrapped =
+            PermissionAwareOperationBackend::new(inner, Arc::new(UnusedInteraction), None);
+
+        assert_eq!(wrapped.exec().default_shell(), Some("/bin/bash"));
+    }
+
     #[test]
     fn parses_cat_runtime_denial_path() {
         let stderr = "cat: /Users/me/.ssh/config: Operation not permitted\n";
@@ -1113,13 +1140,14 @@ mod tests {
             Arc::new(AllowSessionInteraction),
             Some("linux_bubblewrap"),
         );
+        assert_eq!(wrapped.exec().default_shell(), Some("/bin/bash"));
 
         let result = wrapped
             .exec()
             .exec(ExecRequest {
                 command: format!("cat {}", shell_quote(secret.as_path())),
                 args: vec![],
-                shell: None,
+                shell: Some("/bin/bash".to_string()),
                 cwd: Some(BackendPath(workspace.display().to_string())),
                 timeout_ms: Some(5000),
                 env: None,

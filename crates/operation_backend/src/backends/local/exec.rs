@@ -26,8 +26,12 @@ impl LocalExec {
 
 #[async_trait]
 impl OperationExec for LocalExec {
+    fn default_shell(&self) -> Option<&str> {
+        self._state.default_shell.as_deref()
+    }
+
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
-        let command_spec = build_command_spec(self._state.default_shell.as_deref(), &request)?;
+        let command_spec = build_command_spec(&request)?;
         let command_cwd = if let Some(cwd) = request.cwd.as_ref() {
             let cwd = self._state.backend_path_to_host(cwd)?;
             self._state.policy.check_exec_cwd(cwd.as_path())?;
@@ -233,17 +237,14 @@ struct LocalCommandSpec {
     args: Vec<String>,
 }
 
-fn build_command_spec(
-    default_shell: Option<&str>,
-    request: &ExecRequest,
-) -> Result<LocalCommandSpec, OperationError> {
+fn build_command_spec(request: &ExecRequest) -> Result<LocalCommandSpec, OperationError> {
     if request.command.trim().is_empty() {
         return Err(OperationError::ExecutionFailed {
             message: "command cannot be empty".to_string(),
         });
     }
 
-    if let Some(shell) = request.shell.as_deref().or(default_shell) {
+    if let Some(shell) = request.shell.as_deref() {
         if !request.args.is_empty() {
             return Err(OperationError::Unsupported {
                 message: "shell execution does not support args".to_string(),
