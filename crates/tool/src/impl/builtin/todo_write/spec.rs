@@ -46,33 +46,13 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
    - ONLY mark a task as completed when you have FULLY accomplished it
    - If you encounter errors, blockers, or cannot finish, keep the task as in_progress
    - When blocked, create a new task describing what needs to be resolved
-   - Never mark a task as completed if:
-     - Tests are failing
-     - Implementation is partial
-     - You encountered unresolved errors
-     - You couldn't find necessary files or dependencies
 
 4. **Task Breakdown**:
    - Create specific, actionable items
    - Break complex tasks into smaller, manageable steps
    - Use clear, descriptive task names
    - Use imperative descriptions such as "Fix authentication bug", "Run cargo check", or "Inspect routing code"
-
-When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
-
-# Examples where todo_write is appropriate:
-- Adding dark mode with UI, state management, styling, and tests.
-- Renaming a function across many files after searching the codebase.
-- Implementing several requested features such as registration, catalog, cart, and checkout.
-- Optimizing performance after identifying several bottlenecks.
-
-Examples where todo_write is not appropriate:
-- Explaining how to print Hello World.
-- Explaining what git status does.
-- Adding one simple comment in one location.
-- Running a single command and reporting the result.
-
-When in doubt for non-trivial coding work, use this tool. The todo list should reflect the real current plan and progress."#;
+"#;
 
 #[derive(Clone)]
 pub struct TodoWriteToolSpec {
