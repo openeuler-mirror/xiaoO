@@ -711,7 +711,6 @@ impl App {
             return Ok(());
         }
 
-
         if trimmed.eq_ignore_ascii_case("/cron") {
             self.state.chat_state.input.reset();
             self.open_cron_dialog();
@@ -1540,105 +1539,96 @@ impl App {
         let mode = dialog.mode.clone();
 
         match &mode {
-            CronDialogMode::List => {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.state.input_mode = InputMode::Editing;
-                        self.state.cron_dialog = None;
+            CronDialogMode::List => match key.code {
+                KeyCode::Esc => {
+                    self.state.input_mode = InputMode::Editing;
+                    self.state.cron_dialog = None;
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(
+                            "Cron job management closed. Restart daemon to apply changes."
+                                .to_string(),
+                        ));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+                KeyCode::Up => {
+                    dialog.move_up();
+                }
+                KeyCode::Down => {
+                    dialog.move_down();
+                }
+                KeyCode::Char('a') => {
+                    dialog.start_add();
+                }
+                KeyCode::Char('e') => {
+                    dialog.start_edit();
+                }
+                KeyCode::Char('d') => {
+                    dialog.start_delete_confirm();
+                }
+                KeyCode::Char(' ') => {
+                    if let Err(e) = dialog.toggle_enabled() {
                         self.state
                             .chat_state
                             .messages
-                            .push(crate::chat::Message::system(
-                                "Cron job management closed. Restart daemon to apply changes.".to_string(),
-                            ));
+                            .push(crate::chat::Message::error(format!(
+                                "Failed to toggle job: {e}"
+                            )));
                         self.state.chat_state.stick_to_bottom = true;
                     }
-                    KeyCode::Up => {
-                        dialog.move_up();
-                    }
-                    KeyCode::Down => {
-                        dialog.move_down();
-                    }
-                    KeyCode::Char('a') => {
-                        dialog.start_add();
-                    }
-                    KeyCode::Char('e') => {
-                        dialog.start_edit();
-                    }
-                    KeyCode::Char('d') => {
-                        dialog.start_delete_confirm();
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Err(e) = dialog.toggle_enabled() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to toggle job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            CronDialogMode::ConfirmDelete { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Err(e) = dialog.confirm_delete() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to delete job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        dialog.back_to_list();
-                    }
-                    _ => {}
+                _ => {}
+            },
+            CronDialogMode::ConfirmDelete { .. } => match key.code {
+                KeyCode::Esc => {
+                    dialog.back_to_list();
                 }
-            }
-            CronDialogMode::EditForm { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Err(e) = dialog.confirm_delete() {
+                        self.state
+                            .chat_state
+                            .messages
+                            .push(crate::chat::Message::error(format!(
+                                "Failed to delete job: {e}"
+                            )));
+                        self.state.chat_state.stick_to_bottom = true;
                     }
-                    KeyCode::Tab if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
-                        dialog.edit_prev_field();
-                    }
-                    KeyCode::Tab => {
-                        dialog.edit_next_field();
-                    }
-                    KeyCode::Enter => {
-                        match dialog.save_edit_form() {
-                            Ok(()) => {}
-                            Err(error) => {
-                                dialog.edit_set_error(error);
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        dialog.edit_backspace();
-                        dialog.edit_clear_error();
-                    }
-                    KeyCode::Char(c) => {
-                        dialog.edit_push_char(c);
-                        dialog.edit_clear_error();
-                    }
-                    _ => {}
                 }
-            }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    dialog.back_to_list();
+                }
+                _ => {}
+            },
+            CronDialogMode::EditForm { .. } => match key.code {
+                KeyCode::Esc => {
+                    dialog.back_to_list();
+                }
+                KeyCode::Tab if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
+                    dialog.edit_prev_field();
+                }
+                KeyCode::Tab => {
+                    dialog.edit_next_field();
+                }
+                KeyCode::Enter => match dialog.save_edit_form() {
+                    Ok(()) => {}
+                    Err(error) => {
+                        dialog.edit_set_error(error);
+                    }
+                },
+                KeyCode::Backspace => {
+                    dialog.edit_backspace();
+                    dialog.edit_clear_error();
+                }
+                KeyCode::Char(c) => {
+                    dialog.edit_push_char(c);
+                    dialog.edit_clear_error();
+                }
+                _ => {}
+            },
         }
         Ok(())
     }
-
-
 }
 
 /// Classifies whether a key event in editing mode inserts a newline (rather

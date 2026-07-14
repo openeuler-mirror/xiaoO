@@ -260,7 +260,10 @@ mod tests {
                 "/skills"
             ]
         );
-        assert_eq!(candidates_for_prefix("/c", NO_EXT), vec!["/connect", "/cron"]);
+        assert_eq!(
+            candidates_for_prefix("/c", NO_EXT),
+            vec!["/connect", "/cron"]
+        );
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
         assert_eq!(candidates_for_prefix("/l", NO_EXT), vec!["/load"]);

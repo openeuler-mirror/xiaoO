@@ -54,9 +54,7 @@ pub enum CronDialogMode {
     /// Browsing the list of jobs.
     List,
     /// Confirming deletion of a job.
-    ConfirmDelete {
-        job_index: usize,
-    },
+    ConfirmDelete { job_index: usize },
     /// Editing an existing job (Some) or creating a new job (None).
     EditForm {
         /// Index in the jobs vec if editing existing; `None` if adding new.
@@ -145,21 +143,27 @@ impl CronEditForm {
         let timeout_secs = if self.timeout_secs.trim().is_empty() {
             default_timeout_secs
         } else {
-            self.timeout_secs.trim().parse::<u64>()
+            self.timeout_secs
+                .trim()
+                .parse::<u64>()
                 .map_err(|_| "Timeout must be a valid number.".to_string())?
         };
 
         let max_retries = if self.max_retries.trim().is_empty() {
             0
         } else {
-            self.max_retries.trim().parse::<u32>()
+            self.max_retries
+                .trim()
+                .parse::<u32>()
                 .map_err(|_| "Max retries must be a valid number.".to_string())?
         };
 
         let retry_delay_secs = if self.retry_delay.trim().is_empty() {
             60
         } else {
-            self.retry_delay.trim().parse::<u64>()
+            self.retry_delay
+                .trim()
+                .parse::<u64>()
                 .map_err(|_| "Retry delay must be a valid number.".to_string())?
         };
 
@@ -297,7 +301,12 @@ impl CronDialog {
 
     /// Save the edit form: either add new or update existing.
     pub fn save_edit_form(&mut self) -> Result<(), String> {
-        if let CronDialogMode::EditForm { editing_index, form, .. } = &self.mode {
+        if let CronDialogMode::EditForm {
+            editing_index,
+            form,
+            ..
+        } = &self.mode
+        {
             let entry = form.to_entry(self.default_timeout_secs)?;
             match editing_index {
                 Some(index) => {

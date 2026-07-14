@@ -8,7 +8,9 @@ use agent_types::cron::{CronExecutionError, CronJobConfig};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use xiaoo_shared::gateway::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService};
+use xiaoo_shared::gateway::{
+    AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
+};
 
 // ── Public API ──────────────────────────────────────────────────
 

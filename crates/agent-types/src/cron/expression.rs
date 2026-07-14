@@ -56,10 +56,11 @@ impl CronExpression {
         };
 
         // Let the cron crate validate the normalized expression and cache the result
-        let schedule = cron::Schedule::from_str(&normalized).map_err(|e| CronParseError::InvalidSyntax {
-            raw: trimmed.to_string(),
-            message: e.to_string(),
-        })?;
+        let schedule =
+            cron::Schedule::from_str(&normalized).map_err(|e| CronParseError::InvalidSyntax {
+                raw: trimmed.to_string(),
+                message: e.to_string(),
+            })?;
 
         Ok(Self {
             raw: normalized,
@@ -106,10 +107,7 @@ pub enum CronParseError {
     Empty,
 
     #[error("invalid cron expression '{raw}': {message}")]
-    InvalidSyntax {
-        raw: String,
-        message: String,
-    },
+    InvalidSyntax { raw: String, message: String },
 }
 
 #[cfg(test)]

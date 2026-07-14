@@ -786,7 +786,6 @@ fn default_user_workspace_dir(agent_id: &str) -> PathBuf {
         .join(agent_id)
 }
 
-
 // ── Cron types ──────────────────────────────────────────────────
 
 /// Mirror of `config.toml`'s `[cron]` section.
