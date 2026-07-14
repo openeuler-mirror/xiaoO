@@ -340,7 +340,10 @@ impl Config {
             return None;
         }
         let extra = build_extra_server_configs(&lsp.extra_servers);
-        Some(Arc::new(LspServiceRegistry::new(extra)))
+        Some(Arc::new(LspServiceRegistry::new_with_disabled(
+            extra,
+            lsp.disabled_servers.clone(),
+        )))
     }
 }
 
