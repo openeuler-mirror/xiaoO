@@ -316,9 +316,9 @@ impl App {
         } else if self.state.chat_state.is_loading {
             " Enter 加入队列 | Esc 取消当前任务 "
         } else if has_tool_cards {
-            " Enter 发送 | Alt+Enter 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
+            " Enter 发送 | Ctrl+J 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
         } else {
-            " Enter 发送 | Alt+Enter 换行 | / 命令 | Ctrl+C 退出 "
+            " Enter 发送 | Ctrl+J 换行 | / 命令 | Ctrl+C 退出 "
         };
         let input_style = self.state.theme.default_style();
         let block = Block::default()
