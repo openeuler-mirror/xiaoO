@@ -30,6 +30,7 @@ ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shellexpand.workspace = true
 skill = { path = "../../crates/skill" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util.workspace = true

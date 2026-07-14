@@ -1,4 +1,5 @@
 mod channels;
+mod cron;
 mod daemon_config;
 mod daemon_runtime;
 mod httpserver;
@@ -8,6 +9,7 @@ use crate::channels::{
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramConfig,
     TelegramPollingMessageHandler, TelegramPollingService,
 };
+use crate::cron::scheduler::CronScheduler;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
@@ -106,6 +108,38 @@ async fn run_daemon(
         }
     }
 
+    // ── Cron scheduler ──────────────────────────────────────────
+    let cron_enabled = config.cron_section().is_some();
+    let cron_scheduler = match config.resolve_cron_jobs() {
+        Ok(jobs) if !jobs.is_empty() => {
+            let global = config
+                .cron_section()
+                .expect("cron section must exist when jobs loaded");
+            let total = jobs.len();
+            let enabled_count = jobs.iter().filter(|j| j.enabled).count();
+            if enabled_count > 0 {
+                Some(Arc::new(CronScheduler::new(
+                    jobs,
+                    global.max_concurrent_jobs,
+                    session_service.clone(),
+                )))
+            } else {
+                tracing::info!(total, "no enabled cron jobs");
+                None
+            }
+        }
+        Ok(_) => {
+            if cron_enabled {
+                tracing::info!("cron section present but no jobs configured");
+            }
+            None
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to load cron jobs, cron disabled");
+            None
+        }
+    };
+
     let channel_runtimes = config.channel_runtimes()?;
     let router = if channel_runtimes.is_empty() {
         create_router_with_control_plane_and_auth(
@@ -157,6 +191,12 @@ async fn run_daemon(
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("axum server exited unexpectedly");
+
+    // Gracefully shutdown cron scheduler
+    if let Some(scheduler) = cron_scheduler {
+        scheduler.stop().await;
+    }
+
     // Best-effort sandbox cleanup with a bounded timeout so a slow/stuck
     // provider delete call cannot keep the daemon alive indefinitely after a
     // shutdown signal. Matches the TUI exit path which also bounds remote

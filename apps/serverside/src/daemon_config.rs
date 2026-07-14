@@ -3,6 +3,7 @@ use crate::channels::{
     FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
 use crate::httpserver::rate_limit::RateLimitConfig;
+use agent_types::cron::{CronExpression, CronJobConfig};
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
@@ -10,7 +11,7 @@ use mcp::McpSection;
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,8 @@ pub struct AppConfig {
     pub lsp: Option<LspConfig>,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub cron: Option<CronSectionRaw>,
     #[serde(default)]
     pub mcp: McpSection,
 }
@@ -648,6 +651,63 @@ impl DaemonConfig {
             lsp.disabled_servers.clone(),
         )))
     }
+
+    /// Returns a reference to the `[cron]` section of config.toml, if present.
+    pub fn cron_section(&self) -> Option<&CronSectionRaw> {
+        self.app.cron.as_ref()
+    }
+
+    /// Load `jobs.toml`, parse cron expressions, merge global defaults,
+    /// and return a list of validated [`CronJobConfig`]s.
+    ///
+    /// Returns an empty `Vec` when:
+    /// - config.toml has no `[cron]` section, or
+    /// - `jobs.toml` does not exist / contains no jobs.
+    pub fn resolve_cron_jobs(&self) -> Result<Vec<CronJobConfig>> {
+        let global = match self.cron_section() {
+            Some(cfg) => cfg,
+            None => return Ok(Vec::new()),
+        };
+
+        let jobs_dir = shellexpand::tilde(&global.jobs_dir).into_owned();
+        let jobs_file = Path::new(&jobs_dir).join("jobs.toml");
+
+        if !jobs_file.exists() {
+            tracing::info!(path = %jobs_file.display(), "cron jobs.toml not found, no jobs loaded");
+            return Ok(Vec::new());
+        }
+
+        let content = std::fs::read_to_string(&jobs_file)
+            .with_context(|| format!("failed to read {}", jobs_file.display()))?;
+        let raw: CronJobsFileRaw = toml::from_str(&content)
+            .with_context(|| format!("failed to parse {}", jobs_file.display()))?;
+
+        let mut jobs = Vec::with_capacity(raw.job.len());
+        let mut seen_names = HashSet::new();
+        for raw_job in raw.job {
+            // Check for duplicate job names
+            if !seen_names.insert(raw_job.name.clone()) {
+                bail!("duplicate cron job name: '{}'", raw_job.name);
+            }
+
+            let cron = CronExpression::parse(&raw_job.cron)
+                .map_err(|e| anyhow::anyhow!("job '{}' has invalid cron: {}", raw_job.name, e))?;
+            let timeout_secs = raw_job.timeout_secs.unwrap_or(global.default_timeout_secs);
+            jobs.push(CronJobConfig {
+                name: raw_job.name,
+                description: raw_job.description,
+                cron,
+                prompt: raw_job.prompt,
+                agent_role: raw_job.agent_role,
+                timeout_secs,
+                enabled: raw_job.enabled,
+                max_retries: raw_job.max_retries,
+                retry_delay_secs: raw_job.retry_delay_secs,
+            });
+        }
+
+        Ok(jobs)
+    }
 }
 
 fn install_builtin_agent_roles(agent_roles: &mut BTreeMap<String, AgentRoleConfig>) -> Result<()> {
@@ -724,6 +784,81 @@ fn default_user_workspace_dir(agent_id: &str) -> PathBuf {
         .join(".xiaoo")
         .join("workspace")
         .join(agent_id)
+}
+
+// ── Cron types ──────────────────────────────────────────────────
+
+/// Mirror of `config.toml`'s `[cron]` section.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CronSectionRaw {
+    #[serde(default = "default_cron_jobs_dir")]
+    pub jobs_dir: String,
+
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_jobs: usize,
+
+    #[serde(default = "default_cron_timeout")]
+    pub default_timeout_secs: u64,
+}
+
+/// Top-level structure of `jobs.toml`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CronJobsFileRaw {
+    #[serde(default)]
+    pub job: Vec<CronJobRaw>,
+}
+
+/// Single `[[job]]` entry in `jobs.toml`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CronJobRaw {
+    pub name: String,
+
+    #[serde(default)]
+    pub description: Option<String>,
+
+    pub cron: String,
+
+    pub prompt: String,
+
+    #[serde(default)]
+    pub agent_role: Option<String>,
+
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub max_retries: u32,
+
+    #[serde(default = "default_retry_delay")]
+    pub retry_delay_secs: u64,
+}
+
+// ── Default helpers ─────────────────────────────────────────────
+
+fn default_cron_jobs_dir() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config/xiaoo/cron")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn default_max_concurrent() -> usize {
+    3
+}
+
+fn default_cron_timeout() -> u64 {
+    3600
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_retry_delay() -> u64 {
+    60
 }
 
 #[cfg(test)]

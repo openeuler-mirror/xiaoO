@@ -46,6 +46,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror.workspace = true
 url = "2.5"
 uuid.workspace = true
+cron.workspace = true
+shellexpand.workspace = true
 
 agent-contracts = { path = "../../crates/agent-contracts" }
 agent-types = { path = "../../crates/agent-types" }
