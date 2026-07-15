@@ -1,0 +1,1411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🛡️ xiaoO Audit 管控台</title>
+  <style>
+    :root {
+      --primary: #4f46e5;
+      --primary-light: #818cf8;
+      --danger: #ef4444;
+      --danger-light: #fca5a5;
+      --success: #22c55e;
+      --success-light: #86efac;
+      --warning: #f59e0b;
+      --warning-light: #fcd34d;
+      --bg: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-sidebar: #1e293b;
+      --text: #334155;
+      --text-light: #94a3b8;
+      --text-dark: #0f172a;
+      --border: #e2e8f0;
+      --radius: 8px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1);
+      --shadow-lg: 0 4px 12px rgba(0,0,0,0.15);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 220px;
+      background: var(--bg-sidebar);
+      color: #e2e8f0;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .sidebar h1 {
+      font-size: 18px;
+      color: white;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sidebar-item {
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: background 0.2s;
+    }
+
+    .sidebar-item:hover { background: rgba(255,255,255,0.1); }
+    .sidebar-item.active { background: var(--primary); color: white; }
+
+    /* Token stats bar chart */
+    .token-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+      height: 80px;
+      padding-top: 8px;
+    }
+
+    .token-bar {
+      flex: 1;
+      min-width: 30px;
+      background: var(--primary);
+      border-radius: 4px 4px 0 0;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      align-items: center;
+      transition: height 0.3s;
+    }
+
+    .token-bar-label {
+      font-size: 10px;
+      color: var(--text-light);
+      position: absolute;
+      bottom: -16px;
+      text-align: center;
+      width: 100%;
+    }
+
+    .token-bar-value {
+      font-size: 10px;
+      color: white;
+      padding: 2px;
+    }
+
+    .token-bar.completion {
+      background: var(--success);
+    }
+
+    .token-detail-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 0;
+      font-size: 13px;
+    }
+
+    .token-detail-label {
+      color: var(--text-light);
+      min-width: 100px;
+    }
+
+    .token-detail-value {
+      color: var(--text-dark);
+      font-weight: 600;
+    }
+
+    /* Main */
+    .main {
+      flex: 1;
+      padding: 24px 32px;
+      overflow-y: auto;
+    }
+
+    .page-title {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text-dark);
+      margin-bottom: 20px;
+    }
+
+    /* Cards */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-dark);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Toggle Switch */
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .toggle-track {
+      width: 40px;
+      height: 22px;
+      border-radius: 11px;
+      background: #cbd5e1;
+      position: relative;
+      transition: background 0.2s;
+    }
+
+    .toggle-track.on { background: var(--success); }
+    .toggle-track.off-env { background: var(--danger); }
+
+    .toggle-knob {
+      width: 18px;
+      height: 18px;
+      border-radius: 9px;
+      background: white;
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      transition: left 0.2s;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+    }
+
+    .toggle-track.on .toggle-knob { left: 20px; }
+
+    /* Layer Switches */
+    .layer-switches {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .layer-switch {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+
+    .layer-label {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .layer-desc {
+      font-size: 12px;
+      color: var(--text-light);
+      margin-top: 2px;
+    }
+
+    .env-override-badge {
+      background: var(--danger);
+      color: white;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-top: 4px;
+    }
+
+    /* Rule Categories */
+    .category-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+
+    .category-header:hover { background: rgba(0,0,0,0.02); }
+
+    .category-name {
+      font-weight: 600;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .category-count {
+      font-size: 12px;
+      color: var(--text-light);
+    }
+
+    .expand-icon {
+      font-size: 12px;
+      transition: transform 0.2s;
+    }
+
+    .expand-icon.open { transform: rotate(180deg); }
+
+    .rule-list { padding: 8px 0 8px 16px; }
+
+    .rule-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      font-size: 13px;
+    }
+
+    .rule-id { color: var(--text-light); font-size: 11px; }
+    .rule-pattern { color: var(--text); max-width: 400px; overflow: hidden; text-overflow: ellipsis; }
+    .rule-reason { color: var(--text-light); font-size: 12px; margin-top: 2px; }
+
+    .risk-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+
+    .risk-critical { background: #fee2e2; color: #dc2626; }
+    .risk-high { background: #fef3c7; color: #d97706; }
+    .risk-medium { background: #e0f2fe; color: #0284c7; }
+    .risk-low { background: #f0fdf4; color: #16a34a; }
+
+    .builtin-badge {
+      font-size: 10px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: #e2e8f0;
+      color: #64748b;
+    }
+
+    .custom-badge {
+      font-size: 10px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: var(--primary-light);
+      color: white;
+    }
+
+    .btn {
+      padding: 6px 12px;
+      border-radius: var(--radius);
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      transition: all 0.2s;
+    }
+
+    .btn:hover { box-shadow: var(--shadow); }
+
+    .btn-primary { background: var(--primary); color: white; border-color: var(--primary); }
+    .btn-danger { background: var(--danger); color: white; border-color: var(--danger); }
+    .btn-sm { padding: 3px 8px; font-size: 12px; }
+
+    /* Add Rule Form */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+
+    .modal {
+      background: var(--bg-card);
+      border-radius: var(--radius);
+      padding: 24px;
+      width: 500px;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .modal-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+    }
+
+    .form-group {
+      margin-bottom: 12px;
+    }
+
+    .form-label {
+      font-size: 13px;
+      font-weight: 500;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+
+    .form-input, .form-select, .form-textarea {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 14px;
+    }
+
+    .form-textarea { min-height: 80px; resize: vertical; }
+
+    .form-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
+
+    /* Stats */
+    .stats-bar {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .stats-item {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+
+    .stats-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-dark);
+    }
+
+    .stats-label {
+      font-size: 13px;
+      color: var(--text-light);
+    }
+
+    /* Toast */
+    .toast {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 12px 20px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      z-index: 200;
+      animation: slideIn 0.3s ease;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .toast-success { background: var(--success); color: white; }
+    .toast-error { background: var(--danger); color: white; }
+    .toast-warning { background: var(--warning); color: white; }
+
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* Loading */
+    .loading { text-align: center; padding: 40px; color: var(--text-light); }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <h1>🛡️ Audit</h1>
+    <div class="sidebar-item active" onclick="showPage('overview')">📊 概览</div>
+    <div class="sidebar-item" onclick="showPage('l1')">🔍 L1 规则</div>
+    <div class="sidebar-item" onclick="showPage('l2')">🧠 L2 规则</div>
+    <div class="sidebar-item" onclick="showPage('l3')">🤖 L3 Skills</div>
+    <div class="sidebar-item" onclick="showPage('tokens')">📊 Token</div>
+    <div class="sidebar-item" onclick="showPage('settings')">⚙️ 设置</div>
+  </div>
+
+  <div class="main">
+    <!-- Overview Page -->
+    <div id="page-overview">
+      <div class="page-title">📊 安全策略概览</div>
+
+      <div class="card">
+        <div class="card-title">层级全局开关</div>
+        <div class="layer-switches" id="layer-switches">
+          <!-- Dynamic content -->
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">规则统计</div>
+        <div class="stats-bar" id="stats-bar">
+          <!-- Dynamic -->
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          Token 用量统计
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm" onclick="loadTokenStats(1)">今日</button>
+            <button class="btn btn-sm" onclick="loadTokenStats(7)">近7天</button>
+            <button class="btn btn-sm" onclick="loadTokenStats(0)">全部</button>
+          </div>
+        </div>
+        <div class="stats-bar" id="token-stats-summary"></div>
+        <div style="margin-top:16px;height:100px" id="token-chart-container"></div>
+        <div style="margin-top:20px" id="token-breakdown"></div>
+      </div>
+    </div>
+
+    <!-- L1 Rules Page -->
+    <div id="page-l1" style="display:none">
+      <div class="page-title">🔍 L1 静态检测规则</div>
+      <div class="card" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="showAddRuleModal('L1_rules')">＋ 新增规则</button>
+      </div>
+      <div id="l1-categories"></div>
+    </div>
+
+    <!-- L2 Rules Page -->
+    <div id="page-l2" style="display:none">
+      <div class="page-title">🧠 L2 逻辑规则检测</div>
+      <div class="card" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="showAddRuleModal('L2_rules')">＋ 新增规则</button>
+      </div>
+      <div id="l2-categories"></div>
+    </div>
+
+    <!-- L3 Skills Page -->
+    <div id="page-l3" style="display:none">
+      <div class="page-title">🤖 L3 Skill 规则</div>
+      <div class="card" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="showAddSkillModal()">＋ 新增 Skill</button>
+      </div>
+      <div id="l3-categories"></div>
+    </div>
+
+    <!-- Token Stats Page -->
+    <div id="page-tokens" style="display:none">
+      <div class="page-title">📊 Token 用量详细统计</div>
+      <div class="card">
+        <div class="card-title">
+          总览
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-sm" onclick="loadTokenStats(1)">今日</button>
+            <button class="btn btn-sm" onclick="loadTokenStats(7)">近7天</button>
+            <button class="btn btn-sm" onclick="loadTokenStats(30)">近30天</button>
+            <button class="btn btn-sm" onclick="loadTokenStats(0)">全部</button>
+          </div>
+        </div>
+        <div class="stats-bar" id="token-stats-detail-summary"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">按步骤分组</div>
+        <div id="token-by-step"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">按模型分组</div>
+        <div id="token-by-model"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">按日期分布</div>
+        <div style="height:120px" id="token-date-chart"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">最近调用记录</div>
+        <div id="token-recent-records"></div>
+      </div>
+    </div>
+
+    <!-- Settings Page -->
+    <div id="page-settings" style="display:none">
+      <div class="page-title">⚙️ 设置</div>
+      <div class="card">
+        <div class="card-title">环境变量覆盖</div>
+        <div id="env-overrides"></div>
+        <p style="font-size:12px;color:var(--text-light);margin-top:8px">
+          环境变量优先级最高，会覆盖 Web UI 的设置。清除环境变量后 Web 设置才能生效。
+        </p>
+      </div>
+      <div class="card">
+        <div class="card-title">配置文件路径</div>
+        <div id="config-path-info" style="font-size:13px"></div>
+      </div>
+      <div class="card">
+        <button class="btn btn-danger" onclick="resetConfig()">⚠️ 重置到出厂默认</button>
+        <p style="font-size:12px;color:var(--text-light);margin-top:8px">
+          删除本地配置文件，下次 audit-agent 启动时自动从源码默认值重新生成。
+        </p>
+      </div>
+      <div class="card">
+        <div class="card-title">Token 统计管理</div>
+        <button class="btn btn-danger" onclick="resetTokenStats()">⚠️ 清除 Token 统计</button>
+        <p style="font-size:12px;color:var(--text-light);margin-top:8px">
+          删除所有 token 用量统计数据。统计文件路径: ~/.config/xiaoo/audit_token_stats.json
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal" class="modal-overlay" style="display:none">
+    <div class="modal">
+      <div class="modal-title" id="modal-title"></div>
+      <div id="modal-body"></div>
+      <div class="form-actions">
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary" id="modal-submit" onclick="submitModal()">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ==================== State ====================
+    let runtimeConfig = {};
+    let envOverrides = {};
+    let currentModalAction = null;
+
+    const LAYER_NAMES = {
+      "L1_heuristic": { name: "L1 静态检测", desc: "关键命令正则 + 注入关键词 + 用户规则" },
+      "L2_logic_rules": { name: "L2 逻辑规则", desc: "read_before_write + 意图一致性 + 敏感路径" },
+      "L3_llm_analysis": { name: "L3 LLM 分析", desc: "Skill 匹配 + LLM 语义判断" },
+    };
+
+    const L1_CATEGORY_NAMES = {
+      "dangerous_commands": "⚡ 危险命令检测",
+      "injection_detection": "🎯 注入攻击检测",
+      "user_sensitive_actions": "📝 用户敏感动作",
+      "user_custom": "🔧 用户自定义",
+    };
+
+    const L2_CATEGORY_NAMES = {
+      "sensitive_path_access": "🛡️ 敏感路径访问",
+      "intent_consistency": "🎯 意图一致性",
+      "password_modify_consent": "🔑 密码修改授权",
+      "user_deletion_consent": "👤 用户删除授权",
+      "read_before_write": "📄 读写一致性",
+      "dangerous_patterns": "⚠️ 危险操作模式",
+    };
+
+    const L3_CATEGORY_NAMES = {
+      "file_operations": "📁 文件操作",
+      "network_security": "🌐 网络安全",
+      "persistence_supply_chain": "🔒 持久化/供应链",
+      "intent_and_general": "🎯 意图/通用",
+      "resource": "💻 资耗",
+      "user_custom": "🔧 用户自定义",
+    };
+
+    // ==================== API ====================
+    async function api(method, path, body = null) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      const token = localStorage.getItem("audit_token");
+      if (token) opts.headers["Authorization"] = `Bearer ${token}`;
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail || res.statusText);
+      }
+      return res.json();
+    }
+
+    // ==================== Init ====================
+    async function init() {
+      try {
+        runtimeConfig = await api("GET", "/api/config");
+        envOverrides = await api("GET", "/api/env-overrides");
+        renderAll();
+      } catch (e) {
+        showToast("加载配置失败: " + e.message, "error");
+      }
+    }
+
+    // ==================== Render ====================
+    function renderAll() {
+      renderLayerSwitches();
+      renderStats();
+      renderL1Rules();
+      renderL2Rules();
+      renderL3Skills();
+      renderEnvOverrides();
+      renderConfigPath();
+      loadTokenStats(7); // default: 近7天
+    }
+
+    function renderLayerSwitches() {
+      const container = document.getElementById("layer-switches");
+      const layers = runtimeConfig.layers || {};
+      let html = "";
+      for (const [key, info] of Object.entries(LAYER_NAMES)) {
+        const enabled = layers[key] !== false;
+        const overridden = envOverrides[key]?.overridden;
+        const envVar = envOverrides[key]?.env_var || "";
+        html += `
+          <div class="layer-switch">
+            <div>
+              <div class="layer-label">${info.name}</div>
+              <div class="layer-desc">${info.desc}</div>
+              ${overridden ? `<div class="env-override-badge">⚠️ 环境变量 ${envVar}=1 强制禁用</div>` : ''}
+            </div>
+            <div class="toggle" onclick="${overridden ? '' : `toggleLayer('${key}')`}">
+              <div class="toggle-track ${overridden ? 'off-env' : (enabled ? 'on' : '')}">
+                <div class="toggle-knob"></div>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+    }
+
+    function renderStats() {
+      const l1 = runtimeConfig.L1_rules || {};
+      const l2 = runtimeConfig.L2_rules || {};
+      const l3 = runtimeConfig.L3_skills || {};
+
+      let l1Total = 0, l1Enabled = 0, l2Total = 0, l2Enabled = 0, l3Total = 0, l3Enabled = 0;
+      for (const cat of Object.values(l1)) {
+        const rules = cat.rules || [];
+        l1Total += rules.length;
+        l1Enabled += rules.filter(r => r.enabled && cat.category_enabled).length;
+      }
+      for (const cat of Object.values(l2)) {
+        const rules = cat.rules || [];
+        l2Total += rules.length;
+        l2Enabled += rules.filter(r => r.enabled && cat.category_enabled).length;
+      }
+      for (const cat of Object.values(l3)) {
+        const skills = cat.skills || [];
+        l3Total += skills.length;
+        l3Enabled += skills.filter(s => s.enabled && cat.category_enabled).length;
+      }
+
+      document.getElementById("stats-bar").innerHTML = `
+        <div class="stats-item"><div class="stats-value">${l1Enabled}/${l1Total}</div><div class="stats-label">L1 规则启用</div></div>
+        <div class="stats-item"><div class="stats-value">${l2Enabled}/${l2Total}</div><div class="stats-label">L2 规则启用</div></div>
+        <div class="stats-item"><div class="stats-value">${l3Enabled}/${l3Total}</div><div class="stats-label">L3 Skills 启用</div></div>
+      `;
+    }
+
+    function renderRuleCategories(layerKey, containerId, categoryNames) {
+      const layerData = runtimeConfig[layerKey] || {};
+      let html = "";
+      for (const [catName, catData] of Object.entries(layerData)) {
+        const displayName = categoryNames[catName] || catName;
+        const rules = catData.rules || [];
+        const catEnabled = catData.category_enabled !== false;
+        const enabledCount = rules.filter(r => r.enabled).length;
+
+        html += `
+          <div class="card">
+            <div class="category-header" onclick="toggleExpand('${containerId}-${catName}')">
+              <div class="category-name">
+                ${displayName}
+                <span class="category-count">${enabledCount}/${rules.length} 启用</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px">
+                <div class="toggle" onclick="event.stopPropagation();toggleCategory('${layerKey}','${catName}')">
+                  <div class="toggle-track ${catEnabled ? 'on' : ''}">
+                    <div class="toggle-knob"></div>
+                  </div>
+                </div>
+                <span class="expand-icon" id="expand-${containerId}-${catName}">▼</span>
+              </div>
+            </div>
+            <div class="rule-list" id="list-${containerId}-${catName}" style="display:none">
+        `;
+
+        for (const rule of rules) {
+          const risk = rule.risk_level || "low";
+          const isBuiltin = rule.builtin !== false;
+          const patternDisplay = rule.pattern || rule.keyword || rule.path || rule.intent_keywords?.join(", ") || rule.reason || "";
+          const reasonDisplay = rule.reason || rule.desc || "";
+
+          html += `
+            <div class="rule-item">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px">
+                  ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
+                  <span class="risk-badge risk-${risk}">${risk}</span>
+                  <span class="rule-pattern">${escapeHtml(patternDisplay)}</span>
+                </div>
+                ${reasonDisplay ? `<div class="rule-reason">${escapeHtml(reasonDisplay)}</div>` : ''}
+                <div class="rule-id">ID: ${rule.id}</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div class="toggle" onclick="toggleRule('${layerKey}','${catName}','${rule.id}',${!rule.enabled})">
+                  <div class="toggle-track ${rule.enabled ? 'on' : ''}" style="width:32px;height:18px">
+                    <div class="toggle-knob" style="width:14px;height:14px;left:${rule.enabled ? '16px' : '2px'}"></div>
+                  </div>
+                </div>
+                ${!isBuiltin ? `<button class="btn btn-danger btn-sm" onclick="deleteRule('${layerKey}','${catName}','${rule.id}')">删除</button>` : ''}
+              </div>
+            </div>
+          `;
+        }
+
+        html += `</div></div>`;
+      }
+      document.getElementById(containerId).innerHTML = html;
+    }
+
+    function renderL1Rules() { renderRuleCategories("L1_rules", "l1-categories", L1_CATEGORY_NAMES); }
+    function renderL2Rules() { renderRuleCategories("L2_rules", "l2-categories", L2_CATEGORY_NAMES); }
+
+    function renderL3Skills() {
+      const l3 = runtimeConfig.L3_skills || {};
+      let html = "";
+      for (const [catName, catData] of Object.entries(l3)) {
+        const displayName = L3_CATEGORY_NAMES[catName] || catName;
+        const skills = catData.skills || [];
+        const catEnabled = catData.category_enabled !== false;
+
+        html += `
+          <div class="card">
+            <div class="category-header" onclick="toggleExpand('l3-${catName}')">
+              <div class="category-name">
+                ${displayName}
+                <span class="category-count">${skills.filter(s=>s.enabled).length}/${skills.length} 启用</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px">
+                <div class="toggle" onclick="event.stopPropagation();toggleSkillCategory('${catName}')">
+                  <div class="toggle-track ${catEnabled ? 'on' : ''}">
+                    <div class="toggle-knob"></div>
+                  </div>
+                </div>
+                <span class="expand-icon" id="expand-l3-${catName}">▼</span>
+              </div>
+            </div>
+            <div class="rule-list" id="list-l3-${catName}" style="display:none">
+        `;
+
+        for (const skill of skills) {
+          const isBuiltin = skill.builtin !== false;
+          const keywordsStr = (skill.keywords || []).join(", ");
+
+          html += `
+            <div class="rule-item">
+              <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px">
+                  ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
+                  <strong>${skill.id}</strong>
+                </div>
+                <div class="rule-reason">触发关键词: ${escapeHtml(keywordsStr)}</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px">
+                <div class="toggle" onclick="toggleSkill('${skill.id}',${!skill.enabled})">
+                  <div class="toggle-track ${skill.enabled ? 'on' : ''}" style="width:32px;height:18px">
+                    <div class="toggle-knob" style="width:14px;height:14px;left:${skill.enabled ? '16px' : '2px'}"></div>
+                  </div>
+                </div>
+                ${!isBuiltin ? `<button class="btn btn-danger btn-sm" onclick="deleteSkill('${skill.id}','${catName}')">删除</button>` : ''}
+              </div>
+            </div>
+          `;
+        }
+
+        html += `</div></div>`;
+      }
+      document.getElementById("l3-categories").innerHTML = html;
+    }
+
+    function renderEnvOverrides() {
+      const container = document.getElementById("env-overrides");
+      if (!envOverrides || Object.keys(envOverrides).length === 0) {
+        container.innerHTML = '<p style="font-size:13px;color:var(--text-light)">当前没有环境变量覆盖</p>';
+        return;
+      }
+      let html = "";
+      for (const [layer, info] of Object.entries(envOverrides)) {
+        html += `
+          <div style="padding:8px 0;display:flex;align-items:center;gap:8px">
+            ${info.overridden ? '<span class="risk-badge risk-critical">强制禁用</span>' : '<span class="risk-badge risk-low">无覆盖</span>'}
+            <span style="font-size:13px">${LAYER_NAMES[layer]?.name || layer}: ${info.env_var}=${info.env_value}</span>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+    }
+
+    function renderConfigPath() {
+      document.getElementById("config-path-info").innerHTML = `
+        <p>配置文件: ~/.config/xiaoo/audit_runtime.json</p>
+        <p>环境变量 AUDIT_RUNTIME_CONFIG_PATH 可指定自定义路径</p>
+        <p>优先级: 环境变量 > runtime JSON > config.json > 源码默认值</p>
+      `;
+    }
+
+    // ==================== Actions ====================
+    async function toggleLayer(layerKey) {
+      const current = runtimeConfig.layers[layerKey] !== false;
+      try {
+        runtimeConfig = await api("PUT", "/api/layers", { layer_key: layerKey, enabled: !current });
+        envOverrides = await api("GET", "/api/env-overrides");
+        renderAll();
+        showToast(`${LAYER_NAMES[layerKey]?.name} 已${!current ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function toggleRule(layer, category, ruleId, newEnabled) {
+      try {
+        runtimeConfig = await api("PUT", "/api/rules/enabled", { layer, category, rule_id: ruleId, enabled: newEnabled });
+        renderAll();
+        showToast(`规则 ${ruleId} 已${newEnabled ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function toggleCategory(layer, category) {
+      const current = runtimeConfig[layer]?.[category]?.category_enabled !== false;
+      try {
+        runtimeConfig = await api("PUT", "/api/categories/enabled", { layer, category, enabled: !current });
+        renderAll();
+        showToast(`分类 ${category} 已${!current ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function toggleSkill(skillId, newEnabled) {
+      try {
+        runtimeConfig = await api("PUT", "/api/skills/enabled", { skill_id: skillId, enabled: newEnabled });
+        renderAll();
+        showToast(`Skill ${skillId} 已${newEnabled ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function toggleSkillCategory(category) {
+      const current = runtimeConfig.L3_skills?.[category]?.category_enabled !== false;
+      try {
+        runtimeConfig = await api("PUT", "/api/skill-categories/enabled", { category, enabled: !current });
+        renderAll();
+        showToast(`Skill 分类 ${category} 已${!current ? '启用' : '禁用'}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function deleteRule(layer, category, ruleId) {
+      if (!confirm(`确定删除自定义规则 "${ruleId}"？`)) return;
+      try {
+        runtimeConfig = await api("DELETE", "/api/rules", { layer, category, rule_id: ruleId });
+        renderAll();
+        showToast(`规则 ${ruleId} 已删除`, "success");
+      } catch (e) {
+        showToast("删除失败: " + e.message, "error");
+      }
+    }
+
+    async function deleteSkill(skillId, category) {
+      if (!confirm(`确定删除自定义 Skill "${skillId}"？`)) return;
+      try {
+        runtimeConfig = await api("DELETE", "/api/skills", { skill_id: skillId, category });
+        renderAll();
+        showToast(`Skill ${skillId} 已删除`, "success");
+      } catch (e) {
+        showToast("删除失败: " + e.message, "error");
+      }
+    }
+
+    async function resetConfig() {
+      if (!confirm("确定重置配置到出厂默认？所有自定义规则和开关设置将丢失。")) return;
+      try {
+        runtimeConfig = await api("POST", "/api/reset");
+        envOverrides = await api("GET", "/api/env-overrides");
+        renderAll();
+        showToast("配置已重置到出厂默认", "success");
+      } catch (e) {
+        showToast("重置失败: " + e.message, "error");
+      }
+    }
+
+    // ==================== Add Rule Modal ====================
+    function showAddRuleModal(layer) {
+      currentModalAction = { type: "add_rule", layer };
+      const isL1 = layer === "L1_rules";
+      const isL2 = layer === "L2_rules";
+
+      document.getElementById("modal-title").textContent = isL1 ? "新增 L1 静态规则" : "新增 L2 规则";
+
+      let formHtml = "";
+      if (isL1) {
+        formHtml = `
+          <div class="form-group">
+            <div class="form-label">规则类型</div>
+            <select class="form-select" id="rule-type" onchange="updateRuleForm()">
+              <option value="pattern">正则模式匹配</option>
+              <option value="keyword">关键词匹配</option>
+            </select>
+          </div>
+          <div class="form-group" id="form-pattern">
+            <div class="form-label">正则 Pattern</div>
+            <input class="form-input" id="input-pattern" placeholder="如: \\brm\\s+-rf">
+          </div>
+          <div class="form-group" id="form-keyword" style="display:none">
+            <div class="form-label">关键词</div>
+            <input class="form-input" id="input-keyword" placeholder="如: ignore previous instructions">
+          </div>
+          <div class="form-group">
+            <div class="form-label">风险等级</div>
+            <select class="form-select" id="input-risk-level">
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <div class="form-label">风险类型</div>
+            <input class="form-input" id="input-risk-type" placeholder="如: script_execution, file_access, data_exfiltration">
+          </div>
+          <div class="form-group">
+            <div class="form-label">拦截原因</div>
+            <input class="form-input" id="input-reason" placeholder="描述为什么这条规则要拦截">
+          </div>
+          <div class="form-group">
+            <div class="form-label">语言（关键词类型时）</div>
+            <select class="form-select" id="input-lang">
+              <option value="en">English</option>
+              <option value="zh">中文</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <div class="form-label">所属分类</div>
+            <select class="form-select" id="input-category">
+              <option value="user_custom">用户自定义</option>
+              <option value="dangerous_commands">危险命令检测</option>
+              <option value="injection_detection">注入攻击检测</option>
+            </select>
+          </div>
+        `;
+      } else if (isL2) {
+        formHtml = `
+          <div class="form-group">
+            <div class="form-label">规则类型</div>
+            <select class="form-select" id="rule-type-l2" onchange="updateL2RuleForm()">
+              <option value="path">敏感路径</option>
+              <option value="pattern">正则模式</option>
+            </select>
+          </div>
+          <div class="form-group" id="form-l2-path">
+            <div class="form-label">路径</div>
+            <input class="form-input" id="input-l2-path" placeholder="如: /etc/shadow, .ssh/id_rsa">
+          </div>
+          <div class="form-group" id="form-l2-pattern" style="display:none">
+            <div class="form-label">正则 Pattern</div>
+            <input class="form-input" id="input-l2-pattern" placeholder="如: \\bpasswd\\s+--stdin">
+          </div>
+          <div class="form-group">
+            <div class="form-label">描述</div>
+            <input class="form-input" id="input-l2-desc" placeholder="路径/规则的中文描述">
+          </div>
+          <div class="form-group">
+            <div class="form-label">风险等级</div>
+            <select class="form-select" id="input-l2-risk-level">
+              <option value="critical">Critical</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <div class="form-label">凭据文件（无论读写都拦截）</div>
+            <input type="checkbox" id="input-l2-credential">
+          </div>
+          <div class="form-group">
+            <div class="form-label">所属分类</div>
+            <select class="form-select" id="input-l2-category">
+              <option value="sensitive_path_access">敏感路径访问</option>
+              <option value="password_modify_consent">密码修改授权</option>
+              <option value="user_deletion_consent">用户删除授权</option>
+              <option value="intent_consistency">意图一致性</option>
+            </select>
+          </div>
+        `;
+      }
+
+      document.getElementById("modal-body").innerHTML = formHtml;
+      document.getElementById("modal").style.display = "flex";
+    }
+
+    function showAddSkillModal() {
+      currentModalAction = { type: "add_skill" };
+      document.getElementById("modal-title").textContent = "新增 L3 Skill";
+      document.getElementById("modal-body").innerHTML = `
+        <div class="form-group">
+          <div class="form-label">Skill ID（文件名）</div>
+          <input class="form-input" id="input-skill-id" placeholder="如: my_custom_guard">
+        </div>
+        <div class="form-group">
+          <div class="form-label">触发关键词</div>
+          <input class="form-input" id="input-skill-keywords" placeholder="逗号分隔, 如: custom, 特殊, special">
+        </div>
+        <div class="form-group">
+          <div class="form-label">Skill 内容（Markdown）</div>
+          <textarea class="form-textarea" id="input-skill-content" placeholder="# Skill 规则标题\n\n## 适用场景\n...\n\n## 检测模式\n..."></textarea>
+        </div>
+        <div class="form-group">
+          <div class="form-label">所属分类</div>
+          <select class="form-select" id="input-skill-category">
+            <option value="user_custom">用户自定义</option>
+            <option value="file_operations">文件操作</option>
+            <option value="network_security">网络安全</option>
+            <option value="persistence_supply_chain">持久化/供应链</option>
+            <option value="intent_and_general">意图/通用</option>
+            <option value="resource">资源</option>
+          </select>
+        </div>
+      `;
+      document.getElementById("modal").style.display = "flex";
+    }
+
+    function updateRuleForm() {
+      const type = document.getElementById("rule-type").value;
+      document.getElementById("form-pattern").style.display = type === "pattern" ? "" : "none";
+      document.getElementById("form-keyword").style.display = type === "keyword" ? "" : "none";
+    }
+
+    function updateL2RuleForm() {
+      const type = document.getElementById("rule-type-l2").value;
+      document.getElementById("form-l2-path").style.display = type === "path" ? "" : "none";
+      document.getElementById("form-l2-pattern").style.display = type === "pattern" ? "" : "none";
+    }
+
+    async function submitModal() {
+      if (!currentModalAction) return;
+
+      try {
+        if (currentModalAction.type === "add_rule") {
+          const layer = currentModalAction.layer;
+          const isL1 = layer === "L1_rules";
+          const isL2 = layer === "L2_rules";
+
+          let body = { layer };
+          if (isL1) {
+            const ruleType = document.getElementById("rule-type").value;
+            body.category = document.getElementById("input-category").value;
+            body.risk_level = document.getElementById("input-risk-level").value;
+            body.risk_type = document.getElementById("input-risk-type").value;
+            body.reason = document.getElementById("input-reason").value;
+            if (ruleType === "pattern") {
+              body.pattern = document.getElementById("input-pattern").value;
+            } else {
+              body.keyword = document.getElementById("input-keyword").value;
+              body.lang = document.getElementById("input-lang").value;
+            }
+          } else if (isL2) {
+            const ruleType = document.getElementById("rule-type-l2").value;
+            body.category = document.getElementById("input-l2-category").value;
+            body.risk_level = document.getElementById("input-l2-risk-level").value;
+            body.desc = document.getElementById("input-l2-desc").value;
+            const credential = document.getElementById("input-l2-credential").checked;
+            if (credential) body.credential = true;
+            if (ruleType === "path") {
+              body.path = document.getElementById("input-l2-path").value;
+            } else {
+              body.pattern = document.getElementById("input-l2-pattern").value;
+              body.risk_type = "script_execution";
+            }
+          }
+
+          runtimeConfig = await api("POST", "/api/rules", body);
+          showToast("规则已添加", "success");
+
+        } else if (currentModalAction.type === "add_skill") {
+          const keywords = document.getElementById("input-skill-keywords").value.split(",").map(k => k.trim()).filter(Boolean);
+          runtimeConfig = await api("POST", "/api/skills", {
+            skill_id: document.getElementById("input-skill-id").value,
+            category: document.getElementById("input-skill-category").value,
+            keywords,
+            content: document.getElementById("input-skill-content").value,
+          });
+          showToast("Skill 已添加", "success");
+        }
+
+        renderAll();
+        closeModal();
+      } catch (e) {
+        showToast("添加失败: " + e.message, "error");
+      }
+    }
+
+    function closeModal() {
+      document.getElementById("modal").style.display = "none";
+      currentModalAction = null;
+    }
+
+    // ==================== UI Helpers ====================
+    function showPage(page) {
+      for (const p of ["overview", "l1", "l2", "l3", "tokens", "settings"]) {
+        document.getElementById(`page-${p}`).style.display = p === page ? "" : "none";
+      }
+      const labels = { overview: "概览", l1: "L1", l2: "L2", l3: "L3", tokens: "Token", settings: "设置" };
+      document.querySelectorAll(".sidebar-item").forEach(item => {
+        item.classList.toggle("active", item.textContent.trim().includes(labels[page] || ""));
+      });
+    }
+
+    function toggleExpand(id) {
+      const list = document.getElementById(`list-${id}`);
+      const icon = document.getElementById(`expand-${id}`);
+      if (list && icon) {
+        list.style.display = list.style.display === "none" ? "" : "none";
+        icon.classList.toggle("open");
+      }
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement("div");
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function showToast(msg, type = "success") {
+      const toast = document.createElement("div");
+      toast.className = `toast toast-${type}`;
+      toast.textContent = msg;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    }
+
+    // ==================== Token Stats ====================
+    let tokenStatsData = {};
+
+    async function loadTokenStats(days) {
+      try {
+        tokenStatsData = await api("GET", `/api/token-stats?days=${days}`);
+        renderTokenStats();
+        renderTokenStatsDetail();
+      } catch (e) {
+        console.warn("Token stats load failed:", e);
+      }
+    }
+
+    function formatTokens(n) {
+      if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+      if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+      return n.toString();
+    }
+
+    function renderTokenStats() {
+      const data = tokenStatsData;
+      if (!data) return;
+
+      // 概览页的 token 统计摘要
+      const summary = document.getElementById("token-stats-summary");
+      summary.innerHTML = `
+        <div class="stats-item"><div class="stats-value">${formatTokens(data.total_tokens)}</div><div class="stats-label">总 Token</div></div>
+        <div class="stats-item"><div class="stats-value">${formatTokens(data.total_prompt_tokens)}</div><div class="stats-label">输入 Token</div></div>
+        <div class="stats-item"><div class="stats-value">${formatTokens(data.total_completion_tokens)}</div><div class="stats-label">输出 Token</div></div>
+        <div class="stats-item"><div class="stats-value">${data.total_calls}</div><div class="stats-label">LLM 调用次数</div></div>
+      `;
+
+      // 概览页的 token 柱状图（按日期）
+      const chartContainer = document.getElementById("token-chart-container");
+      const byDate = data.by_date || {};
+      const dates = Object.entries(byDate).slice(0, 7).reverse();
+      const maxTokens = Math.max(...dates.map(([,v]) => v.total_tokens), 1);
+
+      let chartHtml = '<div style="display:flex;align-items:flex-end;gap:6px;height:90px;padding-left:4px">';
+      for (const [date, vals] of dates) {
+        const promptH = (vals.prompt_tokens / maxTokens) * 80;
+        const completionH = (vals.completion_tokens / maxTokens) * 80;
+        const shortDate = date.slice(5); // MM-DD
+        chartHtml += `
+          <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
+            <div style="display:flex;flex-direction:column;align-items:stretch;width:100%;gap:0">
+              <div style="height:${Math.max(promptH,2)}px;background:var(--primary);border-radius:3px 3px 0 0;min-height:2px" title="输入: ${vals.prompt_tokens}"></div>
+              <div style="height:${Math.max(completionH,2)}px;background:var(--success);border-radius:0 0 3px 3px;min-height:2px" title="输出: ${vals.completion_tokens}"></div>
+            </div>
+            <div style="font-size:10px;color:var(--text-light)">${shortDate}</div>
+          </div>
+        `;
+      }
+      chartHtml += '</div>';
+      chartHtml += '<div style="display:flex;gap:12px;margin-top:8px;font-size:11px;color:var(--text-light)"><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:var(--primary);border-radius:2px"></span>输入</span><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:var(--success);border-radius:2px"></span>输出</span></div>';
+      chartContainer.innerHTML = chartHtml;
+
+      // 概览页的 step 分组明细
+      const breakdown = document.getElementById("token-breakdown");
+      const byStep = data.by_step || {};
+      let breakdownHtml = "";
+      for (const [step, vals] of Object.entries(byStep)) {
+        const stepName = step === "L3_security_judge" ? "L3 安全判断" :
+                         step === "step2_policy_gen" ? "策略生成" : step;
+        breakdownHtml += `
+          <div class="token-detail-row">
+            <span class="token-detail-label">${stepName}</span>
+            <span class="token-detail-value">${formatTokens(vals.total_tokens)}</span>
+            <span style="font-size:11px;color:var(--text-light)">(${vals.calls} 次, 输入 ${formatTokens(vals.prompt_tokens)}, 输出 ${formatTokens(vals.completion_tokens)})</span>
+          </div>
+        `;
+      }
+      breakdown.innerHTML = breakdownHtml;
+    }
+
+    function renderTokenStatsDetail() {
+      const data = tokenStatsData;
+      if (!data) return;
+
+      // Token 页面的总览
+      const detailSummary = document.getElementById("token-stats-detail-summary");
+      if (detailSummary) {
+        detailSummary.innerHTML = `
+          <div class="stats-item"><div class="stats-value">${formatTokens(data.total_tokens)}</div><div class="stats-label">总 Token</div></div>
+          <div class="stats-item"><div class="stats-value">${formatTokens(data.total_prompt_tokens)}</div><div class="stats-label">输入 Token</div></div>
+          <div class="stats-item"><div class="stats-value">${formatTokens(data.total_completion_tokens)}</div><div class="stats-label">输出 Token</div></div>
+          <div class="stats-item"><div class="stats-value">${data.total_calls}</div><div class="stats-label">调用次数</div></div>
+        `;
+      }
+
+      // Token 页面 - 按 step 分组
+      const stepEl = document.getElementById("token-by-step");
+      if (stepEl) {
+        let html = "";
+        for (const [step, vals] of Object.entries(data.by_step || {})) {
+          const stepName = step === "L3_security_judge" ? "L3 安全判断" :
+                           step === "step2_policy_gen" ? "策略生成" : escapeHtml(step);
+          const pct = data.total_tokens > 0 ? (vals.total_tokens / data.total_tokens * 100).toFixed(1) : 0;
+          html += `
+            <div class="token-detail-row">
+              <span class="token-detail-label">${stepName}</span>
+              <span class="token-detail-value">${formatTokens(vals.total_tokens)}</span>
+              <span style="font-size:11px;color:var(--text-light)">${pct}% (${vals.calls} 次)</span>
+              <div style="flex:1;background:var(--border);height:6px;border-radius:3px;margin-left:8px">
+                <div style="background:var(--primary);height:6px;border-radius:3px;width:${pct}%"></div>
+              </div>
+            </div>
+          `;
+        }
+        stepEl.innerHTML = html;
+      }
+
+      // Token 页面 - 按 model 分组
+      const modelEl = document.getElementById("token-by-model");
+      if (modelEl) {
+        let html = "";
+        for (const [model, vals] of Object.entries(data.by_model || {})) {
+          const pct = data.total_tokens > 0 ? (vals.total_tokens / data.total_tokens * 100).toFixed(1) : 0;
+          html += `
+            <div class="token-detail-row">
+              <span class="token-detail-label">${model}</span>
+              <span class="token-detail-value">${formatTokens(vals.total_tokens)}</span>
+              <span style="font-size:11px;color:var(--text-light)">${pct}% (${vals.calls} 次)</span>
+              <div style="flex:1;background:var(--border);height:6px;border-radius:3px;margin-left:8px">
+                <div style="background:var(--success);height:6px;border-radius:3px;width:${pct}%"></div>
+              </div>
+            </div>
+          `;
+        }
+        modelEl.innerHTML = html;
+      }
+
+      // Token 页面 - 日期分布柱状图
+      const dateChart = document.getElementById("token-date-chart");
+      if (dateChart) {
+        const byDate = data.by_date || {};
+        const dates = Object.entries(byDate).slice(0, 14).reverse();
+        const maxTokens = Math.max(...dates.map(([,v]) => v.total_tokens), 1);
+
+        let html = '<div style="display:flex;align-items:flex-end;gap:4px;height:110px">';
+        for (const [date, vals] of dates) {
+          const promptH = (vals.prompt_tokens / maxTokens) * 100;
+          const completionH = (vals.completion_tokens / maxTokens) * 100;
+          const shortDate = date.slice(5);
+          html += `
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px">
+              <div style="display:flex;flex-direction:column;align-items:stretch;width:100%;gap:0">
+                <div style="height:${Math.max(promptH,2)}px;background:var(--primary);border-radius:3px 3px 0 0;min-height:2px" title="${date}: 输入 ${vals.prompt_tokens}, 输出 ${vals.completion_tokens}"></div>
+                <div style="height:${Math.max(completionH,2)}px;background:var(--success);border-radius:0 0 3px 3px;min-height:2px"></div>
+              </div>
+              <div style="font-size:9px;color:var(--text-light)">${shortDate}</div>
+            </div>
+          `;
+        }
+        html += '</div>';
+        html += '<div style="display:flex;gap:12px;margin-top:4px;font-size:11px;color:var(--text-light)"><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:var(--primary);border-radius:2px"></span>输入</span><span style="display:flex;align-items:center;gap:4px"><span style="width:12px;height:8px;background:var(--success);border-radius:2px"></span>输出</span></div>';
+        dateChart.innerHTML = html;
+      }
+
+      // Token 页面 - 最近记录
+      const recentEl = document.getElementById("token-recent-records");
+      if (recentEl) {
+        loadRecentRecords();
+      }
+    }
+
+    async function loadRecentRecords() {
+      const recentEl = document.getElementById("token-recent-records");
+      if (!recentEl) return;
+      try {
+        const records = await api("GET", "/api/token-stats/recent?limit=10");
+        if (!records || records.length === 0) {
+          recentEl.innerHTML = '<p style="font-size:13px;color:var(--text-light)">暂无记录</p>';
+          return;
+        }
+        let html = '<table style="width:100%;font-size:12px;border-collapse:collapse">';
+        html += '<tr style="border-bottom:1px solid var(--border);color:var(--text-light)"><th style="padding:6px">时间</th><th>步骤</th><th>模型</th><th>输入</th><th>输出</th><th>总计</th></tr>';
+        for (const r of records.reverse()) {
+          const stepName = r.step === "L3_security_judge" ? "L3 安全判断" :
+                           r.step === "step2_policy_gen" ? "策略生成" : escapeHtml(r.step);
+          const ts = r.timestamp ? escapeHtml(r.timestamp.slice(0, 19)) : "";
+          html += `<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:6px">${ts}</td>
+            <td>${stepName}</td>
+            <td style="color:var(--text-light)">${escapeHtml(r.model || '')}</td>
+            <td>${r.prompt_tokens}</td>
+            <td>${r.completion_tokens}</td>
+            <td style="font-weight:600">${r.total_tokens}</td>
+          </tr>`;
+        }
+        html += '</table>';
+        recentEl.innerHTML = html;
+      } catch (e) {
+        recentEl.innerHTML = '<p style="font-size:13px;color:var(--text-light)">加载失败</p>';
+      }
+    }
+
+    async function resetTokenStats() {
+      if (!confirm("确定清除所有 Token 统计数据？")) return;
+      try {
+        await api("POST", "/api/token-stats/reset");
+        showToast("Token 统计已清除", "success");
+        loadTokenStats(7);
+      } catch (e) {
+        showToast("清除失败: " + e.message, "error");
+      }
+    }
+
+    // ==================== Start ====================
+    init();
+  </script>
+</body>
+</html>

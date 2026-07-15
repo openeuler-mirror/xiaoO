@@ -230,6 +230,17 @@ plugins/tests/hookers/audit_agent/
 - LLM 调用超时/异常 + 前序层有违规 → Deny（fail-closed）
 - LLM 调用超时/异常 + 前序层无违规 → Allow（warn-allow）
 
+**超时与卡死自愈（两层兜底）**:
+
+L3 用 `ThreadPoolExecutor` 包装 `call_llm` 加超时，但 worker 线程是非守护线程。当 `call_llm` 卡死（HTTP 超时失效）且 `future.result(timeout)` 超时后，worker 仍永久阻塞，`ThreadPoolExecutor.__exit__` 的 `shutdown(wait=True)` 会等它 → audit.py 进程退出阶段也要等非守护线程 → **永久卡死**。为此设计两层兜底，任一生效即不卡死：
+
+| 层 | 位置 | 机制 | 触发时机 |
+|----|------|------|---------|
+| ① audit 侧 | `audit.py` 末尾 | `os._exit` 代替 `sys.exit`，跳过解释器清理，不等非守护 worker，进程立即退出 | L3 超时（`AUDIT_LLM_TIMEOUT`，默认 300s）后 |
+| ② hooker 侧 | `crates/hook` plugin adaptor | `tokio::process::Command` + `kill_on_drop(true)` + `tokio::time::timeout(600s)`，超时 SIGKILL 子进程 | audit.py 子进程 600s 不退出时 |
+
+正常情况 ① 先生效（audit.py 在 L3 超时后自愈退出）；① 失效时 ② 兜底强杀。audit.py 无 atexit/需清理资源，`os._exit` 前 `flush` stdout 即安全。
+
 ### 3.4 快速放行优化 (Fast-Pass)
 
 为避免安全工具产生不必要的 LLM 调用开销，设计了两级快速放行：
@@ -322,8 +333,12 @@ whitelist = ["PATH", "LANG", "HOME", "USER", "HTTP_PROXY", "HTTPS_PROXY"]
 |------|--------|------|
 | `AUDIT_DISABLE_LLM_LAYER3` | `""` (启用) | 设为 `"1"` 禁用 Layer 3 |
 | `AUDIT_LLM_TIMEOUT` | `300` | LLM 超时（秒） |
-| `AUDIT_LOG_PATH` | `""` | 调试日志路径 |
+| `AUDIT_LOG_PATH` | `""` | 调试日志路径（记录 HOOK_INPUT/HOOK_OUTPUT 全量日志与 LLM prompt 日志） |
 | `AUDIT_ENABLE_POLICY_GEN` | `""` (禁用) | 设为 `"1"` 启用 LLM 策略生成 |
+| `AUDIT_CONFIG_PATH` | `""` | 自定义 config.json 路径，指向的文件存在时生效 |
+| `AUDIT_RUNTIME_CONFIG_PATH` | `""` | 自定义运行时热加载配置路径 |
+
+**文件位置**：audit_settings.json 统一放在**插件根目录**（与 `audit.py` 同级）。无论 pip 安装（venv 形态）还是 RPM 源码直跑形态，`audit.py` 启动时都会把自身所在目录注入 `AUDIT_PLUGIN_ROOT` 环境变量，`config.py` 据此定位到统一的 audit_settings.json。`AUDIT_LOG_PATH` 在此配置即让 HOOK_INPUT/HOOK_OUTPUT 全量日志写入指定文件，效果与设置环境变量一致。
 
 ### 5.4 支持的 LLM Provider
 

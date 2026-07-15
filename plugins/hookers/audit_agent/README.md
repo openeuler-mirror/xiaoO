@@ -918,6 +918,8 @@ LLM 返回结构化 JSON：
 - 前序检测已发现违规 → Deny（fail-closed）
 - 前序检测无违规 → Allow（warn-allow），避免 LLM 服务不可用时误拦截正常操作
 
+**卡死自愈**：当 LLM 调用卡死（HTTP 超时失效）时，audit.py 在 L3 超时（`AUDIT_LLM_TIMEOUT`，默认 300s）后通过 `os._exit` 立即退出，不等卡住的 worker 线程；即使此层失效，xiaoo 的 plugin hooker 执行器还有 600s 超时 + 强制 kill 兜底，确保不会永久卡死 xiaoo 主循环。详见 `TECH_WIKI.md` 3.3 节。
+
 ---
 
 ### 三层协作机制

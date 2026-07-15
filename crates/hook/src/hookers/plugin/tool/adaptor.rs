@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::process::Stdio;
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
@@ -15,9 +16,16 @@ use agent_types::tool::{
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
+
+/// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
+/// 防止卡死命令长期阻塞 tokio worker。
+const PLUGIN_HOOKER_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(crate) struct PluginToolHookerAdaptor {
     id: HookerId,
@@ -353,14 +361,86 @@ impl PluginToolHookerAdaptor {
     }
 
     async fn run_plugin_command(&self, payload: &Value) -> Result<Value, ToolExecutionError> {
-        run_plugin_subprocess(
-            &self.id,
-            &self.command,
-            payload,
-            |message| ToolExecutionError::ExecutionFailed { message },
-            Some(super::super::PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
-        )
-        .await
+        self.run_plugin_command_with_timeout(payload, PLUGIN_HOOKER_TIMEOUT)
+            .await
+    }
+
+    async fn run_plugin_command_with_timeout(
+        &self,
+        payload: &Value,
+        cmd_timeout: Duration,
+    ) -> Result<Value, ToolExecutionError> {
+        let payload_bytes =
+            serde_json::to_vec(payload).map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "failed to serialize plugin command payload for hooker '{}': {}",
+                    self.id.0, error
+                ),
+            })?;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&self.command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
+                    self.id.0, self.command, error
+                ),
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&payload_bytes).await.map_err(|error| {
+                ToolExecutionError::ExecutionFailed {
+                    message: format!(
+                        "failed to write stdin for plugin hooker '{}' (command='{}'): {}",
+                        self.id.0, self.command, error
+                    ),
+                }
+            })?;
+        }
+
+        let output = timeout(cmd_timeout, child.wait_with_output())
+            .await
+            .map_err(|_| ToolExecutionError::Timeout {
+                timeout_ms: cmd_timeout.as_millis() as u64,
+            })?
+            .map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "failed to wait for plugin hooker '{}' (command='{}'): {}",
+                    self.id.0, self.command, error
+                ),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "plugin hooker '{}' command '{}' exited with status {}{}",
+                    self.id.0,
+                    self.command,
+                    output.status,
+                    if stderr.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", stderr)
+                    }
+                ),
+            });
+        }
+
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            ToolExecutionError::ExecutionFailed {
+                message: format!(
+                    "plugin hooker '{}' command '{}' returned invalid JSON: {}",
+                    self.id.0, self.command, error
+                ),
+            }
+        })
     }
 
     fn parse_plugin_command_response(
@@ -591,8 +671,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    use super::super::super::test_support::block_on;
-
     use agent_contracts::events::tool_events::ToolEventSink;
     use agent_contracts::hook::registry::HookerRegistry;
     use agent_contracts::interaction::handle::InteractionHandle;
@@ -820,8 +898,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ask_user_round_trip_returns_final_pre_result() {
+    #[tokio::test]
+    async fn ask_user_round_trip_returns_final_pre_result() {
         let script_path = std::env::temp_dir().join(format!(
             "plugin_ask_user_round_trip_{}.py",
             std::process::id()
@@ -877,8 +955,10 @@ else:
             },
         };
 
-        let output =
-            block_on(adaptor.invoke_pre(&input, &HookInvokeMetadata::default(), &runtime)).unwrap();
+        let output = adaptor
+            .invoke_pre(&input, &HookInvokeMetadata::default(), &runtime)
+            .await
+            .unwrap();
 
         match output.primary {
             HookInvokePrimary::Pre(PreHookResult::Deny { reason }) => {
@@ -989,5 +1069,129 @@ else:
 
         assert!(matches!(legacy, PluginCommandResponse::Final(_)));
         assert!(matches!(explicit, PluginCommandResponse::Final(_)));
+    }
+
+    /// 验证 plugin hooker 子进程超时 + kill 兜底链路：
+    /// spawn 一个 `sleep 30` 子进程（模拟卡死），用 2s 超时，断言：
+    /// 1. 返回 ToolExecutionError::Timeout（而非永久阻塞）；
+    /// 2. 耗时在超时附近（~2s），证明是超时触发而非子进程自己退出；
+    /// 3. kill_on_drop 在 future drop 后杀掉子进程（不验证残留进程，靠 kill_on_drop 语义保证）。
+    #[tokio::test]
+    async fn run_plugin_command_times_out_and_kills_hung_child() {
+        let adaptor = PluginToolHookerAdaptor::new(
+            HookerId("plugin_timeout".to_string()),
+            HookPointId("test-agent.Tool.bash.pre".to_string()),
+            "sleep 30".to_string(),
+            Value::Null,
+        );
+        let payload = json!({"stage": "pre"});
+
+        let start = std::time::Instant::now();
+        let result = adaptor
+            .run_plugin_command_with_timeout(&payload, Duration::from_secs(2))
+            .await;
+        let elapsed = start.elapsed();
+
+        // 1. 返回 Timeout 错误（不是 Ok，不是其它 ExecutionFailed）
+        match result {
+            Err(ToolExecutionError::Timeout { timeout_ms }) => {
+                assert_eq!(timeout_ms, 2000, "timeout_ms 应等于传入超时(2s=2000ms)");
+            }
+            other => panic!("expected Timeout, got: {:?}", other),
+        }
+
+        // 2. 耗时应在超时附近（2s），允许调度抖动，但远小于 sleep 30 的 30s。
+        //    上界给 10s：超过则说明根本没被超时 kill（卡住了）。
+        assert!(
+            elapsed.as_secs() < 10,
+            "超时应在 ~2s 触发，实际耗时 {:?}（疑似未被超时 kill）",
+            elapsed
+        );
+        // 下界：至少要等到超时阈值，不能秒回（秒回说明子进程没卡住）
+        assert!(
+            elapsed.as_secs() >= 2,
+            "应等到 2s 超时才返回，实际耗时 {:?}（疑似子进程未卡住）",
+            elapsed
+        );
+    }
+
+    /// 真实复现客户卡死：经 Rust hooker 调真实 audit.py，audit.py 的 L3 call_llm
+    /// 被 monkeypatch（sitecustomize）永久阻塞（等效 http 超时失效），audit.py 子进程
+    /// 卡死不退出。验证 Rust 侧超时 + kill 兜底能强杀卡死的真实 audit.py 子进程。
+    ///
+    /// 注意：依赖本仓库 plugins/hookers/audit_agent 下的 venv 与 audit.py 存在，
+    /// CI 环境可能没有，故标 #[ignore]，手动 `cargo test -- --ignored` 跑。
+    #[tokio::test]
+    #[ignore]
+    async fn rust_kills_real_hung_audit_py_via_hooker() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let audit_py = repo_root.join("plugins/hookers/audit_agent/audit.py");
+        let venv_python = repo_root
+            .join("plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3");
+        let inject_dir = repo_root.join("plugins/tests/hookers/audit_agent/cases/hang-llm-repro");
+        let cfg_dir = std::env::temp_dir().join("audit_hang_test_cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg = cfg_dir.join("config.json");
+        std::fs::write(
+            &cfg,
+            r#"{"llm":{"api_key":"sk-fake","model":"m","temperature":0.1,"base_url":"http://127.0.0.1:1/api/v1"},"timeout":{"total_timeout":60.0,"prompt1_timeout":30.0,"prompt2_timeout":20.0,"step_interval":0.0},"cache":{"enabled":false,"max_size":1000},"retry":{"max_retries":1,"retry_interval":1.0},"security":{"enabled":true,"heuristic_enabled":true,"logic_rules_enabled":true,"llm_analysis_enabled":true,"rules_path":"","skills_dir":""},"log_level":"INFO"}"#,
+        )
+        .unwrap();
+
+        // command 经 sh -c，前缀设 env：注入 sitecustomize（patch call_llm 永久阻塞）+
+        // 测试 config（开 L3）+ 短 L3 超时 + 隔离 HOME。venv python 跑真实 audit.py。
+        let command = format!(
+            "PYTHONPATH={inject} HOME={home} AUDIT_CONFIG_PATH={cfg} AUDIT_LLM_TIMEOUT=10 {py} {audit}",
+            inject = inject_dir.display(),
+            home = std::env::temp_dir().display(),
+            cfg = cfg.display(),
+            py = venv_python.display(),
+            audit = audit_py.display(),
+        );
+        let adaptor = PluginToolHookerAdaptor::new(
+            HookerId("audit_agent".to_string()),
+            HookPointId("test-agent.Tool.file_write.pre".to_string()),
+            command,
+            Value::Null,
+        );
+        // 会进 L3 的 payload（file_write 非白名单）
+        let payload = json!({
+            "stage": "pre",
+            "session_id": "s",
+            "prompt_session": "写测试文件",
+            "action_history": [],
+            "call": {"call_id": "c", "tool_name": "file_write",
+                     "input": {"file_path": "/tmp/test_hang.txt", "content": "hello"}}
+        });
+
+        // Rust 侧用 5s 超时（比 L3 的 10s 短），验证 Rust 先杀掉卡死的 audit.py。
+        let start = std::time::Instant::now();
+        let result = adaptor
+            .run_plugin_command_with_timeout(&payload, Duration::from_secs(5))
+            .await;
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ToolExecutionError::Timeout { timeout_ms }) => {
+                assert_eq!(timeout_ms, 5000, "应为 Rust 侧 5s 超时");
+            }
+            other => panic!("expected Timeout(Rust 杀掉卡死 audit.py), got: {:?}", other),
+        }
+        // Rust 超时附近返回（~5s），证明强杀了卡死的真实 audit.py 子进程，未永久阻塞。
+        assert!(
+            elapsed.as_secs() < 15,
+            "Rust 应在 ~5s 超时杀掉 audit.py，实际 {:?}（疑似没杀掉）",
+            elapsed
+        );
+        assert!(
+            elapsed.as_secs() >= 5,
+            "应等到 5s 超时，实际 {:?}（疑似 audit.py 没卡住）",
+            elapsed
+        );
     }
 }

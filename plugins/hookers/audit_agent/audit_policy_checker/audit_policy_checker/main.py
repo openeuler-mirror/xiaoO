@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 
 from .config import Config, get_default_config, is_policy_gen_enabled
-from .llm_client import call_llm
+from .llm_client import call_llm, LLMResult
+from .token_stats import record_token_usage
 from .parsers import parse_policy_from_llm
 from .policy_cache import PolicyCache, get_default_cache
 from .prompt_templates import get_prompt1
@@ -185,16 +186,25 @@ def audit_action(
 
             for attempt in range(1, max_retries + 1):
                 try:
-                    llm_response = call_llm(
+                    llm_result: LLMResult = call_llm(
                         prompt=prompt1_text,
                         timeout=cfg.timeout.prompt1_timeout,
                         config=cfg.llm,
                     )
-                    policy_a_next = parse_policy_from_llm(llm_response)
+                    # 记录 token 用量
+                    record_token_usage(
+                        session_id=session_id,
+                        step="step2_policy_gen",
+                        model=llm_result.model,
+                        prompt_tokens=llm_result.prompt_tokens,
+                        completion_tokens=llm_result.completion_tokens,
+                        total_tokens=llm_result.total_tokens,
+                    )
+                    policy_a_next = parse_policy_from_llm(llm_result.content)
                     audit_log.log_llm_interaction(
                         "step2_generate_policy",
                         prompt1_text[:200],
-                        llm_response[:200],
+                        llm_result.content[:200],
                     )
                     # 缓存生成的 policy
                     policy_cache.put(session_id, prompt_session, policy_a_next)

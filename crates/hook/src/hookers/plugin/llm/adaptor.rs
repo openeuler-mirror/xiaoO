@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::process::Stdio;
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
@@ -15,9 +16,16 @@ use agent_types::llm::{
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
+
+/// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
+/// 防止卡死命令长期阻塞 tokio worker。
+const PLUGIN_HOOKER_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(crate) struct PluginLlmHookerAdaptor {
     id: HookerId,
@@ -316,14 +324,74 @@ impl PluginLlmHookerAdaptor {
     }
 
     async fn run_plugin_command(&self, payload: &Value) -> Result<Value, LlmError> {
-        run_plugin_subprocess(
-            &self.id,
-            &self.command,
-            payload,
-            |message| LlmError::RequestFailed { message },
-            Some(super::super::PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
-        )
-        .await
+        let payload_bytes =
+            serde_json::to_vec(payload).map_err(|error| LlmError::RequestFailed {
+                message: format!(
+                    "failed to serialize plugin command payload for hooker '{}': {}",
+                    self.id.0, error
+                ),
+            })?;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&self.command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| LlmError::RequestFailed {
+                message: format!(
+                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
+                    self.id.0, self.command, error
+                ),
+            })?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&payload_bytes)
+                .await
+                .map_err(|error| LlmError::RequestFailed {
+                    message: format!(
+                        "failed to write stdin for plugin hooker '{}' (command='{}'): {}",
+                        self.id.0, self.command, error
+                    ),
+                })?;
+        }
+
+        let output = timeout(PLUGIN_HOOKER_TIMEOUT, child.wait_with_output())
+            .await
+            .map_err(|_| LlmError::Timeout)?
+            .map_err(|error| LlmError::RequestFailed {
+                message: format!(
+                    "failed to wait for plugin hooker '{}' (command='{}'): {}",
+                    self.id.0, self.command, error
+                ),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(LlmError::RequestFailed {
+                message: format!(
+                    "plugin hooker '{}' command '{}' exited with status {}{}",
+                    self.id.0,
+                    self.command,
+                    output.status,
+                    if stderr.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", stderr)
+                    }
+                ),
+            });
+        }
+
+        serde_json::from_slice(&output.stdout).map_err(|error| LlmError::RequestFailed {
+            message: format!(
+                "plugin hooker '{}' command '{}' returned invalid JSON: {}",
+                self.id.0, self.command, error
+            ),
+        })
     }
 
     fn parse_plugin_command_response(

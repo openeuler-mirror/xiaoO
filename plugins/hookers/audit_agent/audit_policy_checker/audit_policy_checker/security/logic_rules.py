@@ -5,6 +5,12 @@
 2. 意图一致性检测 — 动作是否与原始 prompt 意图一致
 3. 敏感路径访问检测 — 访问系统关键文件
 4. 危险操作模式检测 — 批量删除/修改、通配符滥用
+5. 密码修改授权检测 — 非交互式密码修改需用户授权
+6. 用户删除授权检测 — 删除系统用户需用户授权
+
+规则来源优先级：
+  runtime JSON 用户本地副本 > 源码种子默认值
+  禁用的分类/规则在 runtime JSON 中 enabled/category_enabled=False，加载时自动过滤。
 """
 
 import json
@@ -13,6 +19,14 @@ import re
 from pathlib import Path
 
 from .types import LogicRuleResult
+from ..runtime_config import (
+    load_runtime_config,
+    get_enabled_l2_sensitive_paths_or_default,
+    get_enabled_l2_intent_patterns_or_default,
+    get_enabled_l2_password_patterns_or_default,
+    get_enabled_l2_user_deletion_patterns_or_default,
+    is_l2_category_enabled,
+)
 
 # ==================== 敏感路径列表 ====================
 SENSITIVE_PATHS: list[dict] = [
@@ -107,7 +121,23 @@ INTENT_DEVIATION_PATTERNS: list[dict] = [
 
 
 class LogicRulesChecker:
-    """逻辑规则检测器"""
+    """逻辑规则检测器
+
+    规则来源：优先从 runtime JSON 加载启用的规则，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    分类级别开关：category_enabled=False 时跳过整个分类的检测。
+    """
+
+    def __init__(self):
+        # 从 runtime config 加载规则；
+        # 仅在配置文件不存在时回退到源码硬编码默认值，
+        # 配置文件存在但规则列表为空（用户逐条禁用）时不回退。
+        runtime = load_runtime_config()
+        self._sensitive_paths = get_enabled_l2_sensitive_paths_or_default(runtime)
+        self._intent_patterns = get_enabled_l2_intent_patterns_or_default(runtime)
+        self._password_patterns = get_enabled_l2_password_patterns_or_default(runtime)
+        self._user_deletion_patterns = get_enabled_l2_user_deletion_patterns_or_default(runtime)
+        self._runtime = runtime
 
     def check(
         self,
@@ -128,35 +158,41 @@ class LogicRulesChecker:
         Returns:
             LogicRuleResult: 检测结果
         """
-        # 1. read_before_write 原则
-        rbw_result = self._check_read_before_write(action_history, a_next, reason)
-        if rbw_result.hit:
-            return rbw_result
+        # 1. read_before_write 原则（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "read_before_write"):
+            rbw_result = self._check_read_before_write(action_history, a_next, reason)
+            if rbw_result.hit:
+                return rbw_result
 
-        # 2. 意图一致性检测
-        intent_result = self._check_intent_consistency(prompt_session, a_next)
-        if intent_result.hit:
-            return intent_result
+        # 2. 意图一致性检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "intent_consistency"):
+            intent_result = self._check_intent_consistency(prompt_session, a_next)
+            if intent_result.hit:
+                return intent_result
 
-        # 3. 敏感路径访问检测
-        path_result = self._check_sensitive_path_access(a_next)
-        if path_result.hit:
-            return path_result
+        # 3. 敏感路径访问检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "sensitive_path_access"):
+            path_result = self._check_sensitive_path_access(a_next)
+            if path_result.hit:
+                return path_result
 
-        # 4. 危险操作模式检测
-        dangerous_result = self._check_dangerous_patterns(a_next)
-        if dangerous_result.hit:
-            return dangerous_result
+        # 4. 危险操作模式检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "dangerous_patterns"):
+            dangerous_result = self._check_dangerous_patterns(a_next)
+            if dangerous_result.hit:
+                return dangerous_result
 
-        # 5. 密码修改授权检测
-        consent_result = self._check_password_consent(action_history, a_next)
-        if consent_result.hit:
-            return consent_result
+        # 5. 密码修改授权检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "password_modify_consent"):
+            consent_result = self._check_password_consent(action_history, a_next)
+            if consent_result.hit:
+                return consent_result
 
-        # 6. 用户删除授权检测
-        user_del_result = self._check_user_deletion_consent(action_history, a_next)
-        if user_del_result.hit:
-            return user_del_result
+        # 6. 用户删除授权检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "user_deletion_consent"):
+            user_del_result = self._check_user_deletion_consent(action_history, a_next)
+            if user_del_result.hit:
+                return user_del_result
 
         return LogicRuleResult(hit=False)
 
@@ -257,7 +293,7 @@ class LogicRulesChecker:
         prompt_lower = prompt_session.lower()
         action_detail = a_next.get("action_detail", "").lower()
 
-        for pattern in INTENT_DEVIATION_PATTERNS:
+        for pattern in self._intent_patterns:
             intent_matched = any(kw in prompt_lower for kw in pattern["intent_keywords"])
             dangerous_matched = any(kw in action_detail for kw in pattern["dangerous_actions"])
             if intent_matched and dangerous_matched:
@@ -283,7 +319,7 @@ class LogicRulesChecker:
         # 判断是否为写入/删除操作
         is_write_op = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
 
-        for sp in SENSITIVE_PATHS:
+        for sp in self._sensitive_paths:
             raw_path = sp["path"]
             path = raw_path.lower()
             is_credential = sp.get("credential", False)
@@ -395,7 +431,7 @@ class LogicRulesChecker:
             return LogicRuleResult(hit=False)
 
         is_password_modify = any(
-            re.search(p, action_detail, re.IGNORECASE) for p in PASSWORD_MODIFY_PATTERNS
+            re.search(p, action_detail, re.IGNORECASE) for p in self._password_patterns
         )
         if not is_password_modify:
             return LogicRuleResult(hit=False)
@@ -435,7 +471,7 @@ class LogicRulesChecker:
             return LogicRuleResult(hit=False)
 
         is_user_deletion = any(
-            re.search(p, action_detail, re.IGNORECASE) for p in USER_DELETION_PATTERNS
+            re.search(p, action_detail, re.IGNORECASE) for p in self._user_deletion_patterns
         )
         if not is_user_deletion:
             return LogicRuleResult(hit=False)

@@ -4,15 +4,24 @@
 - 加载 skills/ 目录下的所有 .md 规则文件
 - 根据动作类型和内容匹配最相关的 Skill
 - 格式化后注入 LLM prompt 指导安全判断
+
+规则来源优先级：
+  runtime JSON 用户本地副本 > 源码种子默认值
+  禁用的 skill 在 runtime JSON 中 enabled=False 或其分类 category_enabled=False，
+  加载时自动过滤不参与匹配。
 """
 
 import re
 from pathlib import Path
 
 from .types import SkillMatch
+from ..runtime_config import load_runtime_config, get_disabled_skill_ids
 
 # Skills 目录路径
+# 内置 skills 目录（随包发布，只读）：audit_policy_checker/skills/
 DEFAULT_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+# 用户自定义 skills 目录（可写，RPM 安装后用户在此新增 skill）
+USER_SKILLS_DIR = Path.home() / ".config" / "xiaoo" / "audit_skills"
 
 # ==================== Skill 分类映射 ====================
 # action_type / action_detail 中的关键词 → 匹配的 skill 文件名
@@ -79,17 +88,28 @@ class SkillEngine:
     """Skill 引擎 — 加载、匹配和注入安全检测 Skill"""
 
     def __init__(self, skills_dir: str | Path | None = None):
+        # 显式指定 skills_dir 时只加载该目录（兼容旧接口/测试）
+        # 否则同时加载内置 skills 目录 + 用户自定义 skills 目录（用户优先，同名覆盖）
         self._skills_dir = Path(skills_dir) if skills_dir else DEFAULT_SKILLS_DIR
+        self._load_user_skills = skills_dir is None
         self._skills_cache: dict[str, str] = {}
         self._load_all_skills()
 
     def _load_all_skills(self) -> None:
-        """加载所有 Skill 文件到缓存"""
-        if not self._skills_dir.exists():
-            return
-        for md_file in sorted(self._skills_dir.glob("*.md")):
-            skill_name = md_file.stem
-            self._skills_cache[skill_name] = md_file.read_text(encoding="utf-8")
+        """加载所有 Skill 文件到缓存
+
+        先加载内置 skills 目录，再加载用户自定义 skills 目录（用户同名覆盖内置）。
+        """
+        # 1. 内置 skills（随包发布，只读）
+        if self._skills_dir.exists():
+            for md_file in sorted(self._skills_dir.glob("*.md")):
+                skill_name = md_file.stem
+                self._skills_cache[skill_name] = md_file.read_text(encoding="utf-8")
+        # 2. 用户自定义 skills（可写目录，优先级高，同名覆盖内置）
+        if self._load_user_skills and USER_SKILLS_DIR.exists():
+            for md_file in sorted(USER_SKILLS_DIR.glob("*.md")):
+                skill_name = md_file.stem
+                self._skills_cache[skill_name] = md_file.read_text(encoding="utf-8")
 
     def match_skills(
         self,
@@ -100,6 +120,9 @@ class SkillEngine:
         """
         根据 a_next 和 reason 匹配最相关的 Skill。
 
+        自动过滤 runtime JSON 中 disabled 的 skill（enabled=False 或
+        其分类 category_enabled=False）。
+
         Args:
             a_next: 下一步动作
             reason: 执行理由
@@ -108,13 +131,22 @@ class SkillEngine:
         Returns:
             list[SkillMatch]: 匹配到的 Skill 列表，按相关度降序
         """
+        # 从 runtime config 获取被禁用的 skill id 集合
+        runtime = load_runtime_config()
+        disabled_skills = get_disabled_skill_ids(runtime)
+
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
         combined = f"{action_type} {action_detail} {reason}".lower()
 
-        # 计算每个 skill 的相关度
+        # 计算每个 skill 的相关度（跳过被禁用的 skill）
         scores: dict[str, float] = {}
         for skill_name, keywords in SKILL_KEYWORD_MAP.items():
+            if skill_name in disabled_skills:
+                continue  # 跳过被禁用的 skill
+            # 也检查缓存中是否存在该 skill 文件
+            if skill_name not in self._skills_cache:
+                continue  # skill 文件不存在，跳过
             score = 0.0
             for kw in keywords:
                 if kw in combined:
@@ -150,7 +182,8 @@ class SkillEngine:
                 )
 
         # 如果没有匹配到任何 skill，加载 general_tool_risk_guard 作为兜底
-        if not results:
+        # （前提是该 skill 未被用户禁用）
+        if not results and "general_tool_risk_guard" not in disabled_skills:
             fallback = self._skills_cache.get("general_tool_risk_guard", "")
             if fallback:
                 results.append(
