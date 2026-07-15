@@ -6,7 +6,6 @@ use crate::app_state::{
     current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, InputMode,
     SandboxDialog,
 };
-use crate::cron_dialog::CronDialogMode;
 use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
@@ -131,7 +130,6 @@ impl App {
             InputMode::SessionSnapshotSelection => Ok(()),
             InputMode::InteractionPrompt => Ok(()),
             InputMode::TurnDelete => Ok(()),
-            InputMode::CronManagement => self.handle_cron_management_key(key).await,
         }
     }
 
@@ -698,12 +696,6 @@ impl App {
             return Ok(());
         }
 
-
-        if trimmed.eq_ignore_ascii_case("/cron") {
-            self.state.chat_state.input.reset();
-            self.open_cron_dialog();
-            return Ok(());
-        }
         if first_token_is_dir_command(trimmed) {
             match resolve_dir_command(trimmed, &self.state.workspace) {
                 Ok(path) => {
@@ -1486,146 +1478,6 @@ impl App {
         }
         Ok(())
     }
-
-    fn open_cron_dialog(&mut self) {
-        match crate::services::cron_service::load_cron_snapshot(&self.state.config_path) {
-            Ok(snapshot) => {
-                let dialog = crate::cron_dialog::CronDialog::new(
-                    snapshot.jobs,
-                    snapshot.jobs_file,
-                    snapshot.default_timeout_secs,
-                    snapshot.cron_section_present,
-                );
-                self.state.input_mode = InputMode::CronManagement;
-                self.state.cron_dialog = Some(dialog);
-                self.state
-                    .chat_state
-                    .messages
-                    .push(crate::chat::Message::system(
-                        "Cron job management opened. Use arrow keys to navigate, 'a' to add, 'e' to edit, 'd' to delete, Space to toggle.".to_string(),
-                    ));
-                self.state.chat_state.stick_to_bottom = true;
-            }
-            Err(error) => {
-                self.state
-                    .chat_state
-                    .messages
-                    .push(crate::chat::Message::error(format!(
-                        "Failed to load cron config: {error:#}"
-                    )));
-                self.state.chat_state.stick_to_bottom = true;
-            }
-        }
-    }
-
-    async fn handle_cron_management_key(&mut self, key: KeyEvent) -> Result<()> {
-        let Some(dialog) = self.state.cron_dialog.as_mut() else {
-            self.state.input_mode = InputMode::Editing;
-            return Ok(());
-        };
-
-        let mode = dialog.mode.clone();
-
-        match &mode {
-            CronDialogMode::List => {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.state.input_mode = InputMode::Editing;
-                        self.state.cron_dialog = None;
-                        self.state
-                            .chat_state
-                            .messages
-                            .push(crate::chat::Message::system(
-                                "Cron job management closed. Restart daemon to apply changes.".to_string(),
-                            ));
-                        self.state.chat_state.stick_to_bottom = true;
-                    }
-                    KeyCode::Up => {
-                        dialog.move_up();
-                    }
-                    KeyCode::Down => {
-                        dialog.move_down();
-                    }
-                    KeyCode::Char('a') => {
-                        dialog.start_add();
-                    }
-                    KeyCode::Char('e') => {
-                        dialog.start_edit();
-                    }
-                    KeyCode::Char('d') => {
-                        dialog.start_delete_confirm();
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Err(e) = dialog.toggle_enabled() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to toggle job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            CronDialogMode::ConfirmDelete { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Err(e) = dialog.confirm_delete() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to delete job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        dialog.back_to_list();
-                    }
-                    _ => {}
-                }
-            }
-            CronDialogMode::EditForm { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
-                    }
-                    KeyCode::Tab if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
-                        dialog.edit_prev_field();
-                    }
-                    KeyCode::Tab => {
-                        dialog.edit_next_field();
-                    }
-                    KeyCode::Enter => {
-                        match dialog.save_edit_form() {
-                            Ok(()) => {}
-                            Err(error) => {
-                                dialog.edit_set_error(error);
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        dialog.edit_backspace();
-                        dialog.edit_clear_error();
-                    }
-                    KeyCode::Char(c) => {
-                        dialog.edit_push_char(c);
-                        dialog.edit_clear_error();
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
-
 }
 
 fn is_named_slash_command(trimmed: &str, command: &str) -> bool {

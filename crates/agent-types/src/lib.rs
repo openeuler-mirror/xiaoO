@@ -2,7 +2,6 @@ pub mod chat;
 pub mod common;
 pub mod compression;
 pub mod context;
-pub mod cron;
 pub mod events;
 pub mod hook;
 pub mod interaction;

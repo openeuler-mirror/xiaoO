@@ -28,7 +28,6 @@ pub enum InputMode {
     SessionSnapshotSelection,
     InteractionPrompt,
     TurnDelete,
-    CronManagement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +212,6 @@ pub struct AppState {
     pub remote_session_dialog: Option<crate::remote_sessions_service::RemoteSessionDialog>,
     pub session_snapshot_dialog: Option<crate::session_snapshot_service::SessionSnapshotDialog>,
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
-    pub cron_dialog: Option<crate::cron_dialog::CronDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
     pub loading_tick: usize,
     pub agent_config: Config,
@@ -254,7 +252,6 @@ impl AppState {
             remote_session_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
-            cron_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: Config::default(),
@@ -303,7 +300,6 @@ impl AppState {
             remote_session_dialog: None,
             session_snapshot_dialog: None,
             delete_dialog: None,
-            cron_dialog: None,
             api_key_dialog: None,
             loading_tick: 0,
             agent_config: config.clone(),
