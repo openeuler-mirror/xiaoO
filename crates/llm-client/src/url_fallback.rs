@@ -94,8 +94,25 @@ const URL_PATH_ERROR_KEYWORDS: &[&str] = &[
     "url error",
 ];
 
+/// Extracts the HTTP status code from an `ApiError` message produced by
+/// [`crate::error::map_api_status_error`], which formats responses as
+/// `"HTTP {status}: {body}"` (e.g. `"HTTP 401 Unauthorized: ..."`).
+///
+/// Returns `None` for messages that don't follow this shape — e.g.
+/// manually-constructed errors such as `"unexpected content type: ..."` or
+/// `"stream error: ..."`. Those are still matched by their keyword checks.
+///
+/// Parsing the structured prefix (instead of `contains("HTTP 401")`) avoids
+/// false positives when a response *body* happens to contain an HTTP status
+/// string, and survives minor wording changes in the reason phrase.
+fn http_status_code(msg: &str) -> Option<u16> {
+    let rest = msg.strip_prefix("HTTP ")?;
+    let code = rest.split_whitespace().next()?;
+    code.parse::<u16>().ok()
+}
+
 fn is_url_path_error_response(message: &str) -> bool {
-    if !message.contains("HTTP 400") {
+    if http_status_code(message) != Some(400) {
         return false;
     }
 
@@ -123,6 +140,20 @@ fn is_url_path_error_response(message: &str) -> bool {
         .any(|keyword| normalized_message.contains(keyword))
 }
 
+/// True for an HTTP 401 (`Unauthorized`) response.
+///
+/// 401 is classified as an endpoint-path error (see [`is_endpoint_path_error`])
+/// so the URL fallback keeps trying remaining candidates. When *every*
+/// candidate returns 401, the provider uses this predicate to surface the
+/// real "Unauthorized" error to the caller instead of the wrapped
+/// "All N candidates failed" summary.
+pub fn is_http_unauthorized_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::ApiError(msg) => http_status_code(msg) == Some(401),
+        _ => false,
+    }
+}
+
 pub fn is_endpoint_path_error(error: &LlmError) -> bool {
     match error {
         LlmError::HttpError(msg) => {
@@ -132,9 +163,21 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
                 || msg.contains("connect")
         }
         LlmError::ApiError(msg) => {
-            // Some APIs report an incomplete endpoint as HTTP 400 instead of 404/405.
-            msg.contains("HTTP 404")
-                || msg.contains("HTTP 405")
+            // Endpoint path errors → the URL fallback tries the next candidate.
+            // Some servers expose multiple chat-completion routes (e.g.
+            // `/chat/completions` and `/v1/chat/completions`) and only the
+            // versioned one accepts Bearer auth. An HTTP 401 from the
+            // unversioned route therefore means "this route cannot authenticate
+            // the request", not "the API key is wrong", so the fallback keeps
+            // going. HTTP 400 with a recognized URL-error message (see
+            // `is_url_path_error_response`) is treated the same way.
+            //
+            // When *every* candidate returns 401, the provider surfaces the
+            // real "Unauthorized" error instead of the wrapped "All N
+            // candidates failed" summary — see `is_http_unauthorized_error` and
+            // `OpenAiFamilyProvider::complete`.
+            is_http_unauthorized_error(error)
+                || matches!(http_status_code(msg), Some(404) | Some(405))
                 || msg.contains("Not Found")
                 || msg.contains("endpoint not found")
                 || msg.contains("route not found")
@@ -171,8 +214,7 @@ pub fn is_configuration_error(error: &LlmError) -> bool {
                 return false;
             }
 
-            msg.contains("HTTP 400")
-                || msg.contains("HTTP 403")
+            matches!(http_status_code(msg), Some(400) | Some(403))
                 || msg.contains("Bad Request")
                 || msg.contains("Invalid")
                 || msg.contains("invalid_request_error")
@@ -194,9 +236,7 @@ pub fn is_retryable_network_error(error: &LlmError) -> bool {
         LlmError::ApiError(msg) => {
             // Only retry for transient network/server errors
             // RateLimited (429/529) is quota/policy issue - should fail immediately
-            msg.contains("HTTP 502")
-                || msg.contains("HTTP 503")
-                || msg.contains("HTTP 504")
+            matches!(http_status_code(msg), Some(502) | Some(503) | Some(504))
                 || msg.contains("Bad Gateway")
                 || msg.contains("Service Unavailable")
                 || msg.contains("Gateway Timeout")
@@ -443,6 +483,60 @@ mod tests {
         let cancelled = LlmError::Cancelled;
         assert!(!is_endpoint_path_error(&cancelled));
         assert!(!should_try_next_candidate(&cancelled));
+    }
+
+    #[test]
+    fn test_http_401_is_endpoint_error_to_continue_fallback() {
+        // Rationale: see `is_endpoint_path_error`. The error is built through
+        // the real `map_api_status_error` pipeline so this test stays in sync
+        // with the wire-level message format.
+        let response_body = serde_json::json!({
+            "error": {
+                "message": "Authentication failed: Missing API key",
+                "type": "authentication_error",
+                "code": 401
+            }
+        })
+        .to_string();
+        let error = crate::error::map_api_status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &response_body,
+            "",
+            None,
+        );
+
+        // Classified as endpoint path error → keep trying remaining candidates.
+        assert!(is_http_unauthorized_error(&error));
+        assert!(is_endpoint_path_error(&error));
+        assert!(should_try_next_candidate(&error));
+
+        // NOT a configuration error → does not stop the fallback early.
+        assert!(!is_configuration_error(&error));
+    }
+
+    #[test]
+    fn test_http_status_code_parses_structured_prefix() {
+        // Production ApiError messages are produced by `map_api_status_error`
+        // as `"HTTP {status}: {body}"`. The prefix parser must extract the
+        // numeric code from there and ignore HTTP-status substrings that only
+        // appear in the response body (false-positive guard).
+        assert_eq!(
+            http_status_code("HTTP 401 Unauthorized: {\"error\":{}}"),
+            Some(401)
+        );
+        assert_eq!(http_status_code("HTTP 404 Not Found: no body"), Some(404));
+        assert_eq!(http_status_code("HTTP 400 Bad Request: bar"), Some(400));
+
+        // A body that happens to mention another status must not leak in.
+        assert_eq!(
+            http_status_code("HTTP 400 Bad Request: see HTTP 401 docs"),
+            Some(400)
+        );
+        // Non status-shaped, manually constructed ApiErrors → None (keyword
+        // checks handle these instead).
+        assert_eq!(http_status_code("unexpected content type: text/html"), None);
+        assert_eq!(http_status_code("stream error: {\"code\":401}"), None);
+        assert_eq!(http_status_code(""), None);
     }
 
     #[test]
