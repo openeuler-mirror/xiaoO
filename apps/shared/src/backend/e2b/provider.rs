@@ -6,15 +6,23 @@ use agent_contracts::backend::{
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::backend::{
     join_url, normalize_backend_path, E2bBackendState, E2bLifecycle, E2bOperationBackend,
     DEFAULT_API_BASE, DEFAULT_ENVD_PORT, DEFAULT_HOME_DIR, DEFAULT_SHELL, DEFAULT_TEMPLATE_ID,
     DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS, DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
 };
+use super::error::E2bFailure;
 use super::exec::E2bExec;
 use crate::backend::BackendError;
+
+const E2B_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKSPACE_INIT_MAX_ATTEMPTS: usize = 6;
+const WORKSPACE_INIT_BASE_DELAY_MS: u64 = 200;
+const WORKSPACE_INIT_MAX_DELAY_MS: u64 = 2_000;
 
 pub(crate) struct E2bCreateBackendInput {
     pub(crate) backend_id: BackendId,
@@ -118,7 +126,7 @@ pub(crate) async fn create_backend(
 ) -> Result<E2bCreatedBackend, BackendError> {
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let http = reqwest::Client::new();
+    let http = new_e2b_http_client()?;
     let api_base = options
         .api_base
         .as_deref()
@@ -223,7 +231,14 @@ pub(crate) async fn create_backend(
     let backend = Arc::new(E2bOperationBackend::new(Arc::clone(&state)));
 
     if let Err(error) = ensure_remote_roots(&state).await {
-        let _ = state.delete_sandbox().await;
+        if let Err(cleanup_error) = state.delete_sandbox().await {
+            tracing::warn!(
+                operation = "cleanup_failed_workspace_initialization",
+                sandbox_id = %state.sandbox_id,
+                error = %cleanup_error,
+                "Failed to delete E2B sandbox after workspace initialization failure"
+            );
+        }
         return Err(BackendError::BuildFailed {
             message: format!("e2b sandbox created but workspace initialization failed: {error}"),
         });
@@ -243,7 +258,7 @@ pub(crate) async fn create_snapshot(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(DEFAULT_API_BASE)
         .to_string();
-    let http = reqwest::Client::new();
+    let http = new_e2b_http_client()?;
 
     let mut body = Map::new();
     if let Some(name) = input
@@ -306,7 +321,7 @@ pub(crate) async fn delete_snapshot(input: E2bDeleteSnapshotInput) -> Result<boo
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(DEFAULT_API_BASE)
         .to_string();
-    let http = reqwest::Client::new();
+    let http = new_e2b_http_client()?;
 
     let response = http
         .delete(join_url(
@@ -355,7 +370,7 @@ pub(crate) async fn delete_sandbox_by_id(input: E2bDeleteSandboxInput) -> Result
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(DEFAULT_API_BASE)
         .to_string();
-    let http = reqwest::Client::new();
+    let http = new_e2b_http_client()?;
 
     let response = http
         .delete(join_url(
@@ -489,22 +504,39 @@ async fn create_e2b_sandbox(
         body.insert("volumeMounts".to_string(), volume_mounts);
     }
 
+    let started_at = Instant::now();
     let response = http
         .post(join_url(api_base, "/sandboxes"))
         .header("X-API-Key", api_key)
         .json(&Value::Object(body))
         .send()
         .await
-        .map_err(|error| BackendError::BuildFailed {
-            message: format!("failed to create e2b sandbox: {error}"),
+        .map_err(|error| {
+            let failure = E2bFailure::from_reqwest("failed to create e2b sandbox", &error);
+            failure.log(
+                "create_sandbox",
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+            );
+            BackendError::BuildFailed {
+                message: failure.message,
+            }
         })?;
 
     if response.status() != reqwest::StatusCode::CREATED {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let message = super::backend::parse_error_message(text.as_str()).unwrap_or(text);
+        let failure = E2bFailure::from_status("e2b create sandbox", status, message.clone());
+        failure.log(
+            "create_sandbox",
+            None,
+            None,
+            started_at.elapsed().as_millis(),
+        );
         return Err(BackendError::BuildFailed {
-            message: format!("e2b create sandbox failed with HTTP {status}: {message}"),
+            message: failure.message,
         });
     }
 
@@ -614,13 +646,75 @@ async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), Operati
         super::backend::shell_quote(state.workspace_root.0.as_str()),
         super::backend::shell_quote(state.temp_root.0.as_str())
     );
-    let output = exec.run_shell_script(script.as_str(), None).await?;
+    let output = retry_workspace_initialization(
+        state.sandbox_id.as_str(),
+        || exec.run_shell_script_detailed(script.as_str(), None),
+        tokio::time::sleep,
+    )
+    .await
+    .map_err(super::exec::E2bExecFailure::into_operation_error)?;
     if output.exit_code == Some(0) {
         return Ok(());
     }
     Err(OperationError::ExecutionFailed {
         message: String::from_utf8_lossy(output.stderr.as_slice()).to_string(),
     })
+}
+
+async fn retry_workspace_initialization<Attempt, AttemptFuture, Sleep, SleepFuture>(
+    sandbox_id: &str,
+    mut operation: Attempt,
+    mut sleep: Sleep,
+) -> Result<super::exec::E2bExecOutput, super::exec::E2bExecFailure>
+where
+    Attempt: FnMut() -> AttemptFuture,
+    AttemptFuture: Future<Output = Result<super::exec::E2bExecOutput, super::exec::E2bExecFailure>>,
+    Sleep: FnMut(Duration) -> SleepFuture,
+    SleepFuture: Future<Output = ()>,
+{
+    for attempt in 1..=WORKSPACE_INIT_MAX_ATTEMPTS {
+        match operation().await {
+            Ok(output) => return Ok(output),
+            Err(error) if error.retryable() && attempt < WORKSPACE_INIT_MAX_ATTEMPTS => {
+                let delay = workspace_init_backoff(attempt);
+                tracing::warn!(
+                    operation = "initialize_workspace",
+                    sandbox_id,
+                    attempt,
+                    max_attempts = WORKSPACE_INIT_MAX_ATTEMPTS,
+                    retry_delay_ms = delay.as_millis(),
+                    error = %error.message(),
+                    "E2B workspace initialization failed; retrying"
+                );
+                sleep(delay).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("workspace initialization retry loop always returns")
+}
+
+fn workspace_init_backoff(attempt: usize) -> Duration {
+    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+    let base = WORKSPACE_INIT_BASE_DELAY_MS
+        .saturating_mul(2u64.saturating_pow(exponent))
+        .min(WORKSPACE_INIT_MAX_DELAY_MS);
+    let spread = base / 5;
+    let jitter = if spread == 0 {
+        0
+    } else {
+        rand::random::<u64>() % (spread.saturating_mul(2).saturating_add(1))
+    };
+    Duration::from_millis(base.saturating_sub(spread).saturating_add(jitter))
+}
+
+fn new_e2b_http_client() -> Result<reqwest::Client, BackendError> {
+    reqwest::Client::builder()
+        .connect_timeout(E2B_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|error| BackendError::BuildFailed {
+            message: format!("failed to build e2b HTTP client: {error}"),
+        })
 }
 
 fn current_time_ms() -> u64 {
@@ -646,6 +740,136 @@ fn encode_path_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_contracts::backend::capability::exec::ExecRequest;
+    use agent_contracts::backend::capability::filesystem::{WriteBytesRequest, WriteMode};
+    use std::cell::Cell;
+    use std::future::ready;
+
+    #[tokio::test]
+    #[ignore = "requires E2B_API_KEY and creates a real E2B sandbox"]
+    async fn live_structured_grep_executes_command_with_args() {
+        assert!(
+            std::env::var_os("E2B_API_KEY").is_some(),
+            "E2B_API_KEY must be set"
+        );
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let created = create_backend(E2bCreateBackendInput {
+            backend_id: BackendId(format!("e2b-live-grep:{suffix}")),
+            session_id_for_instance: format!("e2b-live-grep-session:{suffix}"),
+            workspace_root_text: DEFAULT_WORKSPACE_ROOT.to_string(),
+            provider_options: json!({
+                "api_key_env": "E2B_API_KEY",
+                "template_id": "base",
+                "timeout_secs": 300,
+                "default_shell": "/bin/sh"
+            }),
+            resource_limits: Default::default(),
+            metadata: json!({"purpose": "structured grep live smoke"}),
+        })
+        .await
+        .expect("create live E2B backend");
+        let backend = created.backend;
+        let smoke_path = BackendPath(format!("{DEFAULT_WORKSPACE_ROOT}/grep-smoke.py"));
+
+        let smoke_result: Result<String, String> = async {
+            backend
+                .files()
+                .write_bytes(WriteBytesRequest {
+                    path: smoke_path,
+                    content: b"watt = watts = W = Quantity(\"watt\")\n".to_vec(),
+                    mode: WriteMode::Overwrite,
+                })
+                .await
+                .map_err(|error| format!("write smoke fixture: {error}"))?;
+
+            let output = backend
+                .exec()
+                .exec(ExecRequest {
+                    command: "grep".to_string(),
+                    args: vec![
+                        "-P".to_string(),
+                        "-n".to_string(),
+                        "-e".to_string(),
+                        r"W\s*=".to_string(),
+                        "grep-smoke.py".to_string(),
+                    ],
+                    shell: None,
+                    cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
+                    timeout_ms: Some(30_000),
+                    env: None,
+                })
+                .await
+                .map_err(|error| format!("execute structured grep: {error}"))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.exit_code != Some(0) {
+                return Err(format!(
+                    "grep exited with {:?}; stderr: {stderr}",
+                    output.exit_code
+                ));
+            }
+            if !stdout.contains("1:watt = watts = W = Quantity") {
+                return Err(format!("unexpected grep stdout: {stdout:?}"));
+            }
+            Ok(stdout)
+        }
+        .await;
+
+        let cleanup_result = backend.shutdown().await;
+        cleanup_result.expect("delete live E2B sandbox");
+        let stdout = smoke_result.expect("structured grep smoke");
+        eprintln!("live E2B structured grep passed: {}", stdout.trim());
+    }
+
+    #[tokio::test]
+    async fn workspace_initialization_retries_transient_failures() {
+        let attempts = Cell::new(0usize);
+        let sleeps = Cell::new(0usize);
+
+        let output = retry_workspace_initialization(
+            "sandbox-test",
+            || {
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                ready(if attempt < 3 {
+                    Err(super::super::exec::E2bExecFailure::retryable_for_test(
+                        "temporary reset",
+                    ))
+                } else {
+                    Ok(super::super::exec::E2bExecOutput {
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        exit_code: Some(0),
+                        timed_out: false,
+                    })
+                })
+            },
+            |_| {
+                sleeps.set(sleeps.get() + 1);
+                ready(())
+            },
+        )
+        .await
+        .expect("third attempt should succeed");
+
+        assert_eq!(output.exit_code, Some(0));
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(sleeps.get(), 2);
+    }
+
+    #[test]
+    fn workspace_backoff_is_bounded_and_jittered() {
+        for attempt in 1..=WORKSPACE_INIT_MAX_ATTEMPTS {
+            let delay_ms = workspace_init_backoff(attempt).as_millis() as u64;
+            let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX);
+            let base = WORKSPACE_INIT_BASE_DELAY_MS
+                .saturating_mul(2u64.saturating_pow(exponent))
+                .min(WORKSPACE_INIT_MAX_DELAY_MS);
+            assert!(delay_ms >= base - base / 5);
+            assert!(delay_ms <= base + base / 5);
+        }
+    }
 
     #[test]
     fn redacts_direct_api_key_from_metadata() {

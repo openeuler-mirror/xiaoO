@@ -17,5 +17,18 @@ mod tool_source;
 mod webfetch;
 mod websearch;
 
+#[cfg(test)]
+mod test_support;
+
+use agent_contracts::backend::capability::filesystem::WriteMode;
+
 pub use todo_write::open_todo_lines;
 pub use tool_source::BuiltinToolSource;
+
+fn preferred_overwrite_mode(supports_atomic_write: bool) -> WriteMode {
+    if supports_atomic_write {
+        WriteMode::AtomicOverwrite
+    } else {
+        WriteMode::Overwrite
+    }
+}

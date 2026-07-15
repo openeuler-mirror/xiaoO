@@ -363,12 +363,13 @@ cat /tmp/xiaoo-demo.log
 
 ### Plugin-requested session actions
 
-`*.Session.lifecycle.state` hook 的响应里除了 `result: "ack"`，还可以携带一个 `actions` 数组，让插件请求宿主在 turn 结束之后执行副作用——目前支持两种：
+`*.Session.lifecycle.state` hook 的响应里除了 `result: "ack"`，还可以携带一个 `actions` 数组，让插件请求宿主在 turn 结束之后执行副作用——目前支持三种：
 
 | `kind` | 必填字段 | daemon 侧行为 | TUI 侧行为 |
 |---|---|---|---|
 | `create_session` | `session_id` | 调用 `open_session`（幂等恢复）打开/恢复该会话 | 切换焦点到该会话并恢复历史 transcript |
-| `switch_session` | `session_id` | 调用 `open_session`（幂等恢复）确保目标会话存在 | 切换焦点到该会话并恢复历史 transcript |
+| `switch_session` | `session_id` | 调用 `open_session`（幂等恢复）确保目标会话存在 | 切换焦点到该会话并恢复历史 transcript（已聚焦则跳过） |
+| `send_prompt` | `session_id`、`text` | 调用 `open_session`（幂等恢复）确保目标会话存在；并给 action 盖戳 `chain_depth = 当前 turn 深度 + 1` | 切换焦点到该会话（已聚焦则跳过）、本地回显 `text` 为用户消息、并向 daemon 的 `POST /api/v1/runtimes/input` 提交该 turn 以拉取 SSE 流自动执行。**仅 remote 模式生效**，本地模式丢弃 |
 
 响应 JSON 形状：
 
@@ -377,10 +378,13 @@ cat /tmp/xiaoo-demo.log
   "result": "ack",
   "actions": [
     { "kind": "create_session", "session_id": "debug-1" },
-    { "kind": "switch_session", "session_id": "debug-1" }
+    { "kind": "switch_session", "session_id": "debug-1" },
+    { "kind": "send_prompt", "session_id": "debug-1", "text": "Investigate the failure you just saw." }
   ]
 }
 ```
+
+> `send_prompt` 的 `chain_depth` 字段**由宿主盖戳，插件不要设置**：daemon 在转发前用 `当前 turn 深度 + 1` 覆盖，TUI 再把它原样回填到新 turn 请求里，让 daemon 在那一轮结束时再次校验。详见下方「跨 turn 深度上限」。
 
 要点：
 
@@ -389,6 +393,33 @@ cat /tmp/xiaoo-demo.log
 - daemon 侧先 `open_session`，失败的 action 被 `tracing::warn!` 记录并过滤，不会转发到 TUI；TUI 侧再异步切换焦点并恢复 transcript。
 - 整条链路 best-effort：任何一层失败都不会向 hook 调用者回传错误。
 - `kind` 用 `snake_case`，未知 `kind` 或缺字段的条目会被静默跳过——单个坏条目不会污染数组其它条目。
-- 宿主强制 `max action depth = 3` 防 `hook→action→hook` 递归：超过上限的批次会被截断（保留前 3 条，多余的条目被 `tracing::warn!` 记录后丢弃）。插件作者请按此硬上限设计。
+- 宿主强制 `max action depth = 3` 防 `hook→action→hook` 单批递归：超过上限的批次会被截断（保留前 3 条，多余的条目被 `tracing::warn!` 记录后丢弃）。**因此 `create_session + switch_session + send_prompt` 三件套恰好填满预算**——若要批量发多条 `send_prompt`，需要拆到多个 turn。插件作者请按此硬上限设计。
+
+### 跨 turn `send_prompt` 深度上限
+
+`send_prompt` 触发的 turn 结束时会**再次** fire `*.Session.lifecycle.state` hook，插件可再发 `send_prompt`，形成跨 turn 链。xiaoo 不约束链的语义终止条件（那是插件脚本自己的职责），但提供一条**宿主侧硬性深度兜底**：
+
+- 配置项：`[hooker].max_prompt_chain_depth`，默认 `128`。
+- 语义：`N` 表示一条链**累积最多跑 N 个 turn**——用户发起的 turn（depth 0）+ `N - 1` 个 `send_prompt` 触发的 turn（depth `1..=N-1`）。第 N 个 `send_prompt` 触发的 turn（depth `N`）会被丢弃。
+- daemon 在 `fire_session_state_hook_and_collect_actions` 收集到 `send_prompt` 后，盖戳 `chain_depth = 当前 turn 深度 + 1`；若该值 `>= max_prompt_chain_depth`，**丢弃该 action**（不转发到 TUI）并 `tracing::warn!`，链在此终止。
+- 用户手动输入的 turn 永远带 `chain_depth = 0`，**立即重置链**——人机协作时随时可以打断。
+- 插件无法伪造低深度绕过上限：daemon 一律覆盖插件可能填写的 `chain_depth` 值。
+
+```toml
+[hooker]
+max_prompt_chain_depth = 128   # 默认值；按需调小便于调试
+```
+
+### `send_prompt` 的使用约束
+
+- **数组顺序**：TUI 顺序处理 `actions`，`send_prompt` 必须排在数组**最后**且每批最多一条。否则后续的 `switch_session` 会重置 TUI state 并打断刚 start 的 turn 的流渲染。`max action depth = 3` 与「三件套」模式天然约束了这一点。
+- **同会话去重**：当 `send_prompt` 的 `session_id` 等于当前已聚焦会话时，TUI 跳过 switch 步骤，直接回显并提交 turn，避免重载 transcript 与插入冗余的 "Switched to session" 系统消息。
+- **并发**：若 TUI 收到 `send_prompt` 时已有 turn 在跑（`is_loading=true`，常见于上一轮的 reveal buffer 还未排空），提示词会被入队 `pending_turns`，由 `start_next_queued_turn` 在 idle 后消费——与用户手输并发时的行为一致。
+- **仅 remote 模式**：本地（非 daemon）模式下 `send_prompt` 与 `create_session`/`switch_session` 一样会被 TUI 丢弃并 `tracing::warn!`，因为可见执行需要 remote backend 才能发起 `/runtimes/input`。
+- **TUI 断连**：daemon 转发 `send_prompt` 后若 TUI 未在读 SSE 流，该 action 实质丢失（daemon 只做了 `open_session`，未自跑 turn）。这是「可见执行」设计的必然代价——turn 的 SSE 流只能由 TUI 发起请求拿到。
+- **turn B 的 chat hook 重入**：`send_prompt` 触发的 turn B 是正常 turn，daemon 的 `agent_loop` 会对其 fire `*.Chat.message.received`，插件会**看到自己刚发出的 `text`**。若同一插件兼注册 `chat_message` 与 `session_state`，`chat_message` 分支不要再基于此发 action，避免二次放大。
+- **`prior_message_count` 语义**：新建 session 的首条 `send_prompt` 在 `chat_message` hook 里 `prior_message_count = 0`，会命中「首条消息」逻辑（如上下文注入），可能符合或不符合预期。
+- **回显 vs 改写**：若 `chat_message` hook 改写了 `send_prompt` 的 `text`，TUI 本地回显原文、daemon 实际跑改写版，下次 transcript 恢复会显改写版（继承自 remote 模式既有行为，非新引入）。
+- **`reasoning_effort` / `llm` 配置**：切焦点时 `reset_for_new_session` 会重置状态，turn B 用目标 session 的默认配置，而非原 turn 的（用户 Ctrl+T 调的强度会丢，与手动 `/sessions` 切换一致）。
 
 完整字段定义、daemon/TUI 两端执行流程、最小示例与排错清单，请参考 [`plugins/hookers/how-to-develop-a-plugin-hooker.md`](../plugins/hookers/how-to-develop-a-plugin-hooker.md) 第 16 章。

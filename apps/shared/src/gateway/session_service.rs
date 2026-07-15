@@ -8,6 +8,7 @@ use crate::{
     RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest, RuntimeReadFileResult,
     RuntimeResumeRequest, RuntimeResumeResult, RuntimeWriteFileRequest, RuntimeWriteFileResult,
 };
+use agent_contracts::backend::ExecutionState;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use memory::MemorySnapshot;
@@ -28,6 +29,13 @@ pub enum SessionServiceError {
     RuntimeShutdown { message: String },
     #[error("core runtime execution failed: {message}")]
     CoreRun { message: String },
+    #[error("core runtime execution interrupted ({execution_state}): {message}")]
+    RuntimeExecInterrupted {
+        message: String,
+        stdout_base64: String,
+        stderr_base64: String,
+        execution_state: ExecutionState,
+    },
     #[error("core runtime execution failed with partial state: {message}")]
     CoreRunWithState {
         message: String,

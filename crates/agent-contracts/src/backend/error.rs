@@ -1,3 +1,21 @@
+/// What is known about a command when its execution transport is interrupted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionState {
+    /// The command request was rejected before execution started.
+    NotStarted,
+    /// The command may still be running or may already have completed remotely.
+    RunningOrCompleted,
+}
+
+impl std::fmt::Display for ExecutionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStarted => formatter.write_str("not_started"),
+            Self::RunningOrCompleted => formatter.write_str("running_or_completed"),
+        }
+    }
+}
+
 /// Errors that can occur during backend operations.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
@@ -27,6 +45,14 @@ pub enum OperationError {
 
     #[error("execution failed: {message}")]
     ExecutionFailed { message: String },
+
+    #[error("execution interrupted ({state}): {message}")]
+    ExecutionInterrupted {
+        message: String,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        state: ExecutionState,
+    },
 
     #[error("transport error: {message}")]
     Transport { message: String },

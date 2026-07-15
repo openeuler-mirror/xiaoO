@@ -375,16 +375,18 @@ impl App {
                 self.state.transcript_selection = None;
             }
             KeyCode::Enter => {
-                if key.modifiers.contains(event::KeyModifiers::ALT) {
-                    self.state
-                        .chat_state
-                        .input
-                        .handle(crate::input::InputRequest::InsertChar('\n'));
-                    self.state.chat_state.reset_input_history_navigation();
-                    self.state.note_input_changed();
+                if editing_key_inserts_newline(key.code, key.modifiers) {
+                    self.insert_newline_into_input();
                 } else {
                     self.submit_editing_input().await?
                 }
+            }
+            // Ctrl+J also inserts a newline. See `editing_key_inserts_newline`
+            // for why both the Enter and Char('j') branches route here.
+            KeyCode::Char('j') | KeyCode::Char('J')
+                if editing_key_inserts_newline(key.code, key.modifiers) =>
+            {
+                self.insert_newline_into_input();
             }
             KeyCode::Up if key.modifiers.is_empty() => {
                 if self.state.chat_state.input_history_cursor.is_some()
@@ -424,6 +426,15 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    fn insert_newline_into_input(&mut self) {
+        self.state
+            .chat_state
+            .input
+            .handle(crate::input::InputRequest::InsertChar('\n'));
+        self.state.chat_state.reset_input_history_navigation();
+        self.state.note_input_changed();
     }
 
     async fn submit_editing_input(&mut self) -> Result<()> {
@@ -528,7 +539,7 @@ impl App {
                 // running turn ends.
                 self.state
                     .chat_state
-                    .enqueue_pending_turn(body, Some(command_context));
+                    .enqueue_pending_turn(body, Some(command_context), 0);
                 return Ok(());
             }
 
@@ -552,7 +563,9 @@ impl App {
                 // any `Transform` would be applied twice (e.g. a prefix
                 // added twice). Queue it once so it is processed once, after
                 // the running turn ends.
-                self.state.chat_state.enqueue_pending_turn(user_input, None);
+                self.state
+                    .chat_state
+                    .enqueue_pending_turn(user_input, None, 0);
             }
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
@@ -697,7 +710,6 @@ impl App {
             self.state.chat_state.stick_to_bottom = true;
             return Ok(());
         }
-
 
         if trimmed.eq_ignore_ascii_case("/cron") {
             self.state.chat_state.input.reset();
@@ -1527,105 +1539,122 @@ impl App {
         let mode = dialog.mode.clone();
 
         match &mode {
-            CronDialogMode::List => {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.state.input_mode = InputMode::Editing;
-                        self.state.cron_dialog = None;
+            CronDialogMode::List => match key.code {
+                KeyCode::Esc => {
+                    self.state.input_mode = InputMode::Editing;
+                    self.state.cron_dialog = None;
+                    self.state
+                        .chat_state
+                        .messages
+                        .push(crate::chat::Message::system(
+                            "Cron job management closed. Restart daemon to apply changes."
+                                .to_string(),
+                        ));
+                    self.state.chat_state.stick_to_bottom = true;
+                }
+                KeyCode::Up => {
+                    dialog.move_up();
+                }
+                KeyCode::Down => {
+                    dialog.move_down();
+                }
+                KeyCode::Char('a') => {
+                    dialog.start_add();
+                }
+                KeyCode::Char('e') => {
+                    dialog.start_edit();
+                }
+                KeyCode::Char('d') => {
+                    dialog.start_delete_confirm();
+                }
+                KeyCode::Char(' ') => {
+                    if let Err(e) = dialog.toggle_enabled() {
                         self.state
                             .chat_state
                             .messages
-                            .push(crate::chat::Message::system(
-                                "Cron job management closed. Restart daemon to apply changes.".to_string(),
-                            ));
+                            .push(crate::chat::Message::error(format!(
+                                "Failed to toggle job: {e}"
+                            )));
                         self.state.chat_state.stick_to_bottom = true;
                     }
-                    KeyCode::Up => {
-                        dialog.move_up();
-                    }
-                    KeyCode::Down => {
-                        dialog.move_down();
-                    }
-                    KeyCode::Char('a') => {
-                        dialog.start_add();
-                    }
-                    KeyCode::Char('e') => {
-                        dialog.start_edit();
-                    }
-                    KeyCode::Char('d') => {
-                        dialog.start_delete_confirm();
-                    }
-                    KeyCode::Char(' ') => {
-                        if let Err(e) = dialog.toggle_enabled() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to toggle job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    _ => {}
                 }
-            }
-            CronDialogMode::ConfirmDelete { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
-                    }
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Err(e) = dialog.confirm_delete() {
-                            self.state
-                                .chat_state
-                                .messages
-                                .push(crate::chat::Message::error(format!(
-                                    "Failed to delete job: {e}"
-                                )));
-                            self.state.chat_state.stick_to_bottom = true;
-                        }
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') => {
-                        dialog.back_to_list();
-                    }
-                    _ => {}
+                _ => {}
+            },
+            CronDialogMode::ConfirmDelete { .. } => match key.code {
+                KeyCode::Esc => {
+                    dialog.back_to_list();
                 }
-            }
-            CronDialogMode::EditForm { .. } => {
-                match key.code {
-                    KeyCode::Esc => {
-                        dialog.back_to_list();
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    if let Err(e) = dialog.confirm_delete() {
+                        self.state
+                            .chat_state
+                            .messages
+                            .push(crate::chat::Message::error(format!(
+                                "Failed to delete job: {e}"
+                            )));
+                        self.state.chat_state.stick_to_bottom = true;
                     }
-                    KeyCode::Tab if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
-                        dialog.edit_prev_field();
-                    }
-                    KeyCode::Tab => {
-                        dialog.edit_next_field();
-                    }
-                    KeyCode::Enter => {
-                        match dialog.save_edit_form() {
-                            Ok(()) => {}
-                            Err(error) => {
-                                dialog.edit_set_error(error);
-                            }
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        dialog.edit_backspace();
-                        dialog.edit_clear_error();
-                    }
-                    KeyCode::Char(c) => {
-                        dialog.edit_push_char(c);
-                        dialog.edit_clear_error();
-                    }
-                    _ => {}
                 }
-            }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    dialog.back_to_list();
+                }
+                _ => {}
+            },
+            CronDialogMode::EditForm { .. } => match key.code {
+                KeyCode::Esc => {
+                    dialog.back_to_list();
+                }
+                KeyCode::Tab if key.modifiers.contains(event::KeyModifiers::SHIFT) => {
+                    dialog.edit_prev_field();
+                }
+                KeyCode::Tab => {
+                    dialog.edit_next_field();
+                }
+                KeyCode::Enter => match dialog.save_edit_form() {
+                    Ok(()) => {}
+                    Err(error) => {
+                        dialog.edit_set_error(error);
+                    }
+                },
+                KeyCode::Backspace => {
+                    dialog.edit_backspace();
+                    dialog.edit_clear_error();
+                }
+                KeyCode::Char(c) => {
+                    dialog.edit_push_char(c);
+                    dialog.edit_clear_error();
+                }
+                _ => {}
+            },
         }
         Ok(())
     }
+}
 
-
+/// Classifies whether a key event in editing mode inserts a newline (rather
+/// than submitting or falling through to the editor's default text input).
+///
+/// Two key forms route to the same newline outcome:
+/// - `Enter` with Alt or Control: most terminals send this for Alt+Enter /
+///   Ctrl+Enter. Some emulators encode Ctrl+J as `Enter`+Control rather than
+///   `Char('j')`+Control, so the Enter branch must accept Control too.
+/// - `Char('j'|'J')` with Control (and without Shift): the traditional Unix
+///   "LF" / ^J. Shift is excluded so Ctrl+Shift+J (and similar combos) is
+///   not silently hijacked as a newline.
+///
+/// Not every terminal can deliver all of these; `Ctrl+J` is the documented
+/// primary shortcut, the others are compatibility fallbacks.
+fn editing_key_inserts_newline(code: KeyCode, modifiers: event::KeyModifiers) -> bool {
+    match code {
+        KeyCode::Enter => {
+            modifiers.intersects(event::KeyModifiers::ALT | event::KeyModifiers::CONTROL)
+        }
+        KeyCode::Char('j') | KeyCode::Char('J') => {
+            modifiers.contains(event::KeyModifiers::CONTROL)
+                && !modifiers.contains(event::KeyModifiers::SHIFT)
+        }
+        _ => false,
+    }
 }
 
 fn is_named_slash_command(trimmed: &str, command: &str) -> bool {
@@ -1712,6 +1741,74 @@ mod tests {
             description: "Review code".to_string(),
             body: "Review this carefully.".to_string(),
         }]
+    }
+
+    #[test]
+    fn editing_newline_key_plain_enter_is_not_newline() {
+        assert!(!editing_key_inserts_newline(
+            KeyCode::Enter,
+            event::KeyModifiers::empty()
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_alt_enter_inserts_newline() {
+        assert!(editing_key_inserts_newline(
+            KeyCode::Enter,
+            event::KeyModifiers::ALT
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_ctrl_enter_inserts_newline() {
+        // Some terminal emulators encode Ctrl+J as Enter+Control rather
+        // than Char('j')+Control, so the Enter branch must accept Control.
+        assert!(editing_key_inserts_newline(
+            KeyCode::Enter,
+            event::KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_ctrl_j_inserts_newline() {
+        assert!(editing_key_inserts_newline(
+            KeyCode::Char('j'),
+            event::KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_ctrl_uppercase_j_inserts_newline() {
+        assert!(editing_key_inserts_newline(
+            KeyCode::Char('J'),
+            event::KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_ctrl_shift_j_does_not_insert_newline() {
+        // Shift must opt out so Ctrl+Shift+J is not silently hijacked.
+        assert!(!editing_key_inserts_newline(
+            KeyCode::Char('j'),
+            event::KeyModifiers::CONTROL | event::KeyModifiers::SHIFT
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_plain_j_is_not_newline() {
+        assert!(!editing_key_inserts_newline(
+            KeyCode::Char('j'),
+            event::KeyModifiers::empty()
+        ));
+    }
+
+    #[test]
+    fn editing_newline_key_alt_j_is_not_newline() {
+        // Only Alt+Enter (not Alt+J) is a newline shortcut.
+        assert!(!editing_key_inserts_newline(
+            KeyCode::Char('j'),
+            event::KeyModifiers::ALT
+        ));
     }
 
     #[test]

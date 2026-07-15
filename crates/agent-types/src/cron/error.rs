@@ -24,19 +24,11 @@ pub use super::expression::CronParseError;
 #[derive(Debug, thiserror::Error)]
 pub enum CronExecutionError {
     #[error("job '{job_name}' timed out after {timeout_secs}s")]
-    Timeout {
-        job_name: String,
-        timeout_secs: u64,
-    },
+    Timeout { job_name: String, timeout_secs: u64 },
 
     #[error("job '{job_name}' session error: {error}")]
-    Session {
-        job_name: String,
-        error: String,
-    },
+    Session { job_name: String, error: String },
 
     #[error("job '{job_name}' is disabled")]
-    Disabled {
-        job_name: String,
-    },
+    Disabled { job_name: String },
 }

@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
 use agent_contracts::tool::{DiscoveredTool, ToolSource};
+use tokio::sync::Mutex;
 
 use super::ask_user_question::discover_ask_user_question;
 use super::bash::discover_bash;
 use super::count_text_length::discover_count_text_length;
 use super::file_edit::discover_file_edit;
-use super::file_read::discover_file_read;
+use super::file_read::{discover_file_read, DedupStateStore};
 use super::file_write::discover_file_write;
 use super::glob::discover_glob;
 use super::grep::discover_grep;
@@ -22,12 +25,16 @@ use crate::r#impl::ToolRuntimeServices;
 /// A built-in tool source.
 pub struct BuiltinToolSource {
     services: ToolRuntimeServices,
+    file_read_state: Arc<Mutex<DedupStateStore>>,
 }
 
 impl BuiltinToolSource {
     /// Creates a new built-in tool source.
     pub fn new(services: ToolRuntimeServices) -> Self {
-        Self { services }
+        Self {
+            services,
+            file_read_state: Arc::new(Mutex::new(DedupStateStore::new())),
+        }
     }
 }
 
@@ -37,8 +44,8 @@ impl ToolSource for BuiltinToolSource {
             discover_ask_user_question(),
             discover_print_hello_world(),
             discover_count_text_length(),
-            discover_file_edit(self.services.clone()),
-            discover_file_read(self.services.clone()),
+            discover_file_edit(self.services.clone(), Arc::clone(&self.file_read_state)),
+            discover_file_read(self.services.clone(), Arc::clone(&self.file_read_state)),
             discover_file_write(self.services.clone()),
             discover_bash(),
             discover_glob(),
@@ -52,5 +59,21 @@ impl ToolSource for BuiltinToolSource {
             discover_send_file(),
             discover_lsp(self.services.clone()),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_read_state_is_isolated_between_sources() {
+        let first = BuiltinToolSource::new(ToolRuntimeServices::default());
+        let second = BuiltinToolSource::new(ToolRuntimeServices::default());
+
+        assert!(!Arc::ptr_eq(
+            &first.file_read_state,
+            &second.file_read_state
+        ));
     }
 }

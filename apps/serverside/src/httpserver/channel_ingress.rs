@@ -101,6 +101,7 @@ pub fn build_channel_turn_request(message: &GatewayChannelMessage) -> AppTurnReq
         reasoning_effort: Default::default(),
         llm: None,
         command_context: None,
+        chain_depth: 0,
     }
 }
 

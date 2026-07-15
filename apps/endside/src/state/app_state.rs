@@ -161,13 +161,6 @@ pub struct RenderState {
     pub slash_popup_inner: Option<Rect>,
     pub interaction_prompt_list_area: Option<Rect>,
     pub interaction_prompt_supplement_area: Option<Rect>,
-    /// Cached plain-text content for each rendered line in the transcript.
-    /// Rebuilt every frame by `render_chat`.
-    pub line_texts: Vec<String>,
-    /// Parallel to `line_texts`: `true` for the first line of every message
-    /// entry (the "▎ Role  HH:MM:SS" header).  These lines are excluded from
-    /// copied text even when visually highlighted.
-    pub line_is_header: Vec<bool>,
     /// Index of the first visible agent tab in the header.
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
@@ -468,8 +461,6 @@ impl AppState {
     pub fn invalidate_transcript_render_cache(&mut self) {
         self.render_state.message_renders.clear();
         self.render_state.transcript_cache = None;
-        self.render_state.line_texts.clear();
-        self.render_state.line_is_header.clear();
         self.render_state.tool_toggle_regions.clear();
         self.render_state.subagent_open_regions.clear();
         self.render_state.active_transcript_key = None;
@@ -699,8 +690,9 @@ impl AppState {
         if sel.is_empty() {
             return None;
         }
+        let cache = self.render_state.transcript_cache.as_ref()?;
         let (start_line, start_col, end_line, end_col) = sel.normalised();
-        let lines = &self.render_state.line_texts;
+        let lines = &cache.line_texts;
 
         if start_line >= lines.len() {
             return None;
@@ -709,13 +701,7 @@ impl AppState {
         let mut segments: Vec<String> = Vec::new();
         for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
             // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
-            if self
-                .render_state
-                .line_is_header
-                .get(line_idx)
-                .copied()
-                .unwrap_or(false)
-            {
+            if cache.line_is_header.get(line_idx).copied().unwrap_or(false) {
                 continue;
             }
             let line = &lines[line_idx];

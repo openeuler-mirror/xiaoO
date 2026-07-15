@@ -92,6 +92,11 @@ impl AppBootstrap {
         hooker_config: HookerRegistryConfig,
         backend_manager: Arc<BackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
+        // Extract the cross-turn `send_prompt` chain depth cap before
+        // `hooker_config` is consumed by the registry builder. The cap is
+        // enforced by `CoreBackedSessionService::fire_session_state_hook_and_collect_actions`,
+        // not by the hooker registry itself.
+        let max_prompt_chain_depth = hooker_config.max_prompt_chain_depth;
         let hooker_registry = HookerRegistryBuilderImpl::new()
             .with_config(hooker_config)
             .build()?;
@@ -100,6 +105,7 @@ impl AppBootstrap {
             runtime_resolver.clone(),
             Arc::from(hooker_registry),
             Arc::clone(&backend_manager),
+            max_prompt_chain_depth,
         ));
         runtime_resolver.bind_subagent_control(
             session_components.clone() as Arc<dyn subagent::SubagentControl>,

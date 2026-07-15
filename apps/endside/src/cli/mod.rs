@@ -16,7 +16,6 @@ use llm_client::{
     LlmProviderWrapper, ResolveInput,
 };
 use serde_json::Value;
-
 // ---------------------------------------------------------------------------
 // CliEventSink
 // ---------------------------------------------------------------------------
@@ -133,6 +132,7 @@ pub struct CliConfig {
     pub operation_backend: Option<crate::backend::GatewayBackendConfig>,
     pub skills_config: skill::SkillsConfig,
     pub subagent: std::collections::BTreeMap<String, config::SubagentRoleConfig>,
+    pub mcp_servers: Vec<mcp::McpServerConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +307,7 @@ mod tests {
             hooker: Default::default(),
             operation_backend: None,
             subagent: Default::default(),
+            mcp_servers: Vec::new(),
         }
     }
 

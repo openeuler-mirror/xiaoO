@@ -464,7 +464,7 @@ impl LlmProvider for OpenAiFamilyProvider {
                     let is_phase1 = idx < base_candidates.len();
                     let has_more_candidates = idx + 1 < final_urls.len();
 
-                    if should_try_next_candidate(&error) && has_more_candidates {
+                    if has_more_candidates && should_try_next_candidate(&error) {
                         if is_phase1 {
                             tracing::warn!(
                                 "Phase 1 candidate #{} failed: {} - trying next candidate",
@@ -670,7 +670,7 @@ impl LlmProvider for OpenAiFamilyProvider {
                     let is_phase1 = idx < base_candidates.len();
                     let has_more_candidates = idx + 1 < final_urls.len();
 
-                    if should_try_next_candidate(&error) && has_more_candidates {
+                    if has_more_candidates && should_try_next_candidate(&error) {
                         if is_phase1 {
                             tracing::warn!(
                                 "Phase 1 candidate #{} failed: {} - trying next candidate",

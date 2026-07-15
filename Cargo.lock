@@ -1856,6 +1856,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3769,6 +3785,7 @@ dependencies = [
  "lazy_static",
  "lopdf",
  "lsp",
+ "mcp",
  "operation_backend",
  "regex",
  "reqwest",
@@ -4894,6 +4911,7 @@ dependencies = [
  "futures-util",
  "llm-client",
  "lsp",
+ "mcp",
  "operation_backend",
  "ratatui",
  "reqwest",
@@ -4932,6 +4950,7 @@ dependencies = [
  "governor",
  "llm-client",
  "lsp",
+ "mcp",
  "mime_guess",
  "operation_backend",
  "prompt",
@@ -4979,6 +4998,7 @@ dependencies = [
  "libc",
  "llm-client",
  "lsp",
+ "mcp",
  "memory",
  "once_cell",
  "operation_backend",

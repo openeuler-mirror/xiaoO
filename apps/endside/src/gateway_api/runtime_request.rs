@@ -22,7 +22,7 @@ const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
-        self.start_turn_internal(state, prompt, true, None).await
+        self.start_turn_internal(state, prompt, true, None, 0).await
     }
 
     /// Like `start_turn` but carries slash-command metadata so the
@@ -33,7 +33,22 @@ impl GatewayRuntime {
         prompt: String,
         command_context: agent_types::chat::CommandContext,
     ) -> Result<(), String> {
-        self.start_turn_internal(state, prompt, true, Some(command_context))
+        self.start_turn_internal(state, prompt, true, Some(command_context), 0)
+            .await
+    }
+
+    /// Like `start_turn` but carries a `send_prompt` hook action's
+    /// `chain_depth`. User-typed turns use [`start_turn`] (depth 0, resets
+    /// the chain); this entry point is for turns spawned by a plugin's
+    /// `SendPrompt` action so the daemon can track and cap the cross-turn
+    /// chain depth.
+    pub async fn start_turn_for_hook_prompt(
+        &mut self,
+        state: &mut AppState,
+        prompt: String,
+        chain_depth: usize,
+    ) -> Result<(), String> {
+        self.start_turn_internal(state, prompt, true, None, chain_depth)
             .await
     }
 
@@ -45,8 +60,14 @@ impl GatewayRuntime {
             return Ok(false);
         };
         self.discard_pending_user_message(&queued.prompt);
-        self.start_turn_internal(state, queued.prompt, true, queued.command_context)
-            .await?;
+        self.start_turn_internal(
+            state,
+            queued.prompt,
+            true,
+            queued.command_context,
+            queued.chain_depth,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -66,10 +87,17 @@ impl GatewayRuntime {
         prompt: String,
         append_user_message: bool,
         command_context: Option<agent_types::chat::CommandContext>,
+        chain_depth: usize,
     ) -> Result<(), String> {
         if self.remote.is_some() {
             return self
-                .start_remote_turn(state, prompt, append_user_message, command_context)
+                .start_remote_turn(
+                    state,
+                    prompt,
+                    append_user_message,
+                    command_context,
+                    chain_depth,
+                )
                 .await;
         }
 
@@ -113,7 +141,8 @@ impl GatewayRuntime {
 
         let runtime_config = self.build_runtime_config(state)?;
         let open_request = self.session_open_request(state)?;
-        let turn_request = self.turn_request(state, prompt.clone(), command_context)?;
+        let turn_request =
+            self.turn_request(state, prompt.clone(), command_context, chain_depth)?;
 
         state.chat_state.stick_to_bottom = true;
         self.request_start = Some(Instant::now());
@@ -270,6 +299,7 @@ impl GatewayRuntime {
                     )
                 })
                 .collect(),
+            mcp_servers: state.agent_config.mcp.servers.clone(),
         })
     }
 
@@ -291,6 +321,7 @@ impl GatewayRuntime {
         state: &AppState,
         text: String,
         command_context: Option<agent_types::chat::CommandContext>,
+        chain_depth: usize,
     ) -> Result<AppTurnRequest, String> {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
         Ok(AppTurnRequest {
@@ -309,6 +340,7 @@ impl GatewayRuntime {
             reasoning_effort: state.reasoning_effort,
             llm: None,
             command_context,
+            chain_depth,
         })
     }
 }

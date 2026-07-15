@@ -8,7 +8,9 @@ use agent_types::cron::{CronExecutionError, CronJobConfig};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use xiaoo_shared::gateway::{AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService};
+use xiaoo_shared::gateway::{
+    AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
+};
 
 // ── Public API ──────────────────────────────────────────────────
 
@@ -296,6 +298,7 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         reasoning_effort: agent_types::ReasoningEffort::Off,
         llm: None,
         command_context: None,
+        chain_depth: 0,
     };
 
     tracing::info!(

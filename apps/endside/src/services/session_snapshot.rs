@@ -882,7 +882,9 @@ mod tests {
             parent_chain: vec!["parent".to_string()],
         });
 
-        let path = autosave_on_interrupt(&state, None).expect("autosave ok").expect("path");
+        let path = autosave_on_interrupt(&state, None)
+            .expect("autosave ok")
+            .expect("path");
 
         // The file must reuse the loaded name and parent chain, not a fresh
         // timestamped one.
@@ -906,7 +908,9 @@ mod tests {
             parent_chain: Vec::new(),
         });
 
-        let path = autosave_on_interrupt(&state, None).expect("autosave ok").expect("path");
+        let path = autosave_on_interrupt(&state, None)
+            .expect("autosave ok")
+            .expect("path");
 
         assert_eq!(path.file_name().unwrap(), "my-snapshot.json");
         let _ = fs::remove_file(&path);

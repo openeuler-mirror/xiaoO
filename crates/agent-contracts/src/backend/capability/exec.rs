@@ -25,6 +25,9 @@ pub struct ExecResult {
 /// Command execution capability.
 #[async_trait]
 pub trait OperationExec: Send + Sync {
+    fn default_shell(&self) -> Option<&str> {
+        None
+    }
     /// Execute a command.
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError>;
 }

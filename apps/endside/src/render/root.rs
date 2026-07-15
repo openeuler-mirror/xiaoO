@@ -113,14 +113,14 @@ impl App {
         area: Rect,
         dialog: &crate::cron_dialog::CronDialog,
     ) {
+        use super::utils::sanitize_terminal_text;
         use crate::cron_dialog::CronDialogMode;
         use ratatui::{
             layout::{Constraint, Direction, Layout},
             style::{Modifier, Style},
-            widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
             text::{Line, Span},
+            widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
         };
-        use super::utils::sanitize_terminal_text;
 
         let theme = self.state.theme;
 
@@ -130,17 +130,28 @@ impl App {
                 let dialog_height = (area.height * 3 / 4).min(24).max(10);
                 let x = (area.width.saturating_sub(dialog_width)) / 2;
                 let y = (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect { x, y, width: dialog_width, height: dialog_height };
+                let dialog_area = Rect {
+                    x,
+                    y,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
                 frame.render_widget(Clear, dialog_area);
 
                 let title = if dialog.cron_section_present {
-                    format!(" Cron Jobs [{} job(s)] — a:add e:edit d:delete Space:toggle Esc:close ", dialog.jobs.len())
+                    format!(
+                        " Cron Jobs [{} job(s)] — a:add e:edit d:delete Space:toggle Esc:close ",
+                        dialog.jobs.len()
+                    )
                 } else {
                     format!(" Cron Jobs [{} job(s)] (no [cron] section in config.toml) — a:add e:edit d:delete Space:toggle Esc:close ", dialog.jobs.len())
                 };
 
                 let block = Block::default()
-                    .title(Span::styled(sanitize_terminal_text(&title), Style::default().add_modifier(Modifier::BOLD)))
+                    .title(Span::styled(
+                        sanitize_terminal_text(&title),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ))
                     .borders(Borders::ALL)
                     .style(Style::default().fg(theme.foreground).bg(theme.background));
                 frame.render_widget(block, dialog_area);
@@ -156,28 +167,36 @@ impl App {
                         .style(Style::default().fg(theme.muted));
                     frame.render_widget(msg, inner);
                 } else {
-                    let items: Vec<ListItem> = dialog.jobs.iter().enumerate().map(|(i, job)| {
-                        let prefix = if i == dialog.selected { "> " } else { "  " };
-                        let status = if job.enabled { "[✓]" } else { "[ ]" };
-                        let cron_status = if job.cron_valid { "" } else { " [INVALID]" };
-                        let text = format!(
-                            "{}{} {} ({}): {}   {}{}",
-                            prefix, status, job.name, job.cron_raw,
-                            job.prompt.chars().take(40).collect::<String>(),
-                            if job.prompt.len() > 40 { "..." } else { "" },
-                            cron_status,
-                        );
-                        let style = if i == dialog.selected {
-                            Style::default().fg(theme.foreground).bg(theme.selection)
-                        } else if !job.enabled {
-                            Style::default().fg(theme.muted)
-                        } else if !job.cron_valid {
-                            Style::default().fg(theme.error)
-                        } else {
-                            Style::default().fg(theme.foreground)
-                        };
-                        ListItem::new(sanitize_terminal_text(&text)).style(style)
-                    }).collect();
+                    let items: Vec<ListItem> = dialog
+                        .jobs
+                        .iter()
+                        .enumerate()
+                        .map(|(i, job)| {
+                            let prefix = if i == dialog.selected { "> " } else { "  " };
+                            let status = if job.enabled { "[✓]" } else { "[ ]" };
+                            let cron_status = if job.cron_valid { "" } else { " [INVALID]" };
+                            let text = format!(
+                                "{}{} {} ({}): {}   {}{}",
+                                prefix,
+                                status,
+                                job.name,
+                                job.cron_raw,
+                                job.prompt.chars().take(40).collect::<String>(),
+                                if job.prompt.len() > 40 { "..." } else { "" },
+                                cron_status,
+                            );
+                            let style = if i == dialog.selected {
+                                Style::default().fg(theme.foreground).bg(theme.selection)
+                            } else if !job.enabled {
+                                Style::default().fg(theme.muted)
+                            } else if !job.cron_valid {
+                                Style::default().fg(theme.error)
+                            } else {
+                                Style::default().fg(theme.foreground)
+                            };
+                            ListItem::new(sanitize_terminal_text(&text)).style(style)
+                        })
+                        .collect();
 
                     let list = List::new(items);
                     frame.render_widget(list, inner);
@@ -190,11 +209,19 @@ impl App {
                     let dialog_height = 6;
                     let x = (area.width.saturating_sub(dialog_width)) / 2;
                     let y = (area.height.saturating_sub(dialog_height)) / 2;
-                    let dialog_area = Rect { x, y, width: dialog_width, height: dialog_height };
+                    let dialog_area = Rect {
+                        x,
+                        y,
+                        width: dialog_width,
+                        height: dialog_height,
+                    };
                     frame.render_widget(Clear, dialog_area);
 
                     let block = Block::default()
-                        .title(Span::styled(" Confirm Delete ", Style::default().add_modifier(Modifier::BOLD)))
+                        .title(Span::styled(
+                            " Confirm Delete ",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        ))
                         .borders(Borders::ALL)
                         .style(Style::default().fg(theme.foreground).bg(theme.background));
                     frame.render_widget(block, dialog_area);
@@ -216,17 +243,27 @@ impl App {
                 }
             }
 
-            CronDialogMode::EditForm { form, focus, error, .. } => {
+            CronDialogMode::EditForm {
+                form, focus, error, ..
+            } => {
                 let dialog_width = 70.min(area.width.saturating_sub(4));
                 let dialog_height = (area.height.saturating_sub(2)).min(22).max(3);
                 let x = (area.width.saturating_sub(dialog_width)) / 2;
                 let y = (area.height.saturating_sub(dialog_height)) / 2;
-                let dialog_area = Rect { x, y, width: dialog_width, height: dialog_height };
+                let dialog_area = Rect {
+                    x,
+                    y,
+                    width: dialog_width,
+                    height: dialog_height,
+                };
                 frame.render_widget(Clear, dialog_area);
 
                 let title = " Edit Cron Job — Tab:next field  Enter:save  Esc:cancel ";
                 let block = Block::default()
-                    .title(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)))
+                    .title(Span::styled(
+                        title,
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ))
                     .borders(Borders::ALL)
                     .style(Style::default().fg(theme.foreground).bg(theme.background));
                 frame.render_widget(block, dialog_area);
@@ -240,19 +277,45 @@ impl App {
                 let fields: Vec<(&str, &str, crate::cron_dialog::CronEditField)> = vec![
                     ("Name:", &form.name, crate::cron_dialog::CronEditField::Name),
                     ("Cron:", &form.cron, crate::cron_dialog::CronEditField::Cron),
-                    ("Prompt:", &form.prompt, crate::cron_dialog::CronEditField::Prompt),
-                    ("Description:", &form.description, crate::cron_dialog::CronEditField::Description),
-                    ("Agent Role:", &form.agent_role, crate::cron_dialog::CronEditField::AgentRole),
-                    ("Timeout (s):", &form.timeout_secs, crate::cron_dialog::CronEditField::TimeoutSecs),
-                    ("Max Retries:", &form.max_retries, crate::cron_dialog::CronEditField::MaxRetries),
-                    ("Retry Delay (s):", &form.retry_delay, crate::cron_dialog::CronEditField::RetryDelay),
+                    (
+                        "Prompt:",
+                        &form.prompt,
+                        crate::cron_dialog::CronEditField::Prompt,
+                    ),
+                    (
+                        "Description:",
+                        &form.description,
+                        crate::cron_dialog::CronEditField::Description,
+                    ),
+                    (
+                        "Agent Role:",
+                        &form.agent_role,
+                        crate::cron_dialog::CronEditField::AgentRole,
+                    ),
+                    (
+                        "Timeout (s):",
+                        &form.timeout_secs,
+                        crate::cron_dialog::CronEditField::TimeoutSecs,
+                    ),
+                    (
+                        "Max Retries:",
+                        &form.max_retries,
+                        crate::cron_dialog::CronEditField::MaxRetries,
+                    ),
+                    (
+                        "Retry Delay (s):",
+                        &form.retry_delay,
+                        crate::cron_dialog::CronEditField::RetryDelay,
+                    ),
                 ];
 
                 let mut lines: Vec<Line> = Vec::new();
                 for (label, value, field) in &fields {
                     let is_focused = *focus == *field;
                     let label_style = if is_focused {
-                        Style::default().fg(theme.foreground).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(theme.foreground)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(theme.muted)
                     };
@@ -267,7 +330,10 @@ impl App {
                         sanitize_terminal_text(value)
                     };
                     lines.push(Line::from(vec![
-                        Span::styled(format!("{:<14}", sanitize_terminal_text(label)), label_style),
+                        Span::styled(
+                            format!("{:<14}", sanitize_terminal_text(label)),
+                            label_style,
+                        ),
                         Span::styled(display_value, value_style),
                     ]));
                 }
@@ -275,12 +341,13 @@ impl App {
                 if let Some(err) = error {
                     lines.push(Line::from(Span::styled(
                         sanitize_terminal_text(&format!("Error: {}", err)),
-                        Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.error)
+                            .add_modifier(Modifier::BOLD),
                     )));
                 }
 
-                let paragraph = Paragraph::new(lines)
-                    .wrap(Wrap { trim: false });
+                let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
                 frame.render_widget(paragraph, inner[0]);
             }
         }

@@ -7,6 +7,7 @@ use agent_types::cron::{CronExpression, CronJobConfig};
 use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
+use mcp::McpSection;
 use serde::Deserialize;
 use serde_json;
 use skill::SkillsConfig;
@@ -50,6 +51,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub cron: Option<CronSectionRaw>,
+    #[serde(default)]
+    pub mcp: McpSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -783,10 +786,9 @@ fn default_user_workspace_dir(agent_id: &str) -> PathBuf {
         .join(agent_id)
 }
 
-
 // ── Cron types ──────────────────────────────────────────────────
 
-/// Mirror of 's  section.
+/// Mirror of `config.toml`'s `[cron]` section.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CronSectionRaw {
     #[serde(default = "default_cron_jobs_dir")]
@@ -799,14 +801,14 @@ pub struct CronSectionRaw {
     pub default_timeout_secs: u64,
 }
 
-/// Top-level structure of .
+/// Top-level structure of `jobs.toml`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CronJobsFileRaw {
     #[serde(default)]
     pub job: Vec<CronJobRaw>,
 }
 
-/// Single  entry in .
+/// Single `[[job]]` entry in `jobs.toml`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CronJobRaw {
     pub name: String,
@@ -837,8 +839,7 @@ pub struct CronJobRaw {
 // ── Default helpers ─────────────────────────────────────────────
 
 fn default_cron_jobs_dir() -> String {
-    let home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".config/xiaoo/cron")
         .to_string_lossy()
         .into_owned()

@@ -87,8 +87,7 @@ struct CronSectionRaw {
 }
 
 fn default_cron_jobs_dir() -> String {
-    let home = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".config/xiaoo/cron")
         .to_string_lossy()
         .into_owned()
@@ -112,15 +111,15 @@ pub fn load_cron_snapshot(config_path: &Path) -> anyhow::Result<CronConfigSnapsh
         .map_err(|e| anyhow::anyhow!("failed to read config.toml: {e}"))?;
 
     // Parse the [cron] section minimally
-    let cron_section: Option<CronSectionRaw> = toml::from_str(&config_content).ok()
+    let cron_section: Option<CronSectionRaw> = toml::from_str(&config_content)
+        .ok()
         .and_then(|v: toml::Value| v.get("cron").cloned())
         .and_then(|v| CronSectionRaw::deserialize(v).ok());
 
-    let (jobs_dir, default_timeout_secs, cron_section_present) =
-        match cron_section {
-            Some(cfg) => (cfg.jobs_dir, cfg.default_timeout_secs, true),
-            None => (default_cron_jobs_dir(), default_cron_timeout(), false),
-        };
+    let (jobs_dir, default_timeout_secs, cron_section_present) = match cron_section {
+        Some(cfg) => (cfg.jobs_dir, cfg.default_timeout_secs, true),
+        None => (default_cron_jobs_dir(), default_cron_timeout(), false),
+    };
 
     let jobs_dir = shellexpand::tilde(&jobs_dir).into_owned();
     let jobs_file = Path::new(&jobs_dir).join("jobs.toml");
@@ -143,28 +142,40 @@ pub fn load_cron_snapshot(config_path: &Path) -> anyhow::Result<CronConfigSnapsh
 
 /// Write the given jobs back to `jobs.toml`.
 pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyhow::Result<()> {
-    let toml_jobs: Vec<JobToml> = jobs.iter().map(|j| JobToml {
-        name: j.name.clone(),
-        description: j.description.clone(),
-        cron: j.cron_raw.clone(),
-        prompt: j.prompt.clone(),
-        agent_role: j.agent_role.clone(),
-        timeout_secs: if j.timeout_secs == snapshot.default_timeout_secs {
-            None
-        } else {
-            Some(j.timeout_secs)
-        },
-        enabled: if !j.enabled { Some(false) } else { None },
-        max_retries: if j.max_retries != 0 { Some(j.max_retries) } else { None },
-        retry_delay_secs: if j.retry_delay_secs != 60 { Some(j.retry_delay_secs) } else { None },
-    }).collect();
+    let toml_jobs: Vec<JobToml> = jobs
+        .iter()
+        .map(|j| JobToml {
+            name: j.name.clone(),
+            description: j.description.clone(),
+            cron: j.cron_raw.clone(),
+            prompt: j.prompt.clone(),
+            agent_role: j.agent_role.clone(),
+            timeout_secs: if j.timeout_secs == snapshot.default_timeout_secs {
+                None
+            } else {
+                Some(j.timeout_secs)
+            },
+            enabled: if !j.enabled { Some(false) } else { None },
+            max_retries: if j.max_retries != 0 {
+                Some(j.max_retries)
+            } else {
+                None
+            },
+            retry_delay_secs: if j.retry_delay_secs != 60 {
+                Some(j.retry_delay_secs)
+            } else {
+                None
+            },
+        })
+        .collect();
 
     let jobs_toml = JobsToml { job: toml_jobs };
 
-    let parent = snapshot.jobs_file.parent()
+    let parent = snapshot
+        .jobs_file
+        .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid jobs file path"))?;
-    fs::create_dir_all(parent)
-        .map_err(|e| anyhow::anyhow!("failed to create cron dir: {e}"))?;
+    fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("failed to create cron dir: {e}"))?;
 
     let content = toml::to_string_pretty(&jobs_toml)
         .map_err(|e| anyhow::anyhow!("failed to serialize jobs.toml: {e}"))?;
@@ -177,28 +188,33 @@ pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyho
 
 /// Validate a cron expression string. Returns `Ok(())` if valid.
 pub fn validate_cron_expr(raw: &str) -> Result<(), String> {
-    CronExpression::parse(raw).map(|_| ()).map_err(|e| e.to_string())
+    CronExpression::parse(raw)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 // ── Internal helpers ───────────────────────────────────────────
 
 fn parse_jobs_toml(content: &str, default_timeout: u64) -> anyhow::Result<Vec<CronJobEntry>> {
-    let jobs: JobsToml = toml::from_str(content)
-        .map_err(|e| anyhow::anyhow!("failed to parse jobs.toml: {e}"))?;
+    let jobs: JobsToml =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("failed to parse jobs.toml: {e}"))?;
 
-    jobs.job.into_iter().map(|j| {
-        let cron_valid = CronExpression::parse(&j.cron).is_ok();
-        Ok(CronJobEntry {
-            name: j.name,
-            description: j.description,
-            cron_raw: j.cron,
-            cron_valid,
-            prompt: j.prompt,
-            agent_role: j.agent_role,
-            timeout_secs: j.timeout_secs.unwrap_or(default_timeout),
-            enabled: j.enabled.unwrap_or(true),
-            max_retries: j.max_retries.unwrap_or(0),
-            retry_delay_secs: j.retry_delay_secs.unwrap_or(60),
+    jobs.job
+        .into_iter()
+        .map(|j| {
+            let cron_valid = CronExpression::parse(&j.cron).is_ok();
+            Ok(CronJobEntry {
+                name: j.name,
+                description: j.description,
+                cron_raw: j.cron,
+                cron_valid,
+                prompt: j.prompt,
+                agent_role: j.agent_role,
+                timeout_secs: j.timeout_secs.unwrap_or(default_timeout),
+                enabled: j.enabled.unwrap_or(true),
+                max_retries: j.max_retries.unwrap_or(0),
+                retry_delay_secs: j.retry_delay_secs.unwrap_or(60),
+            })
         })
-    }).collect()
+        .collect()
 }

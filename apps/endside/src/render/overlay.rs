@@ -316,9 +316,9 @@ impl App {
         } else if self.state.chat_state.is_loading {
             " Enter 加入队列 | Esc 取消当前任务 "
         } else if has_tool_cards {
-            " Enter 发送 | Alt+Enter 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
+            " Enter 发送 | Ctrl+J 换行 | / 命令 | Click 工具详情 | Ctrl+C 退出 "
         } else {
-            " Enter 发送 | Alt+Enter 换行 | / 命令 | Ctrl+C 退出 "
+            " Enter 发送 | Ctrl+J 换行 | / 命令 | Ctrl+C 退出 "
         };
         let input_style = self.state.theme.default_style();
         let block = Block::default()
@@ -1217,9 +1217,46 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Commit pending whitespace then pending word into the current line at
+/// `(row, line_width)`, recording each char's visual position and advancing
+/// the line width. Both pending buffers are drained and their width trackers
+/// reset to 0. Returns the updated line width.
+fn flush_pending(
+    pos: &mut [(usize, usize)],
+    chars: &[char],
+    pending_ws: &mut Vec<usize>,
+    pending_ws_width: &mut usize,
+    pending_word: &mut Vec<usize>,
+    pending_word_width: &mut usize,
+    row: usize,
+    line_width: usize,
+) -> usize {
+    let mut lw = line_width;
+    for ci in pending_ws.drain(..) {
+        pos[ci] = (row, lw);
+        lw += char_display_width(chars[ci]);
+    }
+    *pending_ws_width = 0;
+    for ci in pending_word.drain(..) {
+        pos[ci] = (row, lw);
+        lw += char_display_width(chars[ci]);
+    }
+    *pending_word_width = 0;
+    lw
+}
+
 /// Calculate the visual cursor position considering automatic line wrapping.
-/// Matches ratatui's WordWrapper: tracks pending whitespace separately,
-/// consumes trailing whitespace on wrap, preserves word continuity across wraps.
+///
+/// Faithfully mirrors ratatui 0.28's `WordWrapper` with `Wrap { trim: false }`,
+/// which is exactly what the input `Paragraph` uses. The previous
+/// implementation trimmed trailing whitespace from each wrapped line, but
+/// ratatui keeps it on the current line (filling up to the column width) and
+/// only consumes whitespace that would overflow the break. That mismatch left
+/// the cursor on the wrong row/column whenever long text wrapped around runs
+/// of spaces, hit exact-fill boundaries, or mixed CJK with word breaks.
+///
+/// `pos[p]` holds the visual (row, col) where character `p` is rendered, and
+/// `pos[len]` the end-of-text cursor. `pos[cursor]` is returned.
 fn calculate_visual_cursor_position(
     value: &str,
     cursor: usize,
@@ -1230,141 +1267,145 @@ fn calculate_visual_cursor_position(
     }
 
     let chars: Vec<char> = value.chars().collect();
-    let cursor = cursor.min(chars.len());
+    let n = chars.len();
+    let cursor = cursor.min(n);
 
-    let mut lines: Vec<(usize, usize)> = Vec::new();
-    let mut line_start = 0usize;
-    let mut line_width = 0usize;
-    let mut word_start = 0usize;
-    let mut word_width = 0usize;
-    let mut pending_space = 0usize;
+    let mut pos: Vec<(usize, usize)> = vec![(0, 0); n + 1];
+
+    // ratatui WordWrapper state (trim == false).
+    let mut row = 0usize;
+    let mut line_width = 0usize; // width of committed pending_line content
+    let mut non_ws_prev = false;
+    let mut pending_word: Vec<usize> = Vec::new();
+    let mut pending_word_width = 0usize;
+    let mut pending_ws: Vec<usize> = Vec::new();
+    let mut pending_ws_width = 0usize;
 
     for (idx, &ch) in chars.iter().enumerate() {
+        // ratatui splits Paragraph text on '\n' into separate input Lines
+        // before wrapping, so a newline is a hard line break.
         if ch == '\n' {
-            if idx == cursor {
-                return (lines.len(), line_width + pending_space + word_width);
-            }
-            lines.push((line_start, idx));
-            line_start = idx + 1;
+            line_width = flush_pending(
+                &mut pos,
+                &chars,
+                &mut pending_ws,
+                &mut pending_ws_width,
+                &mut pending_word,
+                &mut pending_word_width,
+                row,
+                line_width,
+            );
+            pos[idx] = (row, line_width);
+            row += 1;
             line_width = 0;
-            word_start = idx + 1;
-            word_width = 0;
-            pending_space = 0;
+            non_ws_prev = false;
             continue;
         }
 
-        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        let sw = char_display_width(ch);
+        if sw > max_width {
+            // ratatui silently drops symbols wider than the line limit.
+            pos[idx] = (row, line_width);
+            non_ws_prev = !ch.is_whitespace();
+            continue;
+        }
+        let is_ws = ch.is_whitespace();
 
-        if ch.is_whitespace() {
-            if word_width > 0 {
-                let total = line_width + pending_space + word_width;
-                if total > max_width && line_width > 0 {
-                    push_line_consume_whitespace(
-                        &mut lines,
-                        &chars,
-                        &mut line_start,
-                        &mut line_width,
-                        word_start,
-                        &mut pending_space,
-                        max_width,
-                    );
-                } else {
-                    line_width += pending_space + word_width;
+        let word_found = non_ws_prev && is_ws;
+        // `untrimmed_overflow` only fires when trim == false (our case) and the
+        // line has no committed content yet but the symbol would overflow.
+        let untrimmed_overflow =
+            line_width == 0 && pending_word_width + pending_ws_width + sw > max_width;
+
+        if word_found || untrimmed_overflow {
+            // commit pending whitespace then pending word into the current line
+            line_width = flush_pending(
+                &mut pos,
+                &chars,
+                &mut pending_ws,
+                &mut pending_ws_width,
+                &mut pending_word,
+                &mut pending_word_width,
+                row,
+                line_width,
+            );
+        }
+
+        let line_full = line_width >= max_width;
+        let pending_word_overflow =
+            sw > 0 && line_width + pending_ws_width + pending_word_width >= max_width;
+
+        if line_full || pending_word_overflow {
+            let pushed_row = row;
+            let pushed_width = line_width;
+            line_width = 0;
+            row += 1;
+
+            // ratatui consumes leading pending whitespace to fill the remainder
+            // of the just-pushed line (rendered as background). Those chars land
+            // on the pushed line, not the next one.
+            let mut remaining = max_width.saturating_sub(pushed_width);
+            let mut fill_col = pushed_width;
+            while let Some(&ci) = pending_ws.first() {
+                let cw = char_display_width(chars[ci]);
+                if cw > remaining {
+                    break;
                 }
-                word_width = 0;
+                pos[ci] = (pushed_row, fill_col);
+                fill_col += cw;
+                remaining -= cw;
+                pending_ws.remove(0);
+                pending_ws_width -= cw;
             }
-            pending_space += char_width;
-            word_start = idx + 1;
+
+            // When the pending whitespace buffer is fully consumed at the break,
+            // ratatui drops the current whitespace symbol (the first one of the
+            // next word). Position it at the end of the just-pushed line so the
+            // cursor clamps there instead of jumping to the next row prematurely.
+            if is_ws && pending_ws.is_empty() {
+                pos[idx] = (pushed_row, max_width);
+                non_ws_prev = false;
+                continue;
+            }
+        }
+
+        if is_ws {
+            pending_ws.push(idx);
+            pending_ws_width += sw;
         } else {
-            if word_width == 0 {
-                word_start = idx;
-            }
-            word_width += char_width;
-
-            let total = line_width + pending_space + word_width;
-            if total > max_width {
-                if line_width > 0 {
-                    push_line_consume_whitespace(
-                        &mut lines,
-                        &chars,
-                        &mut line_start,
-                        &mut line_width,
-                        word_start,
-                        &mut pending_space,
-                        max_width,
-                    );
-                }
-
-                while word_width > max_width {
-                    let mut break_idx = line_start;
-                    let mut break_width = 0usize;
-                    for &c in chars[line_start..=idx].iter() {
-                        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-                        if break_width + w > max_width && break_width > 0 {
-                            break;
-                        }
-                        break_width += w;
-                        break_idx += 1;
-                    }
-                    lines.push((line_start, break_idx));
-                    line_start = break_idx;
-                    word_width -= break_width;
-                }
-            }
+            pending_word.push(idx);
+            pending_word_width += sw;
         }
+        non_ws_prev = !is_ws;
     }
 
-    if line_start < chars.len() {
-        lines.push((line_start, chars.len()));
+    // end-of-input tail, mirroring ratatui's `process_input`
+    if line_width == 0 && pending_word.is_empty() && !pending_ws.is_empty() {
+        // trailing whitespace with no following word on an empty line: ratatui
+        // emits a blank line first, then the whitespace starts the next row.
+        row += 1;
     }
+    line_width = flush_pending(
+        &mut pos,
+        &chars,
+        &mut pending_ws,
+        &mut pending_ws_width,
+        &mut pending_word,
+        &mut pending_word_width,
+        row,
+        line_width,
+    );
+    pos[n] = (row, line_width);
 
-    for (row, (start, end)) in lines.iter().enumerate() {
-        if cursor >= *start && cursor <= *end {
-            let col: usize = chars[*start..cursor.min(*end)]
-                .iter()
-                .map(|c| unicode_width::UnicodeWidthChar::width(*c).unwrap_or(0))
-                .sum();
-            return (row, col);
-        }
-    }
-
-    if cursor >= line_start {
-        return (lines.len(), 0);
-    }
-
-    (0, 0)
-}
-
-fn push_line_consume_whitespace(
-    lines: &mut Vec<(usize, usize)>,
-    chars: &[char],
-    line_start: &mut usize,
-    line_width: &mut usize,
-    word_start: usize,
-    pending_space: &mut usize,
-    max_width: usize,
-) {
-    if *pending_space <= max_width.saturating_sub(*line_width) {
-        *pending_space = 0;
-    }
-    let mut line_end = word_start;
-    while line_end > *line_start && chars[line_end - 1].is_whitespace() {
-        line_end -= 1;
-    }
-    lines.push((*line_start, line_end));
-    *line_start = word_start;
-    *line_width = 0;
-
-    while *pending_space > 0 && *line_start > line_end && chars[*line_start - 1].is_whitespace() {
-        let w = unicode_width::UnicodeWidthChar::width(chars[*line_start - 1]).unwrap_or(0);
-        *line_start -= 1;
-        *pending_space = pending_space.saturating_sub(w);
-    }
+    pos[cursor]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
 
     #[test]
     fn test_basic() {
@@ -1388,5 +1429,134 @@ mod tests {
     fn test_empty() {
         let (row, col) = calculate_visual_cursor_position("", 0, 10);
         assert_eq!((row, col), (0, 0));
+    }
+
+    #[test]
+    fn test_multiple_spaces_wrap() {
+        // "aa   bb" at width 4: ratatui renders "aa  " / "bb  " (two trailing
+        // spaces fill the first line as background). Cursor at the end (7) must
+        // be on row 1 at the end of "bb" (col 2).
+        assert_eq!(calculate_visual_cursor_position("aa   bb", 7, 4), (1, 2));
+        // cursor before the first 'b' lands at the start of row 1.
+        assert_eq!(calculate_visual_cursor_position("aa   bb", 5, 4), (1, 0));
+    }
+
+    #[test]
+    fn test_long_word_break() {
+        // "aaaaaaaa" at width 4 wraps as "aaaa" / "aaaa"; cursor=4 is the start
+        // of the second line, not the (off-screen) end of the first.
+        assert_eq!(calculate_visual_cursor_position("aaaaaaaa", 4, 4), (1, 0));
+        assert_eq!(calculate_visual_cursor_position("aaaaaaaa", 8, 4), (1, 4));
+    }
+
+    #[test]
+    fn test_cjk_wrap() {
+        // Each CJK char is width 2; width 6 fits three per line.
+        assert_eq!(calculate_visual_cursor_position("中文测试", 3, 6), (1, 0));
+        assert_eq!(calculate_visual_cursor_position("中文测试", 4, 6), (1, 2));
+    }
+
+    /// Differential test: for every cursor offset, the (row, col) returned
+    /// must match the cell where ratatui's `Paragraph` + `Wrap { trim: false }`
+    /// actually renders that character (off-screen columns are skipped, since
+    /// the renderer clamps them separately).
+    fn ratatui_cell(value: &str, width: u16, row: usize, col: usize) -> String {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 80,
+        };
+        let mut buf = Buffer::empty(area);
+        Widget::render(
+            Paragraph::new(value).wrap(Wrap { trim: false }),
+            area,
+            &mut buf,
+        );
+        buf[(col as u16, row as u16)].symbol().to_string()
+    }
+
+    fn assert_matches_ratatui(value: &str, width: usize) {
+        let chars: Vec<char> = value.chars().collect();
+        for p in 0..=chars.len() {
+            let (row, col) = calculate_visual_cursor_position(value, p, width);
+            assert!(
+                col <= width,
+                "value={value:?} width={width} cursor={p}: col {col} > width {width}"
+            );
+            if p < chars.len() {
+                let ch = chars[p];
+                if ch == '\n' {
+                    continue;
+                }
+                let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w == 0 || col == width {
+                    // zero-width chars and exact-fill boundary cursors have no
+                    // unique on-screen cell to compare against.
+                    continue;
+                }
+                let cell = ratatui_cell(value, width as u16, row, col);
+                let cell_char = cell.chars().next();
+                assert_eq!(
+                    cell_char,
+                    Some(ch),
+                    "value={value:?} width={width} cursor={p} (char {ch:?}): \
+                     calc=({row},{col}) but ratatui cell is {cell:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diff_basic_word() {
+        assert_matches_ratatui("hello", 10);
+    }
+
+    #[test]
+    fn diff_long_single_word_wraps_mid_word() {
+        assert_matches_ratatui("aaaaaaaa", 4);
+    }
+
+    #[test]
+    fn diff_word_wrap_with_spaces() {
+        assert_matches_ratatui("aa bb cc dd", 4);
+    }
+
+    #[test]
+    fn diff_multiple_spaces_boundary() {
+        assert_matches_ratatui("aa   bb", 4);
+    }
+
+    #[test]
+    fn diff_cursor_in_trailing_whitespace() {
+        assert_matches_ratatui("aaaa ", 4);
+    }
+
+    #[test]
+    fn diff_newline_then_wrap() {
+        assert_matches_ratatui("hello\naaaaaaa", 4);
+    }
+
+    #[test]
+    fn diff_cjk_wrap() {
+        assert_matches_ratatui("中文测试一二三四五六", 6);
+    }
+
+    #[test]
+    fn diff_spaces_then_newline() {
+        assert_matches_ratatui("aa  \nbb", 4);
+    }
+
+    #[test]
+    fn diff_long_paragraph() {
+        assert_matches_ratatui(
+            "The quick brown fox jumps over the lazy dog and keeps going",
+            12,
+        );
+    }
+
+    #[test]
+    fn diff_consecutive_newlines() {
+        assert_matches_ratatui("a\n\nb", 4);
     }
 }

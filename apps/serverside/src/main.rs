@@ -1,8 +1,8 @@
 mod channels;
+mod cron;
 mod daemon_config;
 mod daemon_runtime;
 mod httpserver;
-mod cron;
 
 use crate::channels::{
     build_feishu_runtime, build_telegram_runtime, FeishuConfig, FeishuEventTransport,
@@ -108,12 +108,13 @@ async fn run_daemon(
         }
     }
 
-
     // ── Cron scheduler ──────────────────────────────────────────
     let cron_enabled = config.cron_section().is_some();
     let cron_scheduler = match config.resolve_cron_jobs() {
         Ok(jobs) if !jobs.is_empty() => {
-            let global = config.cron_section().expect("cron section must exist when jobs loaded");
+            let global = config
+                .cron_section()
+                .expect("cron section must exist when jobs loaded");
             let total = jobs.len();
             let enabled_count = jobs.iter().filter(|j| j.enabled).count();
             if enabled_count > 0 {
