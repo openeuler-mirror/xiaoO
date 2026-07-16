@@ -362,14 +362,15 @@ async def get_recent_token_records(limit: int = 20):
 
 @app.get("/api/token-stats/trend", dependencies=[Depends(auth_dependency)])
 async def get_token_trend_api(
+    days: int = 0,
     start_date: str | None = None,
     end_date: str | None = None,
 ):
     """
     获取 Token 消耗趋势（按日期 + 模型聚合），供前端折线图渲染。
-    日期范围必填（YYYY-MM-DD）。
+    days: 0=全部, 1=今天, 7=近7天。start_date/end_date 优先于 days。
     """
-    return get_token_trend(start_date=start_date, end_date=end_date)
+    return get_token_trend(days=days, start_date=start_date, end_date=end_date)
 
 @app.post("/api/token-stats/reset", dependencies=[Depends(auth_dependency)])
 async def reset_token_stats_api():

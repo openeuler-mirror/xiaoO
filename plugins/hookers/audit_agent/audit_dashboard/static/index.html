@@ -588,6 +588,7 @@
     .btn-primary { background: var(--primary); color: white; border-color: var(--primary); }
     .btn-danger { background: var(--danger); color: white; border-color: var(--danger); }
     .btn-sm { padding: 3px 8px; font-size: 12px; }
+    .btn-sm.active { background: var(--primary); color: white; border-color: var(--primary); }
 
     /* 日期范围选择器：与 btn-sm 高度对齐，统一边框/字体/圆角 */
     .input-sm {
@@ -790,9 +791,9 @@
         <div class="card-title">
           Token 用量统计
           <div style="display:flex;gap:6px">
-            <button class="btn btn-sm" onclick="loadTokenStats(1)">今日</button>
-            <button class="btn btn-sm" onclick="loadTokenStats(7)">近7天</button>
-            <button class="btn btn-sm" onclick="loadTokenStats(0)">全部</button>
+            <button class="btn btn-sm" data-days="1" onclick="loadTokenStats(1)">今日</button>
+            <button class="btn btn-sm" data-days="7" onclick="loadTokenStats(7)">近7天</button>
+            <button class="btn btn-sm" data-days="0" onclick="loadTokenStats(0)">全部</button>
           </div>
         </div>
         <div class="stats-bar" id="token-stats-summary"></div>
@@ -834,10 +835,10 @@
         <div class="card-title">
           总览
           <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-            <button class="btn btn-sm" onclick="loadTokenStats(1)">今日</button>
-            <button class="btn btn-sm" onclick="loadTokenStats(7)">近7天</button>
-            <button class="btn btn-sm" onclick="loadTokenStats(30)">近30天</button>
-            <button class="btn btn-sm" onclick="loadTokenStats(0)">全部</button>
+            <button class="btn btn-sm" data-days="1" onclick="loadTokenStats(1)">今日</button>
+            <button class="btn btn-sm" data-days="7" onclick="loadTokenStats(7)">近7天</button>
+            <button class="btn btn-sm" data-days="30" onclick="loadTokenStats(30)">近30天</button>
+            <button class="btn btn-sm" data-days="0" onclick="loadTokenStats(0)">全部</button>
             <span style="width:1px;height:20px;background:var(--border);margin:0 4px"></span>
             <input type="date" id="token-date-from" class="input-sm" title="开始日期">
             <span class="date-sep">至</span>
@@ -1843,6 +1844,14 @@
 
     async function loadTokenStats(days) {
       tokenStatsDays = days;  // 记住当前选择，供自动轮询复用
+      // 高亮当前选中的快捷按钮，取消其他按钮高亮，清除日期选择器
+      document.querySelectorAll('.btn-sm[data-days]').forEach(b => {
+        b.classList.toggle('active', b.dataset.days === String(days));
+      });
+      const fromEl = document.getElementById("token-date-from");
+      const toEl = document.getElementById("token-date-to");
+      if (fromEl) fromEl.value = '';
+      if (toEl) toEl.value = '';
       try {
         tokenStatsData = await api("GET", `/api/token-stats?days=${days}`);
         renderTokenStats();
@@ -1864,6 +1873,8 @@
         showToast("开始日期不能晚于结束日期", "error");
         return;
       }
+      // 自定义范围时取消所有快捷按钮高亮
+      document.querySelectorAll('.btn-sm[data-days]').forEach(b => b.classList.remove('active'));
       // 自定义范围不走 days 轮询逻辑：停掉自动刷新，避免覆盖为 days 模式
       stopTokenAutoRefresh();
       try {
@@ -2015,7 +2026,7 @@
       // Token 页面 - 趋势折线图（ECharts，按模型动态分系列）
       const trendEl = document.getElementById("token-trend-chart");
       if (trendEl) {
-        loadTokenTrend();
+        loadTokenTrend(tokenStatsDays);
       }
 
       // Token 页面 - 最近记录
@@ -2027,13 +2038,15 @@
 
     // 趋势图：按模型动态分系列，数据里有哪些 model 就画哪些线
     let trendChartInstance = null;
-    async function loadTokenTrend() {
+    async function loadTokenTrend(days) {
       const from = document.getElementById("token-date-from")?.value;
       const to = document.getElementById("token-date-to")?.value;
-      // 没选日期范围时默认近 7 天
+      // 优先级：日期选择器 > days 参数 > 默认近7天
       let params;
       if (from && to) {
         params = new URLSearchParams({ start_date: from, end_date: to });
+      } else if (days != null && days !== undefined) {
+        params = new URLSearchParams({ days: days });
       } else {
         const end = new Date();
         const start = new Date(end.getTime() - 6 * 86400000);
