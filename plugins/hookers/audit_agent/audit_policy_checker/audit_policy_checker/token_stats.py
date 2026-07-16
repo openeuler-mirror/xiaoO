@@ -249,6 +249,7 @@ def get_recent_records(limit: int = 20) -> list[dict]:
 
 
 def get_token_trend(
+    days: int = 0,
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict:
@@ -256,8 +257,9 @@ def get_token_trend(
     获取 Token 消耗趋势（按日期 + 模型二维聚合），供前端折线图渲染。
 
     Args:
-        start_date: 起始日期（YYYY-MM-DD，含当天）。
-        end_date: 结束日期（YYYY-MM-DD，含当天全天）。
+        days: 查询最近多少天的数据。0 表示全部，1 表示今天，7 表示近7天。
+        start_date: 起始日期（YYYY-MM-DD，含当天）。优先于 days。
+        end_date: 结束日期（YYYY-MM-DD，含当天全天）。优先于 days。
 
     Returns:
         dict:
@@ -269,22 +271,42 @@ def get_token_trend(
     stats_path = get_stats_path()
     records = _load_all_records(stats_path)
 
-    try:
-        start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
-        end_dt = (
-            datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, microsecond=999999)
-            if end_date else datetime.max
-        )
-    except ValueError:
-        start_dt, end_dt = datetime.min, datetime.max
+    # 按时间范围过滤：start_date/end_date 优先于 days
+    if start_date or end_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
+            end_dt = (
+                datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, microsecond=999999)
+                if end_date else datetime.max
+            )
+        except ValueError:
+            start_dt, end_dt = datetime.min, datetime.max
+        filtered = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+                if start_dt <= ts <= end_dt:
+                    filtered.append(r)
+            except (ValueError, KeyError):
+                filtered.append(r)  # 时间解析失败，保留
+        records = filtered
+    elif days > 0:
+        cutoff = datetime.now() - timedelta(days=days)
+        filtered = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+                if ts >= cutoff:
+                    filtered.append(r)
+            except (ValueError, KeyError):
+                filtered.append(r)  # 时间解析失败，保留
+        records = filtered
 
     series: dict[str, dict[str, int]] = {}  # model -> {date -> tokens}
     dates_set: set[str] = set()
     for r in records:
         try:
             ts = datetime.fromisoformat(r["timestamp"])
-            if not (start_dt <= ts <= end_dt):
-                continue
             date_key = ts.strftime("%Y-%m-%d")
         except (ValueError, KeyError):
             continue

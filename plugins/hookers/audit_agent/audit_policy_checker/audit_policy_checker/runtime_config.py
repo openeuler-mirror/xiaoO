@@ -512,6 +512,48 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
             source_rules = source_cat.get("rules", [])
             user_ids = {r.get("id") for r in user_rules if r.get("id")}
 
+            # 内置规则内容指纹去重：id 变了但实质内容相同（如 reason 推辞更新），
+            # 应替换旧版为新版，而非追加导致重复。
+            def _content_fingerprint(rule: dict) -> str:
+                """用实质内容字段生成指纹，忽略 id/reason 等推辞字段"""
+                # intent_consistency 规则：用 keywords + actions 去重
+                kw = sorted(rule.get("intent_keywords", []))
+                act = sorted(rule.get("dangerous_actions", []))
+                if kw or act:
+                    return f"intent:{','.join(kw)}|{','.join(act)}"
+                # sensitive_path 规则：用 path 去重
+                if rule.get("path"):
+                    return f"path:{rule['path']}"
+                # 其他规则：用 pattern 去重
+                if rule.get("pattern"):
+                    return f"pattern:{rule['pattern']}"
+                # 兜底：用 id
+                return f"id:{rule.get('id', '')}"
+
+            source_fingerprints = {}
+            for sr in source_rules:
+                if sr.get("builtin"):
+                    source_fingerprints[_content_fingerprint(sr)] = sr
+
+            # 清除旧版内置规则中与新版内容指纹相同但 id 不同的条目
+            to_remove = []
+            for ur in user_rules:
+                if ur.get("builtin") and ur.get("id"):
+                    fp = _content_fingerprint(ur)
+                    if fp in source_fingerprints:
+                        new_sr = source_fingerprints[fp]
+                        if ur["id"] != new_sr.get("id"):
+                            # 同内容不同 id → 旧版将被新版替换，记录待删除
+                            to_remove.append(ur["id"])
+                            logger.info(
+                                "内置规则 id 变更: %s → %s (fingerprint=%s)，替换旧版",
+                                ur["id"], new_sr.get("id"), fp,
+                            )
+            if to_remove:
+                remove_ids = set(to_remove)
+                user_rules = [r for r in user_rules if r.get("id") not in remove_ids]
+                user_ids = {r.get("id") for r in user_rules if r.get("id")}
+
             for sr in source_rules:
                 if sr.get("id") and sr["id"] not in user_ids:
                     # 新增的出厂规则 → 加入，默认 enabled=True
