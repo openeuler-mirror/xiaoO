@@ -17,6 +17,9 @@ pub struct SubagentRoleConfig {
 
 #[derive(Clone, Default)]
 pub struct ToolRuntimeServices {
+    /// Disable declarative filesystem/plugin tool discovery while preserving built-ins.
+    /// E2B sets this because host-side custom tool executors cannot safely target the sandbox.
+    pub disable_plugin_tools: bool,
     pub subagent_control: Option<Arc<dyn SubagentControl>>,
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub workspace_root: Option<PathBuf>,

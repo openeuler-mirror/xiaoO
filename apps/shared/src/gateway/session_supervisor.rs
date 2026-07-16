@@ -316,7 +316,12 @@ impl SessionSupervisor {
             let session = self.session.lock().await;
             session.runtime.agent_id.clone()
         };
-        let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
+        let mut runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
+        // The service already validated/bound API bootstrap paths before
+        // entering the supervisor. Any re-resolve after a suspended tool call
+        // must inherit the snapshot and never touch the host source again.
+        runtime_input.workspace = None;
+        runtime_input.skills = None;
         let result = self
             .run_lane_until_terminal(LaneRunInput {
                 agent_id: root_agent_id.clone(),
@@ -385,7 +390,7 @@ impl SessionSupervisor {
         let mut next_resolved_runtime = input.resolved_runtime;
 
         loop {
-            let resolved_runtime = match next_resolved_runtime.take() {
+            let mut resolved_runtime = match next_resolved_runtime.take() {
                 Some(resolved_runtime) => resolved_runtime,
                 None => {
                     let session_snapshot = self.snapshot().await;
@@ -396,6 +401,11 @@ impl SessionSupervisor {
             };
             let loop_event_sink = resolved_runtime.bindings.loop_event_sink.clone();
             let operation_backend = self.lease_backend_for_lane(&resolved_runtime).await?;
+            crate::gateway::finalize_e2b_runtime(
+                &mut resolved_runtime,
+                Arc::clone(&operation_backend),
+            )
+            .await?;
             let session_snapshot = self.snapshot().await;
             let worker_result = SessionWorker::run(SessionWorkerInput {
                 runtime_input: input.runtime_input.clone(),
@@ -1023,6 +1033,8 @@ fn runtime_input_from_session(
         max_turns_override,
         subagent_role_id,
         llm: session.runtime.llm.clone(),
+        workspace: None,
+        skills: None,
     }
 }
 

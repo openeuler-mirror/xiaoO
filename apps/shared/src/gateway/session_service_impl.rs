@@ -69,6 +69,7 @@ pub struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     sessions_handler: Mutex<HashMap<String, SessionHandle>>,
+    runtime_initialization_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     hooker_registry: Arc<dyn HookerRegistry>,
     backend_manager: Arc<BackendManager>,
     runtime_checkpoints: InMemoryRuntimeCheckpointStore,
@@ -100,11 +101,24 @@ impl CoreBackedSessionService {
             session_store,
             runtime_resolver,
             sessions_handler: Mutex::new(HashMap::new()),
+            runtime_initialization_locks: Mutex::new(HashMap::new()),
             hooker_registry,
             backend_manager,
             runtime_checkpoints: InMemoryRuntimeCheckpointStore::default(),
             max_prompt_chain_depth,
         }
+    }
+
+    async fn runtime_initialization_lock(&self, runtime_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.runtime_initialization_locks.lock().await;
+        // The map itself owns one strong reference. Drop entries with no
+        // active/waiting caller so arbitrary runtime IDs cannot grow it forever.
+        locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        Arc::clone(
+            locks
+                .entry(runtime_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     async fn fire_session_hooks(&self, input: HookInvokeInput, hook_point: HookPointId) {
@@ -778,6 +792,7 @@ impl CoreBackedSessionService {
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
                 subagent_roles: resolved.descriptor.subagent_roles.clone(),
+                bootstrap_binding: resolved.bootstrap_binding.clone(),
             },
             backend_instance: None,
             paused_backend_checkpoint: None,
@@ -817,6 +832,7 @@ impl CoreBackedSessionService {
                 max_turns: resolved.descriptor.max_turns,
                 tool_manifest: None,
                 subagent_roles: resolved.descriptor.subagent_roles.clone(),
+                bootstrap_binding: resolved.bootstrap_binding.clone(),
             },
             backend_instance: None,
             paused_backend_checkpoint: None,
@@ -839,10 +855,12 @@ impl CoreBackedSessionService {
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
+        let initialization_lock = self.runtime_initialization_lock(&request.session_id).await;
+        let initialization_guard = initialization_lock.lock().await;
         let existing = self.session_store.load(&request.session_id).await;
         let is_new_session = existing.is_none();
         let runtime_input = SessionRuntimeBuildInput::from_turn_request(&request);
-        let resolved = self
+        let mut resolved = self
             .runtime_resolver
             .resolve(&runtime_input, existing.as_ref())
             .await?;
@@ -857,6 +875,20 @@ impl CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
+        if let Err(error) =
+            crate::gateway::finalize_e2b_runtime(&mut resolved, backend_lease.backend()).await
+        {
+            if is_new_session {
+                self.backend_manager
+                    .release_session(&request.session_id)
+                    .await
+                    .ok();
+            }
+            return Err(error);
+        }
+        seed_session.runtime.system_prompt = resolved.descriptor.system_prompt.clone();
+        seed_session.runtime.workspace_root = resolved.descriptor.workspace_root.clone();
+        seed_session.runtime.bootstrap_binding = resolved.bootstrap_binding.clone();
         let backend_updated = sync_session_backend_instance(&mut seed_session, &backend_lease);
         if was_paused {
             seed_session.status = SessionLifecycleStatus::Idle;
@@ -866,9 +898,10 @@ impl CoreBackedSessionService {
         if backend_updated || was_paused {
             seed_session.updated_at_ms = current_time_ms();
         }
-        if is_new_session || backend_updated || was_paused {
+        if is_new_session || backend_updated || was_paused || resolved.bootstrap_binding.is_some() {
             self.session_store.save(seed_session.clone()).await;
         }
+        drop(initialization_guard);
 
         if is_new_session {
             let hook_point =
@@ -980,7 +1013,17 @@ impl SessionControlPlane for CoreBackedSessionService {
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
+        let initialization_lock = self.runtime_initialization_lock(&request.session_id).await;
+        let _initialization_guard = initialization_lock.lock().await;
         let existing_record = self.session_store.load(&request.session_id).await;
+        let is_new_session = existing_record.is_none();
+        let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
+        // Resolve before every fast return so E2B binding conflicts cannot be
+        // bypassed by an existing handle or a paused runtime.
+        let mut resolved = self
+            .runtime_resolver
+            .resolve(&runtime_input, existing_record.as_ref())
+            .await?;
         if let Some(existing) = &existing_record {
             if existing.status == SessionLifecycleStatus::Paused {
                 return Ok(existing.clone());
@@ -1004,8 +1047,6 @@ impl SessionControlPlane for CoreBackedSessionService {
             return handle.snapshot().await;
         }
 
-        let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
-        let resolved = self.runtime_resolver.resolve(&runtime_input, None).await?;
         let mut session = Self::build_session_for_open(&request, &resolved);
         // Preserve state from any pre-existing store record (e.g. imported
         // via `/load`). Without this, `build_session_for_open` would
@@ -1030,6 +1071,20 @@ impl SessionControlPlane for CoreBackedSessionService {
             self.session_store.clone(),
         )
         .await?;
+        if let Err(error) =
+            crate::gateway::finalize_e2b_runtime(&mut resolved, backend_lease.backend()).await
+        {
+            if is_new_session {
+                self.backend_manager
+                    .release_session(&request.session_id)
+                    .await
+                    .ok();
+            }
+            return Err(error);
+        }
+        session.runtime.system_prompt = resolved.descriptor.system_prompt.clone();
+        session.runtime.workspace_root = resolved.descriptor.workspace_root.clone();
+        session.runtime.bootstrap_binding = resolved.bootstrap_binding.clone();
         if sync_session_backend_instance(&mut session, &backend_lease) {
             session.updated_at_ms = current_time_ms();
         }
@@ -1368,8 +1423,19 @@ impl SubagentControl for CoreBackedSessionService {
 
 impl From<SessionRuntimeResolveError> for SessionServiceError {
     fn from(value: SessionRuntimeResolveError) -> Self {
-        Self::RuntimeResolve {
-            message: value.to_string(),
+        match value {
+            SessionRuntimeResolveError::InvalidBootstrap { message } => {
+                Self::InvalidRequest { message }
+            }
+            SessionRuntimeResolveError::BootstrapConflict { message } => {
+                Self::RuntimeConflict { message }
+            }
+            SessionRuntimeResolveError::BootstrapTooLarge { message } => {
+                Self::PayloadTooLarge { message }
+            }
+            other => Self::RuntimeResolve {
+                message: other.to_string(),
+            },
         }
     }
 }
@@ -1656,6 +1722,11 @@ mod tests {
             request: &SessionRuntimeBuildInput,
             _existing: Option<&SessionRecord>,
         ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+            if request.workspace.as_deref() == Some(std::path::Path::new("/conflict")) {
+                return Err(SessionRuntimeResolveError::BootstrapConflict {
+                    message: "test conflict".to_string(),
+                });
+            }
             Ok(ResolvedSessionRuntime {
                 descriptor: SessionRuntimeDescriptor {
                     agent_id: AgentId("test-agent".to_string()),
@@ -1685,6 +1756,10 @@ mod tests {
                     "local",
                     self.backend_options.clone(),
                 )),
+                backend_workspace_root: self.workspace_root.clone(),
+                e2b_bootstrap: None,
+                bootstrap_binding: None,
+                e2b_finalized: false,
             })
         }
     }
@@ -1714,6 +1789,8 @@ mod tests {
             channel: None,
             channel_instance_id: None,
             llm: None,
+            workspace: None,
+            skills: None,
         }
     }
 
@@ -1763,6 +1840,8 @@ mod tests {
                 channel: None,
                 channel_instance_id: None,
                 llm: None,
+                workspace: None,
+                skills: None,
             })
             .await
             .expect("open session");
@@ -1776,6 +1855,38 @@ mod tests {
         let saved_instance = saved.backend_instance.expect("saved backend instance");
         assert_eq!(saved_instance.state, BackendLifecycleState::Active);
         assert_eq!(saved_instance.backend_id, instance.backend_id);
+    }
+
+    #[tokio::test]
+    async fn existing_handle_does_not_bypass_bootstrap_binding_validation() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(test_open_request("binding-fast-path"))
+            .await
+            .expect("initial open");
+        let mut conflicting = test_open_request("binding-fast-path");
+        conflicting.workspace = Some(std::path::PathBuf::from("/conflict"));
+        let error = dependencies
+            .session_control_plane
+            .open_session(conflicting)
+            .await
+            .expect_err("binding conflict should be checked before handle reuse");
+        assert!(matches!(error, SessionServiceError::RuntimeConflict { .. }));
     }
 
     #[tokio::test]
@@ -1857,6 +1968,8 @@ mod tests {
                 channel: None,
                 channel_instance_id: None,
                 llm: None,
+                workspace: None,
+                skills: None,
             })
             .await
             .expect("open imported session");
@@ -1925,6 +2038,8 @@ mod tests {
                 channel: None,
                 channel_instance_id: None,
                 llm: None,
+                workspace: None,
+                skills: None,
             })
             .await
             .expect("open session");
@@ -1966,6 +2081,8 @@ mod tests {
                 channel: None,
                 channel_instance_id: None,
                 llm: None,
+                workspace: None,
+                skills: None,
             })
             .await
             .expect("open session");

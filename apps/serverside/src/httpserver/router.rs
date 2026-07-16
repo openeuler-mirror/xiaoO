@@ -723,6 +723,13 @@ async fn handle_runtime_write_file(
 
 fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Response {
     let status = match &error {
+        xiaoo_shared::gateway::SessionServiceError::InvalidRequest { .. } => {
+            StatusCode::BAD_REQUEST
+        }
+        xiaoo_shared::gateway::SessionServiceError::RuntimeConflict { .. } => StatusCode::CONFLICT,
+        xiaoo_shared::gateway::SessionServiceError::PayloadTooLarge { .. } => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
         xiaoo_shared::gateway::SessionServiceError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
         xiaoo_shared::gateway::SessionServiceError::SessionBusy { .. } => {
             StatusCode::TOO_MANY_REQUESTS
@@ -866,7 +873,7 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 mod tests {
     use super::{
         create_router_with_auth, create_router_with_control_plane_and_auth, handle_channel_events,
-        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig,
+        map_session_error, GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -1498,6 +1505,31 @@ mod tests {
             .expect("channel adapter mutex poisoned");
         assert_eq!(sent_texts.len(), 1);
         assert_eq!(sent_texts[0].1, "处理完成");
+    }
+
+    #[test]
+    fn bootstrap_errors_map_to_stable_http_statuses() {
+        assert_eq!(
+            map_session_error(SessionServiceError::InvalidRequest {
+                message: "invalid".to_string(),
+            })
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            map_session_error(SessionServiceError::RuntimeConflict {
+                message: "conflict".to_string(),
+            })
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            map_session_error(SessionServiceError::PayloadTooLarge {
+                message: "large".to_string(),
+            })
+            .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 }
 

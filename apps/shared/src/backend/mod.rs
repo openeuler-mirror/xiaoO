@@ -32,6 +32,10 @@ use base::{
     BackendLineageInfo, BackendManagerLimits, STALE_OWNER_THRESHOLD_MS,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
+pub use e2b::{
+    build_e2b_bootstrap_archive, canonicalize_bootstrap_dir, E2bBootstrapArchive,
+    E2bBootstrapBuildError,
+};
 use sandbox_counter::{
     load_global_max_sandbox_cnt, SandboxCounter, SandboxCounterError, SandboxCounterKey,
     MAX_ACTIVE_SANDBOXES_PER_KEY,
@@ -307,6 +311,7 @@ struct BuildBackendInput {
     expires_at_ms: Option<u64>,
     lineage: BackendLineageEntry,
     backend_checkpoint: Option<BackendCheckpointRef>,
+    e2b_bootstrap: Option<Arc<E2bBootstrapArchive>>,
 }
 
 async fn build_backend(input: BuildBackendInput) -> Result<BackendInstanceEntry, BackendError> {
@@ -318,6 +323,7 @@ async fn build_backend(input: BuildBackendInput) -> Result<BackendInstanceEntry,
             provider_options: input.config.options.clone(),
             resource_limits: input.resource_limits,
             metadata: input.metadata,
+            bootstrap: input.e2b_bootstrap,
         })
         .await?;
         let dirty_tracker = Arc::new(BackendDirtyTracker::default());
@@ -480,6 +486,7 @@ mod tests {
             config: Some(GatewayBackendConfig::new("local", options)),
             workspace_root,
             session_id: session_id.to_string(),
+            e2b_bootstrap: None,
         }
     }
 

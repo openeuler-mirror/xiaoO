@@ -20,7 +20,7 @@ use llm_client::{
 use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
-use skill::FileSkillRegistry;
+use skill::{FileSkillRegistry, SkillsConfig};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::PathBuf;
@@ -112,6 +112,7 @@ pub struct ConfiguredRuntimeResolver {
     trace: Value,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
+    skills_config: SkillsConfig,
     skills_dirs: Vec<PathBuf>,
     lsp_registry: Option<Arc<LspServiceRegistry>>,
     operation_backend: Option<GatewayBackendConfig>,
@@ -184,6 +185,7 @@ impl ConfiguredRuntimeResolver {
             trace,
             hooker: config.app.hooker.clone(),
             skill_registry,
+            skills_config: skills_config.clone(),
             skills_dirs: skills_config.skills_dirs.clone(),
             operation_backend: config.server_operation_backend(),
             lsp_registry,
@@ -333,9 +335,67 @@ impl ConfiguredRuntimeResolver {
         }
     }
 
+    async fn resolve_e2b_bootstrap(
+        &self,
+        request: &SessionRuntimeBuildInput,
+        existing: Option<&SessionRecord>,
+    ) -> Result<
+        (
+            Option<xiaoo_shared::gateway::RuntimeBootstrapBinding>,
+            Option<Arc<xiaoo_shared::backend::E2bBootstrapArchive>>,
+        ),
+        SessionRuntimeResolveError,
+    > {
+        let canonical_workspace = request
+            .workspace
+            .as_deref()
+            .map(xiaoo_shared::backend::canonicalize_bootstrap_dir)
+            .transpose()
+            .map_err(map_bootstrap_error)?;
+        let canonical_skill_roots = request
+            .skills
+            .as_ref()
+            .map(|roots| {
+                roots
+                    .iter()
+                    .map(|root| xiaoo_shared::backend::canonicalize_bootstrap_dir(root))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .map_err(map_bootstrap_error)?;
+
+        if let Some(binding) =
+            existing.and_then(|session| session.runtime.bootstrap_binding.as_ref())
+        {
+            validate_existing_e2b_binding(
+                request,
+                canonical_workspace.as_ref(),
+                canonical_skill_roots.as_ref(),
+                binding,
+            )?;
+            return Ok((Some(binding.clone()), None));
+        }
+
+        let workspace = canonical_workspace;
+        let skill_roots = canonical_skill_roots.unwrap_or_default();
+        let policy = self.skills_config.clone();
+        let archive = tokio::task::spawn_blocking(move || {
+            xiaoo_shared::backend::build_e2b_bootstrap_archive(workspace, skill_roots, &policy)
+        })
+        .await
+        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+            message: format!("E2B bootstrap archive task failed: {error}"),
+        })?
+        .map_err(map_bootstrap_error)?;
+        let binding = archive.binding().clone();
+        Ok((Some(binding), Some(Arc::new(archive))))
+    }
+
     fn build_tool_registry(
         &self,
         agent_role: Option<&AgentRoleConfig>,
+        workspace_root: PathBuf,
+        disable_plugin_tools: bool,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
         let subagent_roles: BTreeMap<String, SubagentRoleConfig> = self
             .subagent_roles
@@ -353,8 +413,9 @@ impl ConfiguredRuntimeResolver {
             })
             .collect();
         let services = ToolRuntimeServices {
+            disable_plugin_tools,
             lsp_registry: self.lsp_registry.clone(),
-            workspace_root: Some(self.agent.workspace_root.clone()),
+            workspace_root: Some(workspace_root),
             subagent_roles,
             mcp_servers: self
                 .mcp_tools
@@ -387,6 +448,63 @@ impl ConfiguredRuntimeResolver {
 
         Ok(Some(Arc::from(registry)))
     }
+}
+
+fn map_bootstrap_error(
+    error: xiaoo_shared::backend::E2bBootstrapBuildError,
+) -> SessionRuntimeResolveError {
+    match error {
+        xiaoo_shared::backend::E2bBootstrapBuildError::InvalidPath { message } => {
+            SessionRuntimeResolveError::InvalidBootstrap { message }
+        }
+        xiaoo_shared::backend::E2bBootstrapBuildError::SourceChanged { path } => {
+            SessionRuntimeResolveError::BootstrapConflict {
+                message: format!(
+                    "bootstrap source changed while archiving {}; retry the request",
+                    path.display()
+                ),
+            }
+        }
+        xiaoo_shared::backend::E2bBootstrapBuildError::CapacityExceeded { message } => {
+            SessionRuntimeResolveError::BootstrapTooLarge { message }
+        }
+        xiaoo_shared::backend::E2bBootstrapBuildError::BuildFailed { message } => {
+            SessionRuntimeResolveError::ResolveFailed { message }
+        }
+    }
+}
+
+fn validate_existing_e2b_binding(
+    request: &SessionRuntimeBuildInput,
+    canonical_workspace: Option<&PathBuf>,
+    canonical_skill_roots: Option<&Vec<PathBuf>>,
+    binding: &xiaoo_shared::gateway::RuntimeBootstrapBinding,
+) -> Result<(), SessionRuntimeResolveError> {
+    if binding.manifest_version != xiaoo_shared::gateway::E2B_BOOTSTRAP_MANIFEST_VERSION {
+        return Err(SessionRuntimeResolveError::BootstrapConflict {
+            message: format!(
+                "runtime '{}' uses unsupported bootstrap manifest version {}",
+                request.session_id, binding.manifest_version
+            ),
+        });
+    }
+    if request.workspace.is_some() && canonical_workspace != binding.source_workspace.as_ref() {
+        return Err(SessionRuntimeResolveError::BootstrapConflict {
+            message: format!(
+                "runtime '{}' is already bound to workspace {:?}, requested {:?}",
+                request.session_id, binding.source_workspace, canonical_workspace
+            ),
+        });
+    }
+    if request.skills.is_some() && canonical_skill_roots != Some(&binding.source_skill_roots) {
+        return Err(SessionRuntimeResolveError::BootstrapConflict {
+            message: format!(
+                "runtime '{}' is already bound to skill roots {:?}, requested {:?}",
+                request.session_id, binding.source_skill_roots, canonical_skill_roots
+            ),
+        });
+    }
+    Ok(())
 }
 
 async fn resolve_effective_context_window(
@@ -500,6 +618,31 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
             .unwrap_or(false);
         let llm_runtime = self.resolve_llm_runtime(request, existing).await?;
+        let is_e2b = self
+            .operation_backend
+            .as_ref()
+            .map(|backend| backend.kind == "e2b")
+            .unwrap_or(false);
+        let operation_backend = self.operation_backend.clone().map(|backend| {
+            if is_e2b {
+                force_e2b_remote_roots(backend)
+            } else {
+                backend
+            }
+        });
+        let (bootstrap_binding, e2b_bootstrap) = if is_e2b {
+            self.resolve_e2b_bootstrap(request, existing).await?
+        } else {
+            (None, None)
+        };
+        let effective_workspace_root = bootstrap_binding
+            .as_ref()
+            .map(|binding| binding.remote_workspace_root.clone())
+            .unwrap_or_else(|| self.agent.workspace_root.clone());
+        let effective_skill_roots = bootstrap_binding
+            .as_ref()
+            .map(|binding| binding.remote_skill_roots.clone())
+            .unwrap_or_else(|| self.skills_dirs.clone());
 
         // Lazily initialise MCP servers (connect + initialize + list_tools)
         // once, then cache the live connections for all subsequent resolves.
@@ -537,30 +680,70 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                 llm: Some(llm_runtime.llm_config.clone()),
                 system_prompt: build_system_prompt(
                     system_prompt,
-                    &self.agent.workspace_root,
+                    (!is_e2b).then_some(self.agent.workspace_root.as_path()),
                     request,
                     &subagent_roles,
                     is_subagent,
-                    &self.skills_dirs,
+                    &effective_skill_roots,
                 ),
                 feature_flags: self.feature_flags.clone(),
 
                 token_budget: llm_runtime.token_budget.clone(),
-                workspace_root: self.agent.workspace_root.clone(),
+                workspace_root: effective_workspace_root.clone(),
                 max_turns: agent_role.and_then(|role| role.max_turns),
                 subagent_roles,
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: llm_runtime.llm_provider,
-            tool_registry: self.build_tool_registry(agent_role)?,
-            skill_registry: Some(Arc::clone(&self.skill_registry)),
+            tool_registry: self.build_tool_registry(
+                agent_role,
+                effective_workspace_root,
+                is_e2b,
+            )?,
+            skill_registry: if is_e2b {
+                Some(Arc::new(FileSkillRegistry::from_skills(Vec::new())))
+            } else {
+                Some(Arc::clone(&self.skill_registry))
+            },
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: llm_runtime.compression_pipeline,
             trace: self.trace.clone(),
             hooker: self.hooker.clone(),
-            operation_backend: self.operation_backend.clone(),
+            operation_backend,
+            backend_workspace_root: bootstrap_binding
+                .as_ref()
+                .map(|binding| {
+                    PathBuf::from(format!("/xiaoo/e2b-bootstrap/{}", binding.content_digest))
+                })
+                .unwrap_or_else(|| self.agent.workspace_root.clone()),
+            e2b_bootstrap,
+            bootstrap_binding,
+            e2b_finalized: false,
         })
     }
+}
+
+fn force_e2b_remote_roots(mut backend: GatewayBackendConfig) -> GatewayBackendConfig {
+    let mut options = backend.options.as_object().cloned().unwrap_or_default();
+    for key in [
+        "workspaceRoot",
+        "remoteWorkspaceRoot",
+        "workspace_root",
+        "homeDir",
+        "home_dir",
+    ] {
+        options.remove(key);
+    }
+    options.insert(
+        "workspace_root".to_string(),
+        Value::String(xiaoo_shared::gateway::E2B_REMOTE_WORKSPACE_ROOT.to_string()),
+    );
+    options.insert(
+        "home_dir".to_string(),
+        Value::String("/home/user".to_string()),
+    );
+    backend.options = Value::Object(options);
+    backend
 }
 
 fn resolve_agent_role<'a>(
@@ -679,13 +862,15 @@ fn validate_token_budget_config(
 
 fn build_system_prompt(
     base_prompt: &str,
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
     request: &SessionRuntimeBuildInput,
     subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
     is_subagent: bool,
     skills_dirs: &[PathBuf],
 ) -> String {
-    let mut base_prompt = compose_workspace_system_prompt(base_prompt, workspace_root);
+    let mut base_prompt = workspace_root
+        .map(|workspace_root| compose_workspace_system_prompt(base_prompt, workspace_root))
+        .unwrap_or_else(|| base_prompt.to_string());
     base_prompt = base_prompt.trim().to_string();
 
     base_prompt = base_prompt.replace(
@@ -791,14 +976,19 @@ fn build_compression_pipeline(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_system_prompt, build_token_budget, resolve_agent_role, resolve_allowed_tool_names,
+        build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
+        resolve_allowed_tool_names, validate_existing_e2b_binding,
     };
     use crate::daemon_config::AgentRoleConfig;
     use agent_types::common::ids::ToolName;
     use std::collections::BTreeMap;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
-    use xiaoo_shared::gateway::{GatewayEntryContext, SessionRuntimeBuildInput};
+    use xiaoo_shared::backend::GatewayBackendConfig;
+    use xiaoo_shared::gateway::{
+        GatewayEntryContext, SessionRuntimeBuildInput, SessionRuntimeResolveError,
+    };
 
     #[test]
     fn token_budget_caps_output_to_preserve_prompt_budget() {
@@ -831,11 +1021,13 @@ mod tests {
             max_turns_override: None,
             subagent_role_id: None,
             llm: None,
+            workspace: None,
+            skills: None,
         };
 
         let prompt = build_system_prompt(
             "base rules",
-            temp.path(),
+            Some(temp.path()),
             &request,
             &BTreeMap::new(),
             false,
@@ -898,11 +1090,92 @@ mod tests {
             max_turns_override: None,
             subagent_role_id: None,
             llm: None,
+            workspace: None,
+            skills: None,
         };
 
         let resolved = resolve_agent_role(&agent_roles, &request)
             .expect("agent role should resolve")
             .expect("agent role should exist");
         assert_eq!(resolved.prompt.as_deref(), Some("You are a code reviewer."));
+    }
+
+    #[test]
+    fn existing_e2b_binding_inherits_omissions_and_rejects_changes() {
+        let workspace = PathBuf::from("/host/workspace");
+        let skill_root = PathBuf::from("/host/skills");
+        let binding = xiaoo_shared::gateway::RuntimeBootstrapBinding {
+            source_workspace: Some(workspace.clone()),
+            source_skill_roots: vec![skill_root.clone()],
+            content_digest: "digest".to_string(),
+            remote_workspace_root: PathBuf::from("/home/user/workspace"),
+            remote_skill_roots: vec![PathBuf::from("/home/user/.xiaoo/skills/0")],
+            skills: Vec::new(),
+            manifest_version: xiaoo_shared::gateway::E2B_BOOTSTRAP_MANIFEST_VERSION,
+        };
+        let mut request = SessionRuntimeBuildInput {
+            session_id: "runtime-1".to_string(),
+            conversation_id: "conversation".to_string(),
+            sender_id: "sender".to_string(),
+            channel: None,
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext::default(),
+            agent_id_override: None,
+            max_turns_override: None,
+            subagent_role_id: None,
+            llm: None,
+            workspace: None,
+            skills: None,
+        };
+
+        validate_existing_e2b_binding(&request, None, None, &binding)
+            .expect("omission inherits binding");
+
+        request.workspace = Some(workspace.clone());
+        request.skills = Some(vec![skill_root.clone()]);
+        validate_existing_e2b_binding(
+            &request,
+            Some(&workspace),
+            Some(&vec![skill_root]),
+            &binding,
+        )
+        .expect("same canonical binding is accepted");
+
+        let different = PathBuf::from("/host/different");
+        assert!(matches!(
+            validate_existing_e2b_binding(
+                &request,
+                Some(&different),
+                Some(&binding.source_skill_roots),
+                &binding,
+            ),
+            Err(SessionRuntimeResolveError::BootstrapConflict { .. })
+        ));
+
+        request.workspace = None;
+        request.skills = Some(Vec::new());
+        assert!(matches!(
+            validate_existing_e2b_binding(&request, None, Some(&Vec::new()), &binding),
+            Err(SessionRuntimeResolveError::BootstrapConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn e2b_api_runtime_forces_fixed_remote_roots() {
+        let backend = force_e2b_remote_roots(GatewayBackendConfig::new(
+            "e2b",
+            serde_json::json!({
+                "workspaceRoot": "/configured/workspace",
+                "homeDir": "/configured/home",
+                "api_key_env": "E2B_API_KEY"
+            }),
+        ));
+
+        assert_eq!(backend.options["workspace_root"], "/home/user/workspace");
+        assert_eq!(backend.options["home_dir"], "/home/user");
+        assert!(backend.options.get("workspaceRoot").is_none());
+        assert!(backend.options.get("homeDir").is_none());
+        assert_eq!(backend.options["api_key_env"], "E2B_API_KEY");
     }
 }

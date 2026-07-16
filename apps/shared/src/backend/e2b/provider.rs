@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::io::ReaderStream;
 
 use super::backend::{
     join_url, normalize_backend_path, E2bBackendState, E2bLifecycle, E2bOperationBackend,
@@ -31,6 +32,7 @@ pub(crate) struct E2bCreateBackendInput {
     pub(crate) provider_options: Value,
     pub(crate) resource_limits: agent_contracts::backend::BackendResourceLimits,
     pub(crate) metadata: Value,
+    pub(crate) bootstrap: Option<Arc<super::bootstrap::E2bBootstrapArchive>>,
 }
 
 pub(crate) struct E2bCreatedBackend {
@@ -124,6 +126,7 @@ struct CreateSnapshotResponse {
 pub(crate) async fn create_backend(
     input: E2bCreateBackendInput,
 ) -> Result<E2bCreatedBackend, BackendError> {
+    let bootstrap = input.bootstrap.clone();
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
     let http = new_e2b_http_client()?;
@@ -230,7 +233,16 @@ pub(crate) async fn create_backend(
     });
     let backend = Arc::new(E2bOperationBackend::new(Arc::clone(&state)));
 
-    if let Err(error) = ensure_remote_roots(&state).await {
+    let initialization = async {
+        ensure_remote_roots(&state).await?;
+        if let Some(bootstrap) = bootstrap.as_deref() {
+            install_bootstrap_archive(&state, bootstrap).await?;
+        }
+        Ok::<(), OperationError>(())
+    }
+    .await;
+
+    if let Err(error) = initialization {
         if let Err(cleanup_error) = state.delete_sandbox().await {
             tracing::warn!(
                 operation = "cleanup_failed_workspace_initialization",
@@ -240,7 +252,7 @@ pub(crate) async fn create_backend(
             );
         }
         return Err(BackendError::BuildFailed {
-            message: format!("e2b sandbox created but workspace initialization failed: {error}"),
+            message: format!("e2b sandbox created but bootstrap initialization failed: {error}"),
         });
     }
 
@@ -642,9 +654,10 @@ fn provider_handle(
 async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), OperationError> {
     let exec = E2bExec::new(Arc::clone(state));
     let script = format!(
-        "mkdir -p {} {}",
+        "mkdir -p {} {} {}",
         super::backend::shell_quote(state.workspace_root.0.as_str()),
-        super::backend::shell_quote(state.temp_root.0.as_str())
+        super::backend::shell_quote(state.temp_root.0.as_str()),
+        super::backend::shell_quote("/home/user/.xiaoo")
     );
     let output = retry_workspace_initialization(
         state.sandbox_id.as_str(),
@@ -658,6 +671,129 @@ async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), Operati
     }
     Err(OperationError::ExecutionFailed {
         message: String::from_utf8_lossy(output.stderr.as_slice()).to_string(),
+    })
+}
+
+async fn install_bootstrap_archive(
+    state: &Arc<E2bBackendState>,
+    archive: &super::bootstrap::E2bBootstrapArchive,
+) -> Result<(), OperationError> {
+    use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE};
+    use reqwest::Method;
+
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let remote_archive = format!("/tmp/xiaoo-bootstrap-{nonce}.tar");
+    let remote_manifest = format!("/home/user/.xiaoo/.bootstrap-manifest-{nonce}.json");
+
+    let file = tokio::fs::File::open(archive.path())
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to open E2B bootstrap archive: {error}"),
+        })?;
+    let stream = ReaderStream::new(file);
+    let response = state
+        .envd_request(Method::POST, "/files")
+        .query(&[("path", remote_archive.as_str())])
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_LENGTH, archive.size_bytes())
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to stream E2B bootstrap archive: {error}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(super::backend::http_error("upload E2B bootstrap archive", response).await);
+    }
+
+    let manifest = archive
+        .manifest_json()
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to encode E2B bootstrap manifest: {error}"),
+        })?;
+    let response = state
+        .envd_request(Method::POST, "/files")
+        .query(&[("path", remote_manifest.as_str())])
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json")
+        .body(manifest)
+        .send()
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to upload E2B bootstrap manifest: {error}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(super::backend::http_error("upload E2B bootstrap manifest", response).await);
+    }
+
+    let q = super::backend::shell_quote;
+    let stage_pattern = format!("/home/user/.xiaoo/bootstrap-stage-{nonce}.XXXXXX");
+    let workspace_target = "/home/user/workspace";
+    let skills_target = "/home/user/.xiaoo/skills";
+    let workspace_old = format!("/home/user/.xiaoo/workspace-old-{nonce}");
+    let skills_old = format!("/home/user/.xiaoo/skills-old-{nonce}");
+    let manifest_target = "/home/user/.xiaoo/bootstrap/manifest.json";
+    let script = format!(
+        r#"set -eu
+archive={archive}
+manifest={manifest}
+expected={expected}
+actual=$(sha256sum "$archive" | awk '{{print $1}}')
+[ "$actual" = "$expected" ] || {{ echo "bootstrap archive SHA-256 mismatch" >&2; exit 41; }}
+stage=$(mktemp -d {stage_pattern})
+tar --no-same-owner --same-permissions -xf "$archive" -C "$stage"
+[ -d "$stage/workspace" ] || {{ echo "bootstrap workspace payload missing" >&2; exit 42; }}
+[ -d "$stage/skills" ] || {{ echo "bootstrap skills payload missing" >&2; exit 43; }}
+workspace_target={workspace_target}
+skills_target={skills_target}
+workspace_old={workspace_old}
+skills_old={skills_old}
+had_workspace=0
+had_skills=0
+workspace_installed=0
+skills_installed=0
+rollback() {{
+  set +e
+  [ "$skills_installed" = 0 ] || rm -rf "$skills_target"
+  [ "$had_skills" = 0 ] || mv "$skills_old" "$skills_target"
+  [ "$workspace_installed" = 0 ] || rm -rf "$workspace_target"
+  [ "$had_workspace" = 0 ] || mv "$workspace_old" "$workspace_target"
+  rm -rf "$stage" "$archive" "$manifest"
+  exit 44
+}}
+rm -rf "$workspace_old" "$skills_old"
+if [ -e "$workspace_target" ]; then mv "$workspace_target" "$workspace_old"; had_workspace=1; fi
+mv "$stage/workspace" "$workspace_target" || rollback
+workspace_installed=1
+if [ -e "$skills_target" ]; then mv "$skills_target" "$skills_old"; had_skills=1; fi
+mv "$stage/skills" "$skills_target" || rollback
+skills_installed=1
+mkdir -p $(dirname {manifest_target}) || rollback
+mv "$manifest" {manifest_target} || rollback
+rm -rf "$workspace_old" "$skills_old" "$stage" "$archive" || true
+"#,
+        archive = q(&remote_archive),
+        manifest = q(&remote_manifest),
+        expected = q(archive.sha256()),
+        stage_pattern = q(&stage_pattern),
+        workspace_target = q(workspace_target),
+        skills_target = q(skills_target),
+        workspace_old = q(&workspace_old),
+        skills_old = q(&skills_old),
+        manifest_target = q(manifest_target),
+    );
+    let exec = E2bExec::new(Arc::clone(state));
+    let output = exec.run_shell_script(script.as_str(), None).await?;
+    if output.exit_code == Some(0) {
+        return Ok(());
+    }
+    Err(OperationError::ExecutionFailed {
+        message: format!(
+            "E2B bootstrap install failed (exit {:?}): {}",
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr)
+        ),
     })
 }
 
@@ -766,6 +902,7 @@ mod tests {
             }),
             resource_limits: Default::default(),
             metadata: json!({"purpose": "structured grep live smoke"}),
+            bootstrap: None,
         })
         .await
         .expect("create live E2B backend");

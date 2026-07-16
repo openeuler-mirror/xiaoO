@@ -14,7 +14,19 @@ pub fn load_skill_toml(path: &Path, skill_dir: &Path) -> Result<Skill, SkillErro
         source: e,
     })?;
 
-    let manifest: SkillManifest = toml::from_str(&content).map_err(|e| SkillError::TomlParse {
+    let prompt_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).ok();
+    parse_skill_toml_content(&content, prompt_md.as_deref(), path, skill_dir)
+}
+
+/// Parse an already-loaded TOML manifest and optional companion markdown,
+/// assigning a logical (possibly remote) skill directory.
+pub fn parse_skill_toml_content(
+    content: &str,
+    prompt_md: Option<&str>,
+    path: &Path,
+    skill_dir: &Path,
+) -> Result<Skill, SkillError> {
+    let manifest: SkillManifest = toml::from_str(content).map_err(|e| SkillError::TomlParse {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
@@ -49,9 +61,7 @@ pub fn load_skill_toml(path: &Path, skill_dir: &Path) -> Result<Skill, SkillErro
         .collect();
 
     // Read prompt from companion SKILL.md body if it exists
-    let prompt_md_path = skill_dir.join("SKILL.md");
-    let prompt = if prompt_md_path.exists() {
-        let content = std::fs::read_to_string(&prompt_md_path).unwrap_or_default();
+    let prompt = if let Some(content) = prompt_md {
         // Extract body after frontmatter if present
         let trimmed = content.trim_start();
         if trimmed.starts_with("---") {
@@ -65,10 +75,10 @@ pub fn load_skill_toml(path: &Path, skill_dir: &Path) -> Result<Skill, SkillErro
                     String::new()
                 }
             } else {
-                content
+                content.to_string()
             }
         } else {
-            content
+            content.to_string()
         }
     } else {
         skill_section

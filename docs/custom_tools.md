@@ -2,6 +2,10 @@
 
 xiaoO can discover language-agnostic custom tools from TOML manifests.
 
+> Declarative filesystem custom tools are disabled for E2B runtimes. Their files
+> may exist in the copied workspace but are not registered; see
+> [E2B Workspace 与 Skills Bootstrap](./e2b_workspace_skills_bootstrap.md#custom-tools).
+
 ## Locations
 
 - Project tools: `<workspace>/.xiaoo/tools/*.toml`

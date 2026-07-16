@@ -35,7 +35,9 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
             ..SkillAuditOptions::default()
         };
 
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let skill_dir = entry.path();
             if !skill_dir.is_dir() {
                 continue;
@@ -90,7 +92,7 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
 /// Load a single skill from a directory.
 ///
 /// Prefers SKILL.toml over SKILL.md.
-fn load_skill_from_dir(skill_dir: &Path) -> Result<Skill, crate::error::SkillError> {
+pub fn load_skill_from_dir(skill_dir: &Path) -> Result<Skill, crate::error::SkillError> {
     let toml_path = skill_dir.join("SKILL.toml");
     let md_path = skill_dir.join("SKILL.md");
 

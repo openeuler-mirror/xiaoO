@@ -357,6 +357,8 @@ impl GatewayRuntime {
             channel: None,
             channel_instance_id: None,
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
+            workspace: None,
+            skills: None,
         })
     }
 
@@ -386,6 +388,8 @@ impl GatewayRuntime {
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
+            workspace: None,
+            skills: None,
             command_context,
             chain_depth,
         })

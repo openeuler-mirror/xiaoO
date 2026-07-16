@@ -30,6 +30,34 @@ pub struct SubagentRoleRecord {
     pub tools: BTreeMap<String, bool>,
 }
 
+pub const E2B_BOOTSTRAP_MANIFEST_VERSION: u32 = 1;
+pub const E2B_REMOTE_WORKSPACE_ROOT: &str = "/home/user/workspace";
+pub const E2B_REMOTE_SKILLS_ROOT: &str = "/home/user/.xiaoo/skills";
+
+/// Immutable host-to-E2B bootstrap identity persisted with the runtime.
+/// Host paths are only consulted while the first sandbox is being created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeBootstrapBinding {
+    #[serde(default)]
+    pub source_workspace: Option<PathBuf>,
+    #[serde(default)]
+    pub source_skill_roots: Vec<PathBuf>,
+    pub content_digest: String,
+    pub remote_workspace_root: PathBuf,
+    #[serde(default)]
+    pub remote_skill_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub skills: Vec<RuntimeBootstrapSkill>,
+    pub manifest_version: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeBootstrapSkill {
+    pub name: String,
+    pub remote_dir: PathBuf,
+    pub manifest_file: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRuntimeSnapshot {
     pub agent_id: AgentId,
@@ -46,6 +74,8 @@ pub struct SessionRuntimeSnapshot {
     pub tool_manifest: Option<Vec<ToolSpecSnapshot>>,
     #[serde(default)]
     pub subagent_roles: BTreeMap<String, SubagentRoleRecord>,
+    #[serde(default)]
+    pub bootstrap_binding: Option<RuntimeBootstrapBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
