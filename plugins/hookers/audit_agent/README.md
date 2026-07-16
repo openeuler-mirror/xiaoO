@@ -83,7 +83,7 @@ audit_policy_checker/
 │   ├── heuristic_detector.py  # 层1: 启发式静态检测
 │   ├── logic_rules.py   #   层2: 逻辑规则检测
 │   ├── llm_analyzer.py  #   层3: LLM + Skill 深度分析
-│   ├── script_content_analyzer.py  # 层3预处理: 脚本内容关键词扫描与风险评估
+│   ├── script_content_analyzer.py  # 脚本内容静态扫描: 递归追踪+预处理+L1/L2 规则复用
 │   ├── skill_engine.py  #   Skill 引擎 — 加载、匹配和注入检测规则
 │   └── types.py         #   类型定义 — SecurityJudgment, HeuristicResult 等
 ├── rules/               # 用户自定义安全规则
@@ -497,6 +497,7 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 - 白名单匹配不区分大小写
 - 层1 命中 high/critical 时，即使工具在白名单中也会被拦截（安全优先）
 - **安全兜底**：白名单放行前，用 `CommandPatternScanner` 扫描完整命令，如果管道尾部包含 high/critical 危险模式（如 `echo ... | passwd`），则不允许白名单放行，避免管道前段命令（`echo`）被误判为安全导致绕过
+- **passwd 安全子命令**：交互式 `passwd`（裸命令）、`passwd -S`（查看状态）、`passwd --help` 归入 Tier 2 只读敏感，跳过 L3。危险变体 `passwd -d`、`passwd -l`、`passwd --stdin`、`echo ... | passwd`、`chpasswd` 不在白名单，由层1 规则拦截。白名单用精确正则（`^passwd$`、`^passwd\s+--help\b`、`^passwd\s+-S\b`），不能用 `^passwd` 前缀匹配，否则会把 `passwd -d` 误放行。
 
 **性能效果**：
 
@@ -833,23 +834,32 @@ AuditAgent 的安全检测由 xiaoO Audit Agent 协调器串联三层防御，�
 
 层3 包含 **三个核心机制**：
 
-#### 3.0 脚本内容预分析
+#### 3.0 脚本内容静态扫描（递归追踪 + 预处理 + L1/L2 规则复用）
 
-当检测到 bash 脚本执行时，预扫描脚本内容中的高风险关键词：
+当检测到 bash 脚本执行动作（`bash /path/to/x.sh`、`source x.sh`、`python3 x.py` 等）时，对脚本内容做**静态递归扫描**，命中危险操作直接 Deny（`source=heuristic_script_scan`），不走 LLM。
 
-- **网络外传**：`curl POST`、`curl -d`、`wget --post-data` 等
-- **反弹 Shell**：`nc -e`、`/dev/tcp`、`/dev/udp` 等
-- **敏感文件访问**：`/etc/shadow`、`id_rsa`、`id_ed25519` 等
-- **持久化后门**：`crontab`、`authorized_keys` 等
-- **编码混淆**：`base64` 解码后管道执行等
+**递归追踪调用链**：从入口脚本开始，提取 `source`/`bash`/`.` 等调用的子脚本路径，逐层读取+预处理+扫描，最多 3 层，带 `visited` 防循环引用、深度/总大小上限防护。每个节点读取后**立即用 L1 正则扫描**，命中 critical 立即短路返回，不再读取无用子脚本。
 
-**关键词组合风险评估**：
+**预处理**（扫描前对脚本内容归一化，避免误报/漏报）：
+- 去注释：`# ...`（避免注释里的 `rm -rf /` 被误报）
+- 清输出文本：`echo "..."` / `printf "..."` 内容清空（支持多行字符串，避免 echo 说明文字里的 `/etc/shadow` 被误报）
+- 变量展开：提取 `VAR=value` 简单赋值，对 `$VAR`/`${VAR}` 做文本替换（最多 3 轮，处理两步赋值）。**按变量名长度从长到短排序替换**，避免 `$TARGET` 把 `$TARGET_DIR` 的前缀也替换掉。例：`TARGET=/etc/shadow; cat $TARGET` → 展开为 `cat /etc/shadow` → 命中 L1 规则。
+
+**复用 L1/L2 规则扫描**：对每个节点的预处理内容，用 `CommandPatternScanner`（L1）和 `LogicRulesChecker`（L2，只复用不依赖 action_history 的敏感路径/危险模式规则）扫描。命中 high/critical 直接 Deny，标注命中的脚本路径与递归深度。
+
+**传给 LLM 的脚本分析文本**：
+- L1/L2 已命中的节点不会走到 L3（在 audit_agent 中直接 Deny）。
+- 有可疑关键词但 L1/L2 未拦截的节点：输出可疑内容供 L3 深度判断。
+- **全部节点均无危险/可疑信号（安全脚本）**：输出「✓ 已分析、未发现危险/可疑操作」结论 + 内容预览（截断到 600 字符），给 LLM 一个判 Allow 的明确依据，避免 LLM 因缺乏脚本检查信号而对 `/tmp` 等路径过度警惕、误判 Deny。
+
+**关键词组合风险评估**（L1/L2 未命中但有可疑信号时，辅助 L3 判断）：
 - 网络发送 + 环境变量收集 → **Critical** 数据外传
 - 网络发送 + 敏感文件访问 → **Critical** 凭证外传
 - 反弹 Shell 特征 → **High** 远程控制
 - 持久化后门特征 → **High** 后门植入
 
 风险评估结果注入 LLM prompt，引导正确决策。
+
 
 #### 3.1 Skill 规则匹配与注入
 
