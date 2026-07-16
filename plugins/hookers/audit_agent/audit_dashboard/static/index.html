@@ -1157,7 +1157,7 @@
                     <div class="toggle-knob"></div>
                   </div>
                 </div>
-                ${layerKey === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 也不再对相关路径/关键词做拦截分析。关闭则 L3 仍可能独立拦截"><input type="checkbox" class="skip-l3-checkbox" ${rule.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${layerKey}','${catName}','${rule.id}',this.checked)"> 禁用时跳过L3</label>` : ''}
+                ${layerKey === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 对相关路径/关键词做豁免放行（但仍分析命令其他部分的安全风险）。关闭则 L3 可能独立拦截"><input type="checkbox" class="skip-l3-checkbox" ${rule.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${layerKey}','${catName}','${rule.id}',this.checked)"> 禁用时豁免L3</label>` : ''}
                 ${!isBuiltin ? `<button class="btn btn-danger btn-sm" onclick="deleteRule('${layerKey}','${catName}','${rule.id}')">删除</button>` : ''}
               </div>
             </div>
@@ -1347,7 +1347,7 @@
                 <div class="toggle-knob"></div>
               </div>
             </div>
-            ${r.layer === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 也不再对相关路径/关键词做拦截分析"><input type="checkbox" class="skip-l3-checkbox" ${r.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${r.layer}','${r.category}','${r.id}',this.checked)"> 禁用时跳过L3</label>` : ''}
+            ${r.layer === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 对相关路径/关键词做豁免放行（但仍分析命令其他部分的安全风险）"><input type="checkbox" class="skip-l3-checkbox" ${r.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${r.layer}','${r.category}','${r.id}',this.checked)"> 禁用时豁免L3</label>` : ''}
           </div>
         </div>
       `;
@@ -1398,7 +1398,7 @@
         runtimeConfig = await api("PUT", "/api/rules/skip_l3", { layer, category, rule_id: ruleId, skip_l3_on_disabled: skipL3 });
         renderAll();
         searchRules();
-        showToast(`规则 ${ruleId} "禁用时跳过L3" 已${skipL3 ? '开启' : '关闭'}`, "success");
+        showToast(`规则 ${ruleId} "禁用时豁免L3" 已${skipL3 ? '开启' : '关闭'}`, "success");
       } catch (e) {
         showToast("操作失败: " + e.message, "error");
       }
