@@ -4,7 +4,7 @@
 > **版本**: 0.1.0
 > **语言**: Python 3.10+
 > **框架**: xiaoO AI Agent 插件体系
-> **最后更新**: 2026-06-04
+> **最后更新**: 2026-07-16
 
 ---
 
@@ -101,6 +101,7 @@ audit_agent/
     │   ├── main.py                   # 核心编排：audit_action()
     │   ├── cli.py                    # CLI 工具入口
     │   ├── config.py                 # 配置管理
+    │   ├── runtime_config.py         # 运行时热加载配置 & L2 规则管理 & 合并去重
     │   ├── llm_client.py             # LLM 调用客户端
     │   ├── parsers.py                # 响应解析器
     │   ├── policy_cache.py           # LRU + 文件策略缓存
@@ -152,6 +153,9 @@ plugins/tests/hookers/audit_agent/
 **内联脚本假阳性防护**:
 对 `python -c "print('/etc/shadow')"` 这类内联脚本命令，`file_access` 类风险不立即 Deny（因为敏感路径可能出现在字符串字面量中），而是交给 Layer 3 LLM 做语义判断。
 
+**重定向写入白名单旁路修复**:
+`is_fully_safe_bash_command()` 原先仅检查命令首段是否匹配 `FULLY_SAFE_BASH_PATTERNS`（如 `echo`、`pwd` 等），导致 `echo 1 > /sys/class/...` 被误判为"安全的只读 bash 命令"而跳过 L2+L3。修复后新增**重定向写入守卫**：先提取命令首段（`_extract_first_command`），若 `>` 出现则用 `_DEVNULL_REDIRECT_RE`（匹配 `2>/dev/null`、`&>/dev/null`、`>/dev/null` 等输出丢弃模式）剥离 `/dev/null` 重定向，再检查剩余部分是否仍有 `>`；若有则说明存在真实文件写入重定向，返回 `False`，命令降级进入 L2 流程。该正则与 `logic_rules.py` 中的 `_DEVNULL_REDIRECT_RE` 保持同步。
+
 ### 3.2 Layer 2: 逻辑规则检测 (logic_rules.py)
 
 **目标**: 基于上下文的语义规则检查，利用动作历史和用户意图进行判断。
@@ -162,6 +166,15 @@ plugins/tests/hookers/audit_agent/
 | `intent_consistency` | 用户意图关键词 vs 危险动作关键词一致性 | 用户说"查看日志"但动作是 `rm -rf` → Deny |
 | `sensitive_path_access` | 25 个敏感路径分级（critical/high/medium） | `/etc/shadow`（读+写均阻断）、`.xiaoo-guardian/`（写阻断，读允许） |
 | `dangerous_patterns` | 通配符+删除组合、重定向覆盖系统目录 | `rm *`、`> /etc/passwd` → Deny |
+
+**L2 规则字段 `skip_l3_on_disabled`**:
+每条 L2 种子规则默认携带 `skip_l3_on_disabled: True`。当某条 L2 规则被用户禁用（`enabled=False`）且 `skip_l3_on_disabled=True` 时，若当前动作的 `action_detail` 匹配该规则的关键内容（路径、关键词或 pattern），系统生成**硬约束** `skip_l3_hints` 传递给 L3 Prompt，告知 LLM 必须将涉及该路径/关键词的操作视为允许，但仍需检查命令其他部分的独立安全风险（网络外传、提权等）。
+
+**skip_l3_hints 数据流**:
+1. `get_disabled_l2_rules_with_skip_l3()` 扫描所有 `enabled=False AND skip_l3_on_disabled=True` 的 L2 规则，按类别提取关键内容（`sensitive_path_access` → path 列表；`intent_consistency` → intent_keywords 列表；其他 → pattern 列表）
+2. `audit_agent.py` 对返回的关键内容与当前 `action_detail` 做子串匹配，命中的条目组装为约束文本
+3. 约束文本经 `LLMAnalyzer.analyze()` → `get_security_judge_prompt()` → 模板 `{skip_l3_hints}` 占位符注入 L3 Prompt 的"判断原则"第 6 条
+4. 无命中时占位符填入默认文本 `无（当前无禁用规则命中）`
 
 **敏感路径分级示例**:
 
@@ -201,6 +214,7 @@ plugins/tests/hookers/audit_agent/
 │  + 匹配的 Skill 规则文本         │
 │  + Layer 1/2 检测提示            │
 │  + 脚本预扫描结果                │
+│  + skip_l3_hints 禁用规则约束    │
 └───────────────┬──────────────────┘
                 │
                 ▼
@@ -247,7 +261,7 @@ L3 用 `ThreadPoolExecutor` 包装 `call_llm` 加超时，但 worker 线程是�
 
 | 级别 | 工具列表 | 行为 | 延迟 |
 |------|---------|------|------|
-| **Tier 1 (完全安全)** | `glob`, `ls`, `list_dir`, `ask_user_question`, `count_text_length` + 安全 bash 命令 (`echo`, `pwd`, `which`, `date`, `whoami` 等) | 跳过 Layer 2 + Layer 3 | ~2ms |
+| **Tier 1 (完全安全)** | `glob`, `ls`, `list_dir`, `ask_user_question`, `count_text_length` + 安全 bash 命令 (`echo`, `pwd`, `which`, `date`, `whoami` 等，**不含真实重定向写入**如 `> /path`) | 跳过 Layer 2 + Layer 3 | ~2ms |
 | **Tier 2 (只读敏感)** | `read`, `file_read`, `head`, `tail`, `grep` + 只读 bash (`cat`, `wc`, `diff`, `find` 等) | 跳过 Layer 3，保留 Layer 2 | ~5ms |
 
 > **前提条件**: Layer 1 启发式检测未发现 high/critical 风险。
@@ -508,6 +522,18 @@ result = audit_action(
 ### 10.4 Skill 引导的 LLM 分析
 
 通过关键词匹配从 12 个领域 Skill 文件中选取 Top-3 注入 LLM Prompt，相比通用 Prompt，能显著提升对特定安全场景（数据外泄、供应链攻击、持久化后门等）的识别准确率。
+
+### 10.5 重定向写入白名单旁路防护
+
+`is_fully_safe_bash_command()` 在白名单模式匹配前新增重定向写入守卫：剥离 `/dev/null` 丢弃后检查剩余 `>` 符号。有真实写入重定向的命令（如 `echo 1 > /sys/...`）不再被归类为"完全安全"，而是降级进入 L2 流程，确保敏感路径规则有机会拦截。仅含输出丢弃（`2>/dev/null` 等）的命令仍正确通过白名单。
+
+### 10.6 禁用 L2 规则对 L3 的约束传递
+
+当用户主动禁用某条 L2 规则且该规则设置了 `skip_l3_on_disabled=True`（种子规则默认值），若当前动作命中了该规则的关键内容，系统将生成硬约束文本 `skip_l3_hints` 注入 L3 Prompt 的判断原则第 6 条。该约束要求 LLM 将涉及禁用内容的操作视为允许，但仍需审查命令其他部分的独立风险。这防止了"禁用 L2 后 L3 仍因相同原因拦截"的逻辑矛盾。
+
+### 10.7 规则合并内容指纹去重
+
+`merge_config()` 在 `_merge_rule_categories()` 中使用 `_content_fingerprint()` 检测内置规则 id 变更但实质内容相同的场景。指纹优先级：intent_consistency 规则用 `intent_keywords + dangerous_actions`、sensitive_path 规则用 `path`、其他规则用 `pattern`、兜底用 `id`。当旧版规则与新版指纹相同但 id 不同时，旧版被替换而非追加，防止了 intent_consistency 规则因 reason 推辞更新导致 id 变化而产生的重复条目（如 4 条规则变为 8 条的 duplication bug）。
 
 ---
 

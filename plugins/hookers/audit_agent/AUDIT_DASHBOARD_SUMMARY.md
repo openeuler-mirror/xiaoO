@@ -64,6 +64,7 @@
 | 分类批量开关 | 一键启用/禁用整个分类 |
 | 单条规则开关 | 每条规则独立启用/禁用 |
 | 拦截模式控制 | 敏感路径规则支持三种拦截模式切换(仅拦截写入/仅拦截读取/读写均拦截),内置规则显示来源标注与已覆盖提示 |
+| 禁用时豁免L3 | L2 规则卡片提供"禁用时豁免L3"复选框,勾选后当该 L2 规则被禁用时跳过 L3 检测,避免不必要的 LLM 调用 |
 | 新增自定义规则 | 支持正则模式、关键词、敏感路径等多种类型,带风险等级/类型/原因字段,敏感路径新增时可选拦截模式 |
 | 删除自定义规则 | 仅允许删除用户自定义规则(builtin 标记保护出厂规则) |
 
@@ -85,7 +86,8 @@
 | 自动记录 | 每次 LLM 调用自动记录 token 用量(prompt/completion/total tokens、model、step、时间戳) |
 | 多维统计 | 按步骤(L3 安全判断/策略生成)、按模型、按日期分组汇总 |
 | 可视化展示 | 概览页柱状图(输入/输出 Token 按日期分布)、Token 详情页(分组进度条 + 最近调用记录表) |
-| 时间范围筛选 | 今日/近7天/近30天/全部 |
+| 时间范围筛选 | 今日/近7天/近30天/全部,快捷按钮带高亮状态(`.btn-sm.active`),点击快捷按钮自动清除日期选择器;自定义日期范围查询清除所有快捷按钮高亮 |
+| Token 趋势图 | 趋势图 API 支持与统计相同的 days 参数,前端 `loadTokenTrend(days)` 优先级:日期选择器 > days 参数 > 默认7天 |
 | 容量控制 | 最多保留 10000 条记录,自动裁剪;支持一键清除 |
 
 ### 5. 配置管理
@@ -175,9 +177,11 @@ AUDIT_DASHBOARD_PORT=9765 xiaoo-audit-dashboard
 | GET | `/api/config` | 获取完整配置 |
 | GET | `/api/env-overrides` | 获取环境变量覆盖状态 |
 | POST | `/api/reset` | 重置到出厂默认 |
-| GET | `/api/token-stats` | 获取 token 用量统计(支持 days 参数) |
+| GET | `/api/token-stats` | 获取 token 用量统计(支持 days 参数: 0=全部, 1=今日, 7=近7天, 30=近30天) |
+| GET | `/api/token-stats/trend` | 获取 token 用量趋势图数据(支持 days 参数: 0=全部, 1=今日, 7=近7天, 默认7天) |
 | GET | `/api/token-stats/recent` | 获取最近调用记录 |
 | POST | `/api/token-stats/reset` | 清除 token 统计 |
+| PUT | `/api/rules/skip_l3` | 设置规则的 skip_l3_on_disabled 字段(body: layer, category, rule_id, skip_l3_on_disabled) |
 
 ---
 
