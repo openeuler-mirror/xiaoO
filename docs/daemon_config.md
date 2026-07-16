@@ -167,15 +167,23 @@ temp_root = "/tmp"
 default_shell = "/bin/sh"
 ```
 
-Limit live E2B sandbox usage with `[server.resource_limits]`. If this section is
-omitted, the daemon defaults to E2B's Hobby concurrency limit of 20 active
-sandboxes. Paused runtimes and checkpoint templates do not count toward this
-limit.
+Live E2B sandbox limits are shared by all xiaoO processes running as the same
+Unix user. Configure the per-provider-key limit in the separate global sandbox
+configuration file. If the file or field is absent, xiaoO defaults to 20 live
+sandboxes per key. Paused runtimes and provider checkpoint templates do not
+count toward this limit.
 
 ```toml
-[server.resource_limits]
-max_active_e2b_sandboxes = 20
+# ~/.config/xiaoo/sandbox.toml
+max_sandbox_cnt = 20
 ```
+
+The current daemon does not read `[server.resource_limits]`; that older section
+must not be used for sandbox limits. Runtime processes coordinate confirmed and
+in-progress sandbox counts through `~/.xiaoo/sandbox_counts.json` and record
+backend ownership/activity in `~/.xiaoo/backend_registry.json`. Provider API
+keys are stored only as derived identifiers in these shared files, not as
+plaintext.
 
 Use the local backend in daemon mode by setting `kind = "local"` under the same
 `[server.operation_backend]` namespace.
@@ -289,9 +297,13 @@ kind = "e2b"
 api_key_env = "E2B_API_KEY"
 template_id = "base"
 timeout_secs = 3600
+```
 
-[server.resource_limits]
-max_active_e2b_sandboxes = 20
+Set the shared E2B sandbox limit separately in
+`~/.config/xiaoo/sandbox.toml`:
+
+```toml
+max_sandbox_cnt = 20
 ```
 
 ### API Endpoints
