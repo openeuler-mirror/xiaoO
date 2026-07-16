@@ -433,6 +433,12 @@ READONLY_SENSITIVE_BASH_PATTERNS = [
     r"^cut\s+",
     r"^sort(?:\s|$)",
     r"^uniq(?:\s|$)",
+    # ── passwd 安全子命令（只读/查询/帮助），跳过 L3，保留 L2 ──
+    # 注意：必须用精确模式，不能写 ^passwd，否则 passwd -d/-l 等危险变体会被前缀匹配而误放行。
+    # 危险变体（passwd -d/-l/--stdin、管道 | passwd）由 L1 CommandPatternScanner 单独拦截。
+    r"^passwd$",            # 裸 passwd（交互式改密，无参数）
+    r"^passwd\s+--help\b",  # passwd --help 帮助
+    r"^passwd\s+-S\b",      # passwd -S 查看密码状态
 ]
 
 # 向后兼容：合并为完整安全列表（原 SAFE_BASH_PATTERNS）
