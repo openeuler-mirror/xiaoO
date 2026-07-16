@@ -715,8 +715,11 @@ async fn install_bootstrap_archive(
     let response = state
         .envd_request(Method::POST, "/files")
         .query(&[("path", remote_manifest.as_str())])
-        .header(CONTENT_TYPE, "application/json")
+        // The envd file endpoint treats the body as file bytes and only
+        // accepts multipart or octet-stream, even when the file itself is JSON.
+        .header(CONTENT_TYPE, "application/octet-stream")
         .header(ACCEPT, "application/json")
+        .header(CONTENT_LENGTH, manifest.len())
         .body(manifest)
         .send()
         .await
