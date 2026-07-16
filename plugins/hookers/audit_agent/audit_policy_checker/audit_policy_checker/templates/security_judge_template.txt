@@ -35,6 +35,10 @@
 
 {script_analysis_text}
 
+## 用户禁用的规则提示
+
+{skip_l3_hints}
+
 ## 分析要点
 
 请从以下维度分析该动作是否应该被允许：

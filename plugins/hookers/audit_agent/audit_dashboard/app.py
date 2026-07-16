@@ -37,6 +37,7 @@ from audit_policy_checker.runtime_config import (
     update_layer_enabled,
     update_rule_enabled,
     update_rule_deny_mode,
+    update_rule_skip_l3,
     update_category_enabled,
     add_custom_rule,
     delete_custom_rule,
@@ -130,6 +131,12 @@ class DenyModeUpdate(BaseModel):
     rule_id: str
     deny_mode: str
 
+class SkipL3Update(BaseModel):
+    layer: str
+    category: str
+    rule_id: str
+    skip_l3_on_disabled: bool
+
 class DeleteRule(BaseModel):
     layer: str
     category: str
@@ -221,6 +228,13 @@ async def change_rule_deny_mode(body: DenyModeUpdate):
     if body.deny_mode not in ("deny_write", "deny_read", "deny_both"):
         raise HTTPException(status_code=400, detail=f"无效的 deny_mode: {body.deny_mode}")
     runtime = update_rule_deny_mode(body.layer, body.category, body.rule_id, body.deny_mode)
+    return runtime
+
+
+@app.put("/api/rules/skip_l3", dependencies=[Depends(auth_dependency)])
+async def change_rule_skip_l3(body: SkipL3Update):
+    """修改规则禁用时是否也跳过 L3 分析"""
+    runtime = update_rule_skip_l3(body.layer, body.category, body.rule_id, body.skip_l3_on_disabled)
     return runtime
 
 

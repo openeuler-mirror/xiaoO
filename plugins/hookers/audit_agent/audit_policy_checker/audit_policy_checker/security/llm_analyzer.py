@@ -44,6 +44,7 @@ class LLMAnalyzer:
         heuristic_result: HeuristicResult,
         logic_result: LogicRuleResult,
         config: Config,
+        skip_l3_hints: str = "",
     ) -> SecurityJudgment:
         """
         使用 LLM + Skill 进行深度安全分析。
@@ -89,6 +90,7 @@ class LLMAnalyzer:
             skills_text=skills_text,
             hints_text=hints_text,
             script_analysis_text=script_analysis_text,
+            skip_l3_hints=skip_l3_hints,
         )
 
         # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）

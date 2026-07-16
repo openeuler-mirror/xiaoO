@@ -189,6 +189,7 @@ def _l2_sensitive_paths_to_rules() -> list[dict]:
             "desc": sp["desc"],
             "deny_mode": deny_mode,
             "source_deny_mode": deny_mode,  # 记录代码仓原始拦截模式
+            "skip_l3_on_disabled": True,    # 禁用时也跳过 L3 对该路径的分析
             "enabled": True,
             "builtin": True,
         }
@@ -209,6 +210,7 @@ def _l2_intent_patterns_to_rules() -> list[dict]:
             "intent_keywords": pat["intent_keywords"],
             "dangerous_actions": pat["dangerous_actions"],
             "reason": pat["reason"],
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -224,6 +226,7 @@ def _l2_password_patterns_to_rules() -> list[dict]:
         rules.append({
             "id": id_str,
             "pattern": pat,
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -239,6 +242,7 @@ def _l2_user_deletion_patterns_to_rules() -> list[dict]:
         rules.append({
             "id": id_str,
             "pattern": pat,
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -581,6 +585,10 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                             elif field == "read_only":
                                 # read_only 标记以源码为准：源码标了就同步 True（仅拦截读取）
                                 ur["read_only"] = val
+                            elif field == "skip_l3_on_disabled":
+                                # skip_l3_on_disabled 仅在缺失时补，保留用户手动设置的值
+                                if field not in ur:
+                                    ur[field] = val
 
             # 源码已移除的内置规则 → 禁用（保留在列表中但 enabled=False）
             # 例如 /dev/null、/dev/zero、/dev/urandom 从 SENSITIVE_PATHS 移除后，
@@ -937,6 +945,47 @@ def update_rule_deny_mode(layer: str, category: str, rule_id: str, deny_mode: st
             break
     save_runtime_config(runtime)
     return runtime
+
+
+def update_rule_skip_l3(layer: str, category: str, rule_id: str, skip_l3_on_disabled: bool) -> dict:
+    """更新单条规则的 skip_l3_on_disabled 字段并保存"""
+    runtime = load_runtime_config()
+    rules = runtime.get(layer, {}).get(category, {}).get("rules", [])
+    for r in rules:
+        if r.get("id") == rule_id:
+            r["skip_l3_on_disabled"] = skip_l3_on_disabled
+            break
+    save_runtime_config(runtime)
+    return runtime
+
+
+def get_disabled_l2_rules_with_skip_l3() -> dict[str, list[str]]:
+    """获取所有 enabled=False 且 skip_l3_on_disabled=True 的 L2 规则的关键内容。
+
+    Returns:
+        dict: 按类别分组，每类返回关键内容列表
+            - sensitive_path_access: 返回 path 列表
+            - intent_consistency: 返回 intent_keywords 列表
+            - 其他: 返回 pattern 列表
+    """
+    runtime = load_runtime_config()
+    result: dict[str, list[str]] = {}
+    l2 = runtime.get("L2_rules", {})
+    for cat_name, cat in l2.items():
+        if not cat.get("category_enabled", True):
+            continue
+        items = []
+        for r in cat.get("rules", []):
+            if not r.get("enabled", True) and r.get("skip_l3_on_disabled", False):
+                if cat_name == "sensitive_path_access":
+                    items.append(r.get("path", ""))
+                elif cat_name == "intent_consistency":
+                    items.extend(r.get("intent_keywords", []))
+                elif r.get("pattern"):
+                    items.append(r["pattern"])
+        if items:
+            result[cat_name] = items
+    return result
 
 
 def update_category_enabled(layer: str, category: str, enabled: bool) -> dict:

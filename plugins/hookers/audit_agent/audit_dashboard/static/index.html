@@ -590,6 +590,11 @@
     .btn-sm { padding: 3px 8px; font-size: 12px; }
     .btn-sm.active { background: var(--primary); color: white; border-color: var(--primary); }
 
+    /* skip_l3_on_disabled 控件 */
+    .skip-l3-label { display:inline-flex; align-items:center; gap:3px; font-size:11px; color:var(--text-light); cursor:pointer; white-space:nowrap; }
+    .skip-l3-label:hover { color:var(--text); }
+    .skip-l3-checkbox { width:14px; height:14px; cursor:pointer; accent-color:var(--primary); }
+
     /* 日期范围选择器：与 btn-sm 高度对齐，统一边框/字体/圆角 */
     .input-sm {
       padding: 3px 8px;
@@ -1152,6 +1157,7 @@
                     <div class="toggle-knob"></div>
                   </div>
                 </div>
+                ${layerKey === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 也不再对相关路径/关键词做拦截分析。关闭则 L3 仍可能独立拦截"><input type="checkbox" class="skip-l3-checkbox" ${rule.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${layerKey}','${catName}','${rule.id}',this.checked)"> 禁用时跳过L3</label>` : ''}
                 ${!isBuiltin ? `<button class="btn btn-danger btn-sm" onclick="deleteRule('${layerKey}','${catName}','${rule.id}')">删除</button>` : ''}
               </div>
             </div>
@@ -1341,6 +1347,7 @@
                 <div class="toggle-knob"></div>
               </div>
             </div>
+            ${r.layer === "L2_rules" ? `<label class="skip-l3-label" title="禁用该规则时，L3 也不再对相关路径/关键词做拦截分析"><input type="checkbox" class="skip-l3-checkbox" ${r.skip_l3_on_disabled ? 'checked' : ''} onchange="updateSkipL3('${r.layer}','${r.category}','${r.id}',this.checked)"> 禁用时跳过L3</label>` : ''}
           </div>
         </div>
       `;
@@ -1381,6 +1388,17 @@
         renderAll();
         searchRules();
         showToast(`拦截模式已更新为 ${denyModeLabel(denyMode)}`, "success");
+      } catch (e) {
+        showToast("操作失败: " + e.message, "error");
+      }
+    }
+
+    async function updateSkipL3(layer, category, ruleId, skipL3) {
+      try {
+        runtimeConfig = await api("PUT", "/api/rules/skip_l3", { layer, category, rule_id: ruleId, skip_l3_on_disabled: skipL3 });
+        renderAll();
+        searchRules();
+        showToast(`规则 ${ruleId} "禁用时跳过L3" 已${skipL3 ? '开启' : '关闭'}`, "success");
       } catch (e) {
         showToast("操作失败: " + e.message, "error");
       }
