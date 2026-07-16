@@ -318,7 +318,9 @@ workspace 测试中。
 | `apps/shared/src/backend/e2b/bootstrap.rs` | 路径校验、skill 选择、归档、摘要和容量限制 |
 | `apps/shared/src/backend/e2b/provider.rs` | 流式上传、远端校验、staging 安装与失败清理 |
 | `apps/serverside/src/daemon_runtime.rs` | E2B API 参数解析、绑定校验和 runtime 静态构建 |
-| `apps/shared/src/gateway/e2b_runtime.rs` | 远端 manifest、AGENTS、repo map 和 skill finalize |
+| `apps/shared/src/gateway/e2b_runtime.rs` | E2B manifest 校验和远端 skill finalize |
+| `apps/shared/src/gateway/backend_workspace_context.rs` | 通过 `OperationBackend` 读取 AGENTS 并收集 repo map 输入 |
+| `apps/shared/src/gateway/workspace_prompt.rs` | local/E2B 共用的 AGENTS 与 repo map 筛选、签名和渲染策略 |
 | `apps/shared/src/gateway/session_record.rs` | `RuntimeBootstrapBinding` snapshot 数据结构 |
 | `apps/shared/src/gateway/session_service_impl.rs` | 初始化锁、backend 生命周期与 session 保存顺序 |
 | `crates/skill/src/loading/loader.rs` | 确定性 skill 扫描、解析、审计和去重 |

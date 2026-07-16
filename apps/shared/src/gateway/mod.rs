@@ -1,3 +1,4 @@
+mod backend_workspace_context;
 pub mod bootstrap;
 pub mod channel_interaction;
 pub mod decrypted_api_keys;

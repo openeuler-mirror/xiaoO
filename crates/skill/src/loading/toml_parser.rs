@@ -14,7 +14,10 @@ pub fn load_skill_toml(path: &Path, skill_dir: &Path) -> Result<Skill, SkillErro
         source: e,
     })?;
 
-    let prompt_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).ok();
+    let prompt_md_path = skill_dir.join("SKILL.md");
+    let prompt_md = prompt_md_path
+        .exists()
+        .then(|| std::fs::read_to_string(prompt_md_path).unwrap_or_default());
     parse_skill_toml_content(&content, prompt_md.as_deref(), path, skill_dir)
 }
 

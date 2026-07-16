@@ -92,7 +92,7 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
 /// Load a single skill from a directory.
 ///
 /// Prefers SKILL.toml over SKILL.md.
-pub fn load_skill_from_dir(skill_dir: &Path) -> Result<Skill, crate::error::SkillError> {
+fn load_skill_from_dir(skill_dir: &Path) -> Result<Skill, crate::error::SkillError> {
     let toml_path = skill_dir.join("SKILL.toml");
     let md_path = skill_dir.join("SKILL.md");
 
