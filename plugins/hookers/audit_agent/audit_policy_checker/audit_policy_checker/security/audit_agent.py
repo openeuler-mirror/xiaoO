@@ -260,18 +260,11 @@ class xiaoOSecBot:
         llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and l3_runtime_enabled and not skip_llm
 
         # 收集 L2 禁用且 skip_l3_on_disabled 的规则关键内容，
-        # 生成提示让 L3 不要对这些路径/关键词做拦截分析
-        skip_l3_hints = ""
+        # 命中时作为硬约束传给 L3：对这些路径/关键词必须放行，
+        # 但 L3 仍分析命令其他部分的安全风险
+        skip_l3_hints = "无（当前无禁用规则命中）"
         disabled_l2 = get_disabled_l2_rules_with_skip_l3()
         if disabled_l2:
-            hint_parts = []
-            for cat_name, items in disabled_l2.items():
-                if cat_name == "sensitive_path_access":
-                    hint_parts.append(f"敏感路径: {', '.join(items)}")
-                elif cat_name == "intent_consistency":
-                    hint_parts.append(f"意图关键词: {', '.join(items)}")
-                else:
-                    hint_parts.append(f"规则模式: {', '.join(items[:3])}...")
             # 检查当前 action_detail 是否命中了 skip_l3 的关键内容
             action_lower = a_next.get("action_detail", "").lower()
             matched_items = []
@@ -281,11 +274,13 @@ class xiaoOSecBot:
                         matched_items.append(item)
             if matched_items:
                 skip_l3_hints = (
-                    f"用户已主动禁用以下安全规则的拦截，这些路径/意图不需要特别关注，不应仅因涉及这些内容就拒绝：\n"
-                    f"  {', '.join(matched_items)}"
+                    f"⚠️ 重要约束：用户已主动禁用针对以下内容的安全拦截规则，这是用户的明确决策：\n"
+                    f"  {', '.join(matched_items)}\n"
+                    f"对这些路径/关键词的相关操作，必须视为允许的，不允许仅因涉及这些内容就拒绝。"
+                    f"但你仍需检查命令的其他部分是否有独立于这些内容的安全风险（如网络外传、提权等）。"
                 )
                 logger.info(
-                    "L3 skip_hints: action_detail 命中了禁用规则的 skip_l3 内容: %s",
+                    "L3 skip_l3_hints: action_detail 命中了禁用规则的 skip_l3 内容（硬约束）: %s",
                     matched_items,
                 )
 
