@@ -952,7 +952,7 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 >
 > 写/删操作由统一的 `_is_write_operation` 判定：写入关键词、`rm`/`cp`/`mv`/`dd` 等写删命令、或真实重定向写入（`/dev/null` 丢弃除外，且首命令非只读命令）。
 >
-> **已移除的路径**：`/dev/null`、`/dev/zero`、`/dev/urandom` 已从规则表移除——拦截这些设备的误报率极高（`2>/dev/null` 是丢弃 stderr 的标准范式、`dd if=/dev/zero` 是创建空文件的标准操作、写入 `/dev/urandom` 是投喂熵池），且无安全增益。老用户副本中残留的规则会在下次加载时自动禁用（`enabled=False`），dashboard 上可见但不再生效）。
+> **已移除的路径**：`/dev/null`、`/dev/zero`、`/dev/urandom` 已从规则表移除——拦截这些设备的误报率极高（`2>/dev/null` 是丢弃 stderr 的标准范式、`dd if=/dev/zero` 是创建空文件的标准操作、写入 `/dev/urandom` 是投喂熵池），且无安全增益。老用户副本中残留的规则会在下次加载时自动禁用（`enabled=False`）并打上 `source_removed` 标记，dashboard 上以「已移除」徽标标注（区别于用户主动禁用的默认规则），可见但不再生效，如需可手动启用；若该规则后来又被源码加回，标记自动清除。
 
 > **禁用时豁免 L3（`skip_l3_on_disabled`）**：每条 L2 规则新增 `skip_l3_on_disabled` 字段（默认 `True`）。当规则被用户禁用（`enabled=False`）且 `skip_l3_on_disabled=True`，并且当前 `action_detail` 命中了该规则的关键内容（路径、intent_keywords、pattern 等），系统会在 L3 prompt 的"判断原则"部分注入一条**硬约束**：L3 必须将该路径/关键词的相关操作视为允许，但仍需分析命令的其他部分是否有独立的安全风险（如网络外传、提权等）。
 >

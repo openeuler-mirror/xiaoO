@@ -505,6 +505,16 @@
       color: white;
     }
 
+    /* 源码已移除的默认规则徽标（历史保留，非当前默认规则集） */
+    .removed-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      background: #fef3c7;
+      color: #b45309;
+      border: 1px solid #f59e0b;
+    }
+
     /* 敏感路径拦截模式 badge（统一三种模式为 deny-mode-badge） */
     .deny-mode-badge {
       font-size: 10px;
@@ -1131,6 +1141,7 @@
               <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                   ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
+                  ${rule.source_removed ? '<span class="removed-badge" title="此规则已从当前默认规则集移除，仅作历史保留；如需可手动启用">已移除</span>' : ''}
                   <span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>
                   ${rule.risk_type ? `<span class="rule-type-tag rt-${rule.risk_type}" title="风险类型: ${escapeHtml(rule.risk_type)}">${escapeHtml(riskTypeName(rule.risk_type))}</span>` : ''}
                   ${(layerKey === "L2_rules" && catName === "sensitive_path_access") ? `
@@ -1318,6 +1329,7 @@
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
               <span class="layer-badge layer-${r.layerName.toLowerCase()}">${r.layerName}</span>
               ${isBuiltin ? '<span class="builtin-badge">内置</span>' : '<span class="custom-badge">自定义</span>'}
+              ${r.source_removed ? '<span class="removed-badge" title="此规则已从当前默认规则集移除，仅作历史保留；如需可手动启用">已移除</span>' : ''}
               ${risk ? `<span class="risk-badge risk-${risk}" title="${risk === 'critical' ? '严重：必须拒绝，不可逆破坏或提权操作' : risk === 'high' ? '高危：强烈建议拒绝，需人工审核' : risk === 'medium' ? '中危：需谨慎评估，结合意图判断' : '低危：常规操作，可按需放行'}">${risk}</span>` : ''}
               ${r.risk_type ? `<span class="rule-type-tag rt-${r.risk_type}" title="风险类型: ${escapeHtml(r.risk_type)}">${escapeHtml(riskTypeName(r.risk_type))}</span>` : ''}
               ${(r.isSkill !== true && r.layer === "L2_rules" && r.category === "sensitive_path_access") ? `

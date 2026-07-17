@@ -567,6 +567,8 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                     # 例如 sensitive_path_access 规则新增 credential 标记后，老副本需补上
                     ur = next((r for r in user_rules if r.get("id") == sr.get("id")), None)
                     if ur is not None:
+                        # 规则 id 仍在源码默认集中（被源码重新管理），清除移除标记
+                        ur.pop("source_removed", None)
                         for field, val in sr.items():
                             if field in ("id", "path", "risk_level", "desc", "builtin"):
                                 # 这些字段源码为准（出厂定义），但仅在缺失时补，避免覆盖用户未感知的改动
@@ -597,18 +599,21 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                                 if field not in ur:
                                     ur[field] = val
 
-            # 源码已移除的内置规则 → 禁用（保留在列表中但 enabled=False）
+            # 源码已移除的内置规则 → 标记 source_removed 并禁用（保留在列表中）
             # 例如 /dev/null、/dev/zero、/dev/urandom 从 SENSITIVE_PATHS 移除后，
-            # 老用户副本里还残留，继续拦截会产生误报。禁用而非删除，让用户在
-            # dashboard 上能看到这些规则（标注为已禁用），还能手动启用。
+            # 老用户副本里还残留，继续拦截会产生误报。标记 source_removed 让
+            # dashboard 上能区分「已从默认规则集移除」与「用户主动禁用的默认规则」，
+            # 仍可手动启用。enabled 仅对原本启用的禁用，尊重用户已主动禁用的偏好。
             source_ids = {sr.get("id") for sr in source_rules if sr.get("id")}
             for ur in user_rules:
-                if ur.get("id") and ur.get("builtin") and ur["id"] not in source_ids and ur.get("enabled", True):
-                    ur["enabled"] = False
-                    logger.info(
-                        "内置规则 %s 已从源码移除，在用户副本中禁用（category=%s）",
-                        ur["id"], cat_name,
-                    )
+                if ur.get("id") and ur.get("builtin") and ur["id"] not in source_ids:
+                    ur["source_removed"] = True
+                    if ur.get("enabled", True):
+                        ur["enabled"] = False
+                        logger.info(
+                            "内置规则 %s 已从源码移除，禁用并标记 source_removed（category=%s）",
+                            ur["id"], cat_name,
+                        )
 
             # 敏感路径规则：确保 deny_mode 字段与 credential/read_only 一致
             # 向后兼容：老配置没有 deny_mode，从传统字段推导
