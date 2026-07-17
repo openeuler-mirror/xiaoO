@@ -935,6 +935,7 @@
     let runtimeConfig = {};
     let envOverrides = {};
     let currentModalAction = null;
+    const expandedCats = new Set();  // 记录当前展开的分类 id，供重渲染后恢复（避免操作后列表自动收起）
 
     const LAYER_NAMES = {
       "L1_heuristic": { name: "L1 静态检测", desc: "正则/关键词匹配，仅看下一步动作" },
@@ -1114,10 +1115,10 @@
                     <div class="toggle-knob"></div>
                   </div>
                 </div>
-                <span class="expand-icon" id="expand-${containerId}-${catName}">▼</span>
+                <span class="expand-icon ${expandedCats.has(`${containerId}-${catName}`) ? 'open' : ''}" id="expand-${containerId}-${catName}">▼</span>
               </div>
             </div>
-            <div class="rule-list" id="list-${containerId}-${catName}" style="display:none">
+            <div class="rule-list" id="list-${containerId}-${catName}" style="display:${expandedCats.has(`${containerId}-${catName}`) ? '' : 'none'}">
         `;
 
         for (const rule of rules) {
@@ -1147,8 +1148,8 @@
                   ${(layerKey === "L2_rules" && catName === "sensitive_path_access") ? `
                     <span class="deny-mode-badge ${denyModeClass(rule.deny_mode || 'deny_write')}" title="拦截模式: ${denyModeLabel(rule.deny_mode || 'deny_write')}">${denyModeLabel(rule.deny_mode || 'deny_write')}</span>
                     ${rule.builtin !== false && rule.source_deny_mode ? `
-                      <span class="source-badge">原始: ${denyModeLabel(rule.source_deny_mode)}</span>
-                      ${rule.deny_mode && rule.deny_mode !== rule.source_deny_mode ? '<span class="overridden-hint">(已覆盖)</span>' : ''}
+                      <span class="source-badge" title="源码出厂的原始拦截模式。当前模式与之不同时表示已被用户覆盖">原始: ${denyModeLabel(rule.source_deny_mode)}</span>
+                      ${rule.deny_mode && rule.deny_mode !== rule.source_deny_mode ? '<span class="overridden-hint" title="当前拦截模式已偏离源码默认值（原始模式见左侧）。含义：你手动改过此规则后，源码对该规则策略的后续更新将不会自动套用（视为你有意自定义），如需恢复可改回原始模式">已覆盖</span>' : ''}
                     ` : ''}
                   ` : ''}
                 </div>
@@ -1204,10 +1205,10 @@
                     <div class="toggle-knob"></div>
                   </div>
                 </div>
-                <span class="expand-icon" id="expand-l3-${catName}">▼</span>
+                <span class="expand-icon ${expandedCats.has(`l3-${catName}`) ? 'open' : ''}" id="expand-l3-${catName}">▼</span>
               </div>
             </div>
-            <div class="rule-list" id="list-l3-${catName}" style="display:none">
+            <div class="rule-list" id="list-l3-${catName}" style="display:${expandedCats.has(`l3-${catName}`) ? '' : 'none'}">
         `;
 
         for (const skill of skills) {
@@ -1850,8 +1851,10 @@
       const list = document.getElementById(`list-${id}`);
       const icon = document.getElementById(`expand-${id}`);
       if (list && icon) {
-        list.style.display = list.style.display === "none" ? "" : "none";
-        icon.classList.toggle("open");
+        const willOpen = list.style.display === "none";
+        list.style.display = willOpen ? "" : "none";
+        icon.classList.toggle("open", willOpen);
+        if (willOpen) expandedCats.add(id); else expandedCats.delete(id);
       }
     }
 
