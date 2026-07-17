@@ -826,9 +826,10 @@ skip_llm=True? → Yes → Allow（跳过 L3）
 - **Shell 重定向写入**：`action_detail` 包含 `>` 且首命令不是只读命令（见下），也视为写入操作
 - **`/dev/null` 重定向豁免**：`2>/dev/null`、`&>/dev/null`、`>/dev/null` 等丢弃输出的标准写法**不计入**重定向写入（避免 `blockdev --getsize /dev/sda 2>/dev/null` 被误判为写 /dev/sda）
 
-**只读命令集合 `READ_ONLY_COMMANDS`**（首命令在此集合内时，即使带 `>` 重定向也不视为写入）：
-- 文本查看/过滤：`cat`/`head`/`tail`/`less`/`more`/`grep`/`find`/`awk`/`sed`/`sort`/`uniq`/`wc`/`cut`/`strings`/`od`/`xxd`/`hexdump`/`tr`/`file`/`stat`/`ls` 等
-- 只读系统/设备信息查询：`lsblk`/`blockdev`/`smartctl`/`udevadm`/`dmidecode`/`lscpu`/`lspci`/`dmesg`/`journalctl`/`ip`/`ss`/`uname`/`sysctl` 等
+**重定向写判定豁免命令集合 `REDIRECT_WRITE_EXEMPT_COMMANDS`**（首命令在此集合内时，即使带 `>` 重定向也不视为写入）：
+- 仅传统文本查看/过滤：`cat`/`head`/`tail`/`less`/`more`/`grep`/`find`/`awk`/`sed`/`sort`/`uniq`/`wc`/`cut`/`strings`/`od`/`xxd`/`hexdump`/`tr`/`file`/`stat`/`du`/`df`/`ls`/`dir`/`tree`/`nl`/`tac`/`rev` 等
+
+> 该集合刻意保持保守——只含「绝不可能有写文件意图」的命令。`systemctl`/`sysctl`/`ip`/`ifconfig`/`route`/`fdisk`/`parted` 等能改系统状态的命令**不在此集合**，其 `>` 重定向会被识别为写入并拦截，避免 `systemctl > ~/.bashrc`、`sysctl > /var/spool/cron/x` 等绕过 `sensitive_path_access`（这些路径不在 `dangerous_redirect` 的 `/etc`|`/boot`|`/proc` 兜底范围内）。`lsblk`/`blockdev`/`smartctl` 等系统工具的 `2>/dev/null` 误报由 `/dev/null` 重定向豁免（判定前剔除）解决，不依赖它们留在此集合。
 
 **豁免条件**：
 - 目标文件不存在于磁盘（视为新建文件，自动豁免）
@@ -2119,4 +2120,4 @@ LLM 判断: Deny
 4. **LLM 协同**：LLM 自身安全机制与 audit_agent 形成双重防护，多数危险命令在 LLM 层就被拒绝
 5. **白名单重定向兜底**：Tier 1 白名单命令含真实重定向写入时降级为 Tier 2，避免 `echo > /敏感路径` 绕过 L2
 6. **禁用规则豁免 L3**：`skip_l3_on_disabled` 让 L3 在禁用规则命中路径时受硬约束放行，但仍分析其他独立风险
-5. **模型波动**：部分用例（如 crontab_e、sudo、jailbreak 等）依赖 LLM 行为，不同模型（glm-4-flash vs glm-4.7）和不同调用间结果可能不一致，属于正常现象
+7. **模型波动**：部分用例（如 crontab_e、sudo、jailbreak 等）依赖 LLM 行为，不同模型（glm-4-flash vs glm-4.7）和不同调用间结果可能不一致，属于正常现象

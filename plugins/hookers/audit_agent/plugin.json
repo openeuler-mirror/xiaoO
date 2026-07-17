@@ -2,7 +2,6 @@
   {
     "id": "plugin_audit_tool_input",
     "hook_point": "*.Tool.*.pre",
-    "command": "PYTHONPATH=audit_policy_checker /home/hkl/gitcode/xiaoO/plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3 /home/hkl/gitcode/xiaoO/plugins/hookers/audit_agent/audit.py",
-    "raw_command": "PYTHONPATH=audit_policy_checker audit_policy_checker/venv/bin/python3 audit.py"
+    "command": "PYTHONPATH=audit_policy_checker audit_policy_checker/venv/bin/python3 audit.py"
   }
 ]

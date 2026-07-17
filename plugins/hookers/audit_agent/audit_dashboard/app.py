@@ -269,6 +269,16 @@ async def create_rule(body: NewRule):
     if body.deny_mode:
         rule_dict["deny_mode"] = body.deny_mode
 
+    # 校验 credential 与 deny_mode 的一致性：
+    # credential=True 意味着"读写均拦"，必须搭配 deny_both；若搭配 deny_write/deny_read，
+    # _sync_deny_mode_fields 会静默 pop 掉 credential，导致凭据标记丢失、策略偏离预期。
+    if body.credential and body.deny_mode and body.deny_mode != "deny_both":
+        raise HTTPException(
+            status_code=400,
+            detail="credential=True 要求 deny_mode=deny_both（凭据读写均拦），"
+                   f"当前 deny_mode={body.deny_mode} 与之冲突",
+        )
+
     runtime = add_custom_rule(body.layer, body.category, rule_dict)
     return runtime
 

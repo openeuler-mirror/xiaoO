@@ -59,6 +59,8 @@ def _is_write_operation(action_type, action_detail) -> bool:
 
 ### 2. 新增 `READ_ONLY_COMMANDS`（扩充只读命令白名单）
 
+> ⚠️ **后续修正（code review 反馈）**：下述原版集合把 `systemctl`/`sysctl`/`ip`/`fdisk`/`parted` 等能改系统状态的命令也归为只读，导致 `systemctl > ~/.bashrc`、`sysctl > /var/spool/cron/x` 等因 `is_write_op=False` 绕过 `sensitive_path_access`（这些路径不在 `dangerous_redirect` 的 `/etc`|`/boot`|`/proc` 兜底范围内）。已收紧为 `REDIRECT_WRITE_EXEMPT_COMMANDS`（仅传统文本查看/过滤命令），`/dev/null` 误报由 `_DEVNULL_REDIRECT_RE` 判定前剔除解决，不依赖系统工具留在该集合。详见 `SECURITY_RULES.md`。
+
 ```python
 READ_ONLY_COMMANDS = {
     # 传统文本查看/过滤

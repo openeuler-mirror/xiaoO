@@ -573,9 +573,16 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
                                 if field not in ur:
                                     ur[field] = val
                             elif field == "deny_mode":
-                                # source_deny_mode 以源码为准（代码仓原始值）；deny_mode 保留用户值
+                                # source_deny_mode 以源码为准（代码仓原始值）；
+                                # 若用户未主动改过 deny_mode（仍等于旧 source_deny_mode），
+                                # 则跟随源码最新值，自动继承源码策略放宽/收紧
+                                # （如 credential=deny_both → read_only=deny_read 的调整）。
+                                # 用户主动改过的（deny_mode != 旧 source_deny_mode）保持其值。
+                                old_source = ur.get("source_deny_mode")
                                 ur["source_deny_mode"] = val
                                 if "deny_mode" not in ur:
+                                    ur["deny_mode"] = val
+                                elif old_source is not None and ur["deny_mode"] == old_source:
                                     ur["deny_mode"] = val
                             elif field == "source_deny_mode":
                                 pass  # 由 deny_mode 同步处理

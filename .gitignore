@@ -48,3 +48,7 @@ AUDIT_AGENT_REPLY.md
 create_ppt.py
 test.json
 *.tar.gz
+
+# cerberus_bash_control/plugin.json 是 config.py install 从 plugin.json.template
+# 生成的本机文件（含安装机器的绝对路径），不应进 git；template 为干净源。
+plugins/hookers/cerberus_bash_control/plugin.json

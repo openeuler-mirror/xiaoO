@@ -91,24 +91,21 @@ READ_KEYWORDS = [
     "grep", "search", "搜索", "find", "查找",
 ]
 
-# ==================== 只读命令集合（用于重定向写判定与敏感路径读写区分）====================
-# 这些命令本身只读，即使带 `>` 重定向也不应判为写文件意图。
-# 1) 传统文本查看/过滤命令
-# 2) 只读系统信息查询命令（lsblk/blockdev/smartctl/udevadm/dmidecode 等，常配 2>/dev/null 查设备信息）
+# ==================== 重定向写判定豁免命令集合 ====================
+# 仅包含「绝不可能有写文件意图」的传统文本查看/过滤命令。首命令在此集合内时，
+# 即使带 `>` 重定向也不判为写文件意图。
+# 必须保持保守：systemctl/sysctl/ip/ifconfig/route/fdisk/parted 等命令能改系统状态，
+# 不能进此集合，否则 `systemctl > ~/.bashrc`、`sysctl > /var/spool/cron/x` 等会因
+# is_write_op=False 绕过 sensitive_path_access（这些路径不在 dangerous_redirect 的
+# /etc|/boot|/proc 兜底范围内）。
 # 注：sed/awk 虽能原地编辑(-i)，此处仍按只读看待——原地改写由其他规则另行覆盖。
-READ_ONLY_COMMANDS: set[str] = {
+# 注：lsblk/blockdev/smartctl 等系统工具的 `2>/dev/null` 误报由 _DEVNULL_REDIRECT_RE
+# 在判定前剔除解决，不依赖它们留在本集合。
+REDIRECT_WRITE_EXEMPT_COMMANDS: set[str] = {
     # 传统文本查看/过滤
     "cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
     "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump", "tr",
     "file", "stat", "du", "df", "ls", "dir", "tree", "nl", "tac", "rev",
-    # 只读系统/设备信息查询
-    "lsblk", "blockdev", "smartctl", "udevadm", "dmidecode", "lscpu", "lspci",
-    "lsusb", "lsmem", "lsns", "lsof", "hwinfo", "inxi", "fdisk", "parted",
-    "dmesg", "journalctl", "systemctl", "hostnamectl", "localectl", "timedatectl",
-    "ps", "top", "free", "vmstat", "iostat", "mpstat", "pidof", "pgrep",
-    "ip", "ifconfig", "route", "ss", "netstat", "arp", "ethtool", "nmcli",
-    "uname", "arch", "nproc", "getconf", "getent", "id", "whoami", "who",
-    "w", "last", "uptime", "lsmod", "modinfo", "sysctl",
 }
 
 # 重定向到 /dev/null 的丢弃写法（2>/dev/null、&>/dev/null、>/dev/null）——这是丢弃输出的标准
@@ -152,7 +149,7 @@ def _is_write_operation(action_type: str, action_detail: str) -> bool:
         detail_without_devnull = _DEVNULL_REDIRECT_RE.sub("", action_detail)
         if ">" in detail_without_devnull:
             first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
-            if first_word not in READ_ONLY_COMMANDS:
+            if first_word not in REDIRECT_WRITE_EXEMPT_COMMANDS:
                 return True
     return False
 
