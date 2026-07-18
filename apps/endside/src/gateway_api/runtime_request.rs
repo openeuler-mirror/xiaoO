@@ -313,6 +313,8 @@ impl GatewayRuntime {
             channel: None,
             channel_instance_id: None,
             llm: None,
+            workspace: None,
+            skills: None,
         })
     }
 
@@ -339,6 +341,8 @@ impl GatewayRuntime {
             mentions: Vec::new(),
             reasoning_effort: state.reasoning_effort,
             llm: None,
+            workspace: None,
+            skills: None,
             command_context,
             chain_depth,
         })

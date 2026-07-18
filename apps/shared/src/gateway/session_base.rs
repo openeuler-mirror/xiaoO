@@ -2,6 +2,7 @@ use crate::backend::BackendForkResult;
 use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig, SessionRecord};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 pub fn channel_session_id(
     channel: &str,
@@ -26,6 +27,13 @@ pub struct SessionOpenRequest {
     pub channel_instance_id: Option<String>,
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
+    /// Absolute path on the daemon host to snapshot into an E2B runtime.
+    /// Other backends ignore this field and retain their configured workspace.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
+    /// Ordered daemon-host search roots whose immediate child directories are skills.
+    #[serde(default)]
+    pub skills: Option<Vec<PathBuf>>,
 }
 
 impl SessionOpenRequest {
@@ -45,6 +53,8 @@ impl SessionOpenRequest {
             mentions: Vec::new(),
             reasoning_effort: Default::default(),
             llm: self.llm,
+            workspace: self.workspace,
+            skills: self.skills,
             command_context: None,
             chain_depth: 0,
         }
@@ -140,15 +150,49 @@ mod tests {
             channel: None,
             channel_instance_id: None,
             llm: None,
+            workspace: None,
+            skills: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");
         assert_eq!(value["runtime_id"], "runtime-1");
         assert!(value.get("session_id").is_none());
+        assert!(value["workspace"].is_null());
+        assert!(value["skills"].is_null());
+
+        let old: RuntimeOpenRequest =
+            serde_json::from_str(r#"{"runtime_id":"old","conversation_id":"c","sender_id":"u"}"#)
+                .expect("old request without bootstrap fields should deserialize");
+        assert!(old.workspace.is_none());
+        assert!(old.skills.is_none());
 
         let legacy: RuntimeCloseRequest =
             serde_json::from_str(r#"{"session_id":"legacy-runtime"}"#)
                 .expect("legacy session_id should deserialize");
         assert_eq!(legacy.session_id, "legacy-runtime");
+    }
+
+    #[test]
+    fn open_bootstrap_paths_are_carried_into_direct_turn_conversion() {
+        let request: RuntimeOpenRequest = serde_json::from_str(
+            r#"{
+                "runtime_id":"runtime-1",
+                "conversation_id":"conversation",
+                "sender_id":"user",
+                "workspace":"/home/cz",
+                "skills":["/home/cz/.xiaoo/skills","/opt/company/skills"]
+            }"#,
+        )
+        .expect("bootstrap request");
+        let turn = request.into_turn_request("hello".to_string());
+
+        assert_eq!(turn.workspace, Some(PathBuf::from("/home/cz")));
+        assert_eq!(
+            turn.skills,
+            Some(vec![
+                PathBuf::from("/home/cz/.xiaoo/skills"),
+                PathBuf::from("/opt/company/skills")
+            ])
+        );
     }
 }

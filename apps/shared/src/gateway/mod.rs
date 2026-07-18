@@ -1,6 +1,8 @@
+mod backend_workspace_context;
 pub mod bootstrap;
 pub mod channel_interaction;
 pub mod decrypted_api_keys;
+mod e2b_runtime;
 pub mod hosted_runtime_resolver;
 pub mod pending_interaction;
 pub mod permission_backend;
@@ -21,6 +23,7 @@ pub mod turns;
 pub mod workspace_prompt;
 
 pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
+pub(crate) use e2b_runtime::finalize_e2b_runtime;
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use hosted_runtime_resolver::{
@@ -34,7 +37,9 @@ pub use session_base::{
     SessionOpenRequest, SessionSubmitReceipt,
 };
 pub use session_record::{
-    SessionAgentRecord, SessionLifecycleStatus, SessionRecord, SessionRuntimeSnapshot,
+    RuntimeBootstrapBinding, RuntimeBootstrapSkill, SessionAgentRecord, SessionLifecycleStatus,
+    SessionRecord, SessionRuntimeSnapshot, E2B_BOOTSTRAP_MANIFEST_VERSION, E2B_REMOTE_SKILLS_ROOT,
+    E2B_REMOTE_WORKSPACE_ROOT,
 };
 pub use session_runtime::{
     AppRuntimeAssembly, AppRuntimeFactory, AppRuntimeFactoryError, ResolvedSessionRuntime,

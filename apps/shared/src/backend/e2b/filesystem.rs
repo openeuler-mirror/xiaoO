@@ -33,6 +33,25 @@ impl E2bFileSystem {
             state,
         }
     }
+    async fn upload_raw(&self, path: &BackendPath, content: Vec<u8>) -> Result<(), OperationError> {
+        let response = self
+            .state
+            .envd_request(Method::POST, "/files")
+            .query(&[("path", path.0.as_str())])
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header(ACCEPT, "application/json")
+            .body(content)
+            .send()
+            .await
+            .map_err(|error| OperationError::Transport {
+                message: format!("failed to upload e2b file {}: {error}", path.0),
+            })?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(http_error("upload e2b file", response).await)
+    }
 }
 
 struct E2bExportedFileHandle {
@@ -197,28 +216,6 @@ impl OperationFileSystem for E2bFileSystem {
             .trim()
             .to_string();
         Ok(BackendPath(text))
-    }
-}
-
-impl E2bFileSystem {
-    async fn upload_raw(&self, path: &BackendPath, content: Vec<u8>) -> Result<(), OperationError> {
-        let response = self
-            .state
-            .envd_request(Method::POST, "/files")
-            .query(&[("path", path.0.as_str())])
-            .header(CONTENT_TYPE, "application/octet-stream")
-            .header(ACCEPT, "application/json")
-            .body(content)
-            .send()
-            .await
-            .map_err(|error| OperationError::Transport {
-                message: format!("failed to upload e2b file {}: {error}", path.0),
-            })?;
-
-        if response.status().is_success() {
-            return Ok(());
-        }
-        Err(http_error("upload e2b file", response).await)
     }
 }
 

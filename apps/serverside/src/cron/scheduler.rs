@@ -297,6 +297,8 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         mentions: vec![],
         reasoning_effort: agent_types::ReasoningEffort::Off,
         llm: None,
+        workspace: None,
+        skills: None,
         command_context: None,
         chain_depth: 0,
     };

@@ -69,6 +69,8 @@ impl HookActionSink for DaemonHookActionSink {
                 channel: None,
                 channel_instance_id: None,
                 llm: None,
+                workspace: None,
+                skills: None,
             };
             let should_forward = match self.control_plane.open_session(request).await {
                 Ok(_) => true,

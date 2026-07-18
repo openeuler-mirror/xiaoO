@@ -920,6 +920,8 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         mentions: Vec::new(),
         reasoning_effort: config.reasoning_effort,
         llm: None,
+        workspace: None,
+        skills: None,
         command_context: None,
         chain_depth: 0,
     };

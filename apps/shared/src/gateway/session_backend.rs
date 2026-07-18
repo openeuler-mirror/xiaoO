@@ -37,8 +37,9 @@ pub(super) async fn lease_session_backend(
         .ensure_session_backend(
             BackendEnsureSessionRequest {
                 config: resolved.operation_backend.clone(),
-                workspace_root: resolved.descriptor.workspace_root.clone(),
+                workspace_root: resolved.backend_workspace_root.clone(),
                 session_id: session.session_id.clone(),
+                e2b_bootstrap: resolved.e2b_bootstrap.clone(),
             },
             session_store,
         )

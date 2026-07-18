@@ -244,6 +244,7 @@ More daemon configuration details are in [docs/daemon_config.md](./docs/daemon_c
 - [Memory & Context Compression](./docs/memory_context_system.md)
 - [Plugin System](./docs/plugins.md)
 - [Skill Usage](./docs/skill_usage.md)
+- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
 - [Custom Agents](./docs/custom_agent.md)
 - [Remote TUI](./docs/remote_tui.md)
 - [Feishu Deployment](./docs/feishu_deploy.md)

@@ -59,6 +59,7 @@ pub struct BackendEnsureSessionRequest {
     pub config: Option<GatewayBackendConfig>,
     pub workspace_root: PathBuf,
     pub session_id: String,
+    pub e2b_bootstrap: Option<Arc<crate::backend::E2bBootstrapArchive>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

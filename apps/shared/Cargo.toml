@@ -26,8 +26,8 @@ tonic = { version = "0.12", features = ["transport"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["io"] }
 futures.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
@@ -55,7 +55,8 @@ dirs = "5"
 once_cell = "1"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+tar = "0.4"
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }

@@ -265,6 +265,7 @@ impl BackendManager {
             expires_at_ms,
             lineage: BackendLineageEntry::default(),
             backend_checkpoint: None,
+            e2b_bootstrap: None,
         })
         .await
         {
@@ -653,6 +654,7 @@ impl BackendManager {
             expires_at_ms,
             lineage,
             backend_checkpoint: Some(request.checkpoint.clone()),
+            e2b_bootstrap: None,
         })
         .await
         {
@@ -901,6 +903,7 @@ impl BackendManager {
             expires_at_ms: None,
             lineage: BackendLineageEntry::default(),
             backend_checkpoint: None,
+            e2b_bootstrap: request.e2b_bootstrap,
         })
         .await
         {

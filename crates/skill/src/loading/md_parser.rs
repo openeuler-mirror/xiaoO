@@ -14,7 +14,18 @@ pub fn load_skill_md(path: &Path, skill_dir: &Path) -> Result<Skill, SkillError>
         source: e,
     })?;
 
-    let (frontmatter, body) = split_frontmatter(&content);
+    parse_skill_md_content(&content, path, skill_dir)
+}
+
+/// Parse already-loaded markdown while assigning a logical (possibly remote)
+/// skill directory. This lets remote backends expose their own paths without
+/// copying manifests back to a host staging directory.
+pub fn parse_skill_md_content(
+    content: &str,
+    path: &Path,
+    skill_dir: &Path,
+) -> Result<Skill, SkillError> {
+    let (frontmatter, body) = split_frontmatter(content);
     let meta = parse_frontmatter(frontmatter, path)?;
 
     let name = meta

@@ -19,6 +19,7 @@ use subagent::SubagentControl;
 use thiserror::Error;
 
 use super::SessionRuntimeBindings;
+use crate::gateway::RuntimeBootstrapBinding;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRuntimeDescriptor {
@@ -47,6 +48,13 @@ pub struct ResolvedSessionRuntime {
     pub trace: Value,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<GatewayBackendConfig>,
+    /// Host path used only as the backend/session identity. For E2B this is
+    /// deliberately separate from `descriptor.workspace_root`, which is remote.
+    pub backend_workspace_root: PathBuf,
+    /// A first-creation E2B bootstrap archive. Existing/resumed runtimes leave this empty.
+    pub e2b_bootstrap: Option<Arc<crate::backend::E2bBootstrapArchive>>,
+    pub bootstrap_binding: Option<RuntimeBootstrapBinding>,
+    pub e2b_finalized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +71,10 @@ pub struct SessionRuntimeBuildInput {
     #[serde(default)]
     pub subagent_role_id: Option<String>,
     pub llm: Option<LlmRuntimeConfig>,
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
+    #[serde(default)]
+    pub skills: Option<Vec<PathBuf>>,
 }
 
 impl SessionRuntimeBuildInput {
@@ -79,6 +91,8 @@ impl SessionRuntimeBuildInput {
             max_turns_override: None,
             subagent_role_id: None,
             llm: request.llm.clone(),
+            workspace: request.workspace.clone(),
+            skills: request.skills.clone(),
         }
     }
 
@@ -95,6 +109,8 @@ impl SessionRuntimeBuildInput {
             max_turns_override: None,
             subagent_role_id: None,
             llm: request.llm.clone(),
+            workspace: request.workspace.clone(),
+            skills: request.skills.clone(),
         }
     }
 }
@@ -103,6 +119,12 @@ impl SessionRuntimeBuildInput {
 pub enum SessionRuntimeResolveError {
     #[error("runtime resolution failed: {message}")]
     ResolveFailed { message: String },
+    #[error("invalid runtime bootstrap request: {message}")]
+    InvalidBootstrap { message: String },
+    #[error("runtime bootstrap binding conflict: {message}")]
+    BootstrapConflict { message: String },
+    #[error("runtime bootstrap payload exceeds capacity: {message}")]
+    BootstrapTooLarge { message: String },
 }
 
 #[async_trait]

@@ -19,6 +19,12 @@ use xiaoo_core::LoopStateSnapshot;
 
 #[derive(Debug, Error)]
 pub enum SessionServiceError {
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
+    #[error("runtime conflict: {message}")]
+    RuntimeConflict { message: String },
+    #[error("request payload too large: {message}")]
+    PayloadTooLarge { message: String },
     #[error("session store failed: {message}")]
     SessionStore { message: String },
     #[error("runtime resolution failed: {message}")]
