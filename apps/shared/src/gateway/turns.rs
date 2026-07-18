@@ -11,6 +11,7 @@ pub enum GatewayEntryKind {
     HttpApi,
     ScheduledJob,
     Cli,
+    Mcp,
 }
 
 /// Terminal kind of a completed (non-error) root turn, mirroring the four

@@ -854,7 +854,15 @@ impl CoreBackedSessionService {
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<AppTurnResult, SessionServiceError> {
+        let hooks_enabled = !matches!(
+            (
+                request.entry.kind.as_ref(),
+                request.entry.instance_id.as_deref()
+            ),
+            (Some(crate::gateway::GatewayEntryKind::Mcp), Some("chatbot"))
+        );
         let initialization_lock = self.runtime_initialization_lock(&request.session_id).await;
         let initialization_guard = initialization_lock.lock().await;
         let existing = self.session_store.load(&request.session_id).await;
@@ -864,10 +872,11 @@ impl CoreBackedSessionService {
             .runtime_resolver
             .resolve(&runtime_input, existing.as_ref())
             .await?;
+        resolved.bindings.cancel_token = cancellation_token;
 
         let mut seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
-        let was_paused = seed_session.paused_backend_checkpoint.is_some();
+        let was_paused = seed_session.status == SessionLifecycleStatus::Paused;
         let backend_lease = lease_session_backend(
             self.backend_manager.as_ref(),
             &seed_session,
@@ -903,7 +912,7 @@ impl CoreBackedSessionService {
         }
         drop(initialization_guard);
 
-        if is_new_session {
+        if is_new_session && hooks_enabled {
             let hook_point =
                 session_lifecycle_hook_point(&resolved.descriptor.agent_id.0, "created");
             self.fire_session_hooks(
@@ -960,18 +969,20 @@ impl CoreBackedSessionService {
         // user sees the turn result after the hookers finish; acceptable
         // because session lifecycle hooks only fire after turn termination
         // anyway, and most setups register zero or fast hookers.
-        if let Ok(turn) = turn_result.as_mut() {
-            let actions = self
-                .fire_session_state_hook_and_collect_actions(
-                    idle_session_id,
-                    idle_sender_id,
-                    idle_agent_id,
-                    "idle".to_string(),
-                    turn.outcome.as_tag().to_string(),
-                    idle_chain_depth,
-                )
-                .await;
-            turn.hook_actions = actions;
+        if hooks_enabled {
+            if let Ok(turn) = turn_result.as_mut() {
+                let actions = self
+                    .fire_session_state_hook_and_collect_actions(
+                        idle_session_id,
+                        idle_sender_id,
+                        idle_agent_id,
+                        "idle".to_string(),
+                        turn.outcome.as_tag().to_string(),
+                        idle_chain_depth,
+                    )
+                    .await;
+                turn.hook_actions = actions;
+            }
         }
 
         turn_result
@@ -984,7 +995,7 @@ impl SessionService for CoreBackedSessionService {
         &self,
         request: AppTurnRequest,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, None, None, None).await
+        self.run_turn_inner(request, None, None, None, None).await
     }
 
     async fn run_turn_with_events(
@@ -992,7 +1003,8 @@ impl SessionService for CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, None, None).await
+        self.run_turn_inner(request, event_sink, None, None, None)
+            .await
     }
 
     async fn run_turn_with_interaction(
@@ -1001,14 +1013,42 @@ impl SessionService for CoreBackedSessionService {
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, interaction_handle, channel_file_sender)
-            .await
+        self.run_turn_inner(
+            request,
+            event_sink,
+            interaction_handle,
+            channel_file_sender,
+            cancellation_token,
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl SessionControlPlane for CoreBackedSessionService {
+    async fn hibernate_idle_session(
+        &self,
+        session_id: &str,
+        idle_before_ms: u64,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        let Some(handle) = self.sessions_handler.lock().await.get(session_id).cloned() else {
+            return Ok(None);
+        };
+        let Some(paused) = handle.hibernate_idle(idle_before_ms).await? else {
+            return Ok(None);
+        };
+        self.sessions_handler.lock().await.remove(session_id);
+        self.backend_manager
+            .release_session(session_id)
+            .await
+            .map_err(|error| SessionServiceError::RuntimeShutdown {
+                message: format!("failed to release hibernated local backend: {error}"),
+            })?;
+        Ok(Some(paused))
+    }
+
     async fn open_session(
         &self,
         request: SessionOpenRequest,
@@ -2266,6 +2306,65 @@ mod tests {
             Err(SessionServiceError::SessionBusy { message, .. })
                 if message.contains("no eviction checkpoint")
         ));
+    }
+
+    #[tokio::test]
+    async fn hibernated_mcp_runtime_keeps_record_and_rehydrates_local_backend() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let backend_manager = Arc::new(BackendManager::new());
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store.clone(),
+            resolver,
+            HookerRegistryConfig::default(),
+            backend_manager.clone(),
+        )
+        .expect("dependencies");
+        let mut open = test_open_request("mcp-hibernate");
+        open.entry = GatewayEntryContext {
+            kind: Some(crate::gateway::GatewayEntryKind::Mcp),
+            instance_id: Some("chatbot".to_string()),
+            runtime_profile_id: None,
+            build_tags: Vec::new(),
+        };
+        dependencies
+            .session_control_plane
+            .open_session(open.clone())
+            .await
+            .expect("open MCP session");
+
+        let paused = dependencies
+            .session_control_plane
+            .hibernate_idle_session("mcp-hibernate", u64::MAX)
+            .await
+            .expect("hibernate")
+            .expect("idle session should hibernate");
+        assert_eq!(paused.status, SessionLifecycleStatus::Paused);
+        assert!(paused.backend_instance.is_none());
+        let saved = store.load("mcp-hibernate").await.expect("record retained");
+        assert_eq!(saved.status, SessionLifecycleStatus::Paused);
+        assert!(matches!(
+            backend_manager.lease_bound_session("mcp-hibernate").await,
+            Err(BackendError::NotFound { .. })
+        ));
+
+        let result = dependencies
+            .session_service
+            .run_turn(open.into_turn_request("continue".to_string()))
+            .await;
+        assert!(
+            !matches!(
+                result,
+                Err(SessionServiceError::SessionBusy { ref message, .. })
+                    if message.contains("no eviction checkpoint")
+            ),
+            "hibernated MCP local sessions must rebuild instead of requiring a checkpoint"
+        );
     }
 
     #[tokio::test]

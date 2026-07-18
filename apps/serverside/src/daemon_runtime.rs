@@ -44,6 +44,36 @@ use xiaoo_shared::gateway::{
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_MIN_PROMPT_TOKEN_RESERVE: usize = 2048;
 const DEFAULT_HARD_LIMIT_RATIO: f64 = 0.8;
+const MCP_CHATBOT_INSTANCE_ID: &str = "chatbot";
+const MCP_AGENT_INSTANCE_ID: &str = "agent";
+const MCP_CHATBOT_SYSTEM_PROMPT: &str = r#"You are xiaoO Chatbot, a direct-answer assistant.
+
+Answer the user's question directly. Do not create plans, delegate work, switch roles, access or modify files, or claim capabilities that are not available. You may search and fetch content from the public web when useful."#;
+const MCP_CHATBOT_TOOLS: [&str; 2] = ["web_search", "webfetch"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeCapabilityProfile {
+    Default,
+    McpChatbot,
+    McpAgent,
+}
+
+impl RuntimeCapabilityProfile {
+    fn from_request(
+        request: &SessionRuntimeBuildInput,
+    ) -> Result<Self, SessionRuntimeResolveError> {
+        if request.entry.kind.as_ref() != Some(&xiaoo_shared::gateway::GatewayEntryKind::Mcp) {
+            return Ok(Self::Default);
+        }
+        match request.entry.instance_id.as_deref() {
+            Some(MCP_CHATBOT_INSTANCE_ID) => Ok(Self::McpChatbot),
+            Some(MCP_AGENT_INSTANCE_ID) => Ok(Self::McpAgent),
+            other => Err(SessionRuntimeResolveError::ResolveFailed {
+                message: format!("unknown MCP runtime profile: {other:?}"),
+            }),
+        }
+    }
+}
 
 struct EffectiveLlmConfig {
     provider: String,
@@ -393,35 +423,46 @@ impl ConfiguredRuntimeResolver {
 
     fn build_tool_registry(
         &self,
+        profile: RuntimeCapabilityProfile,
         agent_role: Option<&AgentRoleConfig>,
         workspace_root: PathBuf,
         disable_plugin_tools: bool,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
-        let subagent_roles: BTreeMap<String, SubagentRoleConfig> = self
-            .subagent_roles
-            .iter()
-            .map(|(role_id, config)| {
-                (
-                    role_id.clone(),
-                    SubagentRoleConfig {
-                        description: config.description.clone(),
-                        prompt: config.prompt.clone(),
-                        max_turns: config.max_turns,
-                        tools: config.tools.clone(),
-                    },
-                )
-            })
-            .collect();
+        let subagent_roles: BTreeMap<String, SubagentRoleConfig> =
+            if profile == RuntimeCapabilityProfile::McpChatbot {
+                BTreeMap::new()
+            } else {
+                self.subagent_roles
+                    .iter()
+                    .map(|(role_id, config)| {
+                        (
+                            role_id.clone(),
+                            SubagentRoleConfig {
+                                description: config.description.clone(),
+                                prompt: config.prompt.clone(),
+                                max_turns: config.max_turns,
+                                tools: config.tools.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            };
         let services = ToolRuntimeServices {
-            disable_plugin_tools,
-            lsp_registry: self.lsp_registry.clone(),
+            disable_plugin_tools: disable_plugin_tools
+                || profile == RuntimeCapabilityProfile::McpChatbot,
+            lsp_registry: (profile != RuntimeCapabilityProfile::McpChatbot)
+                .then(|| self.lsp_registry.clone())
+                .flatten(),
             workspace_root: Some(workspace_root),
             subagent_roles,
-            mcp_servers: self
-                .mcp_tools
-                .read()
-                .expect("mcp tools lock should not be poisoned")
-                .clone(),
+            mcp_servers: if profile == RuntimeCapabilityProfile::McpChatbot {
+                None
+            } else {
+                self.mcp_tools
+                    .read()
+                    .expect("mcp tools lock should not be poisoned")
+                    .clone()
+            },
             ..ToolRuntimeServices::default()
         };
         let tool_sources = load_tool_sources_with_services(services);
@@ -430,7 +471,8 @@ impl ConfiguredRuntimeResolver {
             .flat_map(|source| source.discover())
             .map(|tool| tool.spec.name().clone())
             .collect();
-        let allowed_tool_names = resolve_allowed_tool_names(&all_tool_names, agent_role);
+        let allowed_tool_names =
+            resolve_profile_allowed_tool_names(&all_tool_names, profile, agent_role);
         let mut per_agent_allowed_tools = HashMap::new();
         per_agent_allowed_tools.insert(AgentId(self.agent.id.clone()), allowed_tool_names);
 
@@ -505,6 +547,59 @@ fn validate_existing_e2b_binding(
         });
     }
     Ok(())
+}
+
+fn resolve_local_workspace(
+    request: &SessionRuntimeBuildInput,
+    existing: Option<&SessionRecord>,
+    default_workspace: &Path,
+) -> Result<PathBuf, SessionRuntimeResolveError> {
+    let requested = request
+        .workspace
+        .as_deref()
+        .map(canonicalize_workspace_dir)
+        .transpose()?;
+    let existing_workspace = existing
+        .map(|record| canonicalize_workspace_dir(&record.runtime.workspace_root))
+        .transpose()?;
+
+    if let (Some(requested), Some(existing)) = (&requested, &existing_workspace) {
+        if requested != existing {
+            return Err(SessionRuntimeResolveError::BootstrapConflict {
+                message: format!(
+                    "runtime '{}' is already bound to workspace {}, requested {}",
+                    request.session_id,
+                    existing.display(),
+                    requested.display()
+                ),
+            });
+        }
+    }
+
+    if let Some(requested) = requested {
+        return Ok(requested);
+    }
+    if let Some(existing) = existing_workspace {
+        return Ok(existing);
+    }
+    canonicalize_workspace_dir(default_workspace)
+}
+
+fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, SessionRuntimeResolveError> {
+    let canonical =
+        path.canonicalize()
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("invalid workspace {}: {error}", path.display()),
+            })?;
+    if !canonical.is_dir() {
+        return Err(SessionRuntimeResolveError::ResolveFailed {
+            message: format!("workspace is not a directory: {}", canonical.display()),
+        });
+    }
+    fs::read_dir(&canonical).map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+        message: format!("workspace is not readable {}: {error}", canonical.display()),
+    })?;
+    Ok(canonical)
 }
 
 async fn resolve_effective_context_window(
@@ -589,28 +684,50 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         request: &SessionRuntimeBuildInput,
         existing: Option<&SessionRecord>,
     ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
-        let agent_role = resolve_agent_role(&self.agent_roles, request)?;
-        let system_prompt = agent_role
-            .and_then(|role| role.prompt.as_deref())
-            .filter(|prompt| !prompt.trim().is_empty())
-            .unwrap_or(self.agent.system_prompt.as_str());
+        let profile = RuntimeCapabilityProfile::from_request(request)?;
+        if matches!(
+            profile,
+            RuntimeCapabilityProfile::McpChatbot | RuntimeCapabilityProfile::McpAgent
+        ) && request.entry.runtime_profile_id.is_some()
+        {
+            return Err(SessionRuntimeResolveError::ResolveFailed {
+                message: "MCP sessions always use the fixed Core role".to_string(),
+            });
+        }
+        let agent_role = if profile == RuntimeCapabilityProfile::Default {
+            resolve_agent_role(&self.agent_roles, request)?
+        } else {
+            None
+        };
+        let system_prompt = if profile == RuntimeCapabilityProfile::McpChatbot {
+            MCP_CHATBOT_SYSTEM_PROMPT
+        } else {
+            agent_role
+                .and_then(|role| role.prompt.as_deref())
+                .filter(|prompt| !prompt.trim().is_empty())
+                .unwrap_or(self.agent.system_prompt.as_str())
+        };
 
-        let subagent_roles: BTreeMap<String, SubagentRoleRecord> = self
-            .subagent_roles
-            .iter()
-            .map(|(role_id, config)| {
-                (
-                    role_id.clone(),
-                    SubagentRoleRecord {
-                        role_id: role_id.clone(),
-                        description: config.description.clone(),
-                        prompt: config.prompt.clone(),
-                        max_turns: config.max_turns,
-                        tools: config.tools.clone(),
-                    },
-                )
-            })
-            .collect();
+        let subagent_roles: BTreeMap<String, SubagentRoleRecord> =
+            if profile == RuntimeCapabilityProfile::McpChatbot {
+                BTreeMap::new()
+            } else {
+                self.subagent_roles
+                    .iter()
+                    .map(|(role_id, config)| {
+                        (
+                            role_id.clone(),
+                            SubagentRoleRecord {
+                                role_id: role_id.clone(),
+                                description: config.description.clone(),
+                                prompt: config.prompt.clone(),
+                                max_turns: config.max_turns,
+                                tools: config.tools.clone(),
+                            },
+                        )
+                    })
+                    .collect()
+            };
 
         let is_subagent = request
             .agent_id_override
@@ -623,6 +740,11 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .as_ref()
             .map(|backend| backend.kind == "e2b")
             .unwrap_or(false);
+        if profile == RuntimeCapabilityProfile::McpAgent && is_e2b {
+            return Err(SessionRuntimeResolveError::ResolveFailed {
+                message: "MCP agent sessions require the local operation backend".to_string(),
+            });
+        }
         let operation_backend = self.operation_backend.clone().map(|backend| {
             if is_e2b {
                 force_e2b_remote_roots(backend)
@@ -635,9 +757,19 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         } else {
             (None, None)
         };
+        let local_workspace_root = if is_e2b {
+            None
+        } else {
+            Some(resolve_local_workspace(
+                request,
+                existing,
+                &self.agent.workspace_root,
+            )?)
+        };
         let effective_workspace_root = bootstrap_binding
             .as_ref()
             .map(|binding| binding.remote_workspace_root.clone())
+            .or(local_workspace_root.clone())
             .unwrap_or_else(|| self.agent.workspace_root.clone());
         let effective_skill_roots = bootstrap_binding
             .as_ref()
@@ -650,7 +782,8 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         // the vec is empty, e.g. all servers were unreachable). Using `None`
         // as the sentinel prevents re-running the expensive init on every
         // resolve() when no servers are reachable.
-        let needs_init = !self.mcp_servers.is_empty()
+        let needs_init = profile != RuntimeCapabilityProfile::McpChatbot
+            && !self.mcp_servers.is_empty()
             && self
                 .mcp_tools
                 .read()
@@ -678,14 +811,18 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                 agent_id: AgentId(self.agent.id.clone()),
                 model: llm_runtime.model.clone(),
                 llm: Some(llm_runtime.llm_config.clone()),
-                system_prompt: build_system_prompt(
-                    system_prompt,
-                    (!is_e2b).then_some(self.agent.workspace_root.as_path()),
-                    request,
-                    &subagent_roles,
-                    is_subagent,
-                    &effective_skill_roots,
-                ),
+                system_prompt: if profile == RuntimeCapabilityProfile::McpChatbot {
+                    system_prompt.to_string()
+                } else {
+                    build_system_prompt(
+                        system_prompt,
+                        (!is_e2b).then_some(effective_workspace_root.as_path()),
+                        request,
+                        &subagent_roles,
+                        is_subagent,
+                        &effective_skill_roots,
+                    )
+                },
                 feature_flags: self.feature_flags.clone(),
 
                 token_budget: llm_runtime.token_budget.clone(),
@@ -696,11 +833,12 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             entry_kind: request.entry.kind.clone(),
             llm_provider: llm_runtime.llm_provider,
             tool_registry: self.build_tool_registry(
+                profile,
                 agent_role,
-                effective_workspace_root,
+                effective_workspace_root.clone(),
                 is_e2b,
             )?,
-            skill_registry: if is_e2b {
+            skill_registry: if is_e2b || profile == RuntimeCapabilityProfile::McpChatbot {
                 Some(Arc::new(FileSkillRegistry::from_skills(Vec::new())))
             } else {
                 Some(Arc::clone(&self.skill_registry))
@@ -708,13 +846,18 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             bindings: SessionRuntimeBindings::default(),
             compression_pipeline: llm_runtime.compression_pipeline,
             trace: self.trace.clone(),
-            hooker: self.hooker.clone(),
+            hooker: if profile == RuntimeCapabilityProfile::McpChatbot {
+                HookerRegistryConfig::default()
+            } else {
+                self.hooker.clone()
+            },
             operation_backend,
             backend_workspace_root: bootstrap_binding
                 .as_ref()
                 .map(|binding| {
                     PathBuf::from(format!("/xiaoo/e2b-bootstrap/{}", binding.content_digest))
                 })
+                .or(local_workspace_root)
                 .unwrap_or_else(|| self.agent.workspace_root.clone()),
             e2b_bootstrap,
             bootstrap_binding,
@@ -798,6 +941,26 @@ fn resolve_allowed_tool_names(
         .filter(|tool_name| visible_names.contains(tool_name.0.as_str()))
         .cloned()
         .collect()
+}
+
+fn resolve_profile_allowed_tool_names(
+    all_tool_names: &[ToolName],
+    profile: RuntimeCapabilityProfile,
+    agent_role: Option<&AgentRoleConfig>,
+) -> Vec<ToolName> {
+    match profile {
+        RuntimeCapabilityProfile::McpChatbot => all_tool_names
+            .iter()
+            .filter(|name| MCP_CHATBOT_TOOLS.contains(&name.0.as_str()))
+            .cloned()
+            .collect(),
+        RuntimeCapabilityProfile::McpAgent => all_tool_names
+            .iter()
+            .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file"))
+            .cloned()
+            .collect(),
+        RuntimeCapabilityProfile::Default => resolve_allowed_tool_names(all_tool_names, agent_role),
+    }
 }
 
 fn build_token_budget(total_budget: usize, configured_output_tokens: usize) -> TokenBudgetConfig {
@@ -977,7 +1140,8 @@ fn build_compression_pipeline(
 mod tests {
     use super::{
         build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
-        resolve_allowed_tool_names, validate_existing_e2b_binding,
+        resolve_allowed_tool_names, resolve_local_workspace, resolve_profile_allowed_tool_names,
+        validate_existing_e2b_binding, RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::AgentRoleConfig;
     use agent_types::common::ids::ToolName;
@@ -1061,6 +1225,77 @@ mod tests {
 
         assert!(allowed.contains(&"file_edit".to_string()));
         assert!(!allowed.contains(&"file_write".to_string()));
+    }
+
+    #[test]
+    fn mcp_profiles_apply_strict_tool_boundaries() {
+        let all = [
+            "web_search",
+            "webfetch",
+            "file_read",
+            "glob",
+            "grep",
+            "file_write",
+            "bash",
+            "skill",
+            "spawn_subagent",
+            "ask_user_question",
+            "send_file",
+            "plugin_custom",
+        ]
+        .into_iter()
+        .map(|name| ToolName(name.to_string()))
+        .collect::<Vec<_>>();
+
+        let chatbot =
+            resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpChatbot, None);
+        let chatbot = chatbot.into_iter().map(|name| name.0).collect::<Vec<_>>();
+        assert_eq!(chatbot, MCP_CHATBOT_TOOLS.map(str::to_string));
+
+        let agent =
+            resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpAgent, None);
+        let agent = agent.into_iter().map(|name| name.0).collect::<Vec<_>>();
+        assert!(agent.contains(&"file_write".to_string()));
+        assert!(agent.contains(&"spawn_subagent".to_string()));
+        assert!(agent.contains(&"plugin_custom".to_string()));
+        assert!(!agent.contains(&"ask_user_question".to_string()));
+        assert!(!agent.contains(&"send_file".to_string()));
+    }
+
+    #[test]
+    fn local_runtime_uses_request_workspace() {
+        let default_workspace = tempdir().expect("default workspace");
+        let requested_workspace = tempdir().expect("requested workspace");
+        let request = SessionRuntimeBuildInput {
+            session_id: "mcp-agent-session".to_string(),
+            conversation_id: "conversation".to_string(),
+            sender_id: "sender".to_string(),
+            channel: None,
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext {
+                kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
+                instance_id: Some("agent".to_string()),
+                runtime_profile_id: None,
+                build_tags: Vec::new(),
+            },
+            agent_id_override: None,
+            max_turns_override: None,
+            subagent_role_id: None,
+            llm: None,
+            workspace: Some(requested_workspace.path().to_path_buf()),
+            skills: None,
+        };
+
+        let resolved = resolve_local_workspace(&request, None, default_workspace.path())
+            .expect("local workspace should resolve");
+        assert_eq!(
+            resolved,
+            requested_workspace
+                .path()
+                .canonicalize()
+                .expect("canonical workspace")
+        );
     }
 
     #[test]

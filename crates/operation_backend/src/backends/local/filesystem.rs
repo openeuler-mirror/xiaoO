@@ -179,10 +179,16 @@ mod tests {
     use super::*;
     use crate::backends::local::backend::LocalBackendState;
     use crate::backends::local::policy::LocalBackendPolicy;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn test_root() -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("xiaoo-local-fs-policy-{}", std::process::id()));
+        let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "xiaoo-local-fs-policy-{}-{sequence}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(root.as_path());
         std::fs::create_dir_all(root.join("workspace")).unwrap();
         std::fs::create_dir_all(root.join("outside")).unwrap();

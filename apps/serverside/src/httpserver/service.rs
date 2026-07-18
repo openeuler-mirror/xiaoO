@@ -34,7 +34,13 @@ impl GatewayService {
         let request = build_channel_turn_request(&message);
         let visible_reply = self
             .session_service
-            .run_turn_with_interaction(request, event_sink, interaction_handle, channel_file_sender)
+            .run_turn_with_interaction(
+                request,
+                event_sink,
+                interaction_handle,
+                channel_file_sender,
+                None,
+            )
             .await?
             .visible_reply;
 

@@ -27,10 +27,19 @@ pub(super) async fn lease_session_backend(
             )
             .await;
         }
-        return Err(SessionServiceError::SessionBusy {
-            session_id: session.session_id.clone(),
-            message: "session is paused and has no eviction checkpoint to resume from".to_string(),
-        });
+        let is_local_mcp = session.entry.kind == Some(crate::gateway::GatewayEntryKind::Mcp)
+            && resolved
+                .operation_backend
+                .as_ref()
+                .map(|config| config.kind == "local")
+                .unwrap_or(true);
+        if !is_local_mcp {
+            return Err(SessionServiceError::SessionBusy {
+                session_id: session.session_id.clone(),
+                message: "session is paused and has no eviction checkpoint to resume from"
+                    .to_string(),
+            });
+        }
     }
 
     match backend_manager

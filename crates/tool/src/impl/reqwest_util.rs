@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 pub fn format_reqwest_error(e: reqwest::Error, context: &str) -> String {
@@ -26,7 +27,29 @@ pub fn format_reqwest_error(e: reqwest::Error, context: &str) -> String {
 }
 
 pub fn build_http_client(timeout_ms: u64) -> Result<reqwest::Client, String> {
+    build_http_client_inner(timeout_ms, None, false)
+}
+
+pub fn build_http_client_with_dns_override(
+    timeout_ms: u64,
+    dns_override: Option<(&str, &[SocketAddr])>,
+) -> Result<reqwest::Client, String> {
+    build_http_client_inner(timeout_ms, dns_override, true)
+}
+
+fn build_http_client_inner(
+    timeout_ms: u64,
+    dns_override: Option<(&str, &[SocketAddr])>,
+    disable_redirects: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms));
+    if disable_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+
+    if let Some((host, addrs)) = dns_override {
+        builder = builder.resolve_to_addrs(host, addrs);
+    }
 
     let native_certs = rustls_native_certs::load_native_certs();
     for cert in native_certs.certs {
