@@ -36,6 +36,7 @@ pub(crate) struct SessionHandleStatus {
 pub(crate) enum SessionPhase {
     Idle,
     Running,
+    Paused,
     Closing,
     Closed,
 }
@@ -57,6 +58,10 @@ pub(crate) enum SessionCommand {
     },
     ForceClose {
         reply: oneshot::Sender<Result<SessionRecord, SessionServiceError>>,
+    },
+    HibernateIdle {
+        idle_before_ms: u64,
+        reply: oneshot::Sender<Result<Option<SessionRecord>, SessionServiceError>>,
     },
 }
 
@@ -200,6 +205,25 @@ impl SessionHandle {
         })?
     }
 
+    pub(crate) async fn hibernate_idle(
+        &self,
+        idle_before_ms: u64,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::HibernateIdle {
+                idle_before_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| SessionServiceError::SessionClosed {
+                session_id: self.session_id.clone(),
+            })?;
+        rx.await.map_err(|_| SessionServiceError::SessionClosed {
+            session_id: self.session_id.clone(),
+        })?
+    }
+
     #[allow(dead_code)]
     pub(crate) fn status(&self) -> SessionHandleStatus {
         self.status_rx.borrow().clone()
@@ -315,7 +339,10 @@ impl SessionActor {
                 channel_file_sender,
                 reply,
             } => {
-                if matches!(self.phase, SessionPhase::Closing | SessionPhase::Closed) {
+                if matches!(
+                    self.phase,
+                    SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
+                ) {
                     self.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     let _ = reply.send(Err(SessionServiceError::SessionClosed {
                         session_id: self.session_id.clone(),
@@ -350,12 +377,37 @@ impl SessionActor {
             SessionCommand::ForceClose { reply } => {
                 self.begin_force_close(reply).await;
             }
+            SessionCommand::HibernateIdle {
+                idle_before_ms,
+                reply,
+            } => {
+                if self.phase != SessionPhase::Idle
+                    || self.active_turn.is_some()
+                    || !self.pending_turns.is_empty()
+                    || self.queue_depth.load(Ordering::SeqCst) > 0
+                {
+                    let _ = reply.send(Ok(None));
+                    return;
+                }
+                let snapshot = self.supervisor.snapshot().await;
+                if snapshot.updated_at_ms > idle_before_ms {
+                    let _ = reply.send(Ok(None));
+                    return;
+                }
+                let paused = self.supervisor.hibernate_idle().await;
+                self.phase = SessionPhase::Paused;
+                self.publish_status(None).await;
+                let _ = reply.send(Ok(Some(paused)));
+            }
         }
     }
 
     async fn start_next_turn_if_possible(&mut self) {
         if self.active_turn.is_some()
-            || matches!(self.phase, SessionPhase::Closing | SessionPhase::Closed)
+            || matches!(
+                self.phase,
+                SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
+            )
         {
             return;
         }
@@ -458,6 +510,7 @@ impl SessionActor {
         let lifecycle = match self.phase {
             SessionPhase::Idle => snapshot.status.clone(),
             SessionPhase::Running | SessionPhase::Closing => SessionLifecycleStatus::Running,
+            SessionPhase::Paused => SessionLifecycleStatus::Paused,
             SessionPhase::Closed => SessionLifecycleStatus::Closed,
         };
         let _ = self.status_tx.send(SessionHandleStatus {

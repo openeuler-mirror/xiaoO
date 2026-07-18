@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use memory::MemorySnapshot;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_core::LoopStateSnapshot;
 
@@ -80,6 +81,7 @@ pub trait SessionService: Send + Sync {
         event_sink: Option<Arc<dyn LoopEventSink>>,
         _interaction_handle: Option<Arc<dyn InteractionHandle>>,
         _channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        _cancellation_token: Option<CancellationToken>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.run_turn_with_events(request, event_sink).await
     }
@@ -87,6 +89,16 @@ pub trait SessionService: Send + Sync {
 
 #[async_trait]
 pub trait SessionControlPlane: Send + Sync {
+    async fn hibernate_idle_session(
+        &self,
+        _session_id: &str,
+        _idle_before_ms: u64,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "hibernate_idle_session".to_string(),
+        })
+    }
+
     async fn open_session(
         &self,
         _request: SessionOpenRequest,

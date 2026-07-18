@@ -117,3 +117,88 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 - **Server never connects**: run with `RUST_LOG=mcp=warn` to see spawn/handshake errors. Confirm the `command`/`args` invoke the server manually.
 - **Tool not visible to the agent**: check the configured `tools` allowlist includes the exact `mcp__{server}__{tool}` name; a typo produces an "unknown tool name in visibility config" error at startup.
 - **Stale connections after config edit**: restart xiaoO; MCP clients are cached for the resolver's lifetime.
+
+
+---
+# Use xiaoO as MCP server
+### [mcp_server] - Streamable HTTP MCP Server
+
+The daemon can expose two independent MCP 2025-11-25 Streamable HTTP
+endpoints on the same host and port as the runtime API:
+
+| Endpoint | Exposed tool | Capability profile |
+|----------|--------------|--------------------|
+| `/mcp/chatbot` | `chat` | Only `web_search` and `webfetch` internally |
+| `/mcp/agent` | `agent` | Full local Core agent, excluding interactive `ask_user_question` and non-channel `send_file` |
+
+```toml
+[mcp_server]
+enabled = true
+idle_timeout_secs = 600
+reaper_interval_secs = 30
+# Browser requests carrying Origin are rejected when this is empty.
+allowed_origins = []
+
+[mcp_server.chatbot]
+bearer_token_env = "XIAOO_MCP_CHATBOT_TOKEN"
+workspace = "~/.xiaoo/mcp-chatbot-empty"
+
+[mcp_server.agent]
+bearer_token_env = "XIAOO_MCP_AGENT_TOKEN"
+
+# MCP agent mode requires the local backend. Omitting this section also
+# selects the implicit local backend.
+[server.operation_backend]
+kind = "local"
+```
+
+Set both secrets before starting the daemon. They must be non-empty and
+different:
+
+```bash
+export XIAOO_MCP_CHATBOT_TOKEN='replace-with-chatbot-token'
+export XIAOO_MCP_AGENT_TOKEN='replace-with-agent-token'
+xiaoo-daemon --host 127.0.0.1 --port 18080
+```
+
+Every MCP `GET`, `POST`, and `DELETE` request requires the endpoint-specific
+`Authorization: Bearer ...` header. The normal `[http]` bearer token does not
+grant access to either MCP endpoint. `[http.rate_limit]` also applies to MCP
+requests.
+
+The chatbot workspace is created at startup if necessary and must be empty.
+The daemon refuses to start rather than deleting files from a non-empty
+directory. It is only a fixed runtime working directory: the chatbot has no
+file-read, file-search, file-write, or shell tools. Skills, plugins, upstream
+MCP tools, hooks, role switching, planning, subagents, and LSP are also
+disabled for this profile.
+
+Tool inputs are:
+
+```json
+{"name":"chat","arguments":{"message":"Hello","session_id":"mcp_chat_..."}}
+```
+
+```json
+{"name":"agent","arguments":{"message":"Inspect this repository","workspace":"/absolute/existing/directory","session_id":"mcp_agent_..."}}
+```
+
+Omit `session_id` to create a session and complete its first turn in the same
+call. The result contains both MCP text content and `structuredContent` with
+`session_id`, `created`, `reply`, `outcome`, and `usage`. A new agent session
+requires an absolute, existing, readable workspace. Later calls may omit it;
+if supplied again, its canonical path must match the original binding.
+Unknown IDs, IDs from the other endpoint, and workspace conflicts are tool
+errors rather than implicit new sessions.
+
+After `idle_timeout_secs` with no active or queued turn, the daemon releases
+the local runtime and keeps the in-memory conversation record. A later call
+with the same ID rebuilds the local backend and continues the context. The
+record is process-local: restarting the daemon loses MCP application sessions.
+MCP transport-session `DELETE` closes only the protocol connection and does
+not delete the xiaoO application session.
+
+The agent token grants the effective permissions of the Unix account running
+the daemon. With unrestricted local isolation, full-agent tools can access
+host paths outside the selected workspace; use OS isolation and protect this
+token accordingly.

@@ -53,6 +53,8 @@ pub struct AppConfig {
     pub cron: Option<CronSectionRaw>,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub mcp_server: McpServerConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,6 +222,46 @@ pub struct PathsConfig {
 pub struct ServerConfig {
     #[serde(default)]
     pub operation_backend: Option<GatewayBackendConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub reaper_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    #[serde(default)]
+    pub chatbot: McpChatbotConfig,
+    #[serde(default)]
+    pub agent: McpAgentConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpChatbotConfig {
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpAgentConfig {
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedMcpServerConfig {
+    pub idle_timeout_secs: u64,
+    pub reaper_interval_secs: u64,
+    pub allowed_origins: Vec<String>,
+    pub chatbot_token: String,
+    pub chatbot_workspace: PathBuf,
+    pub agent_token: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -397,6 +439,101 @@ impl DaemonConfig {
 
     pub fn server_operation_backend(&self) -> Option<GatewayBackendConfig> {
         self.app.server.operation_backend.clone()
+    }
+
+    pub fn resolve_mcp_server_config(&self) -> Result<Option<ResolvedMcpServerConfig>> {
+        let config = &self.app.mcp_server;
+        if !config.enabled {
+            return Ok(None);
+        }
+
+        if let Some(backend) = self.server_operation_backend() {
+            if backend.kind != "local" {
+                bail!(
+                    "mcp_server.agent requires server.operation_backend.kind = \"local\"; found `{}`",
+                    backend.kind
+                );
+            }
+        }
+
+        let chatbot_token_env = normalize_optional_string(config.chatbot.bearer_token_env.clone())
+            .unwrap_or_else(|| "XIAOO_MCP_CHATBOT_TOKEN".to_string());
+        let agent_token_env = normalize_optional_string(config.agent.bearer_token_env.clone())
+            .unwrap_or_else(|| "XIAOO_MCP_AGENT_TOKEN".to_string());
+        let chatbot_token =
+            required_env_secret("mcp_server.chatbot.bearer_token_env", &chatbot_token_env)?;
+        let agent_token =
+            required_env_secret("mcp_server.agent.bearer_token_env", &agent_token_env)?;
+        if chatbot_token == agent_token {
+            bail!("MCP chatbot and agent bearer tokens must be different");
+        }
+
+        let workspace = config
+            .chatbot
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("~/.xiaoo/mcp-chatbot-empty");
+        let workspace = PathBuf::from(shellexpand::tilde(workspace).into_owned());
+        fs::create_dir_all(&workspace).with_context(|| {
+            format!(
+                "failed to create mcp_server.chatbot.workspace {}",
+                workspace.display()
+            )
+        })?;
+        if !workspace.is_dir() {
+            bail!(
+                "mcp_server.chatbot.workspace must be a directory: {}",
+                workspace.display()
+            );
+        }
+        let mut entries = fs::read_dir(&workspace).with_context(|| {
+            format!(
+                "mcp_server.chatbot.workspace is not readable: {}",
+                workspace.display()
+            )
+        })?;
+        if entries.next().transpose()?.is_some() {
+            bail!(
+                "mcp_server.chatbot.workspace must be empty; refusing to clean {}",
+                workspace.display()
+            );
+        }
+        let chatbot_workspace = workspace.canonicalize().with_context(|| {
+            format!(
+                "failed to canonicalize mcp_server.chatbot.workspace {}",
+                workspace.display()
+            )
+        })?;
+
+        let allowed_origins = config
+            .allowed_origins
+            .iter()
+            .map(|origin| origin.trim())
+            .filter(|origin| !origin.is_empty())
+            .map(ToString::to_string)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let idle_timeout_secs = config.idle_timeout_secs.unwrap_or(600);
+        if idle_timeout_secs == 0 {
+            bail!("mcp_server.idle_timeout_secs must be greater than zero");
+        }
+        let reaper_interval_secs = config.reaper_interval_secs.unwrap_or(30);
+        if reaper_interval_secs == 0 {
+            bail!("mcp_server.reaper_interval_secs must be greater than zero");
+        }
+
+        Ok(Some(ResolvedMcpServerConfig {
+            idle_timeout_secs,
+            reaper_interval_secs,
+            allowed_origins,
+            chatbot_token,
+            chatbot_workspace,
+            agent_token,
+        }))
     }
 
     pub fn http_bearer_token(&self) -> Result<Option<String>> {
@@ -761,6 +898,16 @@ fn required_field(field_name: &str, value: Option<&str>) -> Result<String> {
         bail!("{field_name} is required when the channel is enabled");
     };
     Ok(value.to_string())
+}
+
+fn required_env_secret(field_name: &str, env_name: &str) -> Result<String> {
+    let token = env::var(env_name)
+        .with_context(|| format!("failed to read {field_name} from env `{env_name}`"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        bail!("environment variable `{env_name}` for {field_name} is empty");
+    }
+    Ok(token.to_string())
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -1204,5 +1351,167 @@ mod tests {
         assert!(config.rate_limit.is_none());
         assert!(config.bearer_token.is_none());
         assert!(config.bearer_token_env.is_none());
+    }
+
+    #[test]
+    fn resolves_enabled_mcp_server_and_creates_empty_workspace() {
+        let temp = TempDir::new().expect("tempdir");
+        let workspace = temp.path().join("chatbot-empty");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let chat_env = format!("XIAOO_TEST_MCP_CHAT_{suffix}");
+        let agent_env = format!("XIAOO_TEST_MCP_AGENT_{suffix}");
+        std::env::set_var(&chat_env, "chat-token");
+        std::env::set_var(&agent_env, "agent-token");
+        let content = format!(
+            r#"
+                [llm]
+                provider = "openrouter"
+                model = "z-ai/glm-5"
+
+                [mcp_server]
+                enabled = true
+                allowed_origins = ["https://example.com"]
+
+                [mcp_server.chatbot]
+                bearer_token_env = "{chat_env}"
+                workspace = "{}"
+
+                [mcp_server.agent]
+                bearer_token_env = "{agent_env}"
+            "#,
+            workspace.display()
+        );
+        let app: AppConfig = toml::from_str(&content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app,
+            config_path: "config.toml".into(),
+        };
+
+        let resolved = daemon
+            .resolve_mcp_server_config()
+            .expect("MCP config should validate")
+            .expect("MCP should be enabled");
+        std::env::remove_var(&chat_env);
+        std::env::remove_var(&agent_env);
+
+        assert_eq!(resolved.idle_timeout_secs, 600);
+        assert_eq!(resolved.reaper_interval_secs, 30);
+        assert_eq!(resolved.chatbot_token, "chat-token");
+        assert_eq!(resolved.agent_token, "agent-token");
+        assert_eq!(resolved.allowed_origins, vec!["https://example.com"]);
+        assert_eq!(
+            resolved.chatbot_workspace,
+            workspace.canonicalize().expect("canonical workspace")
+        );
+    }
+
+    #[test]
+    fn rejects_mcp_agent_when_daemon_backend_is_not_local() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [mcp_server]
+            enabled = true
+
+            [server.operation_backend]
+            kind = "e2b"
+        "#;
+        let app: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app,
+            config_path: "config.toml".into(),
+        };
+        let error = daemon
+            .resolve_mcp_server_config()
+            .expect_err("E2B must be rejected");
+        assert!(error
+            .to_string()
+            .contains("requires server.operation_backend"));
+    }
+
+    #[test]
+    fn rejects_equal_mcp_tokens() {
+        let temp = TempDir::new().expect("tempdir");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let chat_env = format!("XIAOO_TEST_MCP_CHAT_EQUAL_{suffix}");
+        let agent_env = format!("XIAOO_TEST_MCP_AGENT_EQUAL_{suffix}");
+        std::env::set_var(&chat_env, "same-token");
+        std::env::set_var(&agent_env, "same-token");
+        let content = format!(
+            r#"
+                [llm]
+                provider = "openrouter"
+                model = "z-ai/glm-5"
+
+                [mcp_server]
+                enabled = true
+
+                [mcp_server.chatbot]
+                bearer_token_env = "{chat_env}"
+                workspace = "{}"
+
+                [mcp_server.agent]
+                bearer_token_env = "{agent_env}"
+            "#,
+            temp.path().join("chatbot-empty").display()
+        );
+        let app: AppConfig = toml::from_str(&content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app,
+            config_path: "config.toml".into(),
+        };
+        let error = daemon
+            .resolve_mcp_server_config()
+            .expect_err("equal MCP tokens must be rejected");
+        std::env::remove_var(&chat_env);
+        std::env::remove_var(&agent_env);
+
+        assert!(error.to_string().contains("must be different"));
+    }
+
+    #[test]
+    fn refuses_to_reuse_nonempty_chatbot_workspace() {
+        let temp = TempDir::new().expect("tempdir");
+        let workspace = temp.path().join("chatbot-nonempty");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        std::fs::write(workspace.join("keep.txt"), "do not delete").expect("seed workspace");
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let chat_env = format!("XIAOO_TEST_MCP_CHAT_NONEMPTY_{suffix}");
+        let agent_env = format!("XIAOO_TEST_MCP_AGENT_NONEMPTY_{suffix}");
+        std::env::set_var(&chat_env, "chat-token");
+        std::env::set_var(&agent_env, "agent-token");
+        let content = format!(
+            r#"
+                [llm]
+                provider = "openrouter"
+                model = "z-ai/glm-5"
+
+                [mcp_server]
+                enabled = true
+
+                [mcp_server.chatbot]
+                bearer_token_env = "{chat_env}"
+                workspace = "{}"
+
+                [mcp_server.agent]
+                bearer_token_env = "{agent_env}"
+            "#,
+            workspace.display()
+        );
+        let app: AppConfig = toml::from_str(&content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app,
+            config_path: "config.toml".into(),
+        };
+        let error = daemon
+            .resolve_mcp_server_config()
+            .expect_err("nonempty chatbot workspace must be rejected");
+        std::env::remove_var(&chat_env);
+        std::env::remove_var(&agent_env);
+
+        assert!(error.to_string().contains("must be empty"));
+        assert!(workspace.join("keep.txt").is_file());
     }
 }

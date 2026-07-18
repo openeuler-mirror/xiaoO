@@ -3,6 +3,7 @@ mod cron;
 mod daemon_config;
 mod daemon_runtime;
 mod httpserver;
+mod mcp_server;
 
 use crate::channels::{
     build_feishu_runtime, build_telegram_runtime, FeishuConfig, FeishuEventTransport,
@@ -17,6 +18,7 @@ use crate::httpserver::{
     create_router_with_control_plane_and_auth, dashboard_router, ChannelRuntimeProcessor,
     DashboardState, HttpBearerAuthConfig,
 };
+use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
 use operation_backend::process_group::ProcessGroupCleanupGuard;
@@ -63,6 +65,7 @@ async fn run_daemon(
         )
     })?;
     let config = DaemonConfig::load_from(&config_path)?;
+    let mcp_server_config = config.resolve_mcp_server_config()?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
     let rate_limit = config.app.http.rate_limit.clone();
@@ -141,25 +144,34 @@ async fn run_daemon(
     };
 
     let channel_runtimes = config.channel_runtimes()?;
-    let router = if channel_runtimes.is_empty() {
+    let mut router = if channel_runtimes.is_empty() {
         create_router_with_control_plane_and_auth(
-            session_service,
-            session_control_plane,
+            session_service.clone(),
+            session_control_plane.clone(),
             bearer_auth,
-            rate_limit,
+            rate_limit.clone(),
         )
     } else {
         create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
-            session_service,
-            session_control_plane,
+            session_service.clone(),
+            session_control_plane.clone(),
             channel_runtimes,
             interaction_timeout_secs,
             bearer_auth,
-            rate_limit,
+            rate_limit.clone(),
         )
         .map_err(anyhow::Error::new)
         .context("failed to create router with channel runtimes")?
     };
+    if let Some(mcp_server_config) = mcp_server_config {
+        router = router.merge(create_mcp_router(
+            mcp_server_config,
+            session_service.clone(),
+            session_control_plane.clone(),
+            session_store.clone(),
+            rate_limit.clone(),
+        ));
+    }
 
     // Dashboard runs on its own listener so it never shares the runtime
     // API port (and its bearer auth). When `[http.dashboard].enabled = false`

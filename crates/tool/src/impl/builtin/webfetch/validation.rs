@@ -59,6 +59,15 @@ fn is_ip_blocked(ip: IpAddr) -> bool {
             if v4.is_link_local() {
                 return true;
             }
+            let octets = v4.octets();
+            // Shared address space (100.64.0.0/10) includes well-known cloud
+            // metadata addresses such as 100.100.100.200.
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return true;
+            }
+            if v4.is_broadcast() || v4.is_multicast() || v4.is_documentation() {
+                return true;
+            }
         }
         IpAddr::V6(v6) => {
             // RFC 4193 unique local (fc00::/7)
@@ -172,28 +181,38 @@ pub fn validate_resolved_addrs(addrs: &[SocketAddr]) -> ValidationResult {
     ValidationResult::ok()
 }
 
-fn validate_url(input: &WebFetchInput) -> ValidationResult {
-    if input.url.trim().is_empty() {
+pub(super) fn validate_url_string(url_str: &str) -> ValidationResult {
+    if url_str.trim().is_empty() {
         return ValidationResult::error("URL cannot be empty", error_code::URL_EMPTY);
     }
 
-    if !input.url.starts_with("http://") && !input.url.starts_with("https://") {
+    let parsed = match url::Url::parse(url_str) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return ValidationResult::error(
+                format!("URL is invalid: {error}"),
+                error_code::URL_INVALID_SCHEME,
+            );
+        }
+    };
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return ValidationResult::error(
-            format!(
-                "URL must start with http:// or https://, got: {}",
-                input.url
-            ),
+            format!("URL must use HTTP or HTTPS and include a host, got: {url_str}"),
             error_code::URL_INVALID_SCHEME,
         );
     }
 
     // SSRF protection: block literal internal IPs in URL host
-    let host_check = validate_url_host_not_blocked_ip(&input.url);
+    let host_check = validate_url_host_not_blocked_ip(url_str);
     if !host_check.result {
         return host_check;
     }
 
     ValidationResult::ok()
+}
+
+fn validate_url(input: &WebFetchInput) -> ValidationResult {
+    validate_url_string(&input.url)
 }
 
 fn validate_timeout(input: &WebFetchInput) -> ValidationResult {

@@ -426,7 +426,13 @@ async fn stream_session_input(
 
     tokio::spawn(async move {
         match session_service
-            .run_turn_with_interaction(payload, Some(sink.clone()), Some(interaction_handle), None)
+            .run_turn_with_interaction(
+                payload,
+                Some(sink.clone()),
+                Some(interaction_handle),
+                None,
+                None,
+            )
             .await
         {
             Ok(result) => {
