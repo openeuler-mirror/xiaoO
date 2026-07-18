@@ -90,10 +90,21 @@ struct AgentInput {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct McpUsage {
+    #[schemars(schema_with = "nonnegative_integer_schema")]
     prompt_tokens: u64,
+    #[schemars(schema_with = "nonnegative_integer_schema")]
     completion_tokens: u64,
+    #[schemars(schema_with = "nonnegative_integer_schema")]
     total_tokens: u64,
+    #[schemars(schema_with = "nonnegative_integer_schema")]
     estimated_input_tokens: u64,
+}
+
+fn nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "integer",
+        "minimum": 0
+    })
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -687,6 +698,31 @@ mod tests {
     fn empty_supplied_session_id_is_rejected() {
         assert!(normalize_session_id(Some("  ".to_string())).is_err());
         assert_eq!(normalize_session_id(None).expect("new session"), None);
+    }
+
+    #[test]
+    fn output_schema_uses_portable_nonnegative_integers_for_usage() {
+        let schema = serde_json::to_value(schemars::schema_for!(McpTurnOutput))
+            .expect("output schema should serialize");
+        let schema_text = schema.to_string();
+        assert!(!schema_text.contains("uint64"), "{schema_text}");
+
+        for field in [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "estimated_input_tokens",
+        ] {
+            let field_schema = schema
+                .pointer(&format!("/$defs/McpUsage/properties/{field}"))
+                .unwrap_or_else(|| panic!("missing usage schema for {field}: {schema_text}"));
+            assert_eq!(
+                field_schema.get("type"),
+                Some(&serde_json::json!("integer"))
+            );
+            assert_eq!(field_schema.get("minimum"), Some(&serde_json::json!(0)));
+            assert!(field_schema.get("format").is_none(), "{field_schema}");
+        }
     }
 
     fn session_record(

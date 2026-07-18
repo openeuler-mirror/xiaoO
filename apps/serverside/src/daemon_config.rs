@@ -1417,7 +1417,6 @@ mod tests {
 
             [server.operation_backend]
             kind = "e2b"
-            options = {}
         "#;
         let app: AppConfig = toml::from_str(content).expect("config should parse");
         let daemon = DaemonConfig {

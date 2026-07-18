@@ -64,6 +64,10 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub mcp: McpSection,
+    /// Preserve daemon- or plugin-owned top-level sections when the TUI
+    /// rewrites config.toml after changing providers or other UI settings.
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -522,6 +526,7 @@ pub fn resolve_context_window(config: &Config) -> Option<usize> {
 mod tests {
     use super::{require_tui_bootstrap_config, resolve_context_window, Config};
     use std::path::Path;
+    use tempfile::tempdir;
 
     fn valid_config() -> Config {
         let mut config = Config::default();
@@ -617,6 +622,47 @@ file_edit = false
         assert_eq!(role.max_turns, Some(3));
         assert_eq!(role.tools.get("file_write"), Some(&false));
         assert_eq!(role.tools.get("file_edit"), Some(&false));
+    }
+
+    #[test]
+    fn save_preserves_daemon_owned_top_level_sections() {
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[mcp_server]
+enabled = true
+
+[mcp_server.chatbot]
+bearer_token_env = "XIAOO_MCP_CHATBOT_TOKEN"
+
+[server.operation_backend]
+kind = "local"
+"#,
+        )
+        .expect("write config");
+
+        let mut config = Config::load_from(&path).expect("load config");
+        config.llm.model = "gpt-4.1".to_string();
+        config.save_to(&path).expect("save config");
+
+        let persisted: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).expect("read persisted config"))
+                .expect("parse persisted config");
+        assert_eq!(persisted["mcp_server"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            persisted["mcp_server"]["chatbot"]["bearer_token_env"].as_str(),
+            Some("XIAOO_MCP_CHATBOT_TOKEN")
+        );
+        assert_eq!(
+            persisted["server"]["operation_backend"]["kind"].as_str(),
+            Some("local")
+        );
     }
 
     #[test]

@@ -17,7 +17,12 @@ pub const STALE_OWNER_THRESHOLD_MS: u64 = 30_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBackendConfig {
     pub kind: String,
+    #[serde(default = "default_backend_options")]
     pub options: Value,
+}
+
+fn default_backend_options() -> Value {
+    Value::Object(Default::default())
 }
 
 impl GatewayBackendConfig {
@@ -370,5 +375,18 @@ impl BackendLease {
 
     pub fn instance(&self) -> BackendInstance {
         self.instance.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayBackendConfig;
+
+    #[test]
+    fn backend_options_default_to_empty_object_when_omitted() {
+        let config: GatewayBackendConfig =
+            toml::from_str("kind = \"local\"").expect("backend config should parse");
+
+        assert_eq!(config.options, serde_json::json!({}));
     }
 }

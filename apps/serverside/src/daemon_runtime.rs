@@ -156,14 +156,16 @@ impl ConfiguredRuntimeResolver {
         let agent = config.resolve_agent()?;
         ensure_workspace_exists(&agent.workspace_root)?;
 
-        let resolved_provider = resolve_config(ResolveInput {
-            provider: Some(config.app.llm.provider.clone()),
-            protocol: None,
-            api_key: None,
+        let startup_llm = EffectiveLlmConfig {
+            provider: config.app.llm.provider.clone(),
+            model: agent.model.clone(),
+            api_base: config.app.llm.api_base.clone(),
             api_key_env: config.app.llm.api_key_env.clone(),
-            base_url: config.app.llm.api_base.clone(),
-        })
-        .context("failed to resolve llm provider config")?;
+            api_key: None,
+        };
+        let resolved_provider = resolve_effective_provider_config(&startup_llm)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+            .context("failed to resolve llm provider config")?;
         let llm_provider = Arc::new(
             create_llm_provider_from_resolved(
                 &resolved_provider,
@@ -290,17 +292,7 @@ impl ConfiguredRuntimeResolver {
             }
         }
 
-        let api_key = resolve_llm_api_key(effective)?;
-        let resolved_provider = resolve_config(ResolveInput {
-            provider: Some(effective.provider.clone()),
-            protocol: None,
-            api_key,
-            api_key_env: None,
-            base_url: effective.api_base.clone(),
-        })
-        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-            message: format!("failed to resolve llm provider config: {error}"),
-        })?;
+        let resolved_provider = resolve_effective_provider_config(effective)?;
 
         let created = Arc::new(
             create_llm_provider_from_resolved(
@@ -644,6 +636,22 @@ fn resolve_llm_api_key(
     }
 
     Ok(None)
+}
+
+fn resolve_effective_provider_config(
+    config: &EffectiveLlmConfig,
+) -> Result<llm_client::ResolvedConfig, SessionRuntimeResolveError> {
+    let api_key = resolve_llm_api_key(config)?;
+    resolve_config(ResolveInput {
+        provider: Some(config.provider.clone()),
+        protocol: None,
+        api_key,
+        api_key_env: None,
+        base_url: config.api_base.clone(),
+    })
+    .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+        message: format!("failed to resolve llm provider config: {error}"),
+    })
 }
 
 fn resolve_api_key_env(
@@ -1140,8 +1148,9 @@ fn build_compression_pipeline(
 mod tests {
     use super::{
         build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
-        resolve_allowed_tool_names, resolve_local_workspace, resolve_profile_allowed_tool_names,
-        validate_existing_e2b_binding, RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
+        resolve_allowed_tool_names, resolve_effective_provider_config, resolve_local_workspace,
+        resolve_profile_allowed_tool_names, validate_existing_e2b_binding, EffectiveLlmConfig,
+        RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::AgentRoleConfig;
     use agent_types::common::ids::ToolName;
@@ -1167,6 +1176,30 @@ mod tests {
         assert_eq!(budget.total_budget, 65536);
         assert_eq!(budget.reserved_for_output, 8192);
         assert_eq!(budget.reserved_for_system, 2048);
+    }
+
+    #[test]
+    fn startup_provider_resolves_api_key_from_encrypted_secrets() {
+        let temp = tempdir().expect("create temp dir");
+        let config_path = temp.path().join("config.toml");
+        let env_name = "XIAOO_DAEMON_TEST_OPENROUTER_API_KEY";
+        std::env::remove_var(env_name);
+
+        xiaoo_shared::llm_secrets::save_llm_secret(&config_path, env_name, "secret-key")
+            .expect("save encrypted LLM secret");
+        xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path)
+            .expect("initialize secret provider");
+
+        let resolved = resolve_effective_provider_config(&EffectiveLlmConfig {
+            provider: "openrouter".to_string(),
+            model: "test-model".to_string(),
+            api_base: None,
+            api_key_env: Some(env_name.to_string()),
+            api_key: None,
+        })
+        .expect("resolve provider with encrypted secret");
+
+        assert_eq!(resolved.api_key.as_deref(), Some("secret-key"));
     }
 
     #[test]
