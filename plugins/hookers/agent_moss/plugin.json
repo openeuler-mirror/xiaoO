@@ -1,0 +1,8 @@
+[
+  {
+    "id": "plugin_agent_moss_tool_input",
+    "hook_point": "*.Tool.*.pre",
+    "command": "python3 hooks/agent_moss/bridge.py",
+    "raw_command": "python3 bridge.py"
+  }
+]
