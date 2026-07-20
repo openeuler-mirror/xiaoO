@@ -1,11 +1,15 @@
-"""xiaoO Audit Agent 主协调器 — 三层防御安全判断
+"""xiaoO Audit Agent 主协调器 — 三层防御 + 脚本内容静态扫描
 
 整体流程：
 1. 启发式静态检测（关键命令 + 注入检测 + 用户敏感规则）→ high/critical 直接 Deny
+1.5 脚本内容预扫描（递归追踪 + 预处理 + L1/L2 规则复用扫描）→ high/critical 直接 Deny
 2. 逻辑规则检测（read_before_write + 意图一致性 + 敏感路径 + 危险模式）→ high/critical 直接 Deny
+   2.5 脚本内容 L2 扫描（对预处理后脚本内容做敏感路径/危险模式/意图偏离检测）
 3. LLM + Skill 深度分析（启发式和逻辑规则结果作为提示注入）
 
 优化：白名单只读工具（grep/read/glob等）在启发式检测未命中 high/critical 时，跳过后续检测。
+脚本内容预扫描：对 bash 类型的脚本执行动作，递归追踪调用链中的脚本文件，
+预处理后用 L1/L2 规则做静态扫描，能直接拦截的不走 L3，减少 token 消耗和不稳定性。
 
 配置控制（优先级：环境变量 > runtime JSON 用户本地副本 > config.json 默认值）：
 - 环境变量: AUDIT_DISABLE_L1=1 / AUDIT_DISABLE_L2=1 / AUDIT_DISABLE_LLM_LAYER3=1
@@ -17,7 +21,7 @@ import logging
 from pathlib import Path
 
 from ..config import Config, is_llm_layer3_enabled
-from ..runtime_config import is_layer_enabled
+from ..runtime_config import is_layer_enabled, get_disabled_l2_rules_with_skip_l3
 from .heuristic_detector import (
     HeuristicDetector,
     is_fully_safe_bash_command, is_readonly_sensitive_bash_command,
@@ -25,6 +29,11 @@ from .heuristic_detector import (
 )
 from .llm_analyzer import LLMAnalyzer
 from .logic_rules import LogicRulesChecker
+from .script_content_analyzer import (
+    analyze_script_content,
+    scan_script_chain_with_l2,
+    ScriptChainAnalysisResult,
+)
 from .skill_engine import SkillEngine
 from .types import HeuristicResult, SecurityJudgment
 
@@ -144,6 +153,38 @@ class xiaoOSecBot:
         else:
             heuristic_result = HeuristicResult(hit=False)
 
+        # ========== L1.5: 脚本内容预扫描（递归追踪 + L1/L2 规则复用） ==========
+        # 对 bash 类型的脚本执行动作，递归追踪脚本调用链，
+        # 预处理后用 L1 CommandPatternScanner 扫描，命中 high/critical 直接 Deny。
+        # 这避免了"脚本内有 rm -rf / 但 L1 只看命令字段 bash deploy.sh 不命中"的漏报，
+        # 也减少了 L3 的 token 消耗（L1 可拦截的场景不再走 LLM）。
+        # 注意：此阶段 action_type/action_detail 局部变量尚未赋值
+        # （它们在"白名单快速放行"阶段才定义），所以直接从 a_next 取值。
+        script_chain_result: ScriptChainAnalysisResult | None = None
+        _l15_action_type = a_next.get("action_type", "").lower()
+        _l15_action_detail = a_next.get("action_detail", "").lower()
+        if _l15_action_type == "bash":
+            script_chain_result = analyze_script_content(_l15_action_type, _l15_action_detail)
+
+            if script_chain_result and script_chain_result.nodes:
+                for node in script_chain_result.nodes:
+                    if node.l1_hit and node.l1_risk_level in ("high", "critical"):
+                        violated_layers.append("1.1-script")
+                        logger.info(
+                            "脚本内容 L1 拦截: path=%s, depth=%d, risk_level=%s, reason=%s",
+                            node.script_path, node.depth, node.l1_risk_level, node.l1_reason,
+                        )
+                        return SecurityJudgment(
+                            allowed=False,
+                            reason=f"脚本内容包含危险操作: {node.l1_reason} (文件: {node.script_path}, 深度: {node.depth})",
+                            risk_level=node.l1_risk_level,
+                            risk_type=node.l1_risk_type,
+                            confidence=90,
+                            source="heuristic_script_scan",
+                            action_desc=a_next.get("action_detail", ""),
+                            violated_layers=violated_layers,
+                        )
+
         # ========== 白名单快速放行（两级） ==========
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
@@ -253,11 +294,64 @@ class xiaoOSecBot:
             from .types import LogicRuleResult
             logic_result = LogicRuleResult(hit=False)
 
+        # ========== L2.5: 脚本内容 L2 扫描（对预处理后脚本内容做 L2 规则检测） ==========
+        # 对脚本调用链中每个节点的预处理内容，复用 L2 的敏感路径/危险模式/意图偏离检测。
+        # 只复用不依赖 action_history 的规则：
+        #   - sensitive_path_access
+        #   - dangerous_patterns
+        #   - intent_consistency（用 prompt_session 判断脚本内容是否偏离用户意图）
+        if script_chain_result and script_chain_result.nodes and l2_enabled:
+            scan_script_chain_with_l2(
+                script_chain_result, self._logic_rules_checker, prompt_session
+            )
+            for node in script_chain_result.nodes:
+                if node.l2_hit and node.l2_risk_level in ("high", "critical"):
+                    violated_layers.append("1.2-script")
+                    logger.info(
+                        "脚本内容 L2 拦截: path=%s, depth=%d, violated_rule=%s, reason=%s",
+                        node.script_path, node.depth, node.l2_violated_rule, node.l2_reason,
+                    )
+                    return SecurityJudgment(
+                        allowed=False,
+                        reason=node.l2_reason,
+                        risk_level=node.l2_risk_level,
+                        risk_type=node.l2_risk_type,
+                        confidence=85,
+                        source="logic_rule_script_scan",
+                        action_desc=a_next.get("action_detail", ""),
+                        violated_layers=violated_layers,
+                    )
+
         # ========== 层3: LLM + Skill 深度分析 ==========
         # 配置控制：环境变量 > runtime JSON > config.json > 默认值
         # skip_llm 由白名单快速放行逻辑设置，只读敏感工具跳过 LLM 分析
         l3_runtime_enabled = is_layer_enabled("L3_llm_analysis")
         llm_analysis_enabled = security_cfg.llm_analysis_enabled and is_llm_layer3_enabled() and l3_runtime_enabled and not skip_llm
+
+        # 收集 L2 禁用且 skip_l3_on_disabled 的规则关键内容，
+        # 命中时作为硬约束传给 L3：对这些路径/关键词必须放行，
+        # 但 L3 仍分析命令其他部分的安全风险
+        skip_l3_hints = "无（当前无禁用规则命中）"
+        disabled_l2 = get_disabled_l2_rules_with_skip_l3()
+        if disabled_l2:
+            # 检查当前 action_detail 是否命中了 skip_l3 的关键内容
+            action_lower = a_next.get("action_detail", "").lower()
+            matched_items = []
+            for cat_name, items in disabled_l2.items():
+                for item in items:
+                    if item.lower() in action_lower:
+                        matched_items.append(item)
+            if matched_items:
+                skip_l3_hints = (
+                    f"⚠️ 重要约束：用户已主动禁用针对以下内容的安全拦截规则，这是用户的明确决策：\n"
+                    f"  {', '.join(matched_items)}\n"
+                    f"对这些路径/关键词的相关操作，必须视为允许的，不允许仅因涉及这些内容就拒绝。"
+                    f"但你仍需检查命令的其他部分是否有独立于这些内容的安全风险（如网络外传、提权等）。"
+                )
+                logger.info(
+                    "L3 skip_l3_hints: action_detail 命中了禁用规则的 skip_l3 内容（硬约束）: %s",
+                    matched_items,
+                )
 
         if llm_analysis_enabled:
             try:
@@ -269,6 +363,8 @@ class xiaoOSecBot:
                     heuristic_result=heuristic_result,
                     logic_result=logic_result,
                     config=config,
+                    skip_l3_hints=skip_l3_hints,
+                    script_chain_result=script_chain_result,
                 )
             except Exception as e:
                 logger.warning("LLM 分析异常: %s", e)

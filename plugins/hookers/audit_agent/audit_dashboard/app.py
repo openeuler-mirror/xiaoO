@@ -36,6 +36,8 @@ from audit_policy_checker.runtime_config import (
     save_runtime_config,
     update_layer_enabled,
     update_rule_enabled,
+    update_rule_deny_mode,
+    update_rule_skip_l3,
     update_category_enabled,
     add_custom_rule,
     delete_custom_rule,
@@ -49,6 +51,7 @@ from audit_policy_checker.runtime_config import (
 from audit_policy_checker.token_stats import (
     get_token_stats,
     get_recent_records,
+    get_token_trend,
     reset_token_stats,
 )
 
@@ -119,6 +122,20 @@ class NewRule(BaseModel):
     path: str | None = None
     desc: str | None = None
     credential: bool | None = None
+    deny_mode: str | None = None  # 敏感路径拦截模式：deny_write / deny_read / deny_both
+
+
+class DenyModeUpdate(BaseModel):
+    layer: str
+    category: str
+    rule_id: str
+    deny_mode: str
+
+class SkipL3Update(BaseModel):
+    layer: str
+    category: str
+    rule_id: str
+    skip_l3_on_disabled: bool
 
 class DeleteRule(BaseModel):
     layer: str
@@ -201,16 +218,31 @@ async def get_rules(layer: str | None = None, category: str | None = None):
 async def toggle_rule(body: RuleToggle):
     """开关单条规则"""
     runtime = update_rule_enabled(body.layer, body.category, body.rule_id, body.enabled)
-    # 返回更新后的该分类规则
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    # 返回完整 runtimeConfig，避免前端全局状态被部分数据覆盖（曾导致搜索失效）
+    return runtime
+
+
+@app.put("/api/rules/deny_mode", dependencies=[Depends(auth_dependency)])
+async def change_rule_deny_mode(body: DenyModeUpdate):
+    """修改敏感路径规则的拦截模式"""
+    if body.deny_mode not in ("deny_write", "deny_read", "deny_both"):
+        raise HTTPException(status_code=400, detail=f"无效的 deny_mode: {body.deny_mode}")
+    runtime = update_rule_deny_mode(body.layer, body.category, body.rule_id, body.deny_mode)
+    return runtime
+
+
+@app.put("/api/rules/skip_l3", dependencies=[Depends(auth_dependency)])
+async def change_rule_skip_l3(body: SkipL3Update):
+    """修改规则禁用时是否也跳过 L3 分析"""
+    runtime = update_rule_skip_l3(body.layer, body.category, body.rule_id, body.skip_l3_on_disabled)
+    return runtime
+
 
 @app.put("/api/categories/enabled", dependencies=[Depends(auth_dependency)])
 async def toggle_category(body: CategoryToggle):
     """开关整个分类"""
     runtime = update_category_enabled(body.layer, body.category, body.enabled)
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    return runtime
 
 @app.post("/api/rules", dependencies=[Depends(auth_dependency)])
 async def create_rule(body: NewRule):
@@ -234,10 +266,21 @@ async def create_rule(body: NewRule):
         rule_dict["desc"] = body.desc
     if body.credential:
         rule_dict["credential"] = body.credential
+    if body.deny_mode:
+        rule_dict["deny_mode"] = body.deny_mode
+
+    # 校验 credential 与 deny_mode 的一致性：
+    # credential=True 意味着"读写均拦"，必须搭配 deny_both；若搭配 deny_write/deny_read，
+    # _sync_deny_mode_fields 会静默 pop 掉 credential，导致凭据标记丢失、策略偏离预期。
+    if body.credential and body.deny_mode and body.deny_mode != "deny_both":
+        raise HTTPException(
+            status_code=400,
+            detail="credential=True 要求 deny_mode=deny_both（凭据读写均拦），"
+                   f"当前 deny_mode={body.deny_mode} 与之冲突",
+        )
 
     runtime = add_custom_rule(body.layer, body.category, rule_dict)
-    cat_data = runtime.get(body.layer, {}).get(body.category, {})
-    return cat_data
+    return runtime
 
 @app.delete("/api/rules", dependencies=[Depends(auth_dependency)])
 async def remove_rule(body: DeleteRule):
@@ -258,19 +301,19 @@ async def get_skills():
 async def toggle_skill(body: SkillToggle):
     """开关单个 skill"""
     runtime = update_skill_enabled(body.skill_id, body.enabled)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.put("/api/skill-categories/enabled", dependencies=[Depends(auth_dependency)])
 async def toggle_skill_category(body: SkillCategoryToggle):
     """开关 skill 分类"""
     runtime = update_skill_category_enabled(body.category, body.enabled)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.post("/api/skills", dependencies=[Depends(auth_dependency)])
 async def create_skill(body: NewSkill):
     """新增自定义 skill"""
     runtime = add_custom_skill(body.skill_id, body.category, body.keywords, body.content)
-    return runtime.get("L3_skills", {})
+    return runtime
 
 @app.delete("/api/skills", dependencies=[Depends(auth_dependency)])
 async def remove_skill(body: DeleteSkill):
@@ -279,6 +322,20 @@ async def remove_skill(body: DeleteSkill):
     if runtime is None:
         raise HTTPException(status_code=403, detail="内置 skill 不可删除，只能禁用")
     return runtime
+
+@app.get("/api/skills/{skill_id}/content", dependencies=[Depends(auth_dependency)])
+async def get_skill_content(skill_id: str):
+    """获取 skill 的完整 Markdown 内容（详情弹窗用）。
+    优先读用户自定义目录，再读内置 skills 目录。"""
+    from audit_policy_checker.security.skill_engine import DEFAULT_SKILLS_DIR, USER_SKILLS_DIR
+    # 防路径穿越：skill_id 只允许字母数字下划线横线
+    if not skill_id.replace("-", "").replace("_", "").isalnum():
+        raise HTTPException(status_code=400, detail="非法 skill id")
+    for base in (USER_SKILLS_DIR, DEFAULT_SKILLS_DIR):
+        p = base / f"{skill_id}.md"
+        if p.exists():
+            return {"skill_id": skill_id, "path": str(p), "content": p.read_text(encoding="utf-8")}
+    raise HTTPException(status_code=404, detail=f"skill {skill_id} 不存在")
 
 # 配置完整查看
 @app.get("/api/config", dependencies=[Depends(auth_dependency)])
@@ -307,19 +364,37 @@ async def reset_config():
 # ==================== Token Stats API ====================
 
 @app.get("/api/token-stats", dependencies=[Depends(auth_dependency)])
-async def get_token_stats_api(days: int = 0):
+async def get_token_stats_api(
+    days: int = 0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
     """
     获取 token 用量统计汇总。
 
     Args:
         days: 查询最近多少天的数据。0=全部, 1=今天, 7=近7天, 30=近30天
+        start_date: 起始日期（YYYY-MM-DD，含当天）。优先于 days。
+        end_date: 结束日期（YYYY-MM-DD，含当天全天）。优先于 days。
     """
-    return get_token_stats(days)
+    return get_token_stats(days, start_date=start_date, end_date=end_date)
 
 @app.get("/api/token-stats/recent", dependencies=[Depends(auth_dependency)])
 async def get_recent_token_records(limit: int = 20):
     """获取最近的 N 条 token 用量记录"""
     return get_recent_records(limit)
+
+@app.get("/api/token-stats/trend", dependencies=[Depends(auth_dependency)])
+async def get_token_trend_api(
+    days: int = 0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+):
+    """
+    获取 Token 消耗趋势（按日期 + 模型聚合），供前端折线图渲染。
+    days: 0=全部, 1=今天, 7=近7天。start_date/end_date 优先于 days。
+    """
+    return get_token_trend(days=days, start_date=start_date, end_date=end_date)
 
 @app.post("/api/token-stats/reset", dependencies=[Depends(auth_dependency)])
 async def reset_token_stats_api():

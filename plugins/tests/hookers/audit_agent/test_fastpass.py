@@ -12,6 +12,7 @@
     python3 test_fastpass.py
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -24,11 +25,16 @@ from audit_policy_checker.security.audit_agent import judge_security
 
 
 # ========== 配置 ==========
+# Phase 2 用 LLM 配置：全部从环境变量读取，禁止硬编码任何 API key（避免泄露入库）。
+# 需要的环境变量：XIAOO_API_KEY（必填）、XIAOO_API_BASE、XIAOO_MODEL、XIAOO_PROVIDER。
+# 未设置 XIAOO_API_KEY 时，Phase 2 自动跳过（见 main()）。
+_xiaoo_api_key = os.environ.get("XIAOO_API_KEY", "")
 config_with_llm = Config(
     llm=LLMConfig(
-        api_key="tp-c9gv3k8hn8plembe6llb5ndinybfvubwe1h2tu4tkwdd0n5g",
-        base_url="https://token-plan-cn.xiaomimimo.com/v1",
-        model="mimo-v2.5-pro",
+        api_key=_xiaoo_api_key,
+        base_url=os.environ.get("XIAOO_API_BASE", "https://token-plan-cn.xiaomimimo.com/v1"),
+        model=os.environ.get("XIAOO_MODEL", "mimo-v2.5-pro"),
+        provider=os.environ.get("XIAOO_PROVIDER", "openai"),
         temperature=0.1,
     ),
     security=SecurityConfig(
@@ -375,6 +381,14 @@ test_cases = [
 
 def run_test(case, config, use_llm=False):
     """运行单个测试用例"""
+    # 若用例声明 ensure_file，先 touch 该文件保证其存在于磁盘上。
+    # read_before_write 规则对"磁盘上不存在的文件"视为新建而放行，
+    # 因此要测该规则必须让目标文件真实存在。
+    if case.get("ensure_file"):
+        try:
+            Path(case["ensure_file"]).touch()
+        except OSError:
+            pass
     t0 = time.time()
     result = judge_security(
         prompt_session=case["prompt"],
@@ -472,7 +486,9 @@ def main():
             "expected_source": "whitelist_bypass",
             "expect_skip_llm": True,
         },
-        # 普通工具：被 Layer 2 read_before_write 拦截（未先读就写）
+        # 普通工具：被 Layer 2 read_before_write 拦截（对已存在文件未先读就写）
+        # 注意：read_before_write 对磁盘上不存在的文件视为新建而放行，
+        # 所以必须 ensure_file 让 /tmp/config.txt 真实存在，规则才会命中。
         {
             "name": "普通工具+LLM: write（被 Layer 2 拦截）",
             "prompt": "写入配置文件",
@@ -481,6 +497,7 @@ def main():
             "expected_allowed": False,
             "expected_source": "logic_rule",
             "expect_skip_llm": False,
+            "ensure_file": "/tmp/config.txt",
         },
     ]
 
@@ -488,33 +505,38 @@ def main():
     failed_count_2 = 0
     total_time_2 = 0
 
-    for i, case in enumerate(llm_test_cases):
-        passed, result, elapsed, errors = run_test(case, config_with_llm, use_llm=True)
-        total_time_2 += elapsed
+    # 未配置 XIAOO_API_KEY 时跳过 Phase 2（不硬编码任何 key）
+    if not _xiaoo_api_key:
+        print("  ⏭  跳过 Phase 2：未设置 XIAOO_API_KEY 环境变量")
+        print("     用法: XIAOO_API_KEY=xxx python3 test_fastpass.py")
+    else:
+        for i, case in enumerate(llm_test_cases):
+            passed, result, elapsed, errors = run_test(case, config_with_llm, use_llm=True)
+            total_time_2 += elapsed
 
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"\n  [{i+1:2d}] {status}  {case['name']}")
-        print(f"       action: {case['a_next']['action_type']} / {case['a_next']['action_detail'][:60]}")
-        print(f"       result: allowed={result.allowed}, source={result.source}, risk={result.risk_level}")
-        print(f"       reason: {result.reason[:80]}")
-        print(f"       time: {elapsed*1000:.0f}ms")
+            status = "✓ PASS" if passed else "✗ FAIL"
+            print(f"\n  [{i+1:2d}] {status}  {case['name']}")
+            print(f"       action: {case['a_next']['action_type']} / {case['a_next']['action_detail'][:60]}")
+            print(f"       result: allowed={result.allowed}, source={result.source}, risk={result.risk_level}")
+            print(f"       reason: {result.reason[:80]}")
+            print(f"       time: {elapsed*1000:.0f}ms")
 
-        # 检查 skip_llm 是否生效
-        if case.get("expect_skip_llm"):
-            if result.source in ("whitelist_bypass", "heuristic_and_logic_only"):
-                print(f"       skip_llm: ✓ 生效（source={result.source}）")
+            # 检查 skip_llm 是否生效
+            if case.get("expect_skip_llm"):
+                if result.source in ("whitelist_bypass", "heuristic_and_logic_only"):
+                    print(f"       skip_llm: ✓ 生效（source={result.source}）")
+                else:
+                    print(f"       skip_llm: ✗ 未生效（source={result.source}，期望跳过 LLM）")
+                    errors.append(f"skip_llm 未生效: source={result.source}")
+
+            if errors:
+                for e in errors:
+                    print(f"       ERROR: {e}")
+
+            if passed:
+                passed_count_2 += 1
             else:
-                print(f"       skip_llm: ✗ 未生效（source={result.source}，期望跳过 LLM）")
-                errors.append(f"skip_llm 未生效: source={result.source}")
-
-        if errors:
-            for e in errors:
-                print(f"       ERROR: {e}")
-
-        if passed:
-            passed_count_2 += 1
-        else:
-            failed_count_2 += 1
+                failed_count_2 += 1
 
     print(f"\n  Phase 2 结果: {passed_count_2}/{passed_count_2+failed_count_2} 通过, 总耗时 {total_time_2*1000:.0f}ms")
 

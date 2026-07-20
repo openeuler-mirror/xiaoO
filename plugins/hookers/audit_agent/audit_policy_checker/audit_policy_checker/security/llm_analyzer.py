@@ -14,9 +14,9 @@ from ..config import Config, get_log_path, get_llm_timeout
 from ..llm_client import call_llm, LLMResult
 from ..token_stats import record_token_usage
 from .script_content_analyzer import (
-    ScriptAnalysisResult,
+    ScriptChainAnalysisResult,
     analyze_script_content,
-    format_script_analysis_for_prompt,
+    format_script_chain_for_prompt,
 )
 from .skill_engine import SkillEngine
 from .types import HeuristicResult, LogicRuleResult, SecurityJudgment
@@ -44,6 +44,8 @@ class LLMAnalyzer:
         heuristic_result: HeuristicResult,
         logic_result: LogicRuleResult,
         config: Config,
+        skip_l3_hints: str = "",
+        script_chain_result: ScriptChainAnalysisResult | None = None,
     ) -> SecurityJudgment:
         """
         使用 LLM + Skill 进行深度安全分析。
@@ -56,6 +58,8 @@ class LLMAnalyzer:
             heuristic_result: 启发式检测结果（作为提示信息注入）
             logic_result: 逻辑规则检测结果（作为提示信息注入）
             config: 全局配置
+            skip_l3_hints: L2 禁用规则的 skip_l3 硬约束提示
+            script_chain_result: 脚本调用链分析结果（来自 L1.5/L2.5 预扫描）
 
         Returns:
             SecurityJudgment: 安全判断结果
@@ -72,13 +76,20 @@ class LLMAnalyzer:
         # 3. 格式化启发式/逻辑规则提示
         hints_text = self._format_hints(heuristic_result, logic_result)
 
-        # 3.5 脚本内容分析（方案3: 关键词预筛选）
-        # 当检测到脚本执行时，预扫描脚本内容中的可疑关键词
-        # 如果命中可疑关键词，将脚本内容注入 LLM prompt 进行深度分析
+        # 3.5 脚本内容分析
+        # 优先使用 L1.5/L2.5 预扫描阶段传入的 chain_result
+        # （已包含递归追踪+预处理+L1/L2扫描+关键词扫描的完整结果）
+        # 如果 L1.5 未执行（如非 bash 类型），在此处兜底执行
         action_type = a_next.get("action_type", "")
         action_detail = a_next.get("action_detail", "")
-        script_analysis = analyze_script_content(action_type, action_detail)
-        script_analysis_text = format_script_analysis_for_prompt(script_analysis)
+
+        if script_chain_result is not None:
+            # 使用 L1.5/L2.5 阶段已生成的结果
+            script_analysis_text = format_script_chain_for_prompt(script_chain_result)
+        else:
+            # 兜底：L1.5 未执行时（如 L1.5 被禁用或非 bash 类型），在此处执行
+            chain = analyze_script_content(action_type, action_detail)
+            script_analysis_text = format_script_chain_for_prompt(chain)
 
         # 4. 生成安全判断 prompt
         judge_prompt = get_security_judge_prompt(
@@ -89,6 +100,7 @@ class LLMAnalyzer:
             skills_text=skills_text,
             hints_text=hints_text,
             script_analysis_text=script_analysis_text,
+            skip_l3_hints=skip_l3_hints,
         )
 
         # 4.5 打印 prompt 到日志文件（如果配置了 AUDIT_LOG_PATH）

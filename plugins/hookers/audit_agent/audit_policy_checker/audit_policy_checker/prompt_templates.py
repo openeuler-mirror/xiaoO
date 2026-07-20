@@ -98,6 +98,7 @@ def get_security_judge_prompt(
     skills_text: str,
     hints_text: str,
     script_analysis_text: str = "",
+    skip_l3_hints: str = "",
 ) -> str:
     """
     生成安全判断 prompt 的完整内容。
@@ -110,9 +111,9 @@ def get_security_judge_prompt(
         skills_text: 匹配到的安全检测规则文本
         hints_text: 前置检测结果提示文本
         script_analysis_text: 脚本内容分析文本（方案3: 关键词预筛选）
+        skip_l3_hints: 用户禁用规则的 skip_l3 提示（告知 L3 不需关注的路径/关键词）
 
-    Returns:
-        str: 实例化后的安全判断 prompt 完整文本
+    Returns:        str: 实例化后的安全判断 prompt 完整文本
     """
     if "security_judge_template.txt" not in _template_cache:
         _template_cache["security_judge_template.txt"] = _load_template(
@@ -130,4 +131,5 @@ def get_security_judge_prompt(
         skills_text=skills_text,
         hints_text=hints_text,
         script_analysis_text=script_analysis_text,
+        skip_l3_hints=skip_l3_hints,
     )

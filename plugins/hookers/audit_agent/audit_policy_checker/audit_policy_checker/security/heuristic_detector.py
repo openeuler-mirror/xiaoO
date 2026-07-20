@@ -433,6 +433,12 @@ READONLY_SENSITIVE_BASH_PATTERNS = [
     r"^cut\s+",
     r"^sort(?:\s|$)",
     r"^uniq(?:\s|$)",
+    # ── passwd 安全子命令（只读/查询/帮助），跳过 L3，保留 L2 ──
+    # 注意：必须用精确模式，不能写 ^passwd，否则 passwd -d/-l 等危险变体会被前缀匹配而误放行。
+    # 危险变体（passwd -d/-l/--stdin、管道 | passwd）由 L1 CommandPatternScanner 单独拦截。
+    r"^passwd$",            # 裸 passwd（交互式改密，无参数）
+    r"^passwd\s+--help\b",  # passwd --help 帮助
+    r"^passwd\s+-S\b",      # passwd -S 查看密码状态
 ]
 
 # 向后兼容：合并为完整安全列表（原 SAFE_BASH_PATTERNS）
@@ -575,6 +581,10 @@ class InjectionKeywordChecker:
         )
 
 
+# /dev/null 重定向排除模式（与 logic_rules.py 中 _DEVNULL_REDIRECT_RE 保持一致）
+_DEVNULL_REDIRECT_RE = re.compile(r"(?:2|&|1)?\s*>\s*/dev/null\b")
+
+
 def _extract_first_command(command: str) -> str:
     """提取管道和链式命令的第一段"""
     main_cmd = command.split("|")[0].strip()
@@ -586,8 +596,17 @@ def _extract_first_command(command: str) -> str:
 
 
 def is_fully_safe_bash_command(command: str) -> bool:
-    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）"""
+    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）
+
+    重定向写入（如 echo xxx > /path）不是只读操作，不应归类为完全安全。
+    此类命令降级为 READONLY_SENSITIVE（只跳 L3，保留 L2），让 L2 敏感路径规则有机会拦截。
+    """
     main_cmd = _extract_first_command(command)
+    # 带真实重定向写入的命令不是"完全安全"：排除 /dev/null 丢弃后，如果还有 > 则为写入
+    if ">" in main_cmd:
+        cmd_without_devnull = _DEVNULL_REDIRECT_RE.sub("", main_cmd)
+        if ">" in cmd_without_devnull:
+            return False
     return any(p.match(main_cmd) for p in FULLY_SAFE_BASH_COMPILED)
 
 

@@ -118,12 +118,18 @@ def _save_records(stats_path: Path, records: list[dict]) -> None:
         logger.warning("Token stats file %s write error: %s", stats_path, e)
 
 
-def get_token_stats(days: int = 0) -> dict:
+def get_token_stats(
+    days: int = 0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
     """
     获取 token 用量统计汇总。
 
     Args:
         days: 查询最近多少天的数据。0 表示全部，1 表示今天，7 表示近7天。
+        start_date: 起始日期（YYYY-MM-DD，含当天）。优先于 days。
+        end_date: 结束日期（YYYY-MM-DD，含当天全天至 23:59:59）。优先于 days。
 
     Returns:
         dict: 包含以下字段：
@@ -139,8 +145,27 @@ def get_token_stats(days: int = 0) -> dict:
     stats_path = get_stats_path()
     records = _load_all_records(stats_path)
 
-    # 按时间范围过滤
-    if days > 0:
+    # 按时间范围过滤：start_date/end_date 优先于 days
+    if start_date or end_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
+            # end_date 取当天结束（23:59:59.999999），含当天
+            end_dt = (
+                datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, microsecond=999999)
+                if end_date else datetime.max
+            )
+        except ValueError:
+            start_dt, end_dt = datetime.min, datetime.max
+        filtered = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+                if start_dt <= ts <= end_dt:
+                    filtered.append(r)
+            except (ValueError, KeyError):
+                filtered.append(r)  # 时间解析失败，保留
+        records = filtered
+    elif days > 0:
         cutoff = datetime.now() - timedelta(days=days)
         filtered = []
         for r in records:
@@ -221,6 +246,79 @@ def get_recent_records(limit: int = 20) -> list[dict]:
     stats_path = get_stats_path()
     records = _load_all_records(stats_path)
     return records[-limit:]
+
+
+def get_token_trend(
+    days: int = 0,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """
+    获取 Token 消耗趋势（按日期 + 模型二维聚合），供前端折线图渲染。
+
+    Args:
+        days: 查询最近多少天的数据。0 表示全部，1 表示今天，7 表示近7天。
+        start_date: 起始日期（YYYY-MM-DD，含当天）。优先于 days。
+        end_date: 结束日期（YYYY-MM-DD，含当天全天）。优先于 days。
+
+    Returns:
+        dict:
+          - dates: 排序后的日期列表 ["YYYY-MM-DD", ...]
+          - models: 出现过的所有模型名列表（动态，数据里有哪些就列哪些）
+          - series: {model: {date: total_tokens}} 嵌套映射
+      前端据此按 model 各画一条折线（date 为 X 轴）。
+    """
+    stats_path = get_stats_path()
+    records = _load_all_records(stats_path)
+
+    # 按时间范围过滤：start_date/end_date 优先于 days
+    if start_date or end_date:
+        try:
+            start_dt = datetime.fromisoformat(start_date) if start_date else datetime.min
+            end_dt = (
+                datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59, microsecond=999999)
+                if end_date else datetime.max
+            )
+        except ValueError:
+            start_dt, end_dt = datetime.min, datetime.max
+        filtered = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+                if start_dt <= ts <= end_dt:
+                    filtered.append(r)
+            except (ValueError, KeyError):
+                filtered.append(r)  # 时间解析失败，保留
+        records = filtered
+    elif days > 0:
+        cutoff = datetime.now() - timedelta(days=days)
+        filtered = []
+        for r in records:
+            try:
+                ts = datetime.fromisoformat(r["timestamp"])
+                if ts >= cutoff:
+                    filtered.append(r)
+            except (ValueError, KeyError):
+                filtered.append(r)  # 时间解析失败，保留
+        records = filtered
+
+    series: dict[str, dict[str, int]] = {}  # model -> {date -> tokens}
+    dates_set: set[str] = set()
+    for r in records:
+        try:
+            ts = datetime.fromisoformat(r["timestamp"])
+            date_key = ts.strftime("%Y-%m-%d")
+        except (ValueError, KeyError):
+            continue
+        model = r.get("model", "unknown")
+        tokens = r.get("total_tokens", 0)
+        dates_set.add(date_key)
+        series.setdefault(model, {})
+        series[model][date_key] = series[model].get(date_key, 0) + tokens
+
+    dates = sorted(dates_set)
+    models = sorted(series.keys())
+    return {"dates": dates, "models": models, "series": series}
 
 
 def reset_token_stats() -> None:

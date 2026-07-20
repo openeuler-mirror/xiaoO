@@ -140,22 +140,61 @@ def _l1_injection_keywords_to_rules() -> list[dict]:
     return rules
 
 
+def _derive_deny_mode(rule: dict) -> str:
+    """从 credential / read_only 推导 deny_mode（向后兼容）
+
+    优先使用已有的 deny_mode 字段；若无则从传统字段推导。
+    """
+    if "deny_mode" in rule and rule["deny_mode"]:
+        return rule["deny_mode"]
+    if rule.get("credential"):
+        return "deny_both"
+    if rule.get("read_only"):
+        return "deny_read"
+    return "deny_write"
+
+
+def _sync_deny_mode_fields(rule: dict) -> None:
+    """根据 deny_mode 同步 credential / read_only 字段（保持底层逻辑兼容）"""
+    dm = rule.get("deny_mode", "deny_write")
+    if dm == "deny_both":
+        rule["credential"] = True
+        rule.pop("read_only", None)
+    elif dm == "deny_read":
+        rule.pop("credential", None)
+        rule["read_only"] = True
+    elif dm == "deny_write":
+        rule.pop("credential", None)
+        rule.pop("read_only", None)
+
+
+DENY_MODE_LABELS = {
+    "deny_write": "仅拦截写入",
+    "deny_read": "仅拦截读取",
+    "deny_both": "读写均拦截",
+}
+
+
 def _l2_sensitive_paths_to_rules() -> list[dict]:
     """将 SENSITIVE_PATHS 转换为规则列表"""
     from .security.logic_rules import SENSITIVE_PATHS
     rules = []
     for sp in SENSITIVE_PATHS:
         id_str = f"path_{_slugify(sp['path'])}"
+        deny_mode = _derive_deny_mode(sp)
         rule = {
             "id": id_str,
             "path": sp["path"],
             "risk_level": sp["risk_level"],
             "desc": sp["desc"],
+            "deny_mode": deny_mode,
+            "source_deny_mode": deny_mode,  # 记录代码仓原始拦截模式
+            "skip_l3_on_disabled": True,    # 禁用时也跳过 L3 对该路径的分析
             "enabled": True,
             "builtin": True,
         }
-        if sp.get("credential"):
-            rule["credential"] = True
+        # 保留传统字段以兼容底层检测逻辑
+        _sync_deny_mode_fields(rule)
         rules.append(rule)
     return rules
 
@@ -171,6 +210,7 @@ def _l2_intent_patterns_to_rules() -> list[dict]:
             "intent_keywords": pat["intent_keywords"],
             "dangerous_actions": pat["dangerous_actions"],
             "reason": pat["reason"],
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -186,6 +226,7 @@ def _l2_password_patterns_to_rules() -> list[dict]:
         rules.append({
             "id": id_str,
             "pattern": pat,
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -201,6 +242,7 @@ def _l2_user_deletion_patterns_to_rules() -> list[dict]:
         rules.append({
             "id": id_str,
             "pattern": pat,
+            "skip_l3_on_disabled": True,
             "enabled": True,
             "builtin": True,
         })
@@ -474,10 +516,112 @@ def _merge_rule_categories(user_cfg: dict, source_defaults: dict, layer_key: str
             source_rules = source_cat.get("rules", [])
             user_ids = {r.get("id") for r in user_rules if r.get("id")}
 
+            # 内置规则内容指纹去重：id 变了但实质内容相同（如 reason 推辞更新），
+            # 应替换旧版为新版，而非追加导致重复。
+            def _content_fingerprint(rule: dict) -> str:
+                """用实质内容字段生成指纹，忽略 id/reason 等推辞字段"""
+                # intent_consistency 规则：用 keywords + actions 去重
+                kw = sorted(rule.get("intent_keywords", []))
+                act = sorted(rule.get("dangerous_actions", []))
+                if kw or act:
+                    return f"intent:{','.join(kw)}|{','.join(act)}"
+                # sensitive_path 规则：用 path 去重
+                if rule.get("path"):
+                    return f"path:{rule['path']}"
+                # 其他规则：用 pattern 去重
+                if rule.get("pattern"):
+                    return f"pattern:{rule['pattern']}"
+                # 兜底：用 id
+                return f"id:{rule.get('id', '')}"
+
+            source_fingerprints = {}
+            for sr in source_rules:
+                if sr.get("builtin"):
+                    source_fingerprints[_content_fingerprint(sr)] = sr
+
+            # 清除旧版内置规则中与新版内容指纹相同但 id 不同的条目
+            to_remove = []
+            for ur in user_rules:
+                if ur.get("builtin") and ur.get("id"):
+                    fp = _content_fingerprint(ur)
+                    if fp in source_fingerprints:
+                        new_sr = source_fingerprints[fp]
+                        if ur["id"] != new_sr.get("id"):
+                            # 同内容不同 id → 旧版将被新版替换，记录待删除
+                            to_remove.append(ur["id"])
+                            logger.info(
+                                "内置规则 id 变更: %s → %s (fingerprint=%s)，替换旧版",
+                                ur["id"], new_sr.get("id"), fp,
+                            )
+            if to_remove:
+                remove_ids = set(to_remove)
+                user_rules = [r for r in user_rules if r.get("id") not in remove_ids]
+                user_ids = {r.get("id") for r in user_rules if r.get("id")}
+
             for sr in source_rules:
                 if sr.get("id") and sr["id"] not in user_ids:
                     # 新增的出厂规则 → 加入，默认 enabled=True
                     user_rules.append(sr)
+                else:
+                    # 已有规则 → 同步源码新增的字段（不影响用户的 enabled 等开关设置）
+                    # 例如 sensitive_path_access 规则新增 credential 标记后，老副本需补上
+                    ur = next((r for r in user_rules if r.get("id") == sr.get("id")), None)
+                    if ur is not None:
+                        # 规则 id 仍在源码默认集中（被源码重新管理），清除移除标记
+                        ur.pop("source_removed", None)
+                        for field, val in sr.items():
+                            if field in ("id", "path", "risk_level", "desc", "builtin"):
+                                # 这些字段源码为准（出厂定义），但仅在缺失时补，避免覆盖用户未感知的改动
+                                if field not in ur:
+                                    ur[field] = val
+                            elif field == "deny_mode":
+                                # source_deny_mode 以源码为准（代码仓原始值）；
+                                # 若用户未主动改过 deny_mode（仍等于旧 source_deny_mode），
+                                # 则跟随源码最新值，自动继承源码策略放宽/收紧
+                                # （如 credential=deny_both → read_only=deny_read 的调整）。
+                                # 用户主动改过的（deny_mode != 旧 source_deny_mode）保持其值。
+                                old_source = ur.get("source_deny_mode")
+                                ur["source_deny_mode"] = val
+                                if "deny_mode" not in ur:
+                                    ur["deny_mode"] = val
+                                elif old_source is not None and ur["deny_mode"] == old_source:
+                                    ur["deny_mode"] = val
+                            elif field == "source_deny_mode":
+                                pass  # 由 deny_mode 同步处理
+                            elif field == "credential":
+                                # credential 标记以源码为准：源码标了就同步 True（读密钥必拦）
+                                ur["credential"] = val
+                            elif field == "read_only":
+                                # read_only 标记以源码为准：源码标了就同步 True（仅拦截读取）
+                                ur["read_only"] = val
+                            elif field == "skip_l3_on_disabled":
+                                # skip_l3_on_disabled 仅在缺失时补，保留用户手动设置的值
+                                if field not in ur:
+                                    ur[field] = val
+
+            # 源码已移除的内置规则 → 标记 source_removed 并禁用（保留在列表中）
+            # 例如 /dev/null、/dev/zero、/dev/urandom 从 SENSITIVE_PATHS 移除后，
+            # 老用户副本里还残留，继续拦截会产生误报。标记 source_removed 让
+            # dashboard 上能区分「已从默认规则集移除」与「用户主动禁用的默认规则」，
+            # 仍可手动启用。enabled 仅对原本启用的禁用，尊重用户已主动禁用的偏好。
+            source_ids = {sr.get("id") for sr in source_rules if sr.get("id")}
+            for ur in user_rules:
+                if ur.get("id") and ur.get("builtin") and ur["id"] not in source_ids:
+                    ur["source_removed"] = True
+                    if ur.get("enabled", True):
+                        ur["enabled"] = False
+                        logger.info(
+                            "内置规则 %s 已从源码移除，禁用并标记 source_removed（category=%s）",
+                            ur["id"], cat_name,
+                        )
+
+            # 敏感路径规则：确保 deny_mode 字段与 credential/read_only 一致
+            # 向后兼容：老配置没有 deny_mode，从传统字段推导
+            if cat_name == "sensitive_path_access":
+                for ur in user_rules:
+                    if "deny_mode" not in ur:
+                        ur["deny_mode"] = _derive_deny_mode(ur)
+                    _sync_deny_mode_fields(ur)
 
             user_cat["rules"] = user_rules
 
@@ -628,7 +772,9 @@ def get_enabled_l2_sensitive_paths(runtime: dict) -> list[dict]:
             "path": r["path"],
             "risk_level": r["risk_level"],
             "desc": r["desc"],
+            "deny_mode": r.get("deny_mode", _derive_deny_mode(r)),
             **({"credential": True} if r.get("credential") else {}),
+            **({"read_only": True} if r.get("read_only") else {}),
         }
         for r in rules
     ]
@@ -800,6 +946,60 @@ def update_rule_enabled(layer: str, category: str, rule_id: str, enabled: bool) 
     return runtime
 
 
+def update_rule_deny_mode(layer: str, category: str, rule_id: str, deny_mode: str) -> dict:
+    """更新单条敏感路径规则的拦截模式并保存"""
+    runtime = load_runtime_config()
+    rules = runtime.get(layer, {}).get(category, {}).get("rules", [])
+    for r in rules:
+        if r.get("id") == rule_id:
+            r["deny_mode"] = deny_mode
+            _sync_deny_mode_fields(r)
+            break
+    save_runtime_config(runtime)
+    return runtime
+
+
+def update_rule_skip_l3(layer: str, category: str, rule_id: str, skip_l3_on_disabled: bool) -> dict:
+    """更新单条规则的 skip_l3_on_disabled 字段并保存"""
+    runtime = load_runtime_config()
+    rules = runtime.get(layer, {}).get(category, {}).get("rules", [])
+    for r in rules:
+        if r.get("id") == rule_id:
+            r["skip_l3_on_disabled"] = skip_l3_on_disabled
+            break
+    save_runtime_config(runtime)
+    return runtime
+
+
+def get_disabled_l2_rules_with_skip_l3() -> dict[str, list[str]]:
+    """获取所有 enabled=False 且 skip_l3_on_disabled=True 的 L2 规则的关键内容。
+
+    Returns:
+        dict: 按类别分组，每类返回关键内容列表
+            - sensitive_path_access: 返回 path 列表
+            - intent_consistency: 返回 intent_keywords 列表
+            - 其他: 返回 pattern 列表
+    """
+    runtime = load_runtime_config()
+    result: dict[str, list[str]] = {}
+    l2 = runtime.get("L2_rules", {})
+    for cat_name, cat in l2.items():
+        if not cat.get("category_enabled", True):
+            continue
+        items = []
+        for r in cat.get("rules", []):
+            if not r.get("enabled", True) and r.get("skip_l3_on_disabled", False):
+                if cat_name == "sensitive_path_access":
+                    items.append(r.get("path", ""))
+                elif cat_name == "intent_consistency":
+                    items.extend(r.get("intent_keywords", []))
+                elif r.get("pattern"):
+                    items.append(r["pattern"])
+        if items:
+            result[cat_name] = items
+    return result
+
+
 def update_category_enabled(layer: str, category: str, enabled: bool) -> dict:
     """更新整个分类的启用状态并保存"""
     runtime = load_runtime_config()
@@ -819,6 +1019,9 @@ def add_custom_rule(layer: str, category: str, rule: dict) -> dict:
     if not rule.get("id"):
         import time
         rule["id"] = f"custom_{int(time.time())}_{_slugify(str(rule)[:30])}"
+    # 如果指定了 deny_mode，同步 credential/read_only 以兼容底层检测
+    if "deny_mode" in rule:
+        _sync_deny_mode_fields(rule)
     rules.append(rule)
     save_runtime_config(runtime)
     return runtime
