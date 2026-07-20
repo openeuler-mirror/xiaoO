@@ -20,7 +20,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 /// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
@@ -1131,8 +1130,8 @@ else:
             .unwrap()
             .to_path_buf();
         let audit_py = repo_root.join("plugins/hookers/audit_agent/audit.py");
-        let venv_python = repo_root
-            .join("plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3");
+        let venv_python =
+            repo_root.join("plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3");
         let inject_dir = repo_root.join("plugins/tests/hookers/audit_agent/cases/hang-llm-repro");
         let cfg_dir = std::env::temp_dir().join("audit_hang_test_cfg");
         std::fs::create_dir_all(&cfg_dir).unwrap();

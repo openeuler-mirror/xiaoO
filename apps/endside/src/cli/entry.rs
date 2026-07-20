@@ -924,6 +924,10 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         skills: None,
         command_context: None,
         chain_depth: 0,
+        // One-shot CLI never opens a session, so it skips the attach-lease
+        // protocol and carries no `client_id`. With `XIAOO_ENFORCE_LEASE=on`,
+        // use the TUI instead.
+        client_id: None,
     };
 
     // 7. Run turn via gateway session service, then explicitly close the

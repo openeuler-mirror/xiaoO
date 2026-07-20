@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use xiaoo_shared::gateway::{
-    AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
+    daemon_cron_principal, AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
 };
 
 // ── Public API ──────────────────────────────────────────────────
@@ -301,6 +301,7 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         skills: None,
         command_context: None,
         chain_depth: 0,
+        client_id: Some(daemon_cron_principal()),
     };
 
     tracing::info!(

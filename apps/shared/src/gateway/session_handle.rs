@@ -1,5 +1,5 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionInputKind,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionInputKind, SessionLeaseTable,
     SessionLifecycleStatus, SessionRecord, SessionServiceError, SessionSubmitReceipt,
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
@@ -20,6 +20,13 @@ pub(crate) struct SessionHandle {
     supervisor: Arc<SessionSupervisor>,
     status_rx: watch::Receiver<SessionHandleStatus>,
     queue_depth: Arc<AtomicUsize>,
+    /// Atomic "closing" flag shared with the actor. Set by the orphan reaper
+    /// (via [`mark_closing`]) before `force_close_session_inner` so a turn
+    /// popped between the reaper's `phase` check and the `ForceClose` command
+    /// is re-queued (not rejected) until the reaper's TOCTOU re-check
+    /// resolves. Also consulted by `try_increment_queue_depth` so new
+    /// `run_turn` calls fail fast with `SessionClosed`.
+    closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +70,11 @@ pub(crate) enum SessionCommand {
         idle_before_ms: u64,
         reply: oneshot::Sender<Result<Option<SessionRecord>, SessionServiceError>>,
     },
+    /// No-op wakeup sent by `clear_closing` after the reaper's TOCTOU
+    /// re-check undid `mark_closing`. The actor's `run` loop processes it
+    /// as a no-op and loops back to `start_next_turn_if_possible`, which
+    /// retries any turns re-queued during the `closing` window.
+    Nop,
 }
 
 struct RunTurnCommand {
@@ -85,9 +97,14 @@ enum ActorEvent {
 }
 
 impl SessionHandle {
-    pub(crate) async fn new(session_id: String, supervisor: Arc<SessionSupervisor>) -> Self {
+    pub(crate) async fn new(
+        session_id: String,
+        supervisor: Arc<SessionSupervisor>,
+        lease_table: SessionLeaseTable,
+    ) -> Self {
         let snapshot = supervisor.snapshot().await;
         let queue_depth = Arc::new(AtomicUsize::new(0));
+        let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let initial_status = SessionHandleStatus {
             session_id: session_id.clone(),
             lifecycle: snapshot.status,
@@ -109,6 +126,8 @@ impl SessionHandle {
             active_done_rx: None,
             phase: SessionPhase::Idle,
             close_reply: None,
+            lease_table,
+            closing: closing.clone(),
         };
         tokio::spawn(actor.run());
 
@@ -118,11 +137,33 @@ impl SessionHandle {
             supervisor,
             status_rx,
             queue_depth,
+            closing,
         }
     }
 
     pub(crate) fn supervisor(&self) -> Arc<SessionSupervisor> {
         Arc::clone(&self.supervisor)
+    }
+
+    /// Mark this handle as closing so subsequent `run_turn` /
+    /// `start_next_turn_if_possible` reject new turns atomically. Used by the
+    /// orphan reaper to close the race window between its `phase` check and
+    /// the `ForceClose` command being processed by the actor.
+    pub(crate) fn mark_closing(&self) {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Clear the `closing` flag set by [`mark_closing`]. Used by the orphan
+    /// reaper's TOCTOU re-check: if a heartbeat refreshed the lease after
+    /// `mark_closing`, the reaper skips this session and must undo
+    /// `mark_closing` so the handle is not bricked. Sends a `Nop` wakeup so
+    /// turns re-queued during the `closing` window are retried promptly
+    /// instead of waiting for the next external command.
+    pub(crate) fn clear_closing(&self) {
+        self.closing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.tx.try_send(SessionCommand::Nop);
     }
 
     pub(crate) async fn run_turn(
@@ -230,6 +271,14 @@ impl SessionHandle {
     }
 
     fn try_increment_queue_depth(&self) -> Result<(), SessionServiceError> {
+        // Reject before queueing when the handle is closing (e.g. orphan
+        // reaper), avoiding the window where the actor pops and starts the
+        // turn before `ForceClose` arrives.
+        if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SessionServiceError::SessionClosed {
+                session_id: self.session_id.clone(),
+            });
+        }
         let mut current = self.queue_depth.load(Ordering::SeqCst);
         loop {
             if current >= SESSION_COMMAND_QUEUE_CAPACITY {
@@ -266,6 +315,18 @@ struct SessionActor {
     active_done_rx: Option<oneshot::Receiver<()>>,
     phase: SessionPhase,
     close_reply: Option<oneshot::Sender<Result<SessionRecord, SessionServiceError>>>,
+    /// Shared attach-lease table. Consulted at pop-time to fail-fast any
+    /// queued turn whose `client_id` is no longer the current lease holder
+    /// (e.g. lease was taken over while this turn was waiting). Read-only
+    /// here; writes go through `CoreBackedSessionService` (`acquire` /
+    /// `heartbeat` / `detach` / `remove`).
+    lease_table: SessionLeaseTable,
+    /// Atomic closing flag shared with `SessionHandle`. Consulted at
+    /// pop-time by `next_runnable_turn`: when set, popped turns are
+    /// re-queued (`push_front`) and the actor pauses popping until a `Nop`
+    /// wakeup from `clear_closing` (TOCTOU recovery) or `ForceClose`
+    /// (`fail_pending_turns` drain) arrives.
+    closing: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SessionActor {
@@ -399,20 +460,118 @@ impl SessionActor {
                 self.publish_status(None).await;
                 let _ = reply.send(Ok(Some(paused)));
             }
+            SessionCommand::Nop => {
+                // No-op wakeup: the command itself is the signal. The `run`
+                // loop will call `start_next_turn_if_possible` on the next
+                // iteration, retrying any turns re-queued during the
+                // `closing` window after `clear_closing`.
+            }
         }
     }
 
-    async fn start_next_turn_if_possible(&mut self) {
-        if self.active_turn.is_some()
-            || matches!(
-                self.phase,
-                SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
-            )
-        {
-            return;
+    /// Pop the next queued turn whose submitter is still the current lease
+    /// holder (or a daemon-internal principal, which bypasses the holder
+    /// check). Ineligible turns (lease taken over, or the actor is shutting
+    /// down) are rejected in-place (their `reply` is sent an `Err`) and the
+    /// loop continues. Returns `None` when the actor is busy / closing /
+    /// closed, the queue is exhausted, **or** the reaper has set `closing`
+    /// (turns are re-queued, not rejected — see below).
+    ///
+    /// The active turn is NOT interrupted — killing an in-flight LLM / tool
+    /// call mid-stream would leave the session half-applied. The reaper's
+    /// `mark_closing` + `ForceClose` sequence is the only path that halts a
+    /// running turn.
+    ///
+    /// **`closing` window**: when the reaper sets `closing` it may still
+    /// undo it via `clear_closing` (TOCTOU re-check). Turns popped during
+    /// this window are **re-queued** (`push_front`) rather than rejected so
+    /// the reaper's TOCTOU recovery doesn't leave a spurious
+    /// `SessionClosed` for a turn that should have run. `clear_closing`
+    /// sends a `Nop` wakeup so the re-queued turn is retried; if the reaper
+    /// instead proceeds to `ForceClose`, `fail_pending_turns` drains it.
+    async fn next_runnable_turn(&mut self) -> Option<RunTurnCommand> {
+        loop {
+            if self.active_turn.is_some()
+                || matches!(
+                    self.phase,
+                    SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
+                )
+            {
+                return None;
+            }
+            let Some(next) = self.pending_turns.pop_front() else {
+                return None;
+            };
+            // Reaper `closing` flag: re-queue and pause popping rather than
+            // rejecting. The reaper's TOCTOU re-check may clear `closing`
+            // (→ `Nop` wakeup retries the turn) or proceed to `ForceClose`
+            // (→ `fail_pending_turns` drains it). Either way the turn is
+            // not spuriously rejected during the race window.
+            if self.closing.load(std::sync::atomic::Ordering::SeqCst) {
+                self.pending_turns.push_front(next);
+                return None;
+            }
+            // Pop-time eligibility check: lease holder check. On reject the
+            // helper returns the error to send on the turn's `reply`; this
+            // loop does the accounting + reply plumbing.
+            if let Some(error) = self.should_reject_at_pop_time(&next).await {
+                self.queue_depth.fetch_sub(1, Ordering::SeqCst);
+                let _ = next.reply.send(Err(error));
+                continue;
+            }
+            return Some(next);
         }
+    }
 
-        let Some(turn) = self.pending_turns.pop_front() else {
+    /// Pop-time eligibility check for a queued turn. Returns `Some(error)`
+    /// when the turn must be rejected, or `None` when it may start now. Pure
+    /// decision — does NOT touch `queue_depth` or `reply` (the caller owns
+    /// the accounting so it lives in exactly one place).
+    ///
+    /// Reject reason: the submitter's `client_id` is no longer the holder
+    /// (→ `SessionAttachedByAnotherClient`). Daemon-internal principals
+    /// (`daemon:*`) bypass the holder check explicitly. The `closing` flag
+    /// is NOT checked here — it's handled by `next_runnable_turn`'s
+    /// re-queue path so the reaper's TOCTOU recovery doesn't spuriously
+    /// reject turns.
+    async fn should_reject_at_pop_time(
+        &mut self,
+        next: &RunTurnCommand,
+    ) -> Option<SessionServiceError> {
+        let Some(client_id) = next.request.client_id.as_deref().filter(|s| !s.is_empty()) else {
+            // Anonymous / legacy caller — router-layer `assert_lease_holder`
+            // already gated it (or the rollout policy allows it).
+            return None;
+        };
+        // Daemon-internal principals bypass the pop-time holder check — they're
+        // cooperative background callers that never hold a lease.
+        if crate::gateway::is_daemon_principal(client_id) {
+            return None;
+        }
+        // Read-only holder check: the pop-time guard must NOT have the
+        // stale-takeover side effect (which would steal the lease from a
+        // freshly-staled holder). A stale lease returns Ok; the router-level
+        // guard already did the takeover at submit time.
+        if let Err(failure) = self
+            .lease_table
+            .check_holder(&self.session_id, Some(client_id))
+            .await
+        {
+            return Some(SessionServiceError::from_lease_check_failure(
+                &self.session_id,
+                failure,
+            ));
+        }
+        None
+    }
+
+    async fn start_next_turn_if_possible(&mut self) {
+        // Pop turns until we find one whose submitter still holds the lease;
+        // turns queued before a takeover are fail-fast'd with
+        // `SessionAttachedByAnotherClient`. Turns popped while the reaper's
+        // `closing` flag is set are re-queued (not rejected) so the reaper's
+        // TOCTOU recovery via `clear_closing` can still let them run.
+        let Some(turn) = self.next_runnable_turn().await else {
             return;
         };
 

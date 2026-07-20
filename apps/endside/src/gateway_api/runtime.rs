@@ -6,6 +6,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 use super::remote::RemoteRuntimeConfig;
+use crate::gateway_api::http_timeouts::resolve_http_connect_timeout;
 use crate::interaction_prompt::UserPromptResult;
 use crate::session_gateway::{SessionGateway, SessionTurnUpdate};
 
@@ -40,10 +41,47 @@ pub struct GatewayRuntime {
     /// the TUI needs to execute (switch session, set title). Drained by the
     /// App's event loop after `poll_stream_updates` returns.
     pub(crate) pending_hook_actions: Vec<agent_types::hook::HookAction>,
+    /// Per-TUI-process identifier sent with every remote RPC body so the
+    /// daemon can attribute the call to this TUI's attach lease. Mirrors
+    /// `AppState.client_id`.
+    pub(crate) client_id: String,
+    /// Cached OS hostname read once at startup so per-RPC paths don't do a
+    /// blocking `/etc/hostname` read on the async event loop. `None` if the
+    /// hostname could not be resolved — purely informational.
+    pub(crate) client_hostname: Option<String>,
+    /// Shared `reqwest::Client` for all outbound HTTP. Only a *connect*
+    /// timeout is configured — the SSE turn stream is a long-lived response
+    /// body and must NOT be cut by a per-request timeout. Short RPCs
+    /// additionally wrap `send()` in a `tokio::time::timeout`.
+    pub(crate) http_client: reqwest::Client,
 }
 
 impl GatewayRuntime {
-    pub fn new() -> Self {
+    /// Construct a new gateway runtime bound to the given `client_id`. The id
+    /// is per-process (never persisted) so the daemon's attach-lease table
+    /// can distinguish concurrent TUIs from the same user; read-only for the
+    /// lifetime of the runtime.
+    pub fn new(client_id: String) -> Self {
+        // Build the shared HTTP client with a connect-phase timeout. `build()`
+        // only fails on TLS backend init failure; in that case fall back to
+        // `Client::new()` (no connect timeout) so the TUI still works, with
+        // an `error!` so an operator can fix the TLS backend.
+        let connect_timeout = resolve_http_connect_timeout();
+        let http_client = match reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed to build reqwest::Client with connect_timeout={connect_timeout:?}; \
+                     retrying with default builder (connect-phase timeout is OFF — \
+                     TUI may freeze up to the OS TCP timeout on an unreachable daemon)",
+                );
+                reqwest::Client::new()
+            }
+        };
         Self {
             session_gateway: SessionGateway::new(),
             stream_rx: None,
@@ -58,6 +96,9 @@ impl GatewayRuntime {
             remote: None,
             remote_session_open: false,
             pending_hook_actions: Vec::new(),
+            client_id,
+            client_hostname: super::runtime_request::hostname(),
+            http_client,
         }
     }
 
@@ -82,6 +123,14 @@ impl GatewayRuntime {
         self.remote_session_open = false;
     }
 
+    /// Mark the remote session as no longer open from this TUI's perspective
+    /// (the daemon considers another client the holder). Used by the
+    /// heartbeat tick on `TakenOver` so subsequent `disconnect_remote` /
+    /// `close_sessions` calls skip the now-meaningless detach RPC.
+    pub(crate) fn mark_remote_session_taken_over(&mut self) {
+        self.remote_session_open = false;
+    }
+
     pub fn needs_active_refresh(&self) -> bool {
         self.stream_rx.is_some()
             || !self.stream_reveal_buffer.is_empty()
@@ -103,24 +152,24 @@ impl GatewayRuntime {
         self.session_gateway.session_store.clone()
     }
 
-    /// Closes sessions before exit.
-    /// - Remote mode: calls daemon API to delete E2B/Conch sandbox
-    /// - Local mode: shutdown_all() cleans up backends
-    ///   - For local backend: delete is noop (no sandbox to delete)
-    ///   - For E2B/Conch backend: calls delete API to remove sandbox
+    /// Detaches / closes sessions before exit.
+    ///
+    /// **Remote mode**: calls `/api/v1/runtimes/detach` so the daemon
+    /// releases this TUI's attach lease without destroying the session or
+    /// sandbox — the session stays warm for another TUI to pick up via
+    /// `/sessions`. Final destruction is left to the daemon's GC reaper
+    /// (force-closes sessions with no live lease for ~2 hours) or an explicit
+    /// `/remote close`.
+    ///
+    /// **Local mode**: `shutdown_all()` cleans up backends (no-op for local
+    /// backend; delete API call for E2B/Conch).
     pub async fn close_sessions(&mut self, session_id: &str) {
         self.session_gateway.close_all_sessions().await;
 
         if self.remote.is_some() && self.remote_session_open {
-            tracing::info!(session_id = %session_id, "Closing remote session on daemon");
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                self.close_remote_session(session_id),
-            )
-            .await;
-            if let Err(_) = result {
-                tracing::warn!("Remote session close timed out after 5 seconds during exit");
-            }
+            tracing::info!(session_id = %session_id, "Detaching remote session on daemon");
+            self.detach_remote_session_bounded(session_id, "close_sessions")
+                .await;
         } else {
             tracing::info!("Shutting down local backends");
             if let Err(error) = self.session_gateway.backend_manager.shutdown_all().await {

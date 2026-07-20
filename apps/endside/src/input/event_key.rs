@@ -478,18 +478,10 @@ impl App {
             self.state.reset_for_new_session();
 
             if was_remote_mode {
-                tracing::info!(old_session_id = %old_session_id, "Closing old remote session");
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    self.gateway.close_remote_session(&old_session_id),
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(_) => {
-                        tracing::warn!("Remote session close timed out after 5 seconds");
-                    }
-                }
+                tracing::info!(old_session_id = %old_session_id, "Detaching old remote session (preserving on daemon)");
+                self.gateway
+                    .detach_remote_session_bounded(&old_session_id, "new_session")
+                    .await;
             } else {
                 tracing::info!(old_session_id = %old_session_id, "Releasing old local session backend");
                 match tokio::time::timeout(
@@ -821,10 +813,14 @@ impl App {
             },
             "close" => {
                 let session_id = self.state.session_id.clone();
-                self.gateway.close_remote_session(&session_id).await;
-                crate::chat::Message::system(format!(
-                    "Remote session closed on daemon: {session_id}"
-                ))
+                match self.gateway.close_remote_session(&session_id).await {
+                    Ok(()) => crate::chat::Message::system(format!(
+                        "Remote session closed on daemon: {session_id}"
+                    )),
+                    Err(error) => {
+                        crate::chat::Message::error(format!("Remote session close failed: {error}"))
+                    }
+                }
             }
             base_url => {
                 let base_url = normalize_remote_url_input(base_url);

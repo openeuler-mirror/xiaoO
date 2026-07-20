@@ -27,9 +27,11 @@ impl App {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Result<Self, anyhow::Error> {
+        let state = AppState::new_with_config(config, config_path, workspace)?;
+        let gateway = GatewayRuntime::new(state.client_id.clone());
         Ok(Self {
-            state: AppState::new_with_config(config, config_path, workspace)?,
-            gateway: GatewayRuntime::new(),
+            state,
+            gateway,
             pending_local_model_fetch: None,
         })
     }
@@ -45,6 +47,13 @@ impl App {
         let mut cursor_visible = true;
         let mut last_cursor_blink_toggle = Instant::now();
         let mut needs_redraw = true;
+        // Heartbeat interval for renewing the daemon's attach lease.
+        let mut heartbeat_interval =
+            tokio::time::interval(crate::gateway_api::http_timeouts::HEARTBEAT_INTERVAL);
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the immediate first tick so we don't fire before any session
+        // is open.
+        heartbeat_interval.tick().await;
 
         #[cfg(unix)]
         let mut sigterm =
@@ -110,6 +119,9 @@ impl App {
                             }
                             needs_redraw = true;
                         }
+                        _ = heartbeat_interval.tick() => {
+                            needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
+                        }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
                             self.state.should_quit = true;
@@ -151,6 +163,9 @@ impl App {
                                 }
                             }
                             needs_redraw = true;
+                        }
+                        _ = heartbeat_interval.tick() => {
+                            needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
@@ -244,6 +259,77 @@ impl App {
             let models = fetch_models_from_local_api(&api_base).await;
             let _ = tx.send(models);
         });
+    }
+
+    /// Periodic attach-lease heartbeat. Runs every 15 s while the TUI is in
+    /// remote mode. On `TakenOver { stale: Some(true) }` it first attempts a
+    /// reclaim via `open_remote_session_with_record` (the recorded holder is
+    /// itself stale, so `open_session`'s `acquire` will take it over for us,
+    /// avoiding a needless takeover notice). On reclaim failure or a live
+    /// holder it flips `session_taken_over = true` and pushes a notice so
+    /// `handle_event` can short-circuit submissions instead of letting them
+    /// fail at the daemon. `Network` errors are just logged — the next tick
+    /// retries; a long outage eventually resolves as `TakenOver` or recovery.
+    ///
+    /// Returns `true` iff this tick changed visible state (so the caller can
+    /// skip a needless redraw on `Network` errors / `Ok(())`).
+    async fn run_heartbeat_tick(&mut self) -> bool {
+        if !self.gateway.is_remote_mode() || self.state.session_taken_over {
+            return false;
+        }
+        let session_id = self.state.session_id.clone();
+        match self.gateway.heartbeat_remote_session(&session_id).await {
+            Ok(()) => false,
+            Err(crate::gateway_api::remote::HeartbeatError::TakenOver { detail, stale }) => {
+                // Stale lease: the recorded holder is presumed dead. Attempt
+                // a reclaim before flagging a takeover — saves the user a
+                // manual `/remote` or `/sessions` round-trip. Only `Some(true)`
+                // reclaims; `None` (parse failure) and `Some(false)` (live
+                // holder) fall through to the taken-over notice so a parse
+                // regression or genuinely-live holder never widens the bypass.
+                if stale == Some(true) {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "heartbeat rejected with stale lease; attempting to reclaim via open"
+                    );
+                    if self
+                        .gateway
+                        .open_remote_session_with_record(&mut self.state)
+                        .await
+                        .is_ok()
+                    {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "reclaimed stale lease via open; resuming normal operation"
+                        );
+                        return true;
+                    }
+                    // Reclaim failed (another client beat us, or network).
+                }
+                tracing::warn!(
+                    session_id = %session_id,
+                    detail = %detail,
+                    "session taken over by another xiaoo process; further submissions will be rejected"
+                );
+                self.state.session_taken_over = true;
+                // Sync `remote_session_open` so `disconnect_remote` /
+                // `close_sessions` skip the now-meaningless detach (the lease
+                // is held by another client; our detach would be a no-op).
+                self.gateway.mark_remote_session_taken_over();
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        crate::gateway_api::runtime_request::session_taken_over_notice_glyph(),
+                    ));
+                self.state.chat_state.stick_to_bottom = true;
+                true
+            }
+            Err(crate::gateway_api::remote::HeartbeatError::Network(error)) => {
+                tracing::warn!(error = %error, "session heartbeat failed; will retry next tick");
+                false
+            }
+        }
     }
 
     /// Execute a single hook action received after a turn terminates.

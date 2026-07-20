@@ -1,8 +1,8 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane, SessionInput,
-    SessionLifecycleStatus, SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput,
-    SessionRuntimeResolveError, SessionRuntimeResolver, SessionService, SessionServiceError,
-    SessionStore, SessionStoreError,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane,
+    SessionDetachRequest, SessionHeartbeatRequest, SessionInput, SessionLifecycleStatus,
+    SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput, SessionRuntimeResolveError,
+    SessionRuntimeResolver, SessionService, SessionServiceError, SessionStore, SessionStoreError,
 };
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
@@ -41,6 +41,7 @@ use super::session_backend::{
     CheckoutEvictionContext,
 };
 use super::session_handle::SessionHandle;
+use super::session_lease::{is_daemon_principal, LeaseAcquireOutcome, SessionLeaseTable};
 use super::session_supervisor::SessionSupervisor;
 use crate::backend::{
     BackendCheckoutRequest, BackendCheckpointRequest, BackendCheckpointSnapshotDeleteRequest,
@@ -50,11 +51,9 @@ use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoin
 
 /// Overall wall-clock budget for collecting `*.Session.lifecycle.state`
 /// hook actions before the turn's `Done` event is emitted. Bounded at one
-/// hooker's per-subprocess cap (`PLUGIN_HOOK_COMMAND_TIMEOUT_MS = 30s`) so a
-/// single legitimately slow hooker is unaffected, while the sum across N
-/// hookers is capped at 30s instead of N × 30s. On timeout the spawned task
-/// is aborted (its in-flight subprocess is reaped via `kill_on_drop`) and no
-/// actions are returned.
+/// hooker's per-subprocess cap (`PLUGIN_HOOK_COMMAND_TIMEOUT_MS = 30s`) so the
+/// sum across N hookers is capped at 30s (not N × 30s). On timeout the
+/// spawned task is aborted (in-flight subprocess reaped via `kill_on_drop`).
 const SESSION_STATE_HOOK_OVERALL_DEADLINE: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
 const RUNTIME_EXEC_FALLBACK_SHELL: &str = "/bin/sh";
@@ -74,19 +73,22 @@ pub struct CoreBackedSessionService {
     backend_manager: Arc<BackendManager>,
     runtime_checkpoints: InMemoryRuntimeCheckpointStore,
     /// Cross-turn `send_prompt` chain depth cap (exclusive upper bound on
-    /// `chain_depth`). Stamped onto each `SendPrompt` action
-    /// (`emitting turn depth + 1`) by
-    /// [`fire_session_state_hook_and_collect_actions`]; actions whose
-    /// stamped `chain_depth` would **reach** this value
-    /// (`next_depth >= max_prompt_chain_depth`) are dropped before
-    /// forwarding. Semantics: `N` permits **N turns total** in a chain —
-    /// the user-initiated turn (depth `0`) plus `N - 1`
-    /// `send_prompt`-triggered turns (depths `1..=N-1`); a `send_prompt`
-    /// that would start the `N`-th-turn-after-user (depth `N`) is dropped.
-    /// Defaults to
+    /// `chain_depth`): `N` permits N turns total — the user-initiated turn
+    /// (depth `0`) plus `N - 1` `send_prompt`-triggered turns (depths
+    /// `1..=N-1`). Defaults to
     /// [`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`](agent_types::hook::DEFAULT_MAX_PROMPT_CHAIN_DEPTH)
     /// (128); configurable via `[hooker].max_prompt_chain_depth`.
     max_prompt_chain_depth: usize,
+    /// Per-session attach lease table. See [`SessionLeaseTable`]: acquired at
+    /// the top of `open_session`, refreshed by `heartbeat_session`, released
+    /// (without destroying the session) by `detach_session`, checked on every
+    /// turn-driving RPC by `assert_lease_holder`.
+    sessions_lease: SessionLeaseTable,
+    /// When `true`, mutating RPCs that omit `client_id` are rejected with
+    /// [`SessionServiceError::LeaseRequired`]. Defaults to `false` for
+    /// gradual rollout; flip via [`Self::set_enforce_anonymous_lease`]
+    /// (typically driven by `XIAOO_ENFORCE_LEASE` in `AppBootstrap`).
+    enforce_anonymous_lease: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl CoreBackedSessionService {
@@ -106,7 +108,251 @@ impl CoreBackedSessionService {
             backend_manager,
             runtime_checkpoints: InMemoryRuntimeCheckpointStore::default(),
             max_prompt_chain_depth,
+            sessions_lease: SessionLeaseTable::new(),
+            enforce_anonymous_lease: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Public accessor so the daemon-side GC reaper can inspect the lease
+    /// table. Returns a clone (Arc-interned, cheap).
+    pub fn lease_table(&self) -> SessionLeaseTable {
+        self.sessions_lease.clone()
+    }
+
+    /// Toggle strict lease enforcement for anonymous callers. When `true`,
+    /// `assert_lease_holder` returns
+    /// [`SessionServiceError::LeaseRequired`] for any RPC whose body omits
+    /// `client_id`. Idempotent; safe to call at any time (atomic store).
+    pub fn set_enforce_anonymous_lease(&self, enabled: bool) {
+        self.enforce_anonymous_lease
+            .store(enabled, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Read-side helper for `assert_lease_holder` and the bootstrap startup
+    /// log. Pure for testability.
+    pub fn anonymous_lease_enforced(&self) -> bool {
+        self.enforce_anonymous_lease
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Spawn the background orphan-session reaper. Wakes every
+    /// [`REAPER_INTERVAL`](crate::gateway::REAPER_INTERVAL) and force-closes
+    /// sessions whose lease has been gone for longer than
+    /// [`ORPHAN_SESSION_THRESHOLD_MS`](crate::gateway::ORPHAN_SESSION_THRESHOLD_MS)
+    /// and whose last activity is older than the same threshold, reclaiming
+    /// leaked backends (e2b sandboxes, conch processes) when a TUI crashes
+    /// and nobody comes back.
+    ///
+    /// The reaper must NOT close sessions whose in-memory handle is currently
+    /// running an active turn (killing the sandbox mid-turn would leave the
+    /// session half-applied).
+    ///
+    /// Returns a `JoinHandle` (currently only the daemon's `main.rs`) so
+    /// callers can `.abort()` it on shutdown. Errors are logged and never
+    /// propagated (best-effort).
+    pub fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        const ORPHAN_THRESHOLD_MS: u64 = crate::gateway::ORPHAN_SESSION_THRESHOLD_MS;
+        const STALE_LEASE_MS: u64 = crate::gateway::STALE_LEASE_THRESHOLD_MS;
+
+        let service = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(crate::gateway::REAPER_INTERVAL);
+            // Skip the immediate first tick so a sweep doesn't fire before any
+            // TUI has registered a lease.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = service
+                    .run_reaper_sweep(ORPHAN_THRESHOLD_MS, STALE_LEASE_MS)
+                    .await
+                {
+                    tracing::warn!(error = %error, "orphan session reaper sweep failed");
+                }
+            }
+        })
+    }
+
+    /// Reaper's per-sweep logic, factored out for unit tests (tests drive it
+    /// directly with backdated `updated_at_ms` rather than waiting 2h; no
+    /// fake-clock injection — `now` uses [`crate::gateway::current_time_ms`],
+    /// fail-closed on a skewed clock). Iterates every session record and
+    /// delegates per-record close decisions to [`reap_one_record`].
+    async fn run_reaper_sweep(
+        &self,
+        orphan_threshold_ms: u64,
+        stale_threshold_ms: u64,
+    ) -> Result<(), SessionServiceError> {
+        // Use the lease table's fail-closed clock so a broken wall clock
+        // doesn't reap live sessions (or never reap). Skip the sweep on clock
+        // skew; the next tick retries once NTP corrects the clock.
+        let Ok(now) = crate::gateway::session_lease::current_time_ms() else {
+            tracing::warn!(
+                "orphan session reaper: wall clock is before UNIX_EPOCH; \
+                 skipping sweep (will retry next tick)"
+            );
+            return Ok(());
+        };
+        let all_sessions = self.session_store.list_all().await;
+        let live_leases = self.sessions_lease.snapshot().await;
+
+        for record in all_sessions {
+            self.reap_one_record(
+                &record,
+                now,
+                &live_leases,
+                orphan_threshold_ms,
+                stale_threshold_ms,
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    /// Per-record close decision for a single [`SessionRecord`] within a
+    /// reaper sweep:
+    ///
+    /// * **Skip** — `Closed`, live lease, recent activity, running turn, or
+    ///   lease refreshed between sweep snapshot and `mark_closing` (TOCTOU
+    ///   re-check).
+    /// * **Close** — `force_close_session_inner`; on failure
+    ///   [`evict_session_artifacts`] runs so the session is not bricked.
+    ///
+    /// Skip-conditions are checked in order via [`should_skip_reap`]; the
+    /// TOCTOU re-check reads the **current** lease table under its own mutex
+    /// and undoes `mark_closing` via [`clear_closing`] if the lease was
+    /// refreshed during the window.
+    async fn reap_one_record(
+        &self,
+        record: &SessionRecord,
+        now: u64,
+        live_leases: &[(String, String, u64)],
+        orphan_threshold_ms: u64,
+        stale_threshold_ms: u64,
+    ) {
+        // All skip decisions (including the TOCTOU `mark_closing` undo) live
+        // in `should_skip_reap` so this reads as "skip if asked, else close".
+        if self
+            .should_skip_reap(
+                record,
+                now,
+                live_leases,
+                orphan_threshold_ms,
+                stale_threshold_ms,
+            )
+            .await
+        {
+            return;
+        }
+
+        let last_activity = record.updated_at_ms;
+        tracing::info!(
+            session_id = %record.session_id,
+            last_activity_ms = last_activity,
+            age_ms = now.saturating_sub(last_activity),
+            "orphan session reaper: force-closing stale session"
+        );
+        // `close_and_evict_on_err` runs `force_close_session_inner` and, on
+        // failure, evicts residual artifacts so a stuck `Closing` handle
+        // can't brick the session. `mark_closing` was set in
+        // `should_skip_reap` above; the error is logged here (not inside the
+        // helper) so the `orphan session reaper:` prefix shows in the log.
+        if let Err(error) = self.close_and_evict_on_err(&record.session_id).await {
+            tracing::warn!(
+                session_id = %record.session_id,
+                error = %error,
+                "orphan session reaper: force_close failed; residual artifacts evicted"
+            );
+        }
+    }
+
+    /// Skip-decision for [`reap_one_record`]: the four pure-read skip
+    /// conditions (Closed / live-lease snapshot / recent activity / Running
+    /// handle) plus the TOCTOU lease re-check that may undo `mark_closing`.
+    ///
+    /// Step 4 (Running check) and step 5 (TOCTOU re-check) both touch shared
+    /// state — `mark_closing` is set in step 4 and may be undone by step 5 —
+    /// so they live together here. The `sessions_handler` lock is held only
+    /// for step 4 (phase check + `mark_closing`); step 5 reads the lease
+    /// table under its own mutex. A `clear_closing` on the TOCTOU hit
+    /// re-acquires `sessions_handler` briefly — the price of not holding it
+    /// across the lease-table await (which would block every `run_turn`
+    /// enqueue during the sweep).
+    async fn should_skip_reap(
+        &self,
+        record: &SessionRecord,
+        now: u64,
+        live_leases: &[(String, String, u64)],
+        orphan_threshold_ms: u64,
+        stale_threshold_ms: u64,
+    ) -> bool {
+        // 1. Already closed — leave it untouched.
+        if record.status == SessionLifecycleStatus::Closed {
+            return true;
+        }
+
+        // 2. Lease still live (per sweep-start snapshot)?
+        let has_live_lease = live_leases.iter().any(|(sid, _client_id, last_hb)| {
+            *sid == record.session_id && now.saturating_sub(*last_hb) <= stale_threshold_ms
+        });
+        if has_live_lease {
+            return true;
+        }
+
+        // 3. Stale activity?
+        if now.saturating_sub(record.updated_at_ms) < orphan_threshold_ms {
+            return true;
+        }
+
+        // 4. In-memory handle currently running a turn? Skip if Running.
+        //    Hold the `sessions_handler` lock for the phase check AND
+        //    `mark_closing` so they happen atomically. Without `mark_closing`,
+        //    a turn popped from `pending_turns` between this check and the
+        //    `ForceClose` command would be started mid-stream and then
+        //    cancelled — the half-applied state the reaper avoids. Turns
+        //    popped while `closing` is set are re-queued (not rejected) by
+        //    `next_runnable_turn`, so a TOCTOU recovery via `clear_closing`
+        //    (step 5) can still let them run.
+        let can_close = self
+            .sessions_handler
+            .lock()
+            .await
+            .get(&record.session_id)
+            .map(|handle| {
+                if matches!(
+                    handle.status().phase,
+                    crate::gateway::session_handle::SessionPhase::Running
+                ) {
+                    false
+                } else {
+                    handle.mark_closing();
+                    true
+                }
+            })
+            .unwrap_or(true);
+        if !can_close {
+            return true;
+        }
+
+        // 5. TOCTOU re-check: the `live_leases` snapshot was taken at sweep
+        //    start. A heartbeat between the snapshot and `mark_closing` above
+        //    could have refreshed a previously-stale lease. Read the CURRENT
+        //    table state; if it's now live, undo `mark_closing` and skip.
+        if self
+            .sessions_lease
+            .has_live_lease(&record.session_id, stale_threshold_ms)
+            .await
+        {
+            tracing::info!(
+                session_id = %record.session_id,
+                "orphan session reaper: lease refreshed during sweep; skipping"
+            );
+            if let Some(handle) = self.sessions_handler.lock().await.get(&record.session_id) {
+                handle.clear_closing();
+            }
+            return true;
+        }
+
+        false
     }
 
     async fn runtime_initialization_lock(&self, runtime_id: &str) -> Arc<Mutex<()>> {
@@ -140,35 +386,28 @@ impl CoreBackedSessionService {
     }
 
     /// Fire the `*.Session.lifecycle.state` event hook, await all hookers,
-    /// and collect the side-effect `actions` they request.
+    /// and collect the side-effect `actions` they request. Used by the
+    /// daemon's `stream_session_input` path (via `run_turn_inner`) so plugin-
+    /// requested actions are bundled into the turn's `Done` event — the TUI
+    /// processes them when it receives `Done`.
     ///
-    /// Used by the daemon's `stream_session_input` path (via `run_turn_inner`)
-    /// so that plugin-requested actions are bundled into the turn's `Done`
-    /// event — the TUI processes them when it receives `Done`. The trade-off
-    /// vs a fire-and-forget design is that the user sees the turn result after
-    /// the hookers finish (or time out), which is acceptable for session
-    /// lifecycle hooks that only fire after turn termination anyway.
-    ///
-    /// An overall deadline of [`SESSION_STATE_HOOK_OVERALL_DEADLINE`] (30s)
-    /// bounds the collection regardless of how many hookers are registered:
-    /// a single hooker can still take up to its 30s per-subprocess cap (no
-    /// regression), but the sum across N hookers is capped at 30s instead of
-    /// growing to N × 30s. On timeout the spawned task is aborted (the
-    /// in-flight subprocess is reaped via `kill_on_drop`) and no actions are
-    /// returned — best-effort, matching the documented semantics that action
-    /// failures never propagate to the hook caller.
+    /// Bounded by [`SESSION_STATE_HOOK_OVERALL_DEADLINE`] (30s) regardless of
+    /// how many hookers are registered — a single hooker can still take up to
+    /// its 30s per-subprocess cap (no regression), but the sum across N is
+    /// capped at 30s. On timeout the spawned task is aborted (in-flight
+    /// subprocess reaped via `kill_on_drop`); no actions are returned
+    /// (best-effort, matching the documented semantics that action failures
+    /// never propagate to the hook caller).
     ///
     /// Actions are returned raw: daemon-side execution (e.g. `open_session`
     /// for `CreateSession`/`SwitchSession`) is the caller's responsibility
-    /// (the HTTP router does this via its own `DaemonHookActionSink`).
+    /// (the HTTP router does this via `DaemonHookActionSink`).
     ///
-    /// The hooker invocations run inside a `tokio::spawn`d task and the
-    /// `JoinHandle` is awaited here (under the overall deadline). We still
-    /// block on the hookers (so the requested actions are collected before
-    /// `Done` is emitted) but a panicking or cancelled plugin task surfaces
-    /// as a `JoinError` here rather than unwinding into `run_turn_inner` and
-    /// tearing down the daemon's SSE connection. A `JoinError` yields an
-    /// empty action set so the turn result is still delivered.
+    /// The hookers run inside a `tokio::spawn`d task awaited under the
+    /// deadline. A panicking or cancelled plugin task surfaces as a
+    /// `JoinError` here (rather than unwinding into `run_turn_inner` and
+    /// tearing down the SSE connection); `JoinError` yields an empty action
+    /// set so the turn result is still delivered.
     pub async fn fire_session_state_hook_and_collect_actions(
         &self,
         session_id: String,
@@ -292,7 +531,12 @@ impl CoreBackedSessionService {
             Arc::clone(&self.backend_manager),
             session.clone(),
         ));
-        let handle = SessionHandle::new(session.session_id.clone(), supervisor).await;
+        let handle = SessionHandle::new(
+            session.session_id.clone(),
+            supervisor,
+            self.sessions_lease.clone(),
+        )
+        .await;
         let mut sessions = self.sessions_handler.lock().await;
         if let Some(existing) = sessions.get(&session.session_id) {
             return existing.clone();
@@ -987,69 +1231,11 @@ impl CoreBackedSessionService {
 
         turn_result
     }
-}
 
-#[async_trait]
-impl SessionService for CoreBackedSessionService {
-    async fn run_turn(
-        &self,
-        request: AppTurnRequest,
-    ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, None, None, None, None).await
-    }
-
-    async fn run_turn_with_events(
-        &self,
-        request: AppTurnRequest,
-        event_sink: Option<Arc<dyn LoopEventSink>>,
-    ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, None, None, None)
-            .await
-    }
-
-    async fn run_turn_with_interaction(
-        &self,
-        request: AppTurnRequest,
-        event_sink: Option<Arc<dyn LoopEventSink>>,
-        interaction_handle: Option<Arc<dyn InteractionHandle>>,
-        channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
-        cancellation_token: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(
-            request,
-            event_sink,
-            interaction_handle,
-            channel_file_sender,
-            cancellation_token,
-        )
-        .await
-    }
-}
-
-#[async_trait]
-impl SessionControlPlane for CoreBackedSessionService {
-    async fn hibernate_idle_session(
-        &self,
-        session_id: &str,
-        idle_before_ms: u64,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        let Some(handle) = self.sessions_handler.lock().await.get(session_id).cloned() else {
-            return Ok(None);
-        };
-        let Some(paused) = handle.hibernate_idle(idle_before_ms).await? else {
-            return Ok(None);
-        };
-        self.sessions_handler.lock().await.remove(session_id);
-        self.backend_manager
-            .release_session(session_id)
-            .await
-            .map_err(|error| SessionServiceError::RuntimeShutdown {
-                message: format!("failed to release hibernated local backend: {error}"),
-            })?;
-        Ok(Some(paused))
-    }
-
-    async fn open_session(
+    /// Body of [`SessionControlPlane::open_session`] after the lease has been
+    /// acquired. Contains the original open / resume + state-preservation
+    /// logic. The trait impl wraps this with lease acquire + rollback.
+    async fn open_session_inner(
         &self,
         request: SessionOpenRequest,
     ) -> Result<SessionRecord, SessionServiceError> {
@@ -1149,31 +1335,76 @@ impl SessionControlPlane for CoreBackedSessionService {
             .await
     }
 
-    async fn resume_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        match self.handle_for_session(session_id).await {
-            Some(handle) => Ok(Some(handle.snapshot().await?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn force_close_session(
+    /// Body of [`SessionControlPlane::force_close_session`] and
+    /// [`SessionControlPlane::force_close_session_with_lease`]: cascade-close
+    /// children, mark this session Closed, release backend, delete checkpoint
+    /// snapshots. The lease-checked variant wraps this with a holder check
+    /// (skipped when the caller is a daemon-internal principal) and a lease
+    /// cleanup at the end.
+    async fn force_close_session_inner(
         &self,
         session_id: &str,
     ) -> Result<SessionRecord, SessionServiceError> {
-        // 1. Collect direct children BEFORE deleting this session's store
-        //    entry. Children are sessions forked via `checkout` whose
-        //    `parent_runtime_id` equals this session. We cascade-close them
-        //    so that descendant sandboxes and snapshots are reclaimed
-        //    together with the parent. Without this, forked runtimes would
-        //    leak their backends and e2b sandboxes indefinitely.
-        let children = self.session_store.list_children(session_id).await;
+        // 1. Cascade-close children first (bottom-up) so descendant sandboxes
+        //    and snapshots are reclaimed together with the parent. A child
+        //    failure does not abort the parent's close.
+        self.cascade_close_children(session_id).await;
 
-        // 2. Recursively close each child first (bottom-up). A child failure
-        //    does not abort the parent's close; we log and continue so a
-        //    single bad child cannot strand the whole subtree.
+        // 2. Close this session's handle (mark Closed) or fall back to the
+        //    store-only path when no live handle exists.
+        let (closed, was_already_closed) = self.close_self_record(session_id).await?;
+
+        // 3. Release backends leased for this session.
+        if let Err(error) = self.backend_manager.release_session(session_id).await {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %error,
+                "failed to release session backends"
+            );
+        }
+
+        // 4. Delete provider snapshots + drop in-memory checkpoint records.
+        self.cleanup_runtime_checkpoints(session_id).await;
+
+        // 5. Fire the `Session.lifecycle.closed` hook (only if the session
+        //    was not already Closed — avoids double-firing on idempotent
+        //    closes).
+        if !was_already_closed {
+            let hook_point = session_lifecycle_hook_point(&closed.runtime.agent_id.0, "closed");
+            self.fire_session_hooks(
+                HookInvokeInput::SessionClosed {
+                    input: SessionClosedHookInput {
+                        session_id: closed.session_id.clone(),
+                        sender_id: closed.sender_id.clone(),
+                    },
+                    metadata: HookInvokeMetadata::default(),
+                },
+                hook_point,
+            )
+            .await;
+        }
+
+        // 6. Drop the store record + in-memory handle + attach lease so a
+        //    future `open_session` for the same id starts fresh.
+        self.evict_session_artifacts(session_id).await;
+
+        Ok(closed)
+    }
+
+    /// Step 1 of [`force_close_session_inner`]: collect direct children
+    /// (sessions forked via `checkout` whose `parent_runtime_id` equals this
+    /// session) and recursively close each one. A child failure is logged but
+    /// does not abort the parent's close — a single bad child must not strand
+    /// the whole subtree.
+    ///
+    /// The recursive call goes through the trait method
+    /// `SessionControlPlane::force_close_session` (rather than
+    /// `force_close_session_inner` directly) so `#[async_trait]` boxes the
+    /// futures, providing the indirection `async fn` recursion needs.
+    /// Children never get a lease check (the parent's lease covers the
+    /// subtree).
+    async fn cascade_close_children(&self, session_id: &str) {
+        let children = self.session_store.list_children(session_id).await;
         for child in &children {
             if let Err(error) = self.force_close_session(&child.session_id).await {
                 tracing::warn!(
@@ -1184,40 +1415,66 @@ impl SessionControlPlane for CoreBackedSessionService {
                 );
             }
         }
+    }
 
-        // 3. Close this session's handle (mark Closed) or fall back to the
-        //    store-only path when no live handle exists.
-        let (closed, was_already_closed) =
-            if let Some(handle) = self.handle_for_session(session_id).await {
-                let before = handle.snapshot().await?;
-                let was_already_closed = before.status == SessionLifecycleStatus::Closed;
-                (handle.force_close().await?, was_already_closed)
-            } else {
-                let Some(mut existing) = self.session_store.load(session_id).await else {
-                    return Err(SessionServiceError::SessionNotFound {
-                        session_id: session_id.to_string(),
-                    });
-                };
-                let was_already_closed = existing.status == SessionLifecycleStatus::Closed;
-                existing.status = SessionLifecycleStatus::Closed;
-                existing.updated_at_ms = current_time_ms();
-                self.session_store.save(existing.clone()).await;
-                (existing, was_already_closed)
-            };
-        if let Err(error) = self.backend_manager.release_session(session_id).await {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %error,
-                "failed to release session backends"
-            );
+    /// Shared tail of [`force_close_session_with_lease`] (the trait close
+    /// path), its anonymous-caller sub-path, and the reaper's
+    /// [`reap_one_record`]: run `force_close_session_inner`, and on error
+    /// evict residual artifacts so the session is not bricked. On success
+    /// `force_close_session_inner` itself evicts everything as step 6, so
+    /// this helper does nothing extra. `evict_session_artifacts` is
+    /// idempotent on absent keys, so partial step-6 progress is covered.
+    async fn close_and_evict_on_err(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        let result = self.force_close_session_inner(session_id).await;
+        if result.is_err() {
+            // `force_close_session_inner` bailed before reaching step 6
+            // (`evict_session_artifacts`). Without this cleanup a handle
+            // stuck at phase `Closing` would reject every subsequent
+            // `run_turn` forever, and a surviving store record would be
+            // re-selected on every re-open — the session is bricked until
+            // the 2 h reaper happens to clean it up. Evict everything here
+            // so the next `open_session` starts fresh. Called from both the
+            // trait close path and the reaper's `reap_one_record`.
+            self.evict_session_artifacts(session_id).await;
         }
+        result
+    }
 
-        // 4. Delete provider snapshots (e.g. e2b snapshots) for every
-        //    checkpoint created by this runtime, then drop the in-memory
-        //    checkpoint records. This prevents remote snapshot leaks when a
-        //    runtime is closed without an explicit `delete_checkpoint_snapshot`
-        //    call. Failures are logged but do not abort the close: local
-        //    tracking is still cleared so it does not accumulate.
+    /// Step 2 of [`force_close_session_inner`]: close this session's handle
+    /// (mark Closed) via the actor, or fall back to the store-only path when
+    /// no live handle exists. Returns the closed `SessionRecord` and whether
+    /// it was already `Closed` (used to gate the `SessionClosed` hook).
+    async fn close_self_record(
+        &self,
+        session_id: &str,
+    ) -> Result<(SessionRecord, bool), SessionServiceError> {
+        if let Some(handle) = self.handle_for_session(session_id).await {
+            let before = handle.snapshot().await?;
+            let was_already_closed = before.status == SessionLifecycleStatus::Closed;
+            Ok((handle.force_close().await?, was_already_closed))
+        } else {
+            let Some(mut existing) = self.session_store.load(session_id).await else {
+                return Err(SessionServiceError::SessionNotFound {
+                    session_id: session_id.to_string(),
+                });
+            };
+            let was_already_closed = existing.status == SessionLifecycleStatus::Closed;
+            existing.status = SessionLifecycleStatus::Closed;
+            existing.updated_at_ms = current_time_ms();
+            self.session_store.save(existing.clone()).await;
+            Ok((existing, was_already_closed))
+        }
+    }
+
+    /// Step 4 of [`force_close_session_inner`]: delete provider snapshots
+    /// (e.g. e2b snapshots) for every checkpoint created by this runtime,
+    /// then drop the in-memory checkpoint records. Failures are logged but
+    /// do not abort the close — local tracking is still cleared so it does
+    /// not accumulate.
+    async fn cleanup_runtime_checkpoints(&self, session_id: &str) {
         let checkpoints = self
             .runtime_checkpoints
             .list_checkpoints_for_runtime(session_id)
@@ -1243,26 +1500,322 @@ impl SessionControlPlane for CoreBackedSessionService {
             }
         }
         self.runtime_checkpoints.remove_runtime(session_id).await;
+    }
 
-        if !was_already_closed {
-            let hook_point = session_lifecycle_hook_point(&closed.runtime.agent_id.0, "closed");
-            self.fire_session_hooks(
-                HookInvokeInput::SessionClosed {
-                    input: SessionClosedHookInput {
-                        session_id: closed.session_id.clone(),
-                        sender_id: closed.sender_id.clone(),
-                    },
-                    metadata: HookInvokeMetadata::default(),
-                },
-                hook_point,
-            )
-            .await;
-        }
-
+    /// Step 6 of [`force_close_session_inner`]: drop the store record (so
+    /// subsequent `load` / `resume_session` calls report the session as gone),
+    /// evict the in-memory handle, and remove the attach lease. Covers the
+    /// cascade-close path: children closed recursively via
+    /// `force_close_session` → `force_close_session_inner` would otherwise
+    /// leave each child's lease (held by a different `client_id`) surviving
+    /// the close. `HashMap::remove` on an absent key is a no-op, so callers
+    /// that already removed the lease (`force_close_session_with_lease`, the
+    /// reaper) are unaffected.
+    async fn evict_session_artifacts(&self, session_id: &str) {
         self.session_store.delete(session_id).await;
         self.sessions_handler.lock().await.remove(session_id);
+        self.sessions_lease.remove(session_id).await;
+    }
+}
 
-        Ok(closed)
+#[async_trait]
+impl SessionService for CoreBackedSessionService {
+    async fn run_turn(
+        &self,
+        request: AppTurnRequest,
+    ) -> Result<AppTurnResult, SessionServiceError> {
+        self.run_turn_inner(request, None, None, None, None).await
+    }
+
+    async fn run_turn_with_events(
+        &self,
+        request: AppTurnRequest,
+        event_sink: Option<Arc<dyn LoopEventSink>>,
+    ) -> Result<AppTurnResult, SessionServiceError> {
+        self.run_turn_inner(request, event_sink, None, None, None)
+            .await
+    }
+
+    async fn run_turn_with_interaction(
+        &self,
+        request: AppTurnRequest,
+        event_sink: Option<Arc<dyn LoopEventSink>>,
+        interaction_handle: Option<Arc<dyn InteractionHandle>>,
+        channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        cancellation_token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<AppTurnResult, SessionServiceError> {
+        self.run_turn_inner(
+            request,
+            event_sink,
+            interaction_handle,
+            channel_file_sender,
+            cancellation_token,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl SessionControlPlane for CoreBackedSessionService {
+    async fn hibernate_idle_session(
+        &self,
+        session_id: &str,
+        idle_before_ms: u64,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        let Some(handle) = self.sessions_handler.lock().await.get(session_id).cloned() else {
+            return Ok(None);
+        };
+        let Some(paused) = handle.hibernate_idle(idle_before_ms).await? else {
+            return Ok(None);
+        };
+        self.sessions_handler.lock().await.remove(session_id);
+        self.backend_manager
+            .release_session(session_id)
+            .await
+            .map_err(|error| SessionServiceError::RuntimeShutdown {
+                message: format!("failed to release hibernated local backend: {error}"),
+            })?;
+        Ok(Some(paused))
+    }
+
+    async fn open_session(
+        &self,
+        request: SessionOpenRequest,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        // Acquire the attach lease BEFORE touching the session store / handle
+        // — atomic under the lease table's mutex, so concurrent `open_session`
+        // calls for the same session_id serialise here.
+        //
+        // Anonymous callers (`None` / empty `client_id`) bypass the acquire
+        // (useful for tests / curl probes / gradual rollout). When
+        // `enforce_anonymous_lease` is on (`XIAOO_ENFORCE_LEASE=on`) they are
+        // rejected with `LeaseRequired` here, mirroring `assert_lease_holder` /
+        // `force_close_session_with_lease` so `open` is not the one mutating
+        // RPC that defeats strict single-writer. Daemon-internal principals
+        // (`daemon:`) also bypass the acquire (cooperative background callers
+        // that would otherwise steal the holder's lease); the bypass is
+        // explicit and logged.
+        let Some(client_id) = request.client_id.as_deref().filter(|s| !s.is_empty()) else {
+            // Anonymous caller: reject under strict enforcement, else skip the
+            // lease acquire and open directly (no lease to roll back on
+            // failure).
+            if self.anonymous_lease_enforced() {
+                return Err(SessionServiceError::LeaseRequired {
+                    session_id: request.session_id.clone(),
+                });
+            }
+            return self.open_session_inner(request).await;
+        };
+
+        if is_daemon_principal(client_id) {
+            tracing::debug!(
+                session_id = %request.session_id,
+                client_id = %client_id,
+                "open_session: daemon-internal principal bypasses lease acquire"
+            );
+        } else {
+            match self
+                .sessions_lease
+                .acquire(
+                    &request.session_id,
+                    client_id,
+                    request.client_pid,
+                    request.client_hostname.clone(),
+                )
+                .await
+            {
+                LeaseAcquireOutcome::Acquired => {}
+                LeaseAcquireOutcome::ClockSkew => {
+                    return Err(SessionServiceError::LeaseClockSkew {
+                        session_id: request.session_id.clone(),
+                    });
+                }
+                LeaseAcquireOutcome::Busy {
+                    holder_client_id,
+                    holder_hostname,
+                    holder_pid,
+                    last_heartbeat_ms,
+                    stale,
+                } => {
+                    return Err(SessionServiceError::SessionAttachedByAnotherClient {
+                        session_id: request.session_id,
+                        holder_client_id,
+                        holder_hostname: holder_hostname.unwrap_or_default(),
+                        holder_pid: holder_pid.unwrap_or(0),
+                        last_heartbeat_ms,
+                        stale,
+                    });
+                }
+            }
+        }
+
+        // Open / resume the session record. Any failure on this path rolls
+        // back the lease so a transient resolver / backend error doesn't leave
+        // a phantom lease blocking subsequent retries. `detach` only removes
+        // the lease when `lease.client_id == client_id`, so it acts as a CAS:
+        // a lease that was taken over by another client (via the stale
+        // path) while we were building the session is left untouched (the
+        // new holder wins).
+        match self.open_session_inner(request.clone()).await {
+            Ok(record) => Ok(record),
+            Err(error) => {
+                self.sessions_lease
+                    .detach(&request.session_id, client_id)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn resume_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        match self.handle_for_session(session_id).await {
+            Some(handle) => Ok(Some(handle.snapshot().await?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn force_close_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        self.force_close_session_inner(session_id).await
+    }
+
+    async fn force_close_session_with_lease(
+        &self,
+        session_id: &str,
+        client_id: Option<&str>,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        // Single entry-point for the close path. Each "allowed to close"
+        // branch falls through to the same `close_and_evict_on_err` tail so
+        // the error-cleanup contract lives in one place.
+        //
+        // Mirror `assert_lease_holder`'s anonymous-caller policy: when
+        // `enforce_anonymous_lease` is on, reject anonymous callers with
+        // `LeaseRequired` so the close path can't bypass
+        // `XIAOO_ENFORCE_LEASE`.
+        let Some(client_id) = client_id.filter(|s| !s.is_empty()) else {
+            if self.anonymous_lease_enforced() {
+                return Err(SessionServiceError::LeaseRequired {
+                    session_id: session_id.to_string(),
+                });
+            }
+            // Anonymous callers allowed under gradual rollout; fall through
+            // to the close without a holder check.
+            return self.close_and_evict_on_err(session_id).await;
+        };
+        // Daemon-internal principals bypass the holder check; the close path
+        // still drops the lease below so a phantom entry doesn't outlive the
+        // session.
+        if is_daemon_principal(client_id) {
+            tracing::debug!(
+                session_id = %session_id,
+                client_id = %client_id,
+                "force_close_session_with_lease: daemon-internal principal bypasses holder check"
+            );
+        } else {
+            // Read-only holder check (`check_holder`): the close path
+            // removes the lease unconditionally below, so we don't want the
+            // stale-takeover side effect of `check_or_takeover_holder`
+            // rewriting the lease just before we drop it.
+            if let Err(failure) = self
+                .sessions_lease
+                .check_holder(session_id, Some(client_id))
+                .await
+            {
+                return Err(SessionServiceError::from_lease_check_failure(
+                    session_id, failure,
+                ));
+            }
+        }
+        self.close_and_evict_on_err(session_id).await
+    }
+
+    async fn heartbeat_session(
+        &self,
+        request: SessionHeartbeatRequest,
+    ) -> Result<(), SessionServiceError> {
+        let Some(client_id) = request.client_id.as_deref().filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+        // `sessions_lease.heartbeat` returns a `LeaseCheckFailure` whose
+        // `stale` field was computed under the table mutex at the moment of
+        // rejection — no re-computation here, so the TUI sees the same
+        // staleness verdict the daemon used to reject the heartbeat.
+        // `client_pid` / `client_hostname` are only consumed on the
+        // auto-re-acquire path (daemon restart wiped the table), so holder
+        // identity is preserved instead of silently dropping to `None`.
+        match self
+            .sessions_lease
+            .heartbeat(
+                &request.session_id,
+                client_id,
+                request.client_pid,
+                request.client_hostname,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(failure) => Err(SessionServiceError::from_lease_check_failure(
+                request.session_id,
+                failure,
+            )),
+        }
+    }
+
+    async fn detach_session(
+        &self,
+        request: SessionDetachRequest,
+    ) -> Result<(), SessionServiceError> {
+        if let Some(client_id) = request.client_id.as_deref().filter(|s| !s.is_empty()) {
+            self.sessions_lease
+                .detach(&request.session_id, client_id)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn assert_lease_holder(
+        &self,
+        session_id: &str,
+        client_id: Option<&str>,
+    ) -> Result<(), SessionServiceError> {
+        // Anonymous callers bypass the lease check by default (gradual
+        // rollout). When `enforce_anonymous_lease` is on (via
+        // `XIAOO_ENFORCE_LEASE`), reject with `LeaseRequired`.
+        let Some(client_id) = client_id.filter(|s| !s.is_empty()) else {
+            return if self.anonymous_lease_enforced() {
+                Err(SessionServiceError::LeaseRequired {
+                    session_id: session_id.to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        // Daemon-internal principals bypass the holder check explicitly; the
+        // bypass is logged so audits can distinguish it from the legacy
+        // anonymous bypass.
+        if is_daemon_principal(client_id) {
+            tracing::debug!(
+                session_id = %session_id,
+                client_id = %client_id,
+                "assert_lease_holder: daemon-internal principal bypasses holder check"
+            );
+            return Ok(());
+        }
+        match self
+            .sessions_lease
+            .check_or_takeover_holder(session_id, Some(client_id))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(failure) => Err(SessionServiceError::from_lease_check_failure(
+                session_id, failure,
+            )),
+        }
     }
 
     async fn checkpoint_runtime(
@@ -1488,11 +2041,33 @@ impl From<SessionStoreError> for SessionServiceError {
     }
 }
 
+/// Wall time in ms for non-lease session timestamps (`updated_at_ms`,
+/// `created_at_ms`, `deleted_at_ms`, `completed_at_ms`).
+///
+/// **Fail-OPEN**: returns `0` when the wall clock is before `UNIX_EPOCH`
+/// (broken RTC / pre-NTP boot). Acceptable for these timestamps because the
+/// lease acquire uses the fail-CLOSED
+/// [`crate::gateway::session_lease::current_time_ms`] (which rejects on clock
+/// skew) — by the time we stamp `created_at_ms` here the clock is already
+/// known-good, and the reaper skips `Closed` records so a `0` timestamp
+/// never causes a false reap.
+///
+/// Delegates to the canonical fail-closed
+/// [`crate::gateway::session_lease::current_time_ms`] for the actual clock
+/// read (single source of truth); the only difference is the error policy —
+/// this wrapper logs a `warn!` and returns `0` (non-fatal), the lease code
+/// bubbles `Err(ClockSkew)` to the caller. The lease table MUST NOT use this
+/// helper (single-writer enforcement must degrade to "reject all acquires",
+/// not "treat every lease as fresh").
 fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+    crate::gateway::session_lease::current_time_ms().unwrap_or_else(|error| {
+        tracing::warn!(
+            error = %error,
+            "wall clock is before UNIX_EPOCH while stamping a non-lease session \
+             timestamp; using 0 (lease enforcement itself stays fail-closed)"
+        );
+        0
+    })
 }
 
 /// Build a `*.Session.lifecycle.<stage>` hook point id. Consolidates the
@@ -1503,25 +2078,17 @@ fn session_lifecycle_hook_point(agent_id: &str, stage: &str) -> HookPointId {
 }
 
 /// Stamp each `SendPrompt` action with `chain_depth = emitting_turn_depth
-/// + 1` (overwriting any plugin-supplied value) and drop it once the
-/// stamped value **reaches** `max_depth` (i.e., `next_depth >= max_depth`
-/// — exclusive upper bound). Other action kinds pass through unchanged.
-/// Pure (no I/O) so it can be unit-tested directly.
+/// + 1` (overwriting any plugin-supplied value) and drop it once the stamped
+/// value **reaches** `max_depth` (i.e., `next_depth >= max_depth` — exclusive
+/// upper bound). Other action kinds pass through unchanged. Pure (no I/O).
 ///
-/// Semantics: `max_depth = N` permits a chain of **N turns total** — the
-/// user-initiated turn at depth `0` plus `N - 1` `send_prompt`-triggered
-/// turns at depths `1..=N-1`. A `send_prompt` that would start a turn at
-/// depth `N` is dropped, so the chain stops after the depth-`N-1` turn.
-/// The cap is the cross-turn `send_prompt` chain depth limit (default
-/// `DEFAULT_MAX_PROMPT_CHAIN_DEPTH` = 128, configurable via
-/// `[hooker].max_prompt_chain_depth`).
-///
-/// Called by [`CoreBackedSessionService::fire_session_state_hook_and_collect_actions`]
-/// after the hookers return, before the actions are forwarded to the TUI.
-/// The stamped `chain_depth` rides along on the forwarded action so the
-/// TUI can relay it back via `RuntimeTurnRequest.chain_depth`, letting the
-/// daemon track the resulting turn's depth and re-enforce the cap when
-/// that turn ends.
+/// Semantics: `max_depth = N` permits N turns total — the user-initiated
+/// turn (depth `0`) plus `N - 1` `send_prompt`-triggered turns (depths
+/// `1..=N-1`). The cap defaults to `DEFAULT_MAX_PROMPT_CHAIN_DEPTH` (128),
+/// configurable via `[hooker].max_prompt_chain_depth`. The stamped
+/// `chain_depth` rides along on the forwarded action so the TUI can relay
+/// it back via `RuntimeTurnRequest.chain_depth`, letting the daemon track
+/// the resulting turn's depth and re-enforce the cap when that turn ends.
 fn stamp_and_cap_send_prompt_actions(
     actions: Vec<HookAction>,
     emitting_turn_depth: usize,
@@ -1560,7 +2127,8 @@ mod tests {
     use crate::backend::GatewayBackendConfig;
     use crate::gateway::{
         AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionInput, SessionInputKind,
-        SessionRuntimeBindings, SessionRuntimeDescriptor,
+        SessionRuntimeBindings, SessionRuntimeDescriptor, ORPHAN_SESSION_THRESHOLD_MS,
+        STALE_LEASE_THRESHOLD_MS,
     };
     use agent_contracts::backend::BackendLifecycleState;
     use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -1568,6 +2136,8 @@ mod tests {
     use agent_types::context::{FeatureFlags, TokenBudgetConfig};
     use agent_types::hook::HookerRegistryConfig;
     use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
+    use hook::framework::HookerRegistryBuilderImpl;
+    use hook::HookerRegistryBuilder;
     use llm_client::LlmProviderWrapper;
     use serde_json::{json, Value};
     use tempfile::TempDir;
@@ -1831,6 +2401,9 @@ mod tests {
             llm: None,
             workspace: None,
             skills: None,
+            client_id: None,
+            client_pid: None,
+            client_hostname: None,
         }
     }
 
@@ -1882,6 +2455,10 @@ mod tests {
                 llm: None,
                 workspace: None,
                 skills: None,
+
+                client_id: None,
+                client_pid: None,
+                client_hostname: None,
             })
             .await
             .expect("open session");
@@ -2010,6 +2587,10 @@ mod tests {
                 llm: None,
                 workspace: None,
                 skills: None,
+
+                client_id: None,
+                client_pid: None,
+                client_hostname: None,
             })
             .await
             .expect("open imported session");
@@ -2080,6 +2661,10 @@ mod tests {
                 llm: None,
                 workspace: None,
                 skills: None,
+
+                client_id: None,
+                client_pid: None,
+                client_hostname: None,
             })
             .await
             .expect("open session");
@@ -2123,6 +2708,10 @@ mod tests {
                 llm: None,
                 workspace: None,
                 skills: None,
+
+                client_id: None,
+                client_pid: None,
+                client_hostname: None,
             })
             .await
             .expect("open session");
@@ -2172,6 +2761,8 @@ mod tests {
                 runtime_id: "runtime-pause".to_string(),
                 metadata: Value::Null,
                 name: Some("pause".to_string()),
+
+                client_id: None,
             })
             .await
             .expect("pause runtime");
@@ -2217,6 +2808,8 @@ mod tests {
                 runtime_id: "runtime-resume".to_string(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await
             .expect("pause runtime");
@@ -2225,6 +2818,8 @@ mod tests {
             .resume_runtime(RuntimeResumeRequest {
                 runtime_id: "runtime-resume".to_string(),
                 metadata: Value::Null,
+
+                client_id: None,
             })
             .await
             .expect("resume runtime");
@@ -2392,6 +2987,8 @@ mod tests {
                 runtime_id: "runtime-1".to_string(),
                 metadata: json!({"kind": "test"}),
                 name: Some("checkpoint-a".to_string()),
+
+                client_id: None,
             })
             .await
             .expect("checkpoint runtime");
@@ -2427,6 +3024,8 @@ mod tests {
                 runtime_id: "runtime-1".to_string(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await
             .expect("checkpoint runtime");
@@ -2475,6 +3074,8 @@ mod tests {
                 runtime_id: parent.session_id.clone(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await
             .expect("checkpoint runtime");
@@ -2541,6 +3142,8 @@ mod tests {
                 runtime_id: "runtime-running".to_string(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await;
 
@@ -2580,6 +3183,8 @@ mod tests {
                 runtime_id: "runtime-source".to_string(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await
             .expect("checkpoint runtime");
@@ -2634,6 +3239,8 @@ mod tests {
                 runtime_id: parent.session_id.clone(),
                 metadata: Value::Null,
                 name: None,
+
+                client_id: None,
             })
             .await
             .expect("checkpoint runtime");
@@ -2700,5 +3307,587 @@ mod tests {
             "checkpoint should have been removed during close, got: {:?}",
             result
         );
+    }
+
+    // ---------- Orphan-session reaper tests ----------
+    //
+    // Tests construct `CoreBackedSessionService` directly (via `use super::*`)
+    // so they can call the private `run_reaper_sweep` and inspect the inner
+    // lease table. The four reaper conditions (Closed / live lease / recent
+    // activity / Running handle) are exercised independently; the Running-
+    // handle case needs the full bootstrap and is covered by the close-cascade
+    // test above (the `mark_closing` race-fix by the handle's own re-queue
+    // path in `next_runnable_turn`).
+
+    /// Build a `StubRuntimeResolver` whose `backend_options` points
+    /// `temp_root` at `workspace`, so the stub backend writes into the
+    /// test's tempdir instead of the real workspace. Centralises the
+    /// `{ workspace_root, backend_options, llm_provider }` triple that was
+    /// copy-pasted across every reaper / checkpoint / fork test.
+    fn make_stub_resolver(workspace: &std::path::Path) -> Arc<StubRuntimeResolver> {
+        Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.to_path_buf(),
+            backend_options: json!({"temp_root": workspace.to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        })
+    }
+
+    fn make_reaper_service(
+        store: Arc<InMemorySessionStore>,
+        resolver: Arc<StubRuntimeResolver>,
+    ) -> Arc<CoreBackedSessionService> {
+        let hooker_registry = HookerRegistryBuilderImpl::new()
+            .with_config(HookerRegistryConfig::default())
+            .build()
+            .expect("build hooker registry");
+        // The chain-depth cap is irrelevant to the reaper; reuse the
+        // documented default of 128 (see `DEFAULT_MAX_PROMPT_CHAIN_DEPTH`
+        // in `agent_types::hook`).
+        Arc::new(CoreBackedSessionService::new(
+            store,
+            resolver,
+            Arc::from(hooker_registry),
+            Arc::new(BackendManager::new()),
+            128,
+        ))
+    }
+
+    /// Save a session record with no leased backend, controlling
+    /// `updated_at_ms` directly. Used by the reaper tests so we can
+    /// backdate activity past `ORPHAN_SESSION_THRESHOLD_MS` without waiting.
+    async fn save_orphan_candidate(
+        store: &Arc<InMemorySessionStore>,
+        resolver: &Arc<StubRuntimeResolver>,
+        session_id: &str,
+        status: SessionLifecycleStatus,
+        updated_at_ms: u64,
+    ) -> SessionRecord {
+        let request = test_open_request(session_id);
+        let runtime_input = SessionRuntimeBuildInput::from_open_request(&request);
+        let resolved = resolver
+            .resolve(&runtime_input, None)
+            .await
+            .expect("resolve runtime");
+        let mut session = CoreBackedSessionService::build_session_for_open(&request, &resolved);
+        session.status = status;
+        session.backend_instance = None;
+        session.updated_at_ms = updated_at_ms;
+        store.save(session.clone()).await;
+        session
+    }
+
+    #[tokio::test]
+    async fn reaper_skips_session_with_live_lease() {
+        // The reaper's most important skip: a stale `updated_at_ms` is NOT
+        // enough to reap when a live lease exists. Without this guard the
+        // reaper would close a session out from under its current holder.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+
+        save_orphan_candidate(
+            &store,
+            &resolver,
+            "rt-held",
+            SessionLifecycleStatus::Idle,
+            crate::gateway::session_lease::current_time_ms()
+                .expect("wall clock")
+                .saturating_sub(ORPHAN_SESSION_THRESHOLD_MS + 1_000),
+        )
+        .await;
+        let _ = service
+            .sessions_lease
+            .acquire("rt-held", "client-a", Some(1), None)
+            .await;
+
+        service
+            .run_reaper_sweep(ORPHAN_SESSION_THRESHOLD_MS, STALE_LEASE_THRESHOLD_MS)
+            .await
+            .expect("reaper sweep");
+
+        assert!(
+            store.load("rt-held").await.is_some(),
+            "session with a live lease must not be reaped"
+        );
+        let snapshot = service.sessions_lease.snapshot().await;
+        assert!(snapshot.iter().any(|(sid, _, _)| sid == "rt-held"));
+    }
+
+    #[tokio::test]
+    async fn reaper_closes_stale_orphan_session() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+
+        // No lease, stale activity, Idle status — the textbook orphan.
+        save_orphan_candidate(
+            &store,
+            &resolver,
+            "rt-orphan",
+            SessionLifecycleStatus::Idle,
+            crate::gateway::session_lease::current_time_ms()
+                .expect("wall clock")
+                .saturating_sub(ORPHAN_SESSION_THRESHOLD_MS + 1_000),
+        )
+        .await;
+
+        service
+            .run_reaper_sweep(ORPHAN_SESSION_THRESHOLD_MS, STALE_LEASE_THRESHOLD_MS)
+            .await
+            .expect("reaper sweep");
+
+        // The reaper force-closes the session: store record deleted, lease
+        // table entry (if any) also removed.
+        assert!(
+            store.load("rt-orphan").await.is_none(),
+            "stale orphan session must be reaped and removed from the store"
+        );
+        let snapshot = service.sessions_lease.snapshot().await;
+        assert!(
+            snapshot.iter().all(|(sid, _, _)| sid != "rt-orphan"),
+            "lease table entry for reaped session must be cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_force_closes_session_with_real_idle_handle() {
+        // Exercises the reaper's step-4 `Some(handle)` branch (an in-memory
+        // Idle handle → `mark_closing`, not skipped). Opens a REAL session
+        // so a `SessionHandle` + actor exist, then backdates the store
+        // record past the orphan threshold so the reaper force-closes it
+        // through the full `force_close_session_inner` success path.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+
+        // Anonymous open (client_id = None) bypasses lease acquire, so the
+        // reaper's step-2 "live lease" check won't skip — we want to reach
+        // step 4.
+        service
+            .open_session(test_open_request("rt-idle-handle"))
+            .await
+            .expect("open session");
+
+        // Verify the in-memory handle exists so we know step 4's `Some(handle)`
+        // branch is exercised (not the no-handle `unwrap_or(true)` path).
+        assert!(
+            service
+                .sessions_handler
+                .lock()
+                .await
+                .get("rt-idle-handle")
+                .is_some(),
+            "handle must exist before reaping (else the test exercises the wrong branch)"
+        );
+
+        // Backdate the store record past the orphan threshold. `open_session`
+        // stamped `updated_at_ms = now`; overwrite it so the reaper's step 3
+        // (stale activity) doesn't skip.
+        {
+            let mut record = store
+                .load("rt-idle-handle")
+                .await
+                .expect("record present after open");
+            record.updated_at_ms = crate::gateway::session_lease::current_time_ms()
+                .expect("wall clock")
+                .saturating_sub(ORPHAN_SESSION_THRESHOLD_MS + 1_000);
+            store.save(record).await;
+        }
+
+        service
+            .run_reaper_sweep(ORPHAN_SESSION_THRESHOLD_MS, STALE_LEASE_THRESHOLD_MS)
+            .await
+            .expect("reaper sweep");
+
+        // The reaper force-closed the session: store record deleted and
+        // in-memory handle evicted (step 6 of `force_close_session_inner`).
+        assert!(
+            store.load("rt-idle-handle").await.is_none(),
+            "session with a real Idle handle + stale activity must be reaped"
+        );
+        assert!(
+            service
+                .sessions_handler
+                .lock()
+                .await
+                .get("rt-idle-handle")
+                .is_none(),
+            "in-memory handle must be evicted after reaping"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_evicts_artifacts_when_close_fails_on_missing_record() {
+        // Error-path cleanup: when `force_close_session_inner` returns `Err`
+        // (here: `SessionNotFound` because the store record was deleted
+        // between `list_all()` snapshot and `reap_one_record`), the reaper
+        // calls `evict_session_artifacts` so the session is not bricked.
+        //
+        // We drive `reap_one_record` directly with a stale snapshot of a
+        // record whose store entry has already been deleted, simulating a
+        // concurrent close.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+
+        // Save a stale orphan candidate and capture its snapshot.
+        let record = save_orphan_candidate(
+            &store,
+            &resolver,
+            "rt-missing",
+            SessionLifecycleStatus::Idle,
+            crate::gateway::session_lease::current_time_ms()
+                .expect("wall clock")
+                .saturating_sub(ORPHAN_SESSION_THRESHOLD_MS + 1_000),
+        )
+        .await;
+
+        // Simulate a concurrent close that deleted the store record BETWEEN
+        // the reaper's `list_all()` snapshot and `reap_one_record`. Now
+        // `force_close_session_inner` → `close_self_record` →
+        // `session_store.load` returns None → `SessionNotFound`.
+        store.delete("rt-missing").await;
+
+        // Drive `reap_one_record` directly with the stale snapshot. The reaper
+        // must NOT panic; the error path calls `evict_session_artifacts`
+        // (idempotent on absent keys) so the store stays clean.
+        let now = crate::gateway::session_lease::current_time_ms().expect("wall clock");
+        service
+            .reap_one_record(
+                &record,
+                now,
+                &[],
+                ORPHAN_SESSION_THRESHOLD_MS,
+                STALE_LEASE_THRESHOLD_MS,
+            )
+            .await;
+
+        // Store must remain clean (the record was already deleted; evict is
+        // a no-op on absent keys — proving the error path is exercised
+        // without panicking or leaving partial state).
+        assert!(
+            store.load("rt-missing").await.is_none(),
+            "store must remain clean after error-path cleanup"
+        );
+        // No handle was ever created, so none should linger.
+        assert!(
+            service
+                .sessions_handler
+                .lock()
+                .await
+                .get("rt-missing")
+                .is_none(),
+            "no handle should linger after error-path cleanup"
+        );
+    }
+
+    // ---------- SessionControlPlane lease trait methods ----------
+    //
+    // `assert_lease_holder` / `heartbeat_session` / `detach_session` /
+    // `force_close_session_with_lease` implement the single-writer guarantee
+    // at the service layer. `session_lease::tests` covers the underlying
+    // `SessionLeaseTable`; these pin the service-layer contract (including
+    // the `enforce_anonymous_lease` toggle and the daemon-principal bypass).
+
+    async fn make_lease_service() -> Arc<CoreBackedSessionService> {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        make_reaper_service(store, resolver)
+    }
+
+    #[tokio::test]
+    async fn assert_lease_holder_allows_anonymous_when_enforce_off() {
+        // Default: `enforce_anonymous_lease = false`. An anonymous caller
+        // (`None`) bypasses the check, matching the gradual-rollout policy.
+        let service = make_lease_service().await;
+        assert!(!service.anonymous_lease_enforced());
+        assert!(
+            service
+                .assert_lease_holder("any-session", None)
+                .await
+                .is_ok(),
+            "anonymous caller bypasses the holder check when enforcement is off"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_lease_holder_rejects_anonymous_when_enforce_on() {
+        let service = make_lease_service().await;
+        service.set_enforce_anonymous_lease(true);
+        assert!(service.anonymous_lease_enforced());
+        let err = service
+            .assert_lease_holder("any-session", None)
+            .await
+            .expect_err("anonymous caller rejected when enforcement is on");
+        assert!(
+            matches!(err, SessionServiceError::LeaseRequired { .. }),
+            "expected LeaseRequired, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_session_allows_anonymous_when_enforce_off() {
+        // Default: `enforce_anonymous_lease = false`. An anonymous caller
+        // (`client_id: None`) bypasses the lease acquire entirely, matching
+        // the gradual-rollout policy in `assert_lease_holder`. Build the
+        // service with a workspace that outlives the call (unlike
+        // `make_lease_service`, whose `TempDir` is dropped on return) so
+        // `open_session_inner` can actually lease the backend.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store, resolver);
+        assert!(!service.anonymous_lease_enforced());
+        let request = test_open_request("rt-open-anon-off");
+        service
+            .open_session(request)
+            .await
+            .expect("anonymous caller may open when enforcement is off");
+    }
+
+    #[tokio::test]
+    async fn open_session_rejects_anonymous_when_enforce_on() {
+        // Regression: before the anonymous-policy guard was added to
+        // `open_session`, an anonymous HTTP caller could open/resume a
+        // session without acquiring the lease even when
+        // `XIAOO_ENFORCE_LEASE=on`, because the `if let Some(client_id)`
+        // skip path had no `enforce_anonymous_lease` check (unlike
+        // `assert_lease_holder` / `force_close_session_with_lease`). The
+        // guard now rejects such callers with `LeaseRequired` before the
+        // bypass, so `open_session` is no longer the one mutating RPC that
+        // defeats strict single-writer enforcement.
+        let service = make_lease_service().await;
+        service.set_enforce_anonymous_lease(true);
+        assert!(service.anonymous_lease_enforced());
+        let request = test_open_request("rt-open-anon-on");
+        let err = service
+            .open_session(request)
+            .await
+            .expect_err("anonymous caller rejected on open when enforcement is on");
+        assert!(
+            matches!(err, SessionServiceError::LeaseRequired { .. }),
+            "expected LeaseRequired, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_lease_holder_rejects_non_holder() {
+        // client-a acquires; client-b's check must fail with
+        // `SessionAttachedByAnotherClient` (the structured-error contract
+        // the TUI parses in `parse_session_attached_body`).
+        let service = make_lease_service().await;
+        let _ = service
+            .sessions_lease
+            .acquire("s1", "client-a", Some(1), None)
+            .await;
+        let err = service
+            .assert_lease_holder("s1", Some("client-b"))
+            .await
+            .expect_err("non-holder must be rejected");
+        match err {
+            SessionServiceError::SessionAttachedByAnotherClient {
+                holder_client_id,
+                stale: false,
+                ..
+            } => assert_eq!(holder_client_id, "client-a"),
+            other => panic!("expected SessionAttachedByAnotherClient, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assert_lease_holder_bypasses_for_daemon_principal() {
+        // Daemon-internal principals (cron / hook / channel) bypass the
+        // holder check explicitly so post-turn hooks and scheduled jobs
+        // don't fail when an HTTP client holds the lease.
+        let service = make_lease_service().await;
+        let _ = service
+            .sessions_lease
+            .acquire("s1", "client-a", Some(1), None)
+            .await;
+        let cron_id = crate::gateway::daemon_cron_principal();
+        assert!(
+            service
+                .assert_lease_holder("s1", Some(&cron_id))
+                .await
+                .is_ok(),
+            "daemon:cron must bypass the holder check"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_session_no_op_for_anonymous_caller() {
+        // Default enforcement is off → anonymous caller is allowed through
+        // without touching the lease table.
+        let service = make_lease_service().await;
+        assert!(service
+            .heartbeat_session(crate::gateway::SessionHeartbeatRequest {
+                session_id: "s1".to_string(),
+                client_id: None,
+                client_pid: None,
+                client_hostname: None,
+            })
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn force_close_session_with_lease_rejects_non_holder() {
+        // client-a holds; client-b's close is rejected with
+        // `SessionAttachedByAnotherClient` *before* the session store is even
+        // touched, so no real session record is needed — only the lease.
+        let service = make_lease_service().await;
+        let _ = service
+            .sessions_lease
+            .acquire("rt-held", "client-a", Some(1), None)
+            .await;
+        let err = service
+            .force_close_session_with_lease("rt-held", Some("client-b"))
+            .await
+            .expect_err("non-holder close must be rejected");
+        assert!(
+            matches!(
+                err,
+                SessionServiceError::SessionAttachedByAnotherClient { .. }
+            ),
+            "expected SessionAttachedByAnotherClient, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_close_session_with_lease_daemon_principal_bypasses_check() {
+        // daemon:cron can close a session even though client-a holds the
+        // lease (matches the trait-level bypass used by cron / hook / channel
+        // ingress). The session's lease is dropped as part of the close.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+        let _ = service
+            .sessions_lease
+            .acquire("rt-daemon", "client-a", Some(1), None)
+            .await;
+        save_orphan_candidate(
+            &store,
+            &resolver,
+            "rt-daemon",
+            SessionLifecycleStatus::Idle,
+            crate::gateway::session_lease::current_time_ms().expect("wall clock"),
+        )
+        .await;
+        let cron_id = crate::gateway::daemon_cron_principal();
+        let _ = service
+            .force_close_session_with_lease("rt-daemon", Some(&cron_id))
+            .await
+            .expect("daemon principal close succeeds");
+        assert!(store.load("rt-daemon").await.is_none());
+    }
+
+    // ---------- SessionActor pop-time lease rejection ----------
+    //
+    // `next_runnable_turn` is the LAST line of defense for single-writer: the
+    // router-level `assert_lease_holder` is the first, but a turn queued
+    // before a takeover waits in `pending_turns` while the lease changes
+    // hands; the actor's pop-time check rejects it with
+    // `SessionAttachedByAnotherClient` instead of starting it mid-stream.
+
+    async fn open_real_session_with_client(
+        service: &Arc<CoreBackedSessionService>,
+        session_id: &str,
+        client_id: &str,
+    ) {
+        let request = SessionOpenRequest {
+            session_id: session_id.to_string(),
+            conversation_id: format!("{session_id}-conversation"),
+            sender_id: "test-user".to_string(),
+            entry: GatewayEntryContext::tui(None),
+            channel: None,
+            channel_instance_id: None,
+            llm: None,
+            workspace: None,
+            skills: None,
+            client_id: Some(client_id.to_string()),
+            client_pid: Some(1),
+            client_hostname: Some("test-host".to_string()),
+        };
+        service
+            .open_session(request)
+            .await
+            .expect("open session with client_id");
+    }
+
+    #[tokio::test]
+    async fn pop_time_check_rejects_turn_after_lease_takeover() {
+        // Open a real session with client-a (→ client-a holds the lease, an
+        // actor is running); backdate client-a's lease so client-b can take
+        // it over via the stale path; then submit a turn whose `client_id`
+        // is still `client-a`. The actor's pop-time check must reject with
+        // `SessionAttachedByAnotherClient` instead of running the turn.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+        open_real_session_with_client(&service, "rt-pop", "client-a").await;
+
+        // Backdate client-a's lease and let client-b take it over via the
+        // stale path (live leases are never overridden).
+        service
+            .sessions_lease
+            .set_last_heartbeat_ms_for_test(
+                "rt-pop",
+                crate::gateway::session_lease::current_time_ms()
+                    .expect("wall clock")
+                    .saturating_sub(STALE_LEASE_THRESHOLD_MS + 1_000),
+            )
+            .await;
+        let _ = service
+            .sessions_lease
+            .acquire("rt-pop", "client-b", Some(2), None)
+            .await;
+
+        // Submit a turn on behalf of client-a (the now-stale holder). The
+        // actor should reject it before invoking the LLM.
+        let mut request = test_open_request("rt-pop").into_turn_request("hi".to_string());
+        request.client_id = Some("client-a".to_string());
+        let result = service.run_turn(request).await;
+        match result {
+            Err(SessionServiceError::SessionAttachedByAnotherClient {
+                holder_client_id, ..
+            }) => assert_eq!(holder_client_id, "client-b"),
+            other => {
+                panic!("expected SessionAttachedByAnotherClient (holder=client-b), got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pop_time_check_allows_daemon_principal_when_http_client_holds_lease() {
+        // A daemon-internal principal (cron / hook / channel) bypasses the
+        // pop-time check even when an HTTP client holds the lease. Without
+        // this bypass, a scheduled cron job firing while a TUI is attached
+        // would be rejected and the cron would never run.
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = make_stub_resolver(workspace.path());
+        let service = make_reaper_service(store.clone(), resolver.clone());
+        open_real_session_with_client(&service, "rt-cron", "client-a").await;
+
+        // Daemon-internal principal's turn is allowed through (the LLM may
+        // or may not succeed depending on stub config, but the actor must
+        // NOT reject it with SessionAttachedByAnotherClient — that's the
+        // contract being tested).
+        let mut request = test_open_request("rt-cron").into_turn_request("hi".to_string());
+        request.client_id = Some(crate::gateway::daemon_cron_principal());
+        let result = service.run_turn(request).await;
+        // We only assert the rejection contract here — the turn itself may
+        // fail for stub-backend reasons (e.g. LLM provider config). The
+        // important invariant: it's NOT `SessionAttachedByAnotherClient`.
+        if let Err(SessionServiceError::SessionAttachedByAnotherClient { .. }) = result {
+            panic!("daemon:cron turn must NOT be rejected by the pop-time holder check");
+        }
     }
 }

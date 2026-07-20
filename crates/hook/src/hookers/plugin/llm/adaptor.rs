@@ -20,7 +20,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
-use super::super::run_plugin_subprocess;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 /// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,

@@ -34,6 +34,17 @@ pub struct SessionOpenRequest {
     /// Ordered daemon-host search roots whose immediate child directories are skills.
     #[serde(default)]
     pub skills: Option<Vec<PathBuf>>,
+    /// Process identifier used by the daemon's attach-lease table to enforce
+    /// single-writer per session. `None` for legacy / anonymous callers
+    /// (bypass during rollout).
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Display-only client PID / hostname, surfaced to the TUI on "who holds
+    /// the lease?" queries. Not authoritative.
+    #[serde(default)]
+    pub client_pid: Option<u32>,
+    #[serde(default)]
+    pub client_hostname: Option<String>,
 }
 
 impl SessionOpenRequest {
@@ -57,6 +68,7 @@ impl SessionOpenRequest {
             skills: self.skills,
             command_context: None,
             chain_depth: 0,
+            client_id: self.client_id,
         }
     }
 }
@@ -65,12 +77,39 @@ impl SessionOpenRequest {
 pub struct SessionCloseRequest {
     #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCancelRequest {
     #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionHeartbeatRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
+    pub session_id: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
+    /// Display-only client PID / hostname, stamped onto the lease on
+    /// auto-re-acquire (daemon restart wiped the table) so holder identity
+    /// survives.
+    #[serde(default)]
+    pub client_pid: Option<u32>,
+    #[serde(default)]
+    pub client_hostname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionDetachRequest {
+    #[serde(rename = "runtime_id", alias = "session_id")]
+    pub session_id: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -96,12 +135,16 @@ pub struct SessionInteractionRequest {
     #[serde(rename = "runtime_id", alias = "session_id")]
     pub session_id: String,
     pub response: InteractionResponse,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 pub type RuntimeOpenRequest = SessionOpenRequest;
 pub type RuntimeCloseRequest = SessionCloseRequest;
 pub type RuntimeCancelRequest = SessionCancelRequest;
 pub type RuntimeInteractionRequest = SessionInteractionRequest;
+pub type RuntimeHeartbeatRequest = SessionHeartbeatRequest;
+pub type RuntimeDetachRequest = SessionDetachRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -152,6 +195,9 @@ mod tests {
             llm: None,
             workspace: None,
             skills: None,
+            client_id: None,
+            client_pid: None,
+            client_hostname: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");
