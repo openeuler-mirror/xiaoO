@@ -17,6 +17,21 @@ use tool::{load_tool_sources_with_services, ToolRuntimeServices};
 use super::runtime::GatewayRuntime;
 use xiaoo_core::spawn_prefetch;
 
+/// User-facing system message (with glyph) shown when the daemon reports the
+/// session has been taken over by another TUI process.
+pub(crate) fn session_taken_over_notice_glyph() -> String {
+    "⚠️ This session has been taken over by another xiaoo process. Submissions are disabled until you switch (use /sessions) or create a new session (use /remote)."
+        .to_string()
+}
+
+/// Plain-text form of [`session_taken_over_notice_glyph`], used as the local
+/// short-circuit error from [`GatewayRuntime::submit_turn`] when the heartbeat
+/// has already reported the takeover.
+pub(crate) fn session_taken_over_notice_plain() -> String {
+    "This session has been taken over by another xiaoo process; use /sessions or /remote to switch to a different session."
+        .to_string()
+}
+
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/tui_default_system_prompt.txt");
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 
@@ -89,6 +104,13 @@ impl GatewayRuntime {
         command_context: Option<agent_types::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<(), String> {
+        // Refuse the submission locally when the heartbeat has already
+        // reported a takeover — saves a wasted RPC and gives a clearer error
+        // than the daemon's 409. Gated on remote mode so a stale flag from a
+        // prior session can't block local submissions.
+        if self.remote.is_some() && state.session_taken_over {
+            return Err(session_taken_over_notice_plain());
+        }
         if self.remote.is_some() {
             return self
                 .start_remote_turn(
@@ -315,6 +337,9 @@ impl GatewayRuntime {
             llm: None,
             workspace: None,
             skills: None,
+            client_id: Some(state.client_id.clone()),
+            client_pid: Some(std::process::id()),
+            client_hostname: self.client_hostname.clone(),
         })
     }
 
@@ -345,7 +370,35 @@ impl GatewayRuntime {
             skills: None,
             command_context,
             chain_depth,
+            client_id: Some(state.client_id.clone()),
         })
+    }
+}
+
+/// Best-effort hostname for the daemon's lease-holder display. `None` if
+/// unresolved — purely informational.
+pub(crate) fn hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .and_then(trim_non_empty)
+            .or_else(|| std::env::var("HOSTNAME").ok().and_then(trim_non_empty))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("COMPUTERNAME").ok().and_then(trim_non_empty)
+    }
+}
+
+/// Trim whitespace and drop if empty, so a blank source falls through to the
+/// next one.
+fn trim_non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 

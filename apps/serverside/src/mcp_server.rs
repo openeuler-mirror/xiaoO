@@ -411,6 +411,15 @@ async fn run_mcp_turn(
         skills: None,
         command_context: None,
         chain_depth: 0,
+        // MCP server is a daemon-internal caller. It calls
+        // `session_service.run_turn()` directly (not via the HTTP router's
+        // `require_lease_holder`), and the SessionActor's pop-time check
+        // allows anonymous (`None`) callers through, so MCP-initiated turns
+        // run even when `XIAOO_ENFORCE_LEASE=on`. If MCP turns ever need to
+        // be gated by single-writer enforcement, assign a `daemon:mcp`
+        // principal here so the pop-time check bypasses explicitly (matching
+        // cron / hook / channel ingress).
+        client_id: None,
     };
 
     let event_sink = progress.map(|sink| sink as Arc<dyn LoopEventSink>);

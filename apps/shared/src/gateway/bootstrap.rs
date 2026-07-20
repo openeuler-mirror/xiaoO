@@ -15,6 +15,10 @@ pub struct AppDependencies {
     pub session_service: Arc<dyn SessionService>,
     pub session_control_plane: Arc<dyn SessionControlPlane>,
     pub backend_manager: Arc<BackendManager>,
+    /// Handle to the orphan-session reaper (best-effort background task that
+    /// force-closes sessions whose attach lease has been gone for ~2 hours).
+    /// Dropping it does NOT abort the task; `.abort()` or runtime drop stops it.
+    pub reaper_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub struct AppBootstrap;
@@ -107,6 +111,35 @@ impl AppBootstrap {
             Arc::clone(&backend_manager),
             max_prompt_chain_depth,
         ));
+        // Opt-in strict lease enforcement for anonymous callers via
+        // `XIAOO_ENFORCE_LEASE` (truthy: `1` / `true` / `yes` / `on`).
+        // When on, mutating RPCs without `client_id` are rejected with
+        // `LeaseRequired` (HTTP 401). Default off for gradual rollout.
+        let enforce = std::env::var("XIAOO_ENFORCE_LEASE")
+            .ok()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        session_components.set_enforce_anonymous_lease(enforce);
+        // Log the enforcement mode so operators can tell whether anonymous
+        // callers are actually single-writer-guarded.
+        let anonymous_lease_enforced = session_components.anonymous_lease_enforced();
+        tracing::info!(
+            enforce_anonymous_lease = anonymous_lease_enforced,
+            "attach-lease enforcement mode: anonymous callers are {}",
+            if anonymous_lease_enforced {
+                "REJECTED (strict)"
+            } else {
+                "ALLOWED (bypass single-writer for rollout)"
+            }
+        );
+        // Best-effort orphan-session reaper: scans `list_all()` every 10 min
+        // and force-closes sessions whose lease has been gone for ~2 hours.
+        let reaper_handle = Some(session_components.spawn_orphan_reaper());
         runtime_resolver.bind_subagent_control(
             session_components.clone() as Arc<dyn subagent::SubagentControl>,
         );
@@ -116,6 +149,7 @@ impl AppBootstrap {
             session_service,
             session_control_plane,
             backend_manager,
+            reaper_handle,
         })
     }
 }

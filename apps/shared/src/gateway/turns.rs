@@ -160,6 +160,11 @@ pub struct AppTurnRequest {
     /// default 128). Set by the host; plugins cannot influence it directly.
     #[serde(default)]
     pub chain_depth: usize,
+    /// Process identifier propagated from `SessionOpenRequest.client_id`.
+    /// The `SessionActor` uses it to fail-fast queued turns whose holder
+    /// changed after a takeover. `None` for legacy / anonymous callers.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 pub type RuntimeTurnRequest = AppTurnRequest;
@@ -189,6 +194,7 @@ mod tests {
             skills: None,
             command_context: None,
             chain_depth: 0,
+            client_id: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");

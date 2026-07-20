@@ -217,6 +217,12 @@ pub struct AppState {
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
+    /// Per-process ephemeral UUID sent with every remote RPC; used by the
+    /// daemon's attach-lease table to enforce single-writer per session.
+    pub client_id: String,
+    /// Set when the daemon reports this session has been taken over by
+    /// another `client_id`; the TUI then refuses further submissions.
+    pub session_taken_over: bool,
     pub current_snapshot_context: Option<crate::session_snapshot_service::SnapshotContext>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
@@ -258,6 +264,8 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
+            client_id: uuid::Uuid::new_v4().to_string(),
+            session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
@@ -307,6 +315,10 @@ impl AppState {
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
+            // Fresh per-process UUID: sharing a persisted id would let two
+            // TUIs refresh each other's lease and bypass single-writer.
+            client_id: uuid::Uuid::new_v4().to_string(),
+            session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
@@ -338,6 +350,7 @@ impl AppState {
         self.session_messages.clear();
         self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
+        self.session_taken_over = false;
         self.current_snapshot_context = None;
         self.slash = SlashState::default();
         self.reasoning_effort = ReasoningEffort::default();

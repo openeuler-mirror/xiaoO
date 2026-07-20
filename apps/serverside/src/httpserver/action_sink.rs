@@ -3,7 +3,9 @@ use std::sync::Arc;
 use agent_contracts::HookActionSink;
 use agent_types::hook::HookAction;
 use async_trait::async_trait;
-use xiaoo_shared::gateway::{GatewayEntryContext, SessionControlPlane, SessionOpenRequest};
+use xiaoo_shared::gateway::{
+    daemon_hook_principal, GatewayEntryContext, SessionControlPlane, SessionOpenRequest,
+};
 
 /// Daemon-side [`HookActionSink`] that executes plugin-requested actions
 /// against the daemon's own `SessionControlPlane` before forwarding them to
@@ -71,6 +73,9 @@ impl HookActionSink for DaemonHookActionSink {
                 llm: None,
                 workspace: None,
                 skills: None,
+                client_id: Some(daemon_hook_principal(action_name)),
+                client_pid: None,
+                client_hostname: None,
             };
             let should_forward = match self.control_plane.open_session(request).await {
                 Ok(_) => true,

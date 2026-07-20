@@ -1,6 +1,8 @@
 use crate::channels::ChannelMessage;
 use thiserror::Error;
-use xiaoo_shared::gateway::{channel_session_id, AppTurnRequest, GatewayEntryContext, TurnMention};
+use xiaoo_shared::gateway::{
+    channel_session_id, daemon_channel_principal, AppTurnRequest, GatewayEntryContext, TurnMention,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayChannelMention {
@@ -104,6 +106,7 @@ pub fn build_channel_turn_request(message: &GatewayChannelMessage) -> AppTurnReq
         skills: None,
         command_context: None,
         chain_depth: 0,
+        client_id: Some(daemon_channel_principal(&message.channel)),
     }
 }
 
@@ -145,6 +148,11 @@ mod tests {
         );
         assert_eq!(request.channel.as_deref(), Some("feishu"));
         assert_eq!(request.message_id.as_deref(), Some("msg-1"));
+        assert_eq!(
+            request.client_id.as_deref(),
+            Some("daemon:channel:feishu"),
+            "channel-ingress turn must carry a daemon channel principal id"
+        );
         assert_eq!(
             request.channel_identity_prompt.as_deref(),
             Some("<participant_directory />")

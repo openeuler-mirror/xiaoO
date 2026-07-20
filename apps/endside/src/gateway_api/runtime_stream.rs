@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn todo_write_completed_update_updates_right_panel_plan() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         runtime.apply_tool_update(
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn tool_update_preserves_previous_assistant_message() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         state
@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn thinking_stream_updates_active_assistant_message() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         runtime.set_stream_message_thinking_content(&mut state, "checking", true);
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn stream_updates_preserve_user_scroll_lock() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
         state.chat_state.stick_to_bottom = false;
 
@@ -982,7 +982,7 @@ mod tests {
 
     #[test]
     fn stream_updates_keep_existing_bottom_stickiness() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
         state.chat_state.stick_to_bottom = true;
 
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn child_stream_updates_create_subagent_lane_without_touching_root_messages() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         let (tx, rx) = mpsc::unbounded_channel();
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn invalid_spawn_output_does_not_create_subagent_lane() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         runtime.apply_tool_update(
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn completed_spawn_output_creates_subagent_lane_with_metadata() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         runtime.apply_tool_update(
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn tool_update_drops_empty_streaming_placeholder() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         state
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn tool_update_tracks_session_file_changes_by_call_id() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn completed_file_edit_without_running_update_tracks_args_delta() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace dir");
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_tokens() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         state
@@ -1258,7 +1258,7 @@ mod tests {
 
     #[test]
     fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semantics() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         state
@@ -1306,7 +1306,7 @@ mod tests {
 
     #[test]
     fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing() {
-        let mut runtime = GatewayRuntime::new();
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
 
         state

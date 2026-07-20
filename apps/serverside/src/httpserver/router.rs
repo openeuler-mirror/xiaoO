@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
-use xiaoo_shared::gateway::SessionService;
+use xiaoo_shared::gateway::{is_daemon_principal, SessionService};
 
 #[derive(Clone)]
 pub struct GatewayAppState {
@@ -262,6 +262,8 @@ fn create_router_from_state(
             )
             .route("/api/v1/runtimes/cancel", post(handle_session_cancel))
             .route("/api/v1/runtimes/close", post(handle_session_close))
+            .route("/api/v1/runtimes/heartbeat", post(handle_session_heartbeat))
+            .route("/api/v1/runtimes/detach", post(handle_session_detach))
             .route(
                 "/api/v1/runtimes/checkpoint",
                 post(handle_runtime_checkpoint),
@@ -382,10 +384,83 @@ async fn health_check() -> Json<GatewayHealthResponse> {
     })
 }
 
+/// Reject HTTP requests whose `client_id` claims the reserved daemon-internal
+/// prefix (`daemon:`). Daemon-internal callers (cron / hook / channel ingress)
+/// never traverse the HTTP router — they call the trait methods in-process —
+/// so any HTTP request claiming the prefix is a forged attempt to bypass the
+/// lease-holder check. Returns `Ok(())` for absent / non-prefixed ids, or
+/// `Err(400 response)` when the prefix is forged.
+fn reject_forged_daemon_principal(client_id: Option<&str>) -> Result<(), Response> {
+    if let Some(cid) = client_id.filter(|s| is_daemon_principal(s)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(GatewayErrorResponse {
+                error: format!(
+                    "client_id prefix `daemon:` is reserved for daemon-internal callers; \
+                     HTTP clients must not claim it (got `{cid}`)"
+                ),
+            }),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+/// Lease guard shared by mutating RPC handlers. Returns `Ok(())` when the
+/// caller may proceed (current holder, no lease in place, or no control plane
+/// configured — matching the gradual-rollout policy), or `Err(response)` (409
+/// / 401 already mapped via `map_session_error`) on failure. Folds in
+/// [`reject_forged_daemon_principal`] so call sites don't call it separately.
+async fn require_lease_holder(
+    state: &GatewayAppState,
+    session_id: &str,
+    client_id: Option<&str>,
+) -> Result<(), Response> {
+    reject_forged_daemon_principal(client_id)?;
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return Ok(());
+    };
+    control_plane
+        .assert_lease_holder(session_id, client_id)
+        .await
+        .map_err(map_session_error)
+}
+
+/// Re-check the lease inside the spawned turn task and emit an SSE `Error`
+/// event on failure. Returns `Break` when the caller should return (lease no
+/// longer held) or `Continue` to proceed. Between the router-layer check and
+/// the spawned task reaching this point another client could have taken over
+/// the lease — without this re-check the daemon would execute a turn for the
+/// wrong client.
+async fn recheck_lease_or_emit_sse_error(
+    state: &GatewayAppState,
+    tx: &tokio::sync::mpsc::UnboundedSender<SseStreamEvent>,
+    session_id: &str,
+    client_id: Option<&str>,
+) -> std::ops::ControlFlow<()> {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return std::ops::ControlFlow::Continue(());
+    };
+    if let Err(error) = control_plane
+        .assert_lease_holder(session_id, client_id)
+        .await
+    {
+        let _ = tx.send(SseStreamEvent::Error {
+            error: error.to_string(),
+        });
+        return std::ops::ControlFlow::Break(());
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
 async fn handle_session_open(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::gateway::RuntimeOpenRequest>,
 ) -> Response {
+    // Reject forged daemon-internal principals at the HTTP edge.
+    if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
+        return response;
+    }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -414,6 +489,13 @@ async fn stream_session_input(
     session_id: String,
     payload: xiaoo_shared::gateway::RuntimeTurnRequest,
 ) -> Response {
+    // Only the current lease holder may submit turns. Anonymous callers
+    // (no `client_id`) bypass the check unless `XIAOO_ENFORCE_LEASE=on`.
+    if let Err(response) =
+        require_lease_holder(&state, &session_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
     let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
@@ -425,6 +507,16 @@ async fn stream_session_input(
     let conversation_id = payload.conversation_id.clone();
 
     tokio::spawn(async move {
+        // Re-check the lease before the turn starts: another client could
+        // have taken over between the router-layer check and here. The
+        // SessionActor's pending_turns pop-time check is a final defense
+        // for turns queued longer than the lease lifetime.
+        if recheck_lease_or_emit_sse_error(&state, &tx, &session_id, payload.client_id.as_deref())
+            .await
+            .is_break()
+        {
+            return;
+        }
         match session_service
             .run_turn_with_interaction(
                 payload,
@@ -483,6 +575,13 @@ async fn handle_session_interaction(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::gateway::RuntimeInteractionRequest>,
 ) -> Response {
+    // Lease check: only the holder may answer an interaction prompt —
+    // otherwise an interloper could inject decisions into the holder's turn.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.session_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
     if state
         .remote_interactions
         .answer(&payload.session_id, payload.response)
@@ -508,6 +607,14 @@ async fn handle_session_cancel(
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return Json(SseStreamEvent::Cancelled { session_id }).into_response();
     };
+
+    // Lease check: only the current holder may cancel an in-flight turn,
+    // otherwise a non-holder could kill another client's turn mid-stream.
+    if let Err(response) =
+        require_lease_holder(&state, &session_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.resume_session(&session_id).await {
         Ok(None) => (
@@ -535,6 +642,10 @@ async fn handle_session_close(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::gateway::RuntimeCloseRequest>,
 ) -> Response {
+    // Reject forged daemon-internal principals at the HTTP edge.
+    if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
+        return response;
+    }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
             StatusCode::NOT_IMPLEMENTED,
@@ -545,8 +656,68 @@ async fn handle_session_close(
             .into_response();
     };
 
-    match control_plane.force_close_session(&payload.session_id).await {
+    match control_plane
+        .force_close_session_with_lease(&payload.session_id, payload.client_id.as_deref())
+        .await
+    {
         Ok(record) => Json(record).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+/// `POST /api/v1/runtimes/heartbeat` — renew the calling TUI's attach lease.
+/// Returns 204 while the caller is still the holder; 409 with
+/// `SessionAttachedByAnotherClient` body when another TUI has taken over,
+/// signalling the original TUI to surface a takeover notice and stop
+/// submitting.
+async fn handle_session_heartbeat(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeHeartbeatRequest>,
+) -> Response {
+    // Reject forged daemon-internal principals at the HTTP edge.
+    if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
+        return response;
+    }
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.heartbeat_session(payload).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+/// `POST /api/v1/runtimes/detach` — release the calling TUI's attach lease
+/// without destroying the session or its backend (used by exit / `/new` /
+/// `/remote off` so the session stays warm for the next TUI). Idempotent:
+/// returns 204 even when the caller never held the lease.
+async fn handle_session_detach(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::gateway::RuntimeDetachRequest>,
+) -> Response {
+    // Reject forged daemon-internal principals at the HTTP edge.
+    if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
+        return response;
+    }
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match control_plane.detach_session(payload).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -564,6 +735,12 @@ async fn handle_runtime_checkpoint(
         )
             .into_response();
     };
+    // Lease guard: checkpoint mutates session state.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.checkpoint_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -585,6 +762,9 @@ async fn handle_runtime_checkout(
             .into_response();
     };
 
+    // No lease check: `checkout` creates a new child session from a checkpoint
+    // — it doesn't mutate the source session's state, and the returned child
+    // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
@@ -604,6 +784,13 @@ async fn handle_runtime_pause(
         )
             .into_response();
     };
+    // Lease guard: pause evicts the backend; a non-holder pausing would
+    // evict the holder's sandbox out from under it.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.pause_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -624,6 +811,13 @@ async fn handle_runtime_resume(
         )
             .into_response();
     };
+    // Lease guard: resume re-leases a backend — a non-holder could silently
+    // reset the holder's paused session.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.resume_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -644,7 +838,8 @@ async fn handle_runtime_checkpoint_snapshot_delete(
         )
             .into_response();
     };
-
+    // No lease check: keyed by `checkpoint_id`, not `runtime_id` — admin
+    // operation that deletes a remote provider snapshot (e.g. e2b).
     match control_plane.delete_checkpoint_snapshot(payload).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => map_session_error(error),
@@ -664,6 +859,12 @@ async fn handle_runtime_exec(
         )
             .into_response();
     };
+    // Lease guard: exec runs a shell in the sandbox.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.exec_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -700,6 +901,13 @@ async fn handle_runtime_read_file(
         )
             .into_response();
     };
+    // Lease guard: read_file is read-only but gated to keep the policy
+    // uniform ("all sandbox access requires the lease") and prevent snooping.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.read_runtime_file(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -720,6 +928,12 @@ async fn handle_runtime_write_file(
         )
             .into_response();
     };
+    // Lease guard: write_file mutates files in the sandbox.
+    if let Err(response) =
+        require_lease_holder(&state, &payload.runtime_id, payload.client_id.as_deref()).await
+    {
+        return response;
+    }
 
     match control_plane.write_runtime_file(payload).await {
         Ok(result) => Json(result).into_response(),
@@ -741,18 +955,54 @@ fn map_session_error(error: xiaoo_shared::gateway::SessionServiceError) -> Respo
             StatusCode::TOO_MANY_REQUESTS
         }
         xiaoo_shared::gateway::SessionServiceError::SessionClosed { .. } => StatusCode::CONFLICT,
+        xiaoo_shared::gateway::SessionServiceError::SessionAttachedByAnotherClient { .. } => {
+            StatusCode::CONFLICT
+        }
+        // Anonymous caller hit a route with `enforce_anonymous_lease = true`.
+        // 401 (not 403) so the TUI can distinguish "missing client_id" from
+        // "wrong client_id".
+        xiaoo_shared::gateway::SessionServiceError::LeaseRequired { .. } => {
+            StatusCode::UNAUTHORIZED
+        }
+        // Daemon wall clock is before UNIX_EPOCH — fail-closed with 503 so
+        // the TUI retries (transient; NTP will correct it).
+        xiaoo_shared::gateway::SessionServiceError::LeaseClockSkew { .. } => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         xiaoo_shared::gateway::SessionServiceError::UnsupportedCapability { .. } => {
             StatusCode::NOT_IMPLEMENTED
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    (
-        status,
-        Json(GatewayErrorResponse {
-            error: error.to_string(),
+    let body = session_error_body(&error);
+    (status, Json(body)).into_response()
+}
+
+/// Build the JSON response body for a [`SessionServiceError`].
+/// `SessionAttachedByAnotherClient` emits structured holder-identity fields
+/// (so TUIs can read `holder_client_id` / `stale` without parsing a Display
+/// string); other variants fall back to `{"error": "<Display>"}`.
+fn session_error_body(error: &xiaoo_shared::gateway::SessionServiceError) -> serde_json::Value {
+    match error {
+        xiaoo_shared::gateway::SessionServiceError::SessionAttachedByAnotherClient {
+            session_id,
+            holder_client_id,
+            holder_hostname,
+            holder_pid,
+            last_heartbeat_ms,
+            stale,
+        } => serde_json::json!({
+            "error": "session is attached by another client; see structured fields for holder identity",
+            "kind": "session_attached_by_another_client",
+            "session_id": session_id,
+            "holder_client_id": holder_client_id,
+            "holder_hostname": holder_hostname,
+            "holder_pid": holder_pid,
+            "last_heartbeat_ms": last_heartbeat_ms,
+            "stale": stale,
         }),
-    )
-        .into_response()
+        _ => serde_json::json!({ "error": error.to_string() }),
+    }
 }
 
 async fn handle_channel_events(
@@ -879,7 +1129,8 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 mod tests {
     use super::{
         create_router_with_auth, create_router_with_control_plane_and_auth, handle_channel_events,
-        map_session_error, GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig,
+        map_session_error, reject_forged_daemon_principal, GatewayAppState, GatewayErrorResponse,
+        HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
@@ -1535,6 +1786,117 @@ mod tests {
             })
             .status(),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    // ---------- Security: reject_forged_daemon_principal ----------
+
+    #[test]
+    fn reject_forged_daemon_principal_blocks_known_daemon_ids() {
+        // Every daemon-internal principal must be rejected from HTTP.
+        for forged in [
+            xiaoo_shared::gateway::daemon_cron_principal(),
+            xiaoo_shared::gateway::daemon_hook_principal("my-hook"),
+            xiaoo_shared::gateway::daemon_channel_principal("feishu"),
+            "daemon:attacker".to_string(),
+            "daemon:".to_string(),
+        ] {
+            let result = reject_forged_daemon_principal(Some(&forged));
+            assert!(
+                result.is_err(),
+                "HTTP client claiming `{forged}` must be rejected at the router edge"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_forged_daemon_principal_passes_legitimate_client_ids() {
+        assert!(reject_forged_daemon_principal(None).is_ok());
+        assert!(reject_forged_daemon_principal(Some("")).is_ok());
+        assert!(
+            reject_forged_daemon_principal(Some("550e8400-e29b-41d4-a716-446655440000")).is_ok()
+        );
+        // Check is prefix-based, not substring-based.
+        assert!(
+            reject_forged_daemon_principal(Some("user-daemon-test")).is_ok(),
+            "non-prefix match must not be rejected"
+        );
+    }
+
+    // ---------- HTTP lease guard: 409 contract ----------
+
+    /// `SessionControlPlane` stub whose `assert_lease_holder` always rejects
+    /// with `SessionAttachedByAnotherClient`, used to drive the 409 path.
+    struct LeaseRejectingControlPlane;
+
+    #[async_trait]
+    impl SessionControlPlane for LeaseRejectingControlPlane {
+        async fn assert_lease_holder(
+            &self,
+            session_id: &str,
+            _client_id: Option<&str>,
+        ) -> Result<(), SessionServiceError> {
+            Err(SessionServiceError::SessionAttachedByAnotherClient {
+                session_id: session_id.to_string(),
+                holder_client_id: "client-a".to_string(),
+                holder_hostname: "holder-host".to_string(),
+                holder_pid: 12345,
+                last_heartbeat_ms: 67890,
+                stale: false,
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn require_lease_holder_returns_409_with_structured_body() {
+        // Drive the lease guard via /runtimes/exec. The router must surface
+        // `SessionAttachedByAnotherClient` as HTTP 409 with the structured
+        // JSON body the TUI parses.
+        let router = create_router_with_control_plane_and_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Arc::new(LeaseRejectingControlPlane),
+            None,
+            None,
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/runtimes/exec")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"runtime_id":"rt-1","command":"echo hi","client_id":"client-b"}"#,
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "SessionAttachedByAnotherClient must surface as 409 CONFLICT"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("response should be JSON");
+        // Contract markers the TUI parser requires.
+        assert_eq!(
+            payload["kind"], "session_attached_by_another_client",
+            "TUI parser keys off `kind`; missing/wrong kind falls back to raw body"
+        );
+        assert_eq!(payload["holder_client_id"], "client-a");
+        assert_eq!(payload["holder_hostname"], "holder-host");
+        assert_eq!(payload["holder_pid"], 12345);
+        assert_eq!(payload["last_heartbeat_ms"], 67890);
+        assert_eq!(payload["stale"], false);
+        // The `error` field must still be present for generic clients.
+        assert!(
+            payload["error"].is_string() && !payload["error"].as_str().unwrap().is_empty(),
+            "generic clients still get a non-empty `error` summary"
         );
     }
 }

@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -8,14 +9,35 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::gateway::{
-    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeInteractionRequest, RuntimeOpenRequest,
-    RuntimeTurnRequest,
+    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
+    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
 };
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
 
+// TUI-side HTTP timeouts live in `crate::gateway_api::http_timeouts` so the
+// shared crate does not carry TUI-only configuration.
+use crate::gateway_api::http_timeouts::{
+    EXIT_RPC_TIMEOUT, HEARTBEAT_RPC_TIMEOUT, OPEN_RPC_TIMEOUT, POST_JSON_SAFETY_TIMEOUT,
+};
+
 use super::runtime::GatewayRuntime;
+
+/// Outcomes of a periodic `/runtimes/heartbeat` call from the TUI.
+#[derive(Debug)]
+pub enum HeartbeatError {
+    /// Another TUI holds the lease. When `stale == Some(true)` the recorded
+    /// holder is itself presumed dead and the caller may reclaim via
+    /// `open_remote_session_with_record` instead of flagging a takeover.
+    /// `stale` is `None` on parse failure (treated as `Some(false)` so a
+    /// parse regression never widens the reclaim bypass).
+    TakenOver { detail: String, stale: Option<bool> },
+    /// Transient transport failure (network down, daemon restart, 5xx). The
+    /// App ignores these — the next tick retries. A long outage eventually
+    /// resolves as `TakenOver` (lease expired + acquired) or recovery.
+    Network(String),
+}
 
 #[derive(Clone, Debug)]
 pub struct RemoteRuntimeConfig {
@@ -101,6 +123,9 @@ impl GatewayRuntime {
             bearer_token_env,
         });
         self.remote_session_open = false;
+        // New session gets a fresh attach lease; clear any stale takeover
+        // flag so the first submission after `/remote <url>` is not rejected.
+        state.session_taken_over = false;
         state
             .status_panel
             .set_backend(format!("Remote: {base_url}"));
@@ -115,7 +140,7 @@ impl GatewayRuntime {
     ) -> Result<String, String> {
         let base_url = normalize_base_url(&base_url);
         let token = resolve_bearer_token(bearer_token_env.as_deref())?;
-        let client = reqwest::Client::new();
+        let client = self.http_client.clone();
         let mut request = client.get(format!("{base_url}/api/v1/health"));
         if let Some(token) = token.as_ref() {
             request = request.bearer_auth(token);
@@ -135,8 +160,19 @@ impl GatewayRuntime {
     }
 
     pub async fn disconnect_remote(&mut self, state: &mut AppState) -> Result<(), String> {
+        // Detach this TUI's lease before clearing local state, so the daemon
+        // doesn't keep the session "held by us" for the 45 s staleness window
+        // (which would block another TUI's `/sessions` pickup meanwhile).
+        if self.remote.is_some() && self.remote_session_open {
+            let session_id = state.session_id.clone();
+            self.detach_remote_session_bounded(&session_id, "disconnect_remote")
+                .await;
+        }
         self.remote = None;
         self.remote_session_open = false;
+        // Takeover flag belongs to the abandoned remote session; clear it so
+        // local submissions work after `/remote off`.
+        state.session_taken_over = false;
         state
             .status_panel
             .set_backend(sandbox_display_name(&state.agent_config.operation_backend));
@@ -156,7 +192,7 @@ impl GatewayRuntime {
             Ok(token) => token,
             Err(error) => return format!("Backend: Remote {}\nHealth: {error}", remote.base_url),
         };
-        let client = reqwest::Client::new();
+        let client = self.http_client.clone();
         let mut request = client.get(format!("{}/api/v1/health", remote.base_url));
         if let Some(token) = token.as_ref() {
             request = request.bearer_auth(token);
@@ -189,7 +225,8 @@ impl GatewayRuntime {
             .clone()
             .ok_or_else(|| "remote backend is not configured".to_string())?;
         let token = resolve_bearer_token(remote.bearer_token_env.as_deref())?;
-        let client = reqwest::Client::new();
+        let client = self.http_client.clone();
+        let client_id = self.client_id.clone();
 
         if !self.remote_session_open {
             let open_request = self.remote_session_open_request(state)?;
@@ -244,6 +281,7 @@ impl GatewayRuntime {
                 client,
                 remote,
                 token,
+                client_id,
                 turn_request,
                 updates_tx,
                 interaction_rx,
@@ -254,36 +292,160 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    pub async fn close_remote_session(&mut self, session_id: &str) {
+    /// `POST /api/v1/runtimes/close` — destroy the session on the daemon.
+    /// Returns `Err` on transport / non-2xx so the caller can surface the
+    /// failure instead of falsely reporting success. `remote_session_open`
+    /// is only cleared on success: on failure the daemon may still hold the
+    /// session (and our lease on it), so a subsequent `disconnect_remote`
+    /// still needs to detach.
+    pub async fn close_remote_session(&mut self, session_id: &str) -> Result<(), String> {
         let Some(remote) = self.remote.clone() else {
-            return;
+            return Ok(());
         };
         let Ok(token) = resolve_bearer_token(remote.bearer_token_env.as_deref()) else {
-            return;
+            return Ok(());
         };
-        let client = reqwest::Client::new();
-        let _ = post_json(
+        let client = self.http_client.clone();
+        let result = post_json(
             &client,
             &remote,
             token.as_deref(),
             "/api/v1/runtimes/close",
             &RuntimeCloseRequest {
                 session_id: session_id.to_string(),
+                client_id: Some(self.client_id.clone()),
             },
         )
         .await;
-        self.remote_session_open = false;
+        if result.is_ok() {
+            self.remote_session_open = false;
+        }
+        result
+    }
+
+    /// `POST /api/v1/runtimes/detach` — release this TUI's attach lease on
+    /// `session_id` without destroying the session or its backend (used by
+    /// exit / `/new` / `/remote off`). Awaits the HTTP call so callers'
+    /// `tokio::time::timeout` wrappers bound the wait; errors surface as
+    /// `String` but never block shutdown (callers log and continue).
+    pub async fn detach_remote_session(&self, session_id: &str) -> Result<(), String> {
+        let Some(remote) = self.remote.clone() else {
+            return Ok(());
+        };
+        let Ok(token) = resolve_bearer_token(remote.bearer_token_env.as_deref()) else {
+            return Ok(());
+        };
+        let client = self.http_client.clone();
+        let session_id = session_id.to_string();
+        post_json(
+            &client,
+            &remote,
+            token.as_deref(),
+            "/api/v1/runtimes/detach",
+            &RuntimeDetachRequest {
+                session_id,
+                client_id: Some(self.client_id.clone()),
+            },
+        )
+        .await
+    }
+
+    /// Detach bounded by [`EXIT_RPC_TIMEOUT`] so an unreachable daemon cannot
+    /// freeze the TUI event loop. Errors are logged (with `context` to identify
+    /// the caller path) and swallowed — every caller treats detach as
+    /// best-effort.
+    pub(crate) async fn detach_remote_session_bounded(&self, session_id: &str, context: &str) {
+        match tokio::time::timeout(EXIT_RPC_TIMEOUT, self.detach_remote_session(session_id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, context = %context, "remote session detach failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    context = %context,
+                    timeout = ?EXIT_RPC_TIMEOUT,
+                    "remote session detach timed out"
+                );
+            }
+        }
+    }
+
+    /// `POST /api/v1/runtimes/heartbeat` — renew this TUI's attach lease,
+    /// called every 15 s by the App's event loop. Returns `Ok(())` while the
+    /// caller is still the holder, or `Err(TakenOver)` when the daemon reports
+    /// another TUI holds the lease (the App then sets
+    /// `state.session_taken_over = true` and refuses further submissions).
+    pub async fn heartbeat_remote_session(&self, session_id: &str) -> Result<(), HeartbeatError> {
+        let Some(remote) = self.remote.as_ref() else {
+            return Ok(());
+        };
+        let token = resolve_bearer_token(remote.bearer_token_env.as_deref())
+            .map_err(|error| HeartbeatError::Network(error))?;
+        let client = self.http_client.clone();
+        let url = format!("{}/api/v1/runtimes/heartbeat", remote.base_url);
+        let mut request = client.post(url).json(&RuntimeHeartbeatRequest {
+            session_id: session_id.to_string(),
+            client_id: Some(self.client_id.clone()),
+            client_pid: Some(std::process::id()),
+            client_hostname: self.client_hostname.clone(),
+        });
+        if let Some(token) = token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        // Bound send by 3 s so an unreachable daemon cannot freeze the
+        // event loop; the 15 s interval leaves a comfortable retry budget.
+        let response = match tokio::time::timeout(HEARTBEAT_RPC_TIMEOUT, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => return Err(HeartbeatError::Network(e.to_string())),
+            Err(_) => {
+                return Err(HeartbeatError::Network(format!(
+                    "heartbeat timed out after {HEARTBEAT_RPC_TIMEOUT:?}"
+                )));
+            }
+        };
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        if response.status() == StatusCode::CONFLICT {
+            // Daemon says another TUI holds the lease. Parse the same 409
+            // body shape as `/runtimes/open` so we can surface `stale`: a
+            // stale lease means the recorded holder is presumed dead and the
+            // caller may reclaim via `open_remote_session_with_record`.
+            let body = read_response_text_bounded(response).await;
+            let parsed = parse_session_attached_body(&body);
+            let detail = format_remote_attached_error(&parsed);
+            tracing::warn!(
+                session_id = %session_id,
+                status = %StatusCode::CONFLICT,
+                stale = ?parsed.stale,
+                holder_client_id = ?parsed.holder_client_id,
+                "heartbeat rejected: session taken over by another client"
+            );
+            return Err(HeartbeatError::TakenOver {
+                detail,
+                stale: parsed.stale,
+            });
+        }
+        let status = response.status();
+        let body = read_response_text_bounded(response).await;
+        tracing::warn!(
+            session_id = %session_id,
+            status = %status,
+            body = %body,
+            "heartbeat failed with non-2xx, non-409 status"
+        );
+        Err(HeartbeatError::Network(format!("HTTP {status} {body}")))
     }
 
     /// Calls `/api/v1/runtimes/open` for the current `state.session_id` and
     /// returns the parsed `SessionRecord`. Idempotent on the daemon side:
-    /// if the session already exists in the daemon's store, the daemon
-    /// returns the existing record (with `loop_state.messages` intact) so
-    /// the TUI can restore the conversation context after a switch.
+    /// if the session already exists, the daemon returns it (with messages
+    /// intact) so the TUI can restore context after a switch. Sets
+    /// `remote_session_open = true` on success.
     ///
-    /// Sets `remote_session_open = true` on success so the next turn skips
-    /// the open call. Errors are surfaced to the caller so they can be
-    /// shown in the transcript instead of being silently swallowed.
+    /// On 409 (`SessionAttachedByAnotherClient`) the error string carries a
+    /// user-readable hint; the caller decides whether to auto-retry (stale
+    /// lease → safe to take over) or surface the error.
     pub async fn open_remote_session_with_record(
         &mut self,
         state: &mut crate::app_state::AppState,
@@ -293,20 +455,32 @@ impl GatewayRuntime {
             .clone()
             .ok_or_else(|| "remote backend is not configured".to_string())?;
         let token = resolve_bearer_token(remote.bearer_token_env.as_deref())?;
-        let client = reqwest::Client::new();
+        let client = self.http_client.clone();
         let open_request = self.remote_session_open_request(state)?;
         let url = format!("{}/api/v1/runtimes/open", remote.base_url);
         let mut request = client.post(url).json(&open_request);
         if let Some(token) = token.as_ref() {
             request = request.bearer_auth(token);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("remote open failed: {error}"))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        // Bound send by 15 s — `open` may involve backend provisioning (e.g.
+        // leasing an e2b sandbox), but must not hang on the OS's 75 s+ TCP
+        // timeout when the daemon is unreachable.
+        let response = match tokio::time::timeout(OPEN_RPC_TIMEOUT, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(format!("remote open failed: {error}")),
+            Err(_) => return Err(format!("remote open timed out after {OPEN_RPC_TIMEOUT:?}")),
+        };
+        let status = response.status();
+        if status == StatusCode::CONFLICT {
+            // Daemon says the session is held by another client. Body shape
+            // matches `map_session_error`'s JSON (`{"error": "<Display>"}`),
+            // which already includes holder/stale info; relay it verbatim.
+            let body = read_response_text_bounded(response).await;
+            let parsed = parse_session_attached_body(&body);
+            return Err(format_remote_attached_error(&parsed));
+        }
+        if !status.is_success() {
+            let body = read_response_text_bounded(response).await;
             return Err(format!("remote open failed: HTTP {status} {body}"));
         }
         let record: crate::gateway::SessionRecord = response
@@ -324,14 +498,18 @@ impl GatewayRuntime {
         let Ok(token) = resolve_bearer_token(remote.bearer_token_env.as_deref()) else {
             return;
         };
+        let client = self.http_client.clone();
+        let client_id = self.client_id.clone();
         tokio::spawn(async move {
-            let client = reqwest::Client::new();
             let _ = post_json(
                 &client,
                 &remote,
                 token.as_deref(),
                 "/api/v1/runtimes/cancel",
-                &RuntimeCancelRequest { session_id },
+                &RuntimeCancelRequest {
+                    session_id,
+                    client_id: Some(client_id),
+                },
             )
             .await;
         });
@@ -341,12 +519,14 @@ impl GatewayRuntime {
         Self::remote_session_open_request_for(
             state,
             self.remote.as_ref().map(|remote| remote.base_url.clone()),
+            self.client_hostname.clone(),
         )
     }
 
     fn remote_session_open_request_for(
         state: &AppState,
         base_url: Option<String>,
+        client_hostname: Option<String>,
     ) -> Result<RuntimeOpenRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
         Ok(RuntimeOpenRequest {
@@ -359,6 +539,9 @@ impl GatewayRuntime {
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
             workspace: None,
             skills: None,
+            client_id: Some(state.client_id.clone()),
+            client_pid: Some(std::process::id()),
+            client_hostname,
         })
     }
 
@@ -392,6 +575,7 @@ impl GatewayRuntime {
             skills: None,
             command_context,
             chain_depth,
+            client_id: Some(state.client_id.clone()),
         })
     }
 }
@@ -400,6 +584,7 @@ async fn run_remote_stream(
     client: reqwest::Client,
     remote: RemoteRuntimeConfig,
     token: Option<String>,
+    client_id: String,
     turn_request: RuntimeTurnRequest,
     updates_tx: UnboundedSender<SessionTurnUpdate>,
     mut interaction_rx: UnboundedReceiver<UserPromptResult>,
@@ -418,7 +603,7 @@ async fn run_remote_stream(
     };
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = read_response_text_bounded(response).await;
         let _ = updates_tx.send(SessionTurnUpdate::Err(format!(
             "remote input failed: HTTP {status} {body}"
         )));
@@ -444,6 +629,7 @@ async fn run_remote_stream(
                         &client,
                         &remote,
                         token.as_deref(),
+                        &client_id,
                         &turn_request.session_id,
                         &updates_tx,
                         &mut interaction_rx,
@@ -465,6 +651,7 @@ async fn handle_remote_event(
     client: &reqwest::Client,
     remote: &RemoteRuntimeConfig,
     token: Option<&str>,
+    client_id: &str,
     session_id: &str,
     updates_tx: &UnboundedSender<SessionTurnUpdate>,
     interaction_rx: &mut UnboundedReceiver<UserPromptResult>,
@@ -541,6 +728,10 @@ async fn handle_remote_event(
                     &RuntimeInteractionRequest {
                         session_id: session_id.to_string(),
                         response,
+                        // Pass through `client_id` so the daemon's lease
+                        // guard on /interaction can attribute the response
+                        // to this TUI's lease.
+                        client_id: Some(client_id.to_string()),
                     },
                 )
                 .await;
@@ -556,17 +747,10 @@ async fn handle_remote_event(
             actions,
             ..
         } => {
-            // IMPORTANT: send HookActions BEFORE Done. The TUI's
-            // `poll_stream_updates` sets `self.stream_rx = None` when it
-            // processes `Done` (to stop draining the now-closed SSE
-            // stream), which immediately exits the receive loop. Any
-            // update sent after `Done` would still be sitting in the
-            // channel buffer but never get drained, so the actions
-            // (create_session / switch_session) would be
-            // silently dropped and the user would never see the session
-            // switch. Sending actions first guarantees they're drained
-            // into `pending_hook_actions` on the same poll tick, then
-            // `Done` cleanly terminates the stream.
+            // Send HookActions BEFORE Done: `poll_stream_updates` clears
+            // `stream_rx` on `Done` and exits the receive loop, so any update
+            // sent after `Done` would sit undrained in the channel buffer
+            // (actions would be silently dropped).
             if !actions.is_empty() {
                 let _ = updates_tx.send(SessionTurnUpdate::HookActions(actions));
             }
@@ -618,13 +802,141 @@ async fn post_json<T: Serialize + ?Sized>(
     if let Some(token) = token {
         request = request.bearer_auth(token);
     }
-    let response = request.send().await.map_err(|error| error.to_string())?;
+    // Safety-net bound so no `post_json` caller can hang on an unreachable
+    // daemon. Tighter caller-side timeouts (e.g. `close_sessions`'s 5 s) fire
+    // first; this is the last line of defense.
+    let response = match tokio::time::timeout(POST_JSON_SAFETY_TIMEOUT, request.send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(error.to_string()),
+        Err(_) => {
+            return Err(format!(
+                "HTTP POST {path} timed out after {POST_JSON_SAFETY_TIMEOUT:?}"
+            ))
+        }
+    };
     if response.status().is_success() {
         Ok(())
     } else {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = read_response_text_bounded(response).await;
         Err(format!("HTTP {status} {body}"))
+    }
+}
+
+/// Parse the 409 body emitted by `map_session_error` for a
+/// `SessionAttachedByAnotherClient` response, extracting the structured
+/// fields (`holder_client_id`, `holder_hostname`, `holder_pid`, `stale`).
+/// If the daemon later evolves the shape, missing fields are reported as
+/// `None` and `format_remote_attached_error` falls back to the raw body —
+/// callers are never blocked by a parse regression.
+struct SessionAttachedInfo {
+    raw: String,
+    holder_client_id: Option<String>,
+    holder_hostname: Option<String>,
+    holder_pid: Option<u32>,
+    stale: Option<bool>,
+}
+
+fn parse_session_attached_body(body: &str) -> SessionAttachedInfo {
+    let raw = body.to_string();
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
+        return SessionAttachedInfo {
+            raw,
+            holder_client_id: None,
+            holder_hostname: None,
+            holder_pid: None,
+            stale: None,
+        };
+    };
+    // `kind` is the contract marker; if absent or mismatched, surface the
+    // raw body rather than guessing.
+    let kind = parsed.get("kind").and_then(|v| v.as_str());
+    if kind != Some("session_attached_by_another_client") {
+        return SessionAttachedInfo {
+            raw,
+            holder_client_id: None,
+            holder_hostname: None,
+            holder_pid: None,
+            stale: None,
+        };
+    }
+    SessionAttachedInfo {
+        raw,
+        holder_client_id: parsed
+            .get("holder_client_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        holder_hostname: parsed
+            .get("holder_hostname")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        holder_pid: parsed
+            .get("holder_pid")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok()),
+        stale: parsed.get("stale").and_then(|v| v.as_bool()),
+    }
+}
+
+fn format_remote_attached_error(info: &SessionAttachedInfo) -> String {
+    // Prefer the full `cid@host (pid=…)` triple, fall back to just `cid`,
+    // fall back to nothing.
+    let holder_line = match (
+        &info.holder_client_id,
+        &info.holder_hostname,
+        info.holder_pid,
+    ) {
+        (Some(cid), Some(host), Some(pid)) => {
+            format!("\n  Held by: {cid}@{host} (pid={pid})")
+        }
+        (Some(cid), _, _) => format!("\n  Held by: {cid}"),
+        _ => String::new(),
+    };
+    // `None` surfaces the raw body so the user sees what the daemon returned
+    // instead of a guessed hint.
+    let stale_hint = match info.stale {
+        Some(true) => "\nThe lease is stale (the holder appears to have crashed). \
+             Re-running /sessions or /remote should succeed automatically."
+            .to_string(),
+        Some(false) => "\nThe lease is still live. Stop the other xiaoo process, \
+             then re-run `/remote <url>` — or switch to a different session \
+             via /sessions."
+            .to_string(),
+        None => format!("\nRaw error: {}", info.raw),
+    };
+    format!(
+        "Remote session is currently attached to another xiaoo process.\
+         {holder_line}{stale_hint}"
+    )
+}
+
+/// Per-call timeout for reading an HTTP response *body* (error / status
+/// line text). `Response::text()` reads the body stream without an upper
+/// bound, so a wedged / malicious daemon could stream bytes forever and
+/// freeze the event loop. Error bodies are small (<1 KiB typically), so 2 s
+/// is a generous upper bound.
+const RESPONSE_BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read a response body as text, bounded by [`RESPONSE_BODY_READ_TIMEOUT`].
+/// Returns the empty string on timeout / read error so callers'
+/// `format!("HTTP {status} {body}")` paths keep working without per-call-site
+/// error plumbing (the `send()` timeout already surfaces the "daemon
+/// unreachable" case; a body-read timeout is best-effort).
+async fn read_response_text_bounded(response: reqwest::Response) -> String {
+    match tokio::time::timeout(RESPONSE_BODY_READ_TIMEOUT, response.text()).await {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "response body read failed; using empty body");
+            String::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout = ?RESPONSE_BODY_READ_TIMEOUT,
+                "response body read timed out; using empty body (daemon may be streaming an unbounded body)"
+            );
+            String::new()
+        }
     }
 }
 
