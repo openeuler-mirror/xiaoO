@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use tokio_util::io::ReaderStream;
 
 use super::backend::{
-    join_url, normalize_backend_path, E2bBackendState, E2bLifecycle, E2bOperationBackend,
-    DEFAULT_API_BASE, DEFAULT_ENVD_PORT, DEFAULT_HOME_DIR, DEFAULT_SHELL, DEFAULT_TEMPLATE_ID,
-    DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS, DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
+    envd_host, join_url, normalize_backend_path, E2bBackendState, E2bLifecycle,
+    E2bOperationBackend, DEFAULT_API_BASE, DEFAULT_DOMAIN, DEFAULT_ENVD_PORT, DEFAULT_HOME_DIR,
+    DEFAULT_SHELL, DEFAULT_TEMPLATE_ID, DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS,
+    DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
 };
 use super::error::E2bFailure;
 use super::exec::E2bExec;
@@ -67,8 +68,10 @@ pub(crate) struct E2bSnapshotResult {
 struct E2bProviderOptions {
     api_key: Option<String>,
     api_key_env: Option<String>,
-    #[serde(alias = "apiBase")]
+    #[serde(alias = "apiBase", alias = "api_url", alias = "apiUrl")]
     api_base: Option<String>,
+    #[serde(alias = "sandbox_domain", alias = "sandboxDomain")]
+    domain: Option<String>,
     #[serde(alias = "templateID", alias = "template")]
     template_id: Option<String>,
     #[serde(alias = "timeout")]
@@ -123,6 +126,12 @@ struct CreateSnapshotResponse {
     names: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct E2bConnectionOptions {
+    api_base: String,
+    sandbox_domain: String,
+}
+
 pub(crate) async fn create_backend(
     input: E2bCreateBackendInput,
 ) -> Result<E2bCreatedBackend, BackendError> {
@@ -130,12 +139,9 @@ pub(crate) async fn create_backend(
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
     let http = new_e2b_http_client()?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let connection = resolve_connection_options(&options)?;
+    let api_base = connection.api_base;
+    let sandbox_domain = connection.sandbox_domain;
     let template_id = options
         .template_id
         .as_deref()
@@ -174,7 +180,12 @@ pub(crate) async fn create_backend(
 
     let now = current_time_ms();
     let backend_id = input.backend_id;
-    let endpoint = provider_handle(&created, envd_port, envd_scheme.as_str());
+    let endpoint = provider_handle(
+        &created,
+        envd_port,
+        envd_scheme.as_str(),
+        sandbox_domain.as_str(),
+    );
     let instance = BackendInstance {
         backend_id: backend_id.clone(),
         provider: BackendProviderKind(E2B_PROVIDER_KIND.to_string()),
@@ -215,6 +226,7 @@ pub(crate) async fn create_backend(
         api_base,
         api_key,
         sandbox_id: created.sandbox_id,
+        sandbox_domain,
         envd_access_token: created.envd_access_token,
         envd_port,
         envd_scheme,
@@ -264,12 +276,7 @@ pub(crate) async fn create_snapshot(
 ) -> Result<E2bSnapshotResult, BackendError> {
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let mut body = Map::new();
@@ -327,12 +334,7 @@ pub(crate) async fn delete_snapshot(input: E2bDeleteSnapshotInput) -> Result<boo
 
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let response = http
@@ -376,12 +378,7 @@ pub(crate) async fn delete_sandbox_by_id(input: E2bDeleteSandboxInput) -> Result
 
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let response = http
@@ -419,6 +416,61 @@ fn parse_options(value: &Value) -> Result<E2bProviderOptions, BackendError> {
     serde_json::from_value(value).map_err(|error| BackendError::InvalidRequest {
         message: format!("invalid e2b backend options: {error}"),
     })
+}
+
+fn resolve_connection_options(
+    options: &E2bProviderOptions,
+) -> Result<E2bConnectionOptions, BackendError> {
+    let api_url_env = std::env::var("E2B_API_URL").ok();
+    let domain_env = std::env::var("E2B_DOMAIN").ok();
+    resolve_connection_options_from_values(options, api_url_env.as_deref(), domain_env.as_deref())
+}
+
+fn resolve_connection_options_from_values(
+    options: &E2bProviderOptions,
+    api_url_env: Option<&str>,
+    domain_env: Option<&str>,
+) -> Result<E2bConnectionOptions, BackendError> {
+    let raw_domain = non_empty(options.domain.as_deref())
+        .or_else(|| non_empty(domain_env))
+        .unwrap_or(DEFAULT_DOMAIN);
+    let sandbox_domain = normalize_sandbox_domain(raw_domain)?;
+    let api_base = non_empty(options.api_base.as_deref())
+        .or_else(|| non_empty(api_url_env))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if sandbox_domain == DEFAULT_DOMAIN {
+                DEFAULT_API_BASE.to_string()
+            } else {
+                format!("https://api.{sandbox_domain}")
+            }
+        });
+
+    Ok(E2bConnectionOptions {
+        api_base,
+        sandbox_domain,
+    })
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_sandbox_domain(value: &str) -> Result<String, BackendError> {
+    let domain = value.trim().trim_end_matches('.');
+    if domain.is_empty()
+        || domain.contains("://")
+        || domain.contains('/')
+        || domain.contains('?')
+        || domain.contains('#')
+    {
+        return Err(BackendError::InvalidRequest {
+            message: format!(
+                "invalid e2b domain {value:?}; expected a hostname without scheme or path"
+            ),
+        });
+    }
+    Ok(domain.to_string())
 }
 
 fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, BackendError> {
@@ -639,12 +691,13 @@ fn provider_handle(
     sandbox: &CreateSandboxResponse,
     envd_port: u16,
     envd_scheme: &str,
+    sandbox_domain: &str,
 ) -> BackendEndpoint {
     BackendEndpoint::ProviderHandle {
         value: json!({
             "provider": "e2b",
             "sandbox_id": sandbox.sandbox_id.clone(),
-            "envd_host": format!("{}-{}.e2b.app", envd_port, sandbox.sandbox_id),
+            "envd_host": envd_host(envd_port, sandbox.sandbox_id.as_str(), sandbox_domain),
             "envd_port": envd_port,
             "envd_scheme": envd_scheme,
         }),
@@ -1044,6 +1097,98 @@ mod tests {
                 .as_deref()
                 .unwrap_or(DEFAULT_TEMPLATE_ID),
             "base"
+        );
+    }
+
+    #[test]
+    fn connection_options_default_to_e2b_cloud() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(&options, None, None)
+            .expect("connection options");
+
+        assert_eq!(connection.api_base, DEFAULT_API_BASE);
+        assert_eq!(connection.sandbox_domain, DEFAULT_DOMAIN);
+    }
+
+    #[test]
+    fn connection_options_derive_api_url_from_self_hosted_domain() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            None,
+            Some(" self-hosted.example.com. "),
+        )
+        .expect("connection options");
+
+        assert_eq!(connection.api_base, "https://api.self-hosted.example.com");
+        assert_eq!(connection.sandbox_domain, "self-hosted.example.com");
+    }
+
+    #[test]
+    fn connection_options_accept_api_url_and_domain_environment_values() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            Some(" https://control.self-hosted.example.com/ "),
+            Some("self-hosted.example.com"),
+        )
+        .expect("connection options");
+
+        assert_eq!(
+            connection.api_base,
+            "https://control.self-hosted.example.com/"
+        );
+        assert_eq!(connection.sandbox_domain, "self-hosted.example.com");
+    }
+
+    #[test]
+    fn explicit_connection_options_override_environment_values() {
+        let options = parse_options(&json!({
+            "apiUrl": "https://control.internal.example.com/",
+            "sandboxDomain": "sandboxes.internal.example.com"
+        }))
+        .expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            Some("https://api.from-env.example.com"),
+            Some("from-env.example.com"),
+        )
+        .expect("connection options");
+
+        assert_eq!(connection.api_base, "https://control.internal.example.com/");
+        assert_eq!(connection.sandbox_domain, "sandboxes.internal.example.com");
+    }
+
+    #[test]
+    fn rejects_domain_with_scheme() {
+        let options = parse_options(&json!({
+            "domain": "https://self-hosted.example.com"
+        }))
+        .expect("options");
+        let error = resolve_connection_options_from_values(&options, None, None)
+            .expect_err("domain with a scheme must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("hostname without scheme or path"));
+    }
+
+    #[test]
+    fn provider_handle_uses_configured_sandbox_domain() {
+        let sandbox = CreateSandboxResponse {
+            sandbox_id: "sandbox-test".to_string(),
+            template_id: "base".to_string(),
+            envd_access_token: Some("access-token".to_string()),
+            traffic_access_token: None,
+        };
+        let endpoint = provider_handle(&sandbox, 49_983, "https", "self-hosted.example.com");
+        let BackendEndpoint::ProviderHandle { value } = endpoint else {
+            panic!("expected provider handle");
+        };
+
+        assert_eq!(
+            value["envd_host"],
+            "49983-sandbox-test.self-hosted.example.com"
         );
     }
 

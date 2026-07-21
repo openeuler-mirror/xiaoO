@@ -167,6 +167,40 @@ temp_root = "/tmp"
 default_shell = "/bin/sh"
 ```
 
+For a self-hosted E2B deployment, configure both the control-plane API URL and
+the sandbox domain. `domain` is a hostname and must not include a URL scheme or
+path.
+
+```toml
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"
+api_base = "https://api.e2b.example.com"
+domain = "e2b.example.com"
+template_id = "base"
+timeout_secs = 3600
+secure = true
+```
+
+The connection settings use the following precedence:
+
+- Control-plane API: `api_base` (also accepts `api_url`) → `E2B_API_URL` →
+  `https://api.<domain>`.
+- Sandbox domain: `domain` → `E2B_DOMAIN` → `e2b.app`.
+
+For example, the equivalent environment-based configuration is:
+
+```bash
+export E2B_API_KEY="<self-hosted-api-key>"
+export E2B_API_URL="https://api.e2b.example.com"
+export E2B_DOMAIN="e2b.example.com"
+```
+
+The daemon process must inherit these environment variables. A shell export
+does not change the environment of an already-running daemon.
+
 Live E2B sandbox limits are shared by all xiaoO processes running as the same
 Unix user. Configure the per-provider-key limit in the separate global sandbox
 configuration file. If the file or field is absent, xiaoO defaults to 20 live
