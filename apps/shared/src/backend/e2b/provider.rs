@@ -731,7 +731,8 @@ async fn install_bootstrap_archive(
     state: &Arc<E2bBackendState>,
     archive: &super::bootstrap::E2bBootstrapArchive,
 ) -> Result<(), OperationError> {
-    use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE};
+    use reqwest::header::ACCEPT;
+    use reqwest::multipart::{Form, Part};
     use reqwest::Method;
 
     let nonce = uuid::Uuid::new_v4().simple().to_string();
@@ -744,13 +745,17 @@ async fn install_bootstrap_archive(
             message: format!("failed to open E2B bootstrap archive: {error}"),
         })?;
     let stream = ReaderStream::new(file);
+    let archive_part =
+        Part::stream_with_length(reqwest::Body::wrap_stream(stream), archive.size_bytes())
+            .file_name(remote_archive.clone());
     let response = state
         .envd_request(Method::POST, "/files")
         .query(&[("path", remote_archive.as_str())])
-        .header(CONTENT_TYPE, "application/octet-stream")
         .header(ACCEPT, "application/json")
-        .header(CONTENT_LENGTH, archive.size_bytes())
-        .body(reqwest::Body::wrap_stream(stream))
+        // Older envd releases only accept multipart uploads. Newer releases
+        // also support application/octet-stream, but multipart remains
+        // compatible with both variants.
+        .multipart(Form::new().part("file", archive_part))
         .send()
         .await
         .map_err(|error| OperationError::Transport {
@@ -765,15 +770,12 @@ async fn install_bootstrap_archive(
         .map_err(|error| OperationError::Transport {
             message: format!("failed to encode E2B bootstrap manifest: {error}"),
         })?;
+    let manifest_part = Part::bytes(manifest).file_name(remote_manifest.clone());
     let response = state
         .envd_request(Method::POST, "/files")
         .query(&[("path", remote_manifest.as_str())])
-        // The envd file endpoint treats the body as file bytes and only
-        // accepts multipart or octet-stream, even when the file itself is JSON.
-        .header(CONTENT_TYPE, "application/octet-stream")
         .header(ACCEPT, "application/json")
-        .header(CONTENT_LENGTH, manifest.len())
-        .body(manifest)
+        .multipart(Form::new().part("file", manifest_part))
         .send()
         .await
         .map_err(|error| OperationError::Transport {
