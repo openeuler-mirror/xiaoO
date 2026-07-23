@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
     }
     run_daemon(
         cli.config,
+        cli.mcp_config,
         cli.host,
         cli.port,
         cli.dashboard_host,
@@ -52,6 +53,7 @@ async fn main() -> Result<()> {
 
 async fn run_daemon(
     config_path: Option<PathBuf>,
+    mcp_config_path: Option<PathBuf>,
     host: String,
     port: u16,
     dashboard_cli_host: Option<String>,
@@ -64,7 +66,13 @@ async fn run_daemon(
             config_path.display()
         )
     })?;
-    let config = DaemonConfig::load_from(&config_path)?;
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = DaemonConfig::load_with_mcp_config(
+        &config_path,
+        mcp_config_path.as_deref(),
+        &workspace,
+        dirs::home_dir().as_deref(),
+    )?;
     let mcp_server_config = config.resolve_mcp_server_config()?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
@@ -421,6 +429,7 @@ fn init_tracing() {
 
 struct Cli {
     config: Option<PathBuf>,
+    mcp_config: Option<PathBuf>,
     host: String,
     port: u16,
     dashboard_host: Option<String>,
@@ -434,6 +443,7 @@ impl Cli {
         I: IntoIterator<Item = String>,
     {
         let mut config = None;
+        let mut mcp_config = None;
         let mut host = "0.0.0.0".to_string();
         let mut port = 18080_u16;
         let mut dashboard_host: Option<String> = None;
@@ -445,6 +455,7 @@ impl Cli {
                 "--help" | "-h" => {
                     return Ok(Self {
                         config,
+                        mcp_config,
                         host,
                         port,
                         dashboard_host,
@@ -456,6 +467,13 @@ impl Cli {
                     index += 1;
                     let value = remaining.get(index).context("missing value for --config")?;
                     config = Some(PathBuf::from(value));
+                }
+                "--mcp-config" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --mcp-config")?;
+                    mcp_config = Some(PathBuf::from(value));
                 }
                 "--host" => {
                     index += 1;
@@ -493,6 +511,7 @@ impl Cli {
         }
         Ok(Self {
             config,
+            mcp_config,
             host,
             port,
             dashboard_host,
@@ -504,7 +523,7 @@ impl Cli {
 
 fn print_usage() {
     eprintln!(
-        "Usage: xiaoo-daemon [--config <path>] [--host <host>] [--port <port>]\n\
+        "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
          \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -537,6 +556,18 @@ mod tests {
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, 18080);
         assert!(!cli.help);
+    }
+
+    #[test]
+    fn parses_daemon_mcp_config_argument() {
+        let cli = Cli::parse(
+            ["--mcp-config", "/tmp/mcp.json"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("daemon should accept --mcp-config");
+
+        assert_eq!(cli.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
     }
 
     #[test]

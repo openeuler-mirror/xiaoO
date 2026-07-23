@@ -1898,10 +1898,12 @@ name = "mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "futures-util",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "toml",

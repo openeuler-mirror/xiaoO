@@ -8,12 +8,17 @@
 mod client;
 mod config;
 mod error;
+mod json_config;
 mod transport;
 mod types;
 
 pub use client::{McpCallResult, McpClient};
 pub use config::{EffectSection, McpSection, McpServerConfig, Transport};
 pub use error::McpError;
+pub use json_config::{
+    load_json_servers, merge_server_configs, parse_mcp_json, resolve_json_config_path,
+    McpConfigError,
+};
 pub use transport::McpTransport;
 pub use types::McpToolDef;
 

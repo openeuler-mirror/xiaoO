@@ -125,6 +125,22 @@ impl FileConfig {
             Err(_) => Self::default(),
         }
     }
+
+    pub fn resolve_mcp_servers(
+        &self,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+        toml_source: &Path,
+    ) -> Result<Vec<mcp::McpServerConfig>, mcp::McpConfigError> {
+        crate::support::config::load_merged_mcp_servers(
+            &self.mcp.servers,
+            explicit_path,
+            workspace,
+            home,
+            toml_source,
+        )
+    }
 }
 
 fn parse_optional_section<T>(

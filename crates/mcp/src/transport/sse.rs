@@ -383,4 +383,6 @@ impl McpTransport for SseTransport {
         })?;
         Ok(())
     }
+
+    async fn set_protocol_version(&self, _protocol_version: &str) {}
 }

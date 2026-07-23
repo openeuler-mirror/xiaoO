@@ -64,6 +64,11 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub mcp: McpSection,
+    /// Effective MCP servers after adding optional `.mcp.json` entries. This
+    /// is runtime-only so TUI config saves never copy imported servers into
+    /// `config.toml`.
+    #[serde(skip)]
+    runtime_mcp_servers: Option<Vec<mcp::McpServerConfig>>,
     /// Preserve daemon- or plugin-owned top-level sections when the TUI
     /// rewrites config.toml after changing providers or other UI settings.
     #[serde(default, flatten)]
@@ -224,6 +229,29 @@ impl Config {
         Ok(())
     }
 
+    pub fn load_runtime_mcp_servers(
+        &mut self,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+        toml_source: &Path,
+    ) -> Result<(), mcp::McpConfigError> {
+        self.runtime_mcp_servers = Some(load_merged_mcp_servers(
+            &self.mcp.servers,
+            explicit_path,
+            workspace,
+            home,
+            toml_source,
+        )?);
+        Ok(())
+    }
+
+    pub fn mcp_servers(&self) -> &[mcp::McpServerConfig] {
+        self.runtime_mcp_servers
+            .as_deref()
+            .unwrap_or(&self.mcp.servers)
+    }
+
     pub fn list_agent_ids(&self) -> Vec<String> {
         self.agents
             .list
@@ -349,6 +377,24 @@ impl Config {
             lsp.disabled_servers.clone(),
         )))
     }
+}
+
+pub(crate) fn load_merged_mcp_servers(
+    toml_servers: &[mcp::McpServerConfig],
+    explicit_path: Option<&Path>,
+    workspace: &Path,
+    home: Option<&Path>,
+    toml_source: &Path,
+) -> Result<Vec<mcp::McpServerConfig>, mcp::McpConfigError> {
+    let json_source = mcp::resolve_json_config_path(explicit_path, workspace, home);
+    let json_servers = mcp::load_json_servers(explicit_path, workspace, home)?;
+    let fallback_json_source = workspace.join(".mcp.json");
+    mcp::merge_server_configs(
+        toml_servers.to_vec(),
+        json_servers,
+        toml_source,
+        json_source.as_deref().unwrap_or(&fallback_json_source),
+    )
 }
 
 pub fn require_tui_bootstrap_config(config: Option<Config>, config_path: &Path) -> Result<Config> {
@@ -663,6 +709,56 @@ kind = "local"
             persisted["server"]["operation_backend"]["kind"].as_str(),
             Some("local")
         );
+    }
+
+    #[test]
+    fn imported_json_mcp_servers_are_runtime_only_when_tui_saves() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let json_path = temp.path().join("mcp.json");
+        std::fs::write(
+            &config_path,
+            r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[[mcp.servers]]
+name = "toml-server"
+transport = "stdio"
+command = "toml-server"
+"#,
+        )
+        .expect("write TOML config");
+        std::fs::write(
+            &json_path,
+            r#"{"mcpServers":{"json-server":{"transport":"stdio","command":"json-server"}}}"#,
+        )
+        .expect("write JSON config");
+
+        let mut config = Config::load_from(&config_path).expect("load TOML config");
+        config
+            .load_runtime_mcp_servers(
+                Some(&json_path),
+                temp.path(),
+                Some(temp.path()),
+                &config_path,
+            )
+            .expect("merge JSON MCP servers");
+        assert_eq!(
+            config
+                .mcp_servers()
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["toml-server", "json-server"]
+        );
+
+        config.llm.model = "gpt-4.1".to_string();
+        config.save_to(&config_path).expect("save TUI config");
+        let persisted = Config::load_from(&config_path).expect("reload TOML config");
+        assert_eq!(persisted.mcp.servers.len(), 1);
+        assert_eq!(persisted.mcp.servers[0].name, "toml-server");
     }
 
     #[test]

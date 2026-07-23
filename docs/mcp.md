@@ -1,12 +1,55 @@
 # MCP (Model Context Protocol) Support
 
-xiaoO can expose tools from any [Model Context Protocol](https://modelcontextprotocol.io/) server to the agent loop. Each connected MCP server's tools become first-class xiaoO tools, named `mcp__{server}__{tool}`, and are dispatched to the server via JSON-RPC over stdio or SSE.
+XiaoO can expose tools from any [Model Context Protocol](https://modelcontextprotocol.io/) server to the agent loop. Each connected MCP server's tools become first-class XiaoO tools, named `mcp__{server}__{tool}`, and are dispatched to the server via JSON-RPC over stdio, legacy SSE, or Streamable HTTP.
 
 This works in **all runtimes**: CLI, TUI, and daemon.
 
 ## Configuration
 
 Add an `[mcp]` section with a `[[mcp.servers]]` array entry per server. Place it in `~/.config/xiaoo/config.toml` (CLI/TUI) or the daemon config file.
+
+XiaoO also imports the standard `mcpServers` object from JSON. The lookup order
+is deterministic:
+
+1. `--mcp-config <path>`
+2. `XIAOO_MCP_CONFIG`
+3. `.mcp.json` in the current workspace
+4. `~/.config/xiaoo/mcp.json`
+
+An explicitly selected file must exist, and any selected file must parse and
+validate successfully. Invalid JSON is a startup error rather than an empty
+configuration. JSON entries are runtime-only: TUI configuration saves never
+copy them into `config.toml`. A server name present in both TOML and JSON is a
+startup error that identifies both source files; entries are never silently
+overwritten.
+
+### Standard `.mcp.json` Streamable HTTP server
+
+The key under `mcpServers` becomes the server name:
+
+```json
+{
+  "mcpServers": {
+    "ram-a": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:18081/mcp",
+      "bearer_token_env": "RAM_A_TOKEN",
+      "agent_id": "xiaoo",
+      "headers": {
+        "X-XiaoO-Client": "ram-a"
+      },
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+`transport` uses the exact string `streamable_http`. Unknown fields, invalid
+HTTP(S) URLs, zero timeouts, malformed headers, and secret-bearing headers
+such as `Authorization` are rejected. `bearer_token_env` stores only the name
+of an environment variable; put the token in that environment variable, never
+in JSON. Fixed `headers` are intended only for non-sensitive routing or client
+metadata.
 
 ### stdio server (local subprocess)
 

@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::config::FileConfig;
@@ -35,6 +35,10 @@ struct Args {
     /// Path to config file (default: ~/.config/xiaoo/config.toml)
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// Path to standard MCP JSON config (default discovery uses .mcp.json)
+    #[arg(long, global = true)]
+    mcp_config: Option<PathBuf>,
 
     /// Show intermediate results (turns, tool calls, tokens)
     #[arg(long, global = true)]
@@ -191,6 +195,7 @@ where
     let args = Args::parse_from(args);
     let debug = args.debug;
     let config_path = FileConfig::resolve_path(args.config.as_deref());
+    let mcp_config_path = args.mcp_config;
 
     if args.version {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -255,6 +260,20 @@ where
             let reasoning_effort = reasoning_effort.unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let default_toml_source = Path::new("config.toml");
+            let mcp_servers = match file_cfg.resolve_mcp_servers(
+                mcp_config_path.as_deref(),
+                &workspace,
+                dirs::home_dir().as_deref(),
+                config_path.as_deref().unwrap_or(default_toml_source),
+            ) {
+                Ok(servers) => servers,
+                Err(error) => {
+                    eprintln!("Failed to load MCP config: {error}");
+                    std::process::exit(1);
+                }
+            };
 
             let config = CliConfig {
                 provider,
@@ -281,11 +300,11 @@ where
                 operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
-                mcp_servers: file_cfg.mcp.servers.clone(),
+                mcp_servers,
             };
 
-let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
-            
+            let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
+
             run_once(
                 config,
                 prompt,
@@ -1482,6 +1501,24 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn parses_explicit_mcp_config_path() {
+        let args = Args::try_parse_from([
+            "xiaoo",
+            "--mcp-config",
+            "/tmp/mcp.json",
+            "run",
+            "--prompt",
+            "hello",
+        ])
+        .expect("CLI should accept --mcp-config");
+
+        assert_eq!(
+            args.mcp_config.as_deref(),
+            Some(std::path::Path::new("/tmp/mcp.json"))
+        );
+    }
 
     #[test]
     fn copy_dir_rejects_destination_inside_source() {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::config::{McpServerConfig, Transport};
 use crate::error::McpError;
-use crate::transport::{McpTransport, SseTransport, StdioTransport};
+use crate::transport::{McpTransport, SseTransport, StdioTransport, StreamableHttpTransport};
 use crate::types::{
     CallToolParams, CallToolResult, ClientInfo, ContentBlock, InitializeParams, InitializeResult,
     ListToolsResult, McpToolDef,
@@ -15,6 +15,7 @@ use crate::types::{
 pub struct McpCallResult {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
+    pub structured_content: Option<Value>,
 }
 
 /// A connected, initialised MCP client. Cloning shares the underlying
@@ -46,6 +47,7 @@ impl McpClient {
                 })?;
                 Arc::new(SseTransport::connect(&url, config.timeout_ms).await?)
             }
+            Transport::StreamableHttp => Arc::new(StreamableHttpTransport::connect(config).await?),
         };
 
         Ok(Self {
@@ -66,7 +68,7 @@ impl McpClient {
     /// Perform the MCP `initialize` handshake.
     pub async fn initialize(&self) -> Result<InitializeResult, McpError> {
         let params = InitializeParams {
-            protocol_version: "2024-11-05".to_string(),
+            protocol_version: self.transport.initialize_protocol_version().to_string(),
             capabilities: serde_json::json!({}),
             client_info: ClientInfo {
                 name: "xiaoo".to_string(),
@@ -81,6 +83,11 @@ impl McpClient {
             .await?;
         let init: InitializeResult =
             serde_json::from_value(result).map_err(|e| McpError::HandshakeFailed(e.to_string()))?;
+        self.transport
+            .validate_negotiated_protocol_version(&init.protocol_version)?;
+        self.transport
+            .set_protocol_version(&init.protocol_version)
+            .await;
         // Notify the server that initialisation is complete.
         self.transport
             .send_notification("notifications/initialized", None)
@@ -129,6 +136,7 @@ impl McpClient {
         Ok(McpCallResult {
             content: call.content,
             is_error: call.is_error,
+            structured_content: call.structured_content,
         })
     }
 }
@@ -158,13 +166,18 @@ impl McpCallResult {
             }
             out.push_str(&segment);
         }
+        if out.is_empty() {
+            if let Some(structured_content) = &self.structured_content {
+                return serde_json::to_string(structured_content).unwrap_or_default();
+            }
+        }
         out
     }
 }
 
 fn base64_decoded_len(s: &str) -> usize {
     let len = s.len();
-    if len == 0 || len % 4 != 0 {
+    if len == 0 || !len.is_multiple_of(4) {
         return len;
     }
     let padding = s.bytes().filter(|b| *b == b'=').count();

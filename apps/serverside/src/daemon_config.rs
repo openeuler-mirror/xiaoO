@@ -376,6 +376,27 @@ impl DaemonConfig {
         Ok(Self { app, config_path })
     }
 
+    pub fn load_with_mcp_config(
+        path: impl AsRef<Path>,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+    ) -> Result<Self> {
+        let mut config = Self::load_from(path)?;
+        let json_source = mcp::resolve_json_config_path(explicit_path, workspace, home);
+        let json_servers = mcp::load_json_servers(explicit_path, workspace, home)
+            .context("failed to load MCP JSON config")?;
+        let fallback_json_source = workspace.join(".mcp.json");
+        config.app.mcp.servers = mcp::merge_server_configs(
+            std::mem::take(&mut config.app.mcp.servers),
+            json_servers,
+            &config.config_path,
+            json_source.as_deref().unwrap_or(&fallback_json_source),
+        )
+        .context("failed to merge MCP server configs")?;
+        Ok(config)
+    }
+
     pub fn resolve_agent(&self) -> Result<ResolvedAgentConfig> {
         let default_agent_id = self
             .app
@@ -1012,6 +1033,51 @@ fn default_retry_delay() -> u64 {
 mod tests {
     use super::{resolve_config_path, AppConfig, DaemonConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn daemon_load_merges_runtime_json_mcp_servers() {
+        let temp = TempDir::new().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let json_path = temp.path().join("mcp.json");
+        std::fs::write(
+            &config_path,
+            r#"
+[llm]
+provider = "openrouter"
+model = "z-ai/glm-5"
+
+[[mcp.servers]]
+name = "toml-server"
+transport = "stdio"
+command = "toml-server"
+"#,
+        )
+        .expect("write TOML config");
+        std::fs::write(
+            &json_path,
+            r#"{"mcpServers":{"json-server":{"transport":"stdio","command":"json-server"}}}"#,
+        )
+        .expect("write JSON config");
+
+        let daemon = DaemonConfig::load_with_mcp_config(
+            &config_path,
+            Some(&json_path),
+            temp.path(),
+            Some(temp.path()),
+        )
+        .expect("load merged daemon config");
+
+        assert_eq!(
+            daemon
+                .app
+                .mcp
+                .servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["toml-server", "json-server"]
+        );
+    }
 
     #[test]
     fn parses_feishu_channel_config() {
