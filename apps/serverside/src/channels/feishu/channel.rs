@@ -1,12 +1,10 @@
 use crate::channels::feishu::client::{build_progress_card_content, FeishuClient};
 use crate::channels::feishu::ingress::handle_event as handle_feishu_event;
-use crate::channels::feishu::types::{
-    FeishuCardRequest, FeishuChatInfo, FeishuConfig, FeishuSendRequest,
-};
+use crate::channels::feishu::types::{FeishuCardRequest, FeishuConfig, FeishuSendRequest};
 use crate::channels::{
     AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelError, ChannelMember,
     ChannelMessage, ChannelMeta, ChannelOutboundAttachment, ChannelProgressUpdate, ChannelResult,
-    ChannelRuntime, ChannelTextFormat,
+    ChannelTextFormat,
 };
 use async_trait::async_trait;
 use axum::http::HeaderMap;
@@ -30,24 +28,6 @@ impl FeishuAdapter {
             config,
         })
     }
-
-    #[allow(dead_code)]
-    pub async fn get_chat_info(&self, chat_id: &str) -> ChannelResult<FeishuChatInfo> {
-        self.client.get_chat_info(chat_id).await
-    }
-}
-
-#[allow(dead_code)]
-pub fn runtime(config: FeishuConfig) -> ChannelResult<ChannelRuntime> {
-    let adapter: std::sync::Arc<dyn ChannelAdapter> =
-        std::sync::Arc::new(FeishuAdapter::new(config)?);
-    Ok(ChannelRuntime {
-        instance_id: "feishu".to_string(),
-        channel_id: "feishu".to_string(),
-        meta: meta(),
-        capabilities: capabilities(),
-        adapter,
-    })
 }
 
 #[async_trait]

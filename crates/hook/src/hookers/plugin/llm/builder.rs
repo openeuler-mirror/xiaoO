@@ -10,7 +10,6 @@ pub(crate) fn build_plugin_llm_hooker(
     parsed_hook_point: ParsedPluginHookPoint,
 ) -> Result<Box<dyn Hooker>, BuildError> {
     let _agent = &parsed_hook_point.agent;
-    let _detail = &parsed_hook_point.detail;
 
     match parsed_hook_point.stage.0.as_str() {
         "pre" | "post" | "error" => {

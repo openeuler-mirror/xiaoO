@@ -20,11 +20,6 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/cron",
         summary: "管理 cron 定时任务：查看、配置、删除、启用/禁用。",
     },
-    // NOTE: /create-skill is not yet implemented; hidden from TUI until ready.
-    // SlashCommandSpec {
-    //     name: "/create-skill",
-    //     summary: "引导 agent 生成一个新的 skill。",
-    // },
     SlashCommandSpec {
         name: "/dir",
         summary: "切换当前工作目录。",

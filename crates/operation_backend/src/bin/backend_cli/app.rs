@@ -334,11 +334,6 @@ fn strip_jsonc_comments(input: &str) -> String {
     output
 }
 
-#[allow(dead_code)]
-fn default_exclude_vcs() -> bool {
-    true
-}
-
 #[derive(Debug, Deserialize)]
 struct BackendConfigFile {
     backend: BackendConfigEntry,

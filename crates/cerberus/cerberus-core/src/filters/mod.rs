@@ -142,11 +142,6 @@ impl ExecutionControl {
 
             let total_redactions = stdout_result.redactions + stderr_result.redactions;
             result.metadata.redactions_applied = total_redactions;
-
-            // Note: termination would need to be handled by caller
-            // if stdout_result.should_terminate || stderr_result.should_terminate {
-            //     // Would need to signal termination
-            // }
         }
         result
     }

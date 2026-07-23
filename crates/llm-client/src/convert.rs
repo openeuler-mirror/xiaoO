@@ -93,7 +93,6 @@ pub(crate) fn llm_request_to_wire(request: &LlmRequest, model: &str) -> WireRequ
         tool_choice,
         response_format,
         route_info: None,
-        extra_fields: None,
     }
 }
 

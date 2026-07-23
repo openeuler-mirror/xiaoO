@@ -164,22 +164,6 @@ pub(crate) fn to_anthropic_output_format(
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn response_format_warning(
-    response_format: &WireResponseFormat,
-) -> Option<crate::wire_types::Warning> {
-    if to_anthropic_output_format(response_format).is_some() {
-        None
-    } else {
-        Some(
-            crate::wire_types::Warning::new("response_format", "anthropic", "ignored")
-                .with_message(
-                    "Anthropic output_config.format is only mapped for json_schema requests.",
-                ),
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

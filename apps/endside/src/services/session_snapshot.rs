@@ -767,11 +767,6 @@ impl From<SavedTodoDisplayStatus> for TodoDisplayStatus {
     }
 }
 
-#[allow(dead_code)]
-fn _snapshot_dir_for_tests(path: &Path) -> PathBuf {
-    path.join(".xiaoo").join("session")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

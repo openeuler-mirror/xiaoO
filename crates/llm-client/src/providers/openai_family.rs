@@ -112,11 +112,6 @@ impl OpenAiFamilyProvider {
         req
     }
 
-    #[allow(dead_code)]
-    fn chat_completions_url(&self) -> String {
-        format!("{}/chat/completions", self.api_base.trim_end_matches('/'))
-    }
-
     async fn try_single_endpoint(
         &self,
         url: &str,

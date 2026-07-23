@@ -174,38 +174,6 @@ impl LspServerInstance {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub async fn change_file(&mut self, path: &Path, text: String) -> Result<(), LspError> {
-        self.ensure_started().await?;
-        let uri = path_to_uri(path);
-        let version = self.open_files.entry(uri.clone()).or_insert(0);
-        *version += 1;
-        let version = *version;
-
-        self.client().notify(
-            "textDocument/didChange",
-            json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": text }]
-            }),
-        );
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub async fn close_file(&mut self, path: &Path) -> Result<(), LspError> {
-        if self.state != State::Running {
-            return Ok(());
-        }
-        let uri = path_to_uri(path);
-        self.open_files.remove(&uri);
-        self.client().notify(
-            "textDocument/didClose",
-            json!({ "textDocument": { "uri": uri } }),
-        );
-        Ok(())
-    }
-
     pub async fn diagnostics(&self, path: &Path) -> Result<Vec<LspDiagnostic>, LspError> {
         let uri = path_to_uri(path);
 

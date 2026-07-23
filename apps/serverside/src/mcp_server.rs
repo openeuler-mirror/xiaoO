@@ -310,6 +310,7 @@ impl AgentOperationRegistry {
         Ok((operation_id, cancellation_token, output))
     }
 
+    #[cfg(test)]
     fn status(&self, operation_id: &str) -> Result<AgentOperationOutput, String> {
         let inner = self
             .inner

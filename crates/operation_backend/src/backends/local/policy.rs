@@ -155,15 +155,6 @@ impl LocalBackendPolicy {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn allow_network(&self) -> bool {
-        match &self.isolation {
-            LocalIsolationConfig::None => true,
-            LocalIsolationConfig::MacosSeatbelt(config) => config.allow_network,
-            LocalIsolationConfig::LinuxBubblewrap(config) => config.allow_network,
-        }
-    }
-
     pub(crate) fn check_read(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
         let Some((isolation_name, config)) = self.active_path_isolation() else {
             return Ok(());
