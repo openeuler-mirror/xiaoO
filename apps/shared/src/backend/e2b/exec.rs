@@ -646,6 +646,7 @@ mod tests {
             api_base: "https://api.e2b.test".to_string(),
             api_key: "test-key".to_string(),
             sandbox_id: "sandbox-test".to_string(),
+            sandbox_domain: "e2b.test".to_string(),
             envd_access_token: None,
             envd_port: 49_983,
             envd_scheme: "https".to_string(),

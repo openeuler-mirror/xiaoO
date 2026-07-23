@@ -21,6 +21,7 @@ use super::path::E2bPathResolver;
 use super::search::E2bSearch;
 
 pub(crate) const E2B_PROVIDER_KIND: &str = "e2b";
+pub(crate) const DEFAULT_DOMAIN: &str = "e2b.app";
 pub(crate) const DEFAULT_API_BASE: &str = "https://api.e2b.app";
 pub(crate) const DEFAULT_TEMPLATE_ID: &str = "base";
 pub(crate) const DEFAULT_ENVD_PORT: u16 = 49983;
@@ -42,6 +43,7 @@ pub(crate) struct E2bBackendState {
     pub(crate) api_base: String,
     pub(crate) api_key: String,
     pub(crate) sandbox_id: String,
+    pub(crate) sandbox_domain: String,
     pub(crate) envd_access_token: Option<String>,
     pub(crate) envd_port: u16,
     pub(crate) envd_scheme: String,
@@ -168,8 +170,14 @@ impl E2bBackendState {
     pub(crate) fn envd_url(&self, path: &str) -> String {
         let path = path.trim_start_matches('/');
         format!(
-            "{}://{}-{}.e2b.app/{}",
-            self.envd_scheme, self.envd_port, self.sandbox_id, path
+            "{}://{}/{}",
+            self.envd_scheme,
+            envd_host(
+                self.envd_port,
+                self.sandbox_id.as_str(),
+                self.sandbox_domain.as_str()
+            ),
+            path
         )
     }
 
@@ -317,6 +325,10 @@ pub(crate) fn join_url(base: &str, path: &str) -> String {
         base.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+pub(crate) fn envd_host(port: u16, sandbox_id: &str, domain: &str) -> String {
+    format!("{port}-{sandbox_id}.{domain}")
 }
 
 pub(crate) async fn http_error(context: &str, response: reqwest::Response) -> OperationError {
