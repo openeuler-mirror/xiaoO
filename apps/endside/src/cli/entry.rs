@@ -18,7 +18,7 @@ use skill::types::config::SkillsConfig;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    LlmRuntimeConfig, SessionDetachRequest, SessionOpenRequest,
+    LlmRuntimeConfig, McpMemoryAutomation, SessionDetachRequest, SessionOpenRequest,
     SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
@@ -301,6 +301,7 @@ where
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
                 mcp_servers,
+                memory_automation: file_cfg.memory_automation.clone(),
             };
 
             let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
@@ -1028,6 +1029,7 @@ if let Some(attach_url) = &attach {
             })
             .collect(),
         mcp_servers: config.mcp_servers.clone(),
+        memory_automation: config.memory_automation.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)
@@ -1044,12 +1046,26 @@ if let Some(attach_url) = &attach {
 
     // 5. Bootstrap gateway
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let memory_automation = match McpMemoryAutomation::connect(
+        config.memory_automation.clone(),
+        &config.mcp_servers,
+    )
+    .await
+    {
+        Ok(automation) => automation,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory automation disabled after CLI startup error");
+            None
+        }
+    };
     let resolver: Arc<dyn SessionRuntimeResolver> =
         Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-    let deps = match AppBootstrap::from_session_components_with_hooks(
+    let deps = match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
         store,
         resolver,
         config.hooker.clone(),
+        Arc::new(xiaoo_shared::backend::BackendManager::new()),
+        memory_automation,
     ) {
         Ok(d) => d,
         Err(e) => {

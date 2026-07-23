@@ -133,6 +133,7 @@ pub struct CliConfig {
     pub skills_config: skill::SkillsConfig,
     pub subagent: std::collections::BTreeMap<String, config::SubagentRoleConfig>,
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+    pub memory_automation: xiaoo_shared::gateway::MemoryAutomationConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +309,7 @@ mod tests {
             operation_backend: None,
             subagent: Default::default(),
             mcp_servers: Vec::new(),
+            memory_automation: Default::default(),
         }
     }
 

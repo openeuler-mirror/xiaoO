@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
+use xiaoo_shared::gateway::MemoryAutomationConfig;
 
 const DEFAULT_AGENT_ID: &str = "main";
 const DEFAULT_LLM_MAX_TOKENS: u32 = 16384;
@@ -64,6 +65,8 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub memory_automation: MemoryAutomationConfig,
     /// Effective MCP servers after adding optional `.mcp.json` entries. This
     /// is runtime-only so TUI config saves never copy imported servers into
     /// `config.toml`.
@@ -598,6 +601,39 @@ mod tests {
         config.llm.provider = "anthropic".to_string();
 
         assert_eq!(resolve_context_window(&config), Some(200_000));
+    }
+
+    #[test]
+    fn parses_memory_automation_config() {
+        let config: Config = toml::from_str(
+            r#"
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 3
+recall_token_budget = 128
+context_messages = 2
+queue_path = "/tmp/xiaoo-memory-queue.jsonl"
+queue_capacity = 32
+max_retries = 4
+retry_backoff_ms = 50
+allowed_agent_roles = ["main", "researcher"]
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(config.memory_automation.enabled);
+        assert_eq!(config.memory_automation.server, "ram-a");
+        assert_eq!(config.memory_automation.recall_top_k, 3);
+        assert_eq!(config.memory_automation.recall_token_budget, 128);
+        assert_eq!(config.memory_automation.context_messages, 2);
+        assert_eq!(config.memory_automation.queue_capacity, 32);
+        assert_eq!(config.memory_automation.max_retries, 4);
+        assert_eq!(config.memory_automation.retry_backoff_ms, 50);
+        assert_eq!(
+            config.memory_automation.allowed_agent_roles,
+            vec!["main".to_string(), "researcher".to_string()]
+        );
     }
 
     #[test]

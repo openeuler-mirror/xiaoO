@@ -322,6 +322,7 @@ impl GatewayRuntime {
                 })
                 .collect(),
             mcp_servers: state.agent_config.mcp_servers().to_vec(),
+            memory_automation: state.agent_config.memory_automation.clone(),
         })
     }
 

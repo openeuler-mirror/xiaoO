@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
     AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, SessionControlPlane, SessionOpenRequest, SessionRecord,
-    SessionRuntimeBindings, SessionStore,
+    HostedSessionRuntimeResolver, McpMemoryAutomation, SessionControlPlane, SessionOpenRequest,
+    SessionRecord, SessionRuntimeBindings, SessionStore,
 };
 use crate::interaction_prompt::UserPromptResult;
 
@@ -126,13 +126,26 @@ impl SessionGateway {
             };
 
             let hooker_config = runtime_config.hooker.clone();
+            let memory_automation = match McpMemoryAutomation::connect(
+                runtime_config.memory_automation.clone(),
+                &runtime_config.mcp_servers,
+            )
+            .await
+            {
+                Ok(automation) => automation,
+                Err(error) => {
+                    tracing::warn!(error = %error, "memory automation disabled after startup error");
+                    None
+                }
+            };
             let resolver = Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
             let dependencies =
-                match AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+                match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
                     session_store,
                     resolver,
                     hooker_config,
                     backend_manager,
+                    memory_automation,
                 ) {
                     Ok(dependencies) => dependencies,
                     Err(error) => {

@@ -96,6 +96,22 @@ impl AppBootstrap {
         hooker_config: HookerRegistryConfig,
         backend_manager: Arc<BackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
+        Self::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            session_store,
+            runtime_resolver,
+            hooker_config,
+            backend_manager,
+            None,
+        )
+    }
+
+    pub fn from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+        session_store: Arc<dyn SessionStore>,
+        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+        hooker_config: HookerRegistryConfig,
+        backend_manager: Arc<BackendManager>,
+        memory_automation: Option<Arc<dyn crate::gateway::TurnMemoryAutomation>>,
+    ) -> Result<AppDependencies, AppBootstrapError> {
         // Extract the cross-turn `send_prompt` chain depth cap before
         // `hooker_config` is consumed by the registry builder. The cap is
         // enforced by `CoreBackedSessionService::fire_session_state_hook_and_collect_actions`,
@@ -110,6 +126,7 @@ impl AppBootstrap {
             Arc::from(hooker_registry),
             Arc::clone(&backend_manager),
             max_prompt_chain_depth,
+            memory_automation,
         ));
         // Opt-in strict lease enforcement for anonymous callers via
         // `XIAOO_ENFORCE_LEASE` (truthy: `1` / `true` / `yes` / `on`).

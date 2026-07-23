@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_shared::backend::BackendManager;
-use xiaoo_shared::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
+use xiaoo_shared::gateway::{
+    AppBootstrap, InMemorySessionStore, McpMemoryAutomation, SessionStore,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,6 +82,18 @@ async fn run_daemon(
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let backend_manager = Arc::new(BackendManager::new());
+    let memory_automation = match McpMemoryAutomation::connect(
+        config.app.memory_automation.clone(),
+        &config.app.mcp.servers,
+    )
+    .await
+    {
+        Ok(automation) => automation,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory automation disabled after startup error");
+            None
+        }
+    };
     // Start the cross-process signal handler so backends owned by this
     // daemon that another process has marked for eviction get evicted
     // immediately upon receiving SIGUSR1.
@@ -89,12 +103,14 @@ async fn run_daemon(
     tokio::spawn(async move {
         handler_handle.await.ok();
     });
-    let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        session_store.clone(),
-        resolver,
-        hooker_config,
-        backend_manager.clone(),
-    )?;
+    let app =
+        AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            session_store.clone(),
+            resolver,
+            hooker_config,
+            backend_manager.clone(),
+            memory_automation,
+        )?;
     let interaction_timeout_secs = config.interaction_timeout_secs();
     let session_service = app.session_service.clone();
     let session_control_plane = app.session_control_plane.clone();

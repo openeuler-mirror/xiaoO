@@ -4,6 +4,9 @@ pub mod channel_interaction;
 pub mod decrypted_api_keys;
 mod e2b_runtime;
 pub mod hosted_runtime_resolver;
+pub mod memory_automation;
+#[cfg(test)]
+mod memory_automation_test;
 pub mod pending_interaction;
 pub mod permission_backend;
 pub mod progress_updates;
@@ -36,6 +39,7 @@ pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
+pub use memory_automation::{McpMemoryAutomation, MemoryAutomationConfig, TurnMemoryAutomation};
 pub use progress_updates::ChannelProgressRelayHandle;
 pub use session_base::{
     channel_session_id, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest,

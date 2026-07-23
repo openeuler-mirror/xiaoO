@@ -4,6 +4,29 @@ XiaoO can expose tools from any [Model Context Protocol](https://modelcontextpro
 
 This works in **all runtimes**: CLI, TUI, and daemon.
 
+## Opt-in long-term memory automation
+
+Set `[memory_automation] enabled = true` and select an existing `[[mcp.servers]]`
+entry with `server = "ram-a"`. The selected server must provide both
+`memory_search` and `memory_ingest`. Recall is appended as bounded
+`<untrusted_long_term_memory>` system context; it never modifies the user
+message. Ingest is queued durably and MCP failures only produce degraded logs,
+never a failed completed turn. Use `allowed_agent_roles` to limit automation.
+
+```toml
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 5
+recall_token_budget = 512
+context_messages = 4
+queue_path = "memory-queue.jsonl"
+queue_capacity = 256
+max_retries = 5
+retry_backoff_ms = 250
+allowed_agent_roles = ["main"]
+```
+
 ## Configuration
 
 Add an `[mcp]` section with a `[[mcp.servers]]` array entry per server. Place it in `~/.config/xiaoo/config.toml` (CLI/TUI) or the daemon config file.
