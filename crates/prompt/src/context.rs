@@ -77,7 +77,6 @@ mod tests {
     use agent_llm::ChatMessageExt;
 
     #[test]
-    #[ignore]
     fn collect_prompt_context_lifts_instruction_snippets_out_of_memory_section() {
         let input = PromptBuildInput {
             system_prompt: "system".to_string(),

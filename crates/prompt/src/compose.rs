@@ -313,7 +313,6 @@ mod tests {
     use agent_types::ChatMessage;
 
     #[test]
-    #[ignore]
     fn channel_prompt_keeps_existing_rule_sections() {
         let prompt = compose_channel_system_prompt(ChannelPromptSections {
             memory_prompt: "<channel_memory>memo</channel_memory>",
@@ -330,7 +329,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn channel_prompt_output_matches_expected_template() {
         let prompt = compose_channel_system_prompt(ChannelPromptSections {
             memory_prompt: "<channel_memory>memo</channel_memory>",
@@ -353,7 +351,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn generic_system_text_keeps_workspace_prompt_separate_and_skips_history_and_tools() {
         let context = PromptContext {
             environment: EnvironmentInfo {

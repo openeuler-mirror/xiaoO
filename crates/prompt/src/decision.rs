@@ -100,7 +100,6 @@ mod tests {
     use agent_llm::ChatMessageExt;
 
     #[test]
-    #[ignore]
     fn chooses_auto_tool_mode_for_new_user_turn_with_visible_tools() {
         let messages = vec![ChatMessage::user("search docs")];
 
@@ -113,7 +112,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn treats_tool_result_message_as_integration_turn() {
         let messages = vec![ChatMessage {
             role: MessageRole::Tool,
@@ -134,7 +132,7 @@ mod tests {
 
         assert_eq!(decision.state, PromptState::AfterToolResult);
         assert_eq!(decision.action, PromptAction::IntegrateToolResults);
-        assert_eq!(decision.tool_mode, ToolMode::None);
-        assert!(matches!(decision.tool_choice, ToolChoice::None));
+        assert_eq!(decision.tool_mode, ToolMode::Auto);
+        assert!(matches!(decision.tool_choice, ToolChoice::Auto));
     }
 }
