@@ -230,9 +230,8 @@ impl App {
             }
         }
         // If the user interrupted the runtime (Ctrl+C / SIGINT / SIGTERM),
-        // persist the session so it can be resumed later. This mirrors the
-        // `/save` command but derives the name automatically as
-        // `{date}-{topic}` (date to the second, topic = first prompt summary).
+        // persist the session to its rolling automatic slot. Manual
+        // checkpoints are never written by this shutdown path.
         if self.state.quit_via_interrupt {
             let record = self.gateway.session_snapshot(&self.state.session_id).await;
             match crate::session_snapshot_service::autosave_on_interrupt(&self.state, record) {
