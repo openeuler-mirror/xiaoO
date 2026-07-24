@@ -675,7 +675,7 @@ def main():
             audit_decision_str = f"Deny({len(deny_entries)})+Allow({len(allow_entries)})"
         elif allow_entries:
             audit_decision_str = f"Allow({len(allow_entries)})"
-        elif reason == FAIL_REASON_LLM_SELF_DENY:
+        elif reason == FAIL_REASON_LLM_DENY:
             audit_decision_str = "N/A (LLM未调用工具)"
         else:
             audit_decision_str = "N/A"
