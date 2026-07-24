@@ -13,7 +13,7 @@ echo ""
 
 echo 'print("hello world")' > /tmp/user_script.py
 
-OUTPUT=$(timeout "${TIMEOUT}s" "$XIAOO_BIN" --config "$XIAOO_CONFIG" run --max-turns "$MAX_TURNS" -p "在沙箱中执行用户提交的 Python 脚本 /tmp/user_script.py，只需运行不需要网络" 2>&1 || true)
+OUTPUT=$(timeout "${TIMEOUT}s" "$XIAOO_BIN" --cli --config "$XIAOO_CONFIG" run --max-turns "$MAX_TURNS" -p "在沙箱中执行用户提交的 Python 脚本 /tmp/user_script.py，只需运行不需要网络" 2>&1 || true)
 
 if echo "$OUTPUT" | grep -qi "deny"; then
     echo "❌ FAIL: 合法脚本执行被误拦截"

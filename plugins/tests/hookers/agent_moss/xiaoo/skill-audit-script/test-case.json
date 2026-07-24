@@ -1,7 +1,7 @@
 {
     "id": "XIAOO-SKILL-AUDIT-SCRIPT",
     "desc": "Skill脚本文件阻断 — skill目录中包含setup.sh脚本文件，审计配置allow_scripts=false时检测到脚本文件并阻断加载",
-    "xiaoo_command": "./target/release/xiaoo skill audit tests/cases/xiaoo/skill-audit-script/",
+    "xiaoo_command": "./target/release/xiaoo --cli skill audit tests/cases/xiaoo/skill-audit-script/",
     "expected_block": true,
     "block_mechanism": "skill_audit_script_file",
     "input": {

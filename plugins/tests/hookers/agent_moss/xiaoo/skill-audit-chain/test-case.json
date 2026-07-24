@@ -1,7 +1,7 @@
 {
     "id": "XIAOO-SKILL-AUDIT-CHAIN",
     "desc": "Skill SKILL.toml命令链注入阻断 — skill的SKILL.toml中tool命令使用&&链式操作符拼接rm -rf /，审计检测到高危模式和shell链式操作符",
-    "xiaoo_command": "./target/release/xiaoo skill audit tests/cases/xiaoo/skill-audit-chain/",
+    "xiaoo_command": "./target/release/xiaoo --cli skill audit tests/cases/xiaoo/skill-audit-chain/",
     "expected_block": true,
     "block_mechanism": "skill_audit_command_chain",
     "input": {
