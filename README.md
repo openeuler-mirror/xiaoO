@@ -89,7 +89,7 @@ See [docs/skill_usage.md](./docs/skill_usage.md) for details.
 ./build.sh --release
 ```
 
-The build wrapper can install the `audit_agent` hooker, which audits tool execution for risky operations. Plugin installation details are available in [docs/plugins.md](./docs/plugins.md).
+The build wrapper can install the `agent_moss` hooker, a thin bridge that audits tool execution for risky operations via the resident AgentMoss HTTP service. Plugin installation details are available in [docs/plugins.md](./docs/plugins.md).
 
 ### Docker
 

@@ -67,7 +67,7 @@ storage_backend = "stdout"
 
 # Hooker (optional)
 [hooker]
-default = "audit_agent"
+default = "agent_moss"
 ```
 
 > **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field).

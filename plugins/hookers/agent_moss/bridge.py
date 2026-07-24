@@ -350,7 +350,8 @@ def _handle_hook_payload(data: dict) -> int:
 
     _log("HOOK_INPUT", {
         "session_id": session_id, "tool_name": tool_name,
-        "reason": reason, "action_history_len": len(action_history),
+        "tool_input": tool_input, "reason": reason,
+        "action_history_len": len(action_history),
     })
 
     # === Step 2: POST /api/v1/analyze ===
