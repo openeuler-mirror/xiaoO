@@ -30,7 +30,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/load",
-        summary: "读取 session 快照并继续对话。可选名称，默认 latest。",
+        summary: "打开手动/自动存档列表；带名称时仅匹配手动存档。",
     },
     SlashCommandSpec {
         name: "/new",
@@ -38,7 +38,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/save",
-        summary: "保存当前 session 快照。可选名称，默认 latest。",
+        summary: "保存手动检查点；不带名称时自动生成唯一名称。",
     },
     SlashCommandSpec {
         name: "/remote",

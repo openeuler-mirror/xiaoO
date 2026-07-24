@@ -14,60 +14,178 @@ use crate::chat::{
 use crate::gateway::{SessionLifecycleStatus, SessionRecord};
 use crate::input::Input;
 
-const SNAPSHOT_VERSION: u32 = 1;
-const DEFAULT_SNAPSHOT_NAME: &str = "latest";
+const SNAPSHOT_VERSION: u32 = 2;
+const AUTO_SNAPSHOT_KEY_PREFIX: &str = "@auto-";
 
-#[derive(Debug, Clone)]
-pub struct SnapshotContext {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotKind {
+    Manual,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualSnapshotRef {
+    pub snapshot_id: String,
+    pub snapshot_key: String,
     pub name: String,
+    #[serde(default)]
     pub parent_chain: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
+pub struct SnapshotContext {
+    pub kind: SnapshotKind,
+    pub snapshot_id: String,
+    pub snapshot_key: String,
+    pub name: String,
+    pub parent_chain: Vec<String>,
+    pub base_manual: Option<ManualSnapshotRef>,
+}
+
+impl SnapshotContext {
+    pub fn from_snapshot(snapshot_key: String, snapshot: &TuiSessionSnapshot) -> Self {
+        Self {
+            kind: snapshot.kind,
+            snapshot_id: snapshot.snapshot_id.clone(),
+            snapshot_key,
+            name: snapshot.name.clone(),
+            parent_chain: snapshot.parent_chain.clone(),
+            base_manual: snapshot.base_manual.clone(),
+        }
+    }
+
+    fn manual_ref(&self) -> Option<ManualSnapshotRef> {
+        match self.kind {
+            SnapshotKind::Manual => Some(ManualSnapshotRef {
+                snapshot_id: self.snapshot_id.clone(),
+                snapshot_key: self.snapshot_key.clone(),
+                name: self.name.clone(),
+                parent_chain: self.parent_chain.clone(),
+            }),
+            SnapshotKind::Auto => self.base_manual.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionSnapshotListEntry {
+    pub kind: SnapshotKind,
     pub name: String,
     pub snapshot_key: String,
     pub saved_at_ms: u64,
     pub parent_name: Option<String>,
     pub parent_chain: Vec<String>,
     pub depth: usize,
+    pub base_manual_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionSnapshotCatalog {
+    pub manual: Vec<SessionSnapshotListEntry>,
+    pub automatic: Vec<SessionSnapshotListEntry>,
+}
+
+impl SessionSnapshotCatalog {
+    pub fn is_empty(&self) -> bool {
+        self.manual.is_empty() && self.automatic.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSnapshotPane {
+    Manual,
+    Automatic,
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionSnapshotDialog {
-    pub entries: Vec<SessionSnapshotListEntry>,
-    pub selected: usize,
+    pub manual_entries: Vec<SessionSnapshotListEntry>,
+    pub automatic_entries: Vec<SessionSnapshotListEntry>,
+    pub active_pane: SessionSnapshotPane,
+    pub manual_selected: usize,
+    pub automatic_selected: usize,
 }
 
 impl SessionSnapshotDialog {
-    pub fn new(entries: Vec<SessionSnapshotListEntry>) -> Self {
+    pub fn new(catalog: SessionSnapshotCatalog) -> Self {
+        let active_pane = if catalog.manual.is_empty() {
+            SessionSnapshotPane::Automatic
+        } else {
+            SessionSnapshotPane::Manual
+        };
         Self {
-            entries,
-            selected: 0,
+            manual_entries: catalog.manual,
+            automatic_entries: catalog.automatic,
+            active_pane,
+            manual_selected: 0,
+            automatic_selected: 0,
         }
+    }
+
+    pub fn manual_only(entries: Vec<SessionSnapshotListEntry>) -> Self {
+        Self::new(SessionSnapshotCatalog {
+            manual: entries,
+            automatic: Vec::new(),
+        })
     }
 
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub fn move_down(&mut self) {
-        if !self.entries.is_empty() {
-            self.selected = (self.selected + 1).min(self.entries.len() - 1);
+        match self.active_pane {
+            SessionSnapshotPane::Manual => {
+                self.manual_selected = self.manual_selected.saturating_sub(1)
+            }
+            SessionSnapshotPane::Automatic => {
+                self.automatic_selected = self.automatic_selected.saturating_sub(1)
+            }
         }
     }
 
+    pub fn move_down(&mut self) {
+        match self.active_pane {
+            SessionSnapshotPane::Manual if !self.manual_entries.is_empty() => {
+                self.manual_selected =
+                    (self.manual_selected + 1).min(self.manual_entries.len() - 1);
+            }
+            SessionSnapshotPane::Automatic if !self.automatic_entries.is_empty() => {
+                self.automatic_selected =
+                    (self.automatic_selected + 1).min(self.automatic_entries.len() - 1);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn toggle_pane(&mut self) {
+        self.active_pane = match self.active_pane {
+            SessionSnapshotPane::Manual if !self.automatic_entries.is_empty() => {
+                SessionSnapshotPane::Automatic
+            }
+            SessionSnapshotPane::Automatic if !self.manual_entries.is_empty() => {
+                SessionSnapshotPane::Manual
+            }
+            current => current,
+        };
+    }
+
     pub fn selected_entry(&self) -> Option<&SessionSnapshotListEntry> {
-        self.entries.get(self.selected)
+        match self.active_pane {
+            SessionSnapshotPane::Manual => self.manual_entries.get(self.manual_selected),
+            SessionSnapshotPane::Automatic => self.automatic_entries.get(self.automatic_selected),
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiSessionSnapshot {
     pub version: u32,
+    pub kind: SnapshotKind,
+    pub snapshot_id: String,
+    pub name: String,
     pub saved_at_ms: u64,
     #[serde(default)]
     pub parent_chain: Vec<String>,
+    #[serde(default)]
+    pub base_manual: Option<ManualSnapshotRef>,
     pub session_id: String,
     pub workspace: PathBuf,
     #[serde(default)]
@@ -168,35 +286,49 @@ pub fn snapshot_name_from_command(trimmed: &str, command: &str) -> Result<String
         bail!("expected {command}");
     }
     let rest = trimmed[first.len()..].trim();
-    let name = if rest.is_empty() {
-        DEFAULT_SNAPSHOT_NAME
-    } else {
-        rest
-    };
-    validate_snapshot_name(name)?;
-    Ok(name.to_string())
+    if rest.is_empty() {
+        bail!("snapshot name is required");
+    }
+    validate_snapshot_name(rest)?;
+    Ok(rest.to_string())
 }
 
-pub fn snapshot_path(name: &str, parent_chain: Option<&[String]>) -> Result<PathBuf> {
+pub fn manual_snapshot_name_from_command(trimmed: &str, command: &str) -> Result<Option<String>> {
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    if !first.eq_ignore_ascii_case(command) {
+        bail!("expected {command}");
+    }
+    let rest = trimmed[first.len()..].trim();
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    validate_snapshot_name(rest)?;
+    Ok(Some(rest.to_string()))
+}
+
+fn manual_snapshot_path_in_dir(dir: &Path, name: &str, parent_chain: &[String]) -> Result<PathBuf> {
     validate_snapshot_name(name)?;
-    let dir = snapshot_dir()?;
-    let filename = if let Some(chain) = parent_chain {
-        if chain.is_empty() {
-            format!("{name}.json")
-        } else {
-            let prefix = chain.join("_");
-            format!("{prefix}_{name}.json")
-        }
-    } else {
+    let filename = if parent_chain.is_empty() {
         format!("{name}.json")
+    } else {
+        let prefix = parent_chain.join("_");
+        format!("{prefix}_{name}.json")
     };
     Ok(dir.join(filename))
 }
 
-pub fn build_snapshot(
+struct SnapshotDescriptor {
+    kind: SnapshotKind,
+    snapshot_id: String,
+    name: String,
+    parent_chain: Vec<String>,
+    base_manual: Option<ManualSnapshotRef>,
+}
+
+fn build_snapshot(
     state: &AppState,
     session_record: Option<SessionRecord>,
-    parent_chain: Vec<String>,
+    descriptor: SnapshotDescriptor,
 ) -> TuiSessionSnapshot {
     let status_metrics = SavedStatusMetrics {
         total_tokens: state.status_panel.total_tokens,
@@ -208,8 +340,12 @@ pub fn build_snapshot(
     };
     TuiSessionSnapshot {
         version: SNAPSHOT_VERSION,
+        kind: descriptor.kind,
+        snapshot_id: descriptor.snapshot_id,
+        name: descriptor.name,
         saved_at_ms: current_time_ms(),
-        parent_chain,
+        parent_chain: descriptor.parent_chain,
+        base_manual: descriptor.base_manual,
         session_id: state.session_id.clone(),
         workspace: state.workspace.clone(),
         active_agent_role: state.active_agent_role.clone(),
@@ -229,57 +365,179 @@ pub fn build_snapshot(
     }
 }
 
-pub fn save_snapshot_with_chain(
-    name: &str,
-    snapshot: &TuiSessionSnapshot,
-    parent_chain: Option<&[String]>,
-) -> Result<PathBuf> {
-    let path = snapshot_path(name, parent_chain)?;
+fn save_snapshot_at_path(path: &Path, snapshot: &TuiSessionSnapshot) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create snapshot directory {}", parent.display()))?;
     }
     let json = serde_json::to_string_pretty(snapshot).context("failed to serialize snapshot")?;
-    fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path.to_path_buf())
+}
+
+pub fn save_manual_snapshot(
+    state: &AppState,
+    session_record: Option<SessionRecord>,
+    requested_name: Option<&str>,
+) -> Result<(PathBuf, SnapshotContext)> {
+    save_manual_snapshot_in_dir(&snapshot_dir()?, state, session_record, requested_name)
+}
+
+fn save_manual_snapshot_in_dir(
+    dir: &Path,
+    state: &AppState,
+    session_record: Option<SessionRecord>,
+    requested_name: Option<&str>,
+) -> Result<(PathBuf, SnapshotContext)> {
+    let anchor = state
+        .current_snapshot_context
+        .as_ref()
+        .and_then(SnapshotContext::manual_ref);
+    let explicit_name = requested_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = explicit_name {
+        validate_snapshot_name(name)?;
+    }
+
+    let name = match explicit_name {
+        Some(name) => name.to_string(),
+        None => unique_generated_manual_name(dir, state)?,
+    };
+
+    let (path, parent_chain) = match anchor.as_ref() {
+        Some(anchor) if explicit_name.is_some() && anchor.name == name => (
+            path_for_snapshot_key(dir, &anchor.snapshot_key)?,
+            anchor.parent_chain.clone(),
+        ),
+        Some(anchor) => {
+            let mut chain = anchor.parent_chain.clone();
+            chain.push(anchor.name.clone());
+            (manual_snapshot_path_in_dir(dir, &name, &chain)?, chain)
+        }
+        None => (manual_snapshot_path_in_dir(dir, &name, &[])?, Vec::new()),
+    };
+
+    let existing = if path.exists() {
+        Some(
+            parse_snapshot_file(&path, snapshot_key_from_path(&path)?).with_context(|| {
+                format!(
+                "snapshot target {} is an unsupported legacy or corrupt file; choose another name",
+                path.display()
+            )
+            })?,
+        )
+    } else {
+        None
+    };
+    if existing
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.kind == SnapshotKind::Auto)
+    {
+        bail!("manual snapshot target is reserved for automatic saves");
+    }
+    let snapshot_id = existing
+        .filter(|snapshot| snapshot.kind == SnapshotKind::Manual)
+        .map(|snapshot| snapshot.snapshot_id)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let snapshot = build_snapshot(
+        state,
+        session_record,
+        SnapshotDescriptor {
+            kind: SnapshotKind::Manual,
+            snapshot_id,
+            name,
+            parent_chain,
+            base_manual: None,
+        },
+    );
+    let path = save_snapshot_at_path(&path, &snapshot)?;
+    let snapshot_key = snapshot_key_from_path(&path)?.to_string();
+    let context = SnapshotContext::from_snapshot(snapshot_key, &snapshot);
+    Ok((path, context))
 }
 
 /// Auto-save the current session when the user interrupts the runtime
 /// (Ctrl+C / SIGINT / SIGTERM).
 ///
-/// When the running session was itself loaded via `/load` (i.e.
-/// `state.current_snapshot_context` is populated), the snapshot is written
-/// back under the same name and parent chain so subsequent `/load` calls
-/// resume the same file instead of spawning a fresh timestamped one.
-///
-/// Otherwise the snapshot is written to the default session directory
-/// (`~/.xiaoo/session/`) — the same location used by the `/save` command —
-/// using the name pattern `{date}-{topic}`:
-/// * `date`  — local timestamp precise to the second (`YYYYMMDD-HHMMSS`).
-/// * `topic` — a ≤10-character summary derived from the first user prompt.
+/// Manual snapshots are immutable from this path. A loaded manual snapshot
+/// owns one rolling auto-save slot, while a loaded auto-save updates itself.
+/// Sessions without a manual anchor create one unbound auto-save.
 ///
 /// Returns `Ok(None)` when there is no user prompt to summarise (nothing worth
-/// saving). Errors are propagated so the caller can log them without aborting
-/// the shutdown sequence.
+/// saving) and the session is not already associated with a snapshot.
 pub fn autosave_on_interrupt(
     state: &AppState,
     session_record: Option<SessionRecord>,
 ) -> Result<Option<PathBuf>> {
-    if let Some(context) = state.current_snapshot_context.as_ref() {
-        let parent_chain = context.parent_chain.clone();
-        let snapshot = build_snapshot(state, session_record, parent_chain.clone());
-        let path = save_snapshot_with_chain(&context.name, &snapshot, Some(&parent_chain))?;
-        return Ok(Some(path));
-    }
+    autosave_on_interrupt_in_dir(&snapshot_dir()?, state, session_record)
+}
 
-    let Some(topic) = autosave_topic(state) else {
-        return Ok(None);
+fn autosave_on_interrupt_in_dir(
+    dir: &Path,
+    state: &AppState,
+    session_record: Option<SessionRecord>,
+) -> Result<Option<PathBuf>> {
+    let context = state.current_snapshot_context.as_ref();
+    let (path, snapshot_id, name, base_manual) = match context {
+        Some(context) if context.kind == SnapshotKind::Auto => (
+            path_for_snapshot_key(dir, &context.snapshot_key)?,
+            context.snapshot_id.clone(),
+            context.name.clone(),
+            context.base_manual.clone(),
+        ),
+        Some(context) => {
+            let base_manual = context
+                .manual_ref()
+                .context("manual snapshot context is missing its manual identity")?;
+            let path = dir.join(format!(
+                "{AUTO_SNAPSHOT_KEY_PREFIX}{}.json",
+                base_manual.snapshot_id
+            ));
+            if !path.exists() {
+                (
+                    path,
+                    uuid::Uuid::new_v4().to_string(),
+                    generated_snapshot_name(state),
+                    Some(base_manual),
+                )
+            } else {
+                match parse_snapshot_file(&path, snapshot_key_from_path(&path)?) {
+                    Ok(existing) if existing.kind == SnapshotKind::Auto => {
+                        (path, existing.snapshot_id, existing.name, Some(base_manual))
+                    }
+                    Ok(_) => bail!("automatic snapshot path contains a manual snapshot"),
+                    Err(error) => return Err(error).context(
+                        "automatic snapshot path contains an unsupported legacy or corrupt file",
+                    ),
+                }
+            }
+        }
+        None => {
+            if autosave_topic(state).is_none() {
+                return Ok(None);
+            }
+            let snapshot_id = uuid::Uuid::new_v4().to_string();
+            (
+                dir.join(format!("{AUTO_SNAPSHOT_KEY_PREFIX}{snapshot_id}.json")),
+                snapshot_id,
+                generated_snapshot_name(state),
+                None,
+            )
+        }
     };
-    let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let name = format!("{date}-{topic}");
-    let snapshot = build_snapshot(state, session_record, Vec::new());
-    let path = save_snapshot_with_chain(&name, &snapshot, Some(&[]))?;
-    Ok(Some(path))
+    let snapshot = build_snapshot(
+        state,
+        session_record,
+        SnapshotDescriptor {
+            kind: SnapshotKind::Auto,
+            snapshot_id,
+            name,
+            parent_chain: Vec::new(),
+            base_manual,
+        },
+    );
+    save_snapshot_at_path(&path, &snapshot).map(Some)
 }
 
 /// Derive a short topic label (≤10 characters) from the first user prompt.
@@ -320,19 +578,54 @@ fn sanitize_topic(text: &str) -> String {
     }
 }
 
-pub fn load_snapshot_by_key(snapshot_key: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
-    let dir = snapshot_dir()?;
-    let path = dir.join(format!("{snapshot_key}.json"));
+fn generated_snapshot_name(state: &AppState) -> String {
+    let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let topic = autosave_topic(state).unwrap_or_else(|| "untitled".to_string());
+    format!("{date}-{topic}")
+}
 
+fn unique_generated_manual_name(dir: &Path, state: &AppState) -> Result<String> {
+    let base = generated_snapshot_name(state);
+    let existing_names = list_session_snapshots_in_dir(dir)?
+        .manual
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect::<std::collections::HashSet<_>>();
+    let mut candidate = base.clone();
+    let mut suffix = 2usize;
+    while existing_names.contains(&candidate) || dir.join(format!("{candidate}.json")).exists() {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    Ok(candidate)
+}
+
+pub fn load_snapshot_by_key(snapshot_key: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
+    load_snapshot_by_key_in_dir(&snapshot_dir()?, snapshot_key)
+}
+
+fn load_snapshot_by_key_in_dir(
+    dir: &Path,
+    snapshot_key: &str,
+) -> Result<(TuiSessionSnapshot, Vec<String>)> {
+    let path = path_for_snapshot_key(dir, snapshot_key)?;
     if !path.exists() {
         bail!("snapshot '{}' not found", snapshot_key);
     }
-
-    parse_snapshot_file(&path, snapshot_key)
+    let snapshot = parse_snapshot_file(&path, snapshot_key)?;
+    let parent_chain = snapshot.parent_chain.clone();
+    Ok((snapshot, parent_chain))
 }
 
 pub fn load_snapshot(name: &str) -> Result<Vec<(String, TuiSessionSnapshot, Vec<String>)>> {
-    let dir = snapshot_dir()?;
+    load_snapshot_in_dir(&snapshot_dir()?, name)
+}
+
+fn load_snapshot_in_dir(
+    dir: &Path,
+    name: &str,
+) -> Result<Vec<(String, TuiSessionSnapshot, Vec<String>)>> {
+    validate_snapshot_name(name)?;
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -352,13 +645,11 @@ pub fn load_snapshot(name: &str) -> Result<Vec<(String, TuiSessionSnapshot, Vec<
         let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        let snapshot_name = extract_snapshot_name(file_stem);
-        if snapshot_name != name {
-            continue;
-        }
-
-        if let Ok((snapshot, parent_chain)) = parse_snapshot_file(&path, file_stem) {
-            matching_snapshots.push((file_stem.to_string(), snapshot, parent_chain));
+        if let Ok(snapshot) = parse_snapshot_file(&path, file_stem) {
+            if snapshot.kind == SnapshotKind::Manual && snapshot.name == name {
+                let parent_chain = snapshot.parent_chain.clone();
+                matching_snapshots.push((file_stem.to_string(), snapshot, parent_chain));
+            }
         }
     }
 
@@ -371,7 +662,7 @@ pub fn load_snapshot(name: &str) -> Result<Vec<(String, TuiSessionSnapshot, Vec<
     Ok(matching_snapshots)
 }
 
-fn parse_snapshot_file(path: &Path, file_stem: &str) -> Result<(TuiSessionSnapshot, Vec<String>)> {
+fn parse_snapshot_file(path: &Path, _file_stem: &str) -> Result<TuiSessionSnapshot> {
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let snapshot: TuiSessionSnapshot = serde_json::from_str(&content)
@@ -383,40 +674,49 @@ fn parse_snapshot_file(path: &Path, file_stem: &str) -> Result<(TuiSessionSnapsh
             SNAPSHOT_VERSION
         );
     }
-
-    let parent_chain = if snapshot.parent_chain.is_empty() {
-        extract_parent_chain(file_stem)
-    } else {
-        snapshot.parent_chain.clone()
-    };
-
-    Ok((snapshot, parent_chain))
-}
-
-fn extract_parent_chain(file_stem: &str) -> Vec<String> {
-    let parts: Vec<&str> = file_stem.rsplit('_').collect();
-    if parts.len() <= 1 {
-        Vec::new()
-    } else {
-        parts[1..].iter().rev().map(|s| s.to_string()).collect()
+    uuid::Uuid::parse_str(&snapshot.snapshot_id)
+        .with_context(|| format!("invalid snapshot id in {}", path.display()))?;
+    validate_snapshot_name(&snapshot.name)
+        .with_context(|| format!("invalid snapshot name in {}", path.display()))?;
+    for parent in &snapshot.parent_chain {
+        validate_snapshot_name(parent)
+            .with_context(|| format!("invalid parent snapshot name in {}", path.display()))?;
     }
+    if snapshot.kind == SnapshotKind::Manual && snapshot.base_manual.is_some() {
+        bail!("manual snapshot cannot reference a base manual snapshot");
+    }
+    if let Some(base) = snapshot.base_manual.as_ref() {
+        uuid::Uuid::parse_str(&base.snapshot_id)
+            .with_context(|| format!("invalid base manual id in {}", path.display()))?;
+        path_for_snapshot_key(Path::new("."), &base.snapshot_key)
+            .with_context(|| format!("invalid base manual key in {}", path.display()))?;
+        validate_snapshot_name(&base.name)
+            .with_context(|| format!("invalid base manual name in {}", path.display()))?;
+        for parent in &base.parent_chain {
+            validate_snapshot_name(parent)
+                .with_context(|| format!("invalid base parent name in {}", path.display()))?;
+        }
+    }
+    Ok(snapshot)
 }
 
-fn extract_snapshot_name(file_stem: &str) -> &str {
-    file_stem.rsplit('_').next().unwrap_or(file_stem)
+pub fn list_session_snapshots() -> Result<SessionSnapshotCatalog> {
+    list_session_snapshots_in_dir(&snapshot_dir()?)
 }
 
-pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
-    let dir = snapshot_dir()?;
+fn list_session_snapshots_in_dir(dir: &Path) -> Result<SessionSnapshotCatalog> {
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SessionSnapshotCatalog::default())
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("failed to read {}", dir.display()));
         }
     };
 
-    let mut snapshots = Vec::new();
+    let mut manual = Vec::new();
+    let mut automatic = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -425,31 +725,39 @@ pub fn list_session_snapshots() -> Result<Vec<SessionSnapshotListEntry>> {
         let Some(file_stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        let name = extract_snapshot_name(file_stem).to_string();
-        if validate_snapshot_name(&name).is_err() {
+        let Ok(snapshot) = parse_snapshot_file(&path, file_stem) else {
             continue;
-        }
-        let header = snapshot_header(&path);
-        let saved_at_ms = header
-            .as_ref()
-            .and_then(|header| header.saved_at_ms)
-            .or_else(|| file_timestamp_ms(&path));
-        let parent_chain = header
-            .as_ref()
-            .map(|header| header.parent_chain.clone())
-            .unwrap_or_else(|| extract_parent_chain(file_stem));
+        };
         let snapshot_key = file_stem.to_string();
-        snapshots.push(SessionSnapshotListEntry {
-            name,
+        let mut list_entry = SessionSnapshotListEntry {
+            kind: snapshot.kind,
+            name: snapshot.name,
             snapshot_key,
-            saved_at_ms: saved_at_ms.unwrap_or(0),
-            parent_name: parent_chain.last().cloned(),
-            parent_chain,
+            saved_at_ms: snapshot.saved_at_ms,
+            parent_name: snapshot.parent_chain.last().cloned(),
+            parent_chain: snapshot.parent_chain,
             depth: 0,
-        });
+            base_manual_name: snapshot.base_manual.map(|base| base.name),
+        };
+        match list_entry.kind {
+            SnapshotKind::Manual => manual.push(list_entry),
+            SnapshotKind::Auto => {
+                list_entry.parent_name = None;
+                automatic.push(list_entry);
+            }
+        }
     }
 
-    Ok(order_snapshots_by_parent(snapshots))
+    automatic.sort_by(|left, right| {
+        right
+            .saved_at_ms
+            .cmp(&left.saved_at_ms)
+            .then(left.name.cmp(&right.name))
+    });
+    Ok(SessionSnapshotCatalog {
+        manual: order_snapshots_by_parent(manual),
+        automatic,
+    })
 }
 
 pub fn format_snapshot_time(saved_at_ms: u64) -> String {
@@ -534,29 +842,27 @@ fn validate_snapshot_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn path_for_snapshot_key(dir: &Path, snapshot_key: &str) -> Result<PathBuf> {
+    if snapshot_key.is_empty()
+        || snapshot_key == "."
+        || snapshot_key == ".."
+        || snapshot_key.contains('/')
+        || snapshot_key.contains('\\')
+    {
+        bail!("invalid snapshot key");
+    }
+    Ok(dir.join(format!("{snapshot_key}.json")))
+}
+
+fn snapshot_key_from_path(path: &Path) -> Result<&str> {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("snapshot path has no valid file name")
+}
+
 fn snapshot_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("unable to resolve home directory for ~/.xiaoo/session")?;
     Ok(home.join(".xiaoo").join("session"))
-}
-
-#[derive(Deserialize)]
-struct SnapshotHeader {
-    saved_at_ms: Option<u64>,
-    #[serde(default)]
-    parent_chain: Vec<String>,
-}
-
-fn snapshot_header(path: &Path) -> Option<SnapshotHeader> {
-    let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<SnapshotHeader>(&content).ok()
-}
-
-fn file_timestamp_ms(path: &Path) -> Option<u64> {
-    let metadata = fs::metadata(path).ok()?;
-    let time = metadata.created().or_else(|_| metadata.modified()).ok()?;
-    time.duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_millis() as u64)
 }
 
 fn order_snapshots_by_parent(
@@ -771,53 +1077,23 @@ impl From<SavedTodoDisplayStatus> for TodoDisplayStatus {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_snapshot_path_without_parent() {
-        let path = snapshot_path("test", None).unwrap();
-        assert_eq!(path.file_name().unwrap(), "test.json");
+    fn state_with_prompt(prompt: &str) -> AppState {
+        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
+        state.chat_state.messages.push(Message::user(prompt));
+        state
     }
 
-    #[test]
-    fn test_snapshot_path_with_parent_chain() {
-        let chain = vec!["parent".to_string()];
-        let path = snapshot_path("child", Some(&chain)).unwrap();
-        assert_eq!(path.file_name().unwrap(), "parent_child.json");
-
-        let chain = vec!["grandparent".to_string(), "parent".to_string()];
-        let path = snapshot_path("child", Some(&chain)).unwrap();
-        assert_eq!(path.file_name().unwrap(), "grandparent_parent_child.json");
+    fn read_snapshot(path: &Path) -> TuiSessionSnapshot {
+        let key = snapshot_key_from_path(path).unwrap();
+        parse_snapshot_file(path, key).unwrap()
     }
 
-    #[test]
-    fn test_extract_snapshot_name() {
-        assert_eq!(extract_snapshot_name("test"), "test");
-        assert_eq!(extract_snapshot_name("parent_test"), "test");
-        assert_eq!(extract_snapshot_name("grandparent_parent_test"), "test");
-        assert_eq!(extract_snapshot_name("a_b_c_d"), "d");
-    }
-
-    #[test]
-    fn test_validate_snapshot_name() {
-        assert!(validate_snapshot_name("test123").is_ok());
-        assert!(validate_snapshot_name("test-123").is_ok());
-        assert!(validate_snapshot_name("test_123").is_ok());
-        assert!(validate_snapshot_name("test.123").is_ok());
-        assert!(validate_snapshot_name("").is_err());
-        assert!(validate_snapshot_name(".").is_err());
-        assert!(validate_snapshot_name("..").is_err());
-        assert!(validate_snapshot_name("test 123").is_err());
-        assert!(validate_snapshot_name("test/123").is_err());
-    }
-
-    #[test]
-    fn test_extract_parent_chain() {
-        assert_eq!(extract_parent_chain("test"), Vec::<String>::new());
-        assert_eq!(extract_parent_chain("parent_test"), vec!["parent"]);
-        assert_eq!(
-            extract_parent_chain("grandparent_parent_test"),
-            vec!["grandparent", "parent"]
-        );
-        assert_eq!(extract_parent_chain("a_b_c_d"), vec!["a", "b", "c"]);
+    fn json_file_count(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+            .count()
     }
 
     #[test]
@@ -866,48 +1142,271 @@ mod tests {
     }
 
     #[test]
-    fn test_autosave_on_interrupt_uses_loaded_context_name() {
-        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
-        state
-            .chat_state
-            .messages
-            .push(Message::user("any prompt to make autosave eligible"));
-        state.current_snapshot_context = Some(SnapshotContext {
-            name: "loaded-name".to_string(),
-            parent_chain: vec!["parent".to_string()],
-        });
-
-        let path = autosave_on_interrupt(&state, None)
-            .expect("autosave ok")
-            .expect("path");
-
-        // The file must reuse the loaded name and parent chain, not a fresh
-        // timestamped one.
-        assert_eq!(path.file_name().unwrap(), "parent_loaded-name.json");
-        let _ = fs::remove_file(&path);
+    fn manual_path_builds_parent_chain() {
+        let dir = Path::new("/tmp/xiaoo-session-test");
+        assert_eq!(
+            manual_snapshot_path_in_dir(dir, "child", &["parent".to_string()])
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "parent_child.json"
+        );
     }
 
     #[test]
-    fn test_autosave_on_interrupt_uses_save_context_name() {
-        // Mirrors the state after `/save my-snapshot`: the save handler
-        // populates `current_snapshot_context` with the chosen name and an
-        // empty parent chain (no prior context to extend). The exit autosave
-        // must overwrite the same file instead of spawning a timestamped one.
-        let mut state = AppState::new(PathBuf::new(), PathBuf::new()).unwrap();
+    fn validate_snapshot_name_reserves_auto_namespace() {
+        assert!(validate_snapshot_name("test123").is_ok());
+        assert!(validate_snapshot_name("test-123").is_ok());
+        assert!(validate_snapshot_name("test_123").is_ok());
+        assert!(validate_snapshot_name("test.123").is_ok());
+        assert!(validate_snapshot_name("@auto-id").is_err());
+        assert!(validate_snapshot_name("").is_err());
+        assert!(validate_snapshot_name(".").is_err());
+        assert!(validate_snapshot_name("..").is_err());
+        assert!(validate_snapshot_name("test 123").is_err());
+        assert!(validate_snapshot_name("test/123").is_err());
+    }
+
+    #[test]
+    fn autosave_from_manual_never_rewrites_manual_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("protect this checkpoint");
+        let (manual_path, manual_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("checkpoint")).unwrap();
+        let manual_before = fs::read(&manual_path).unwrap();
+        let manual_id = manual_context.snapshot_id.clone();
+        state.current_snapshot_context = Some(manual_context);
         state
             .chat_state
             .messages
-            .push(Message::user("any prompt to make autosave eligible"));
-        state.current_snapshot_context = Some(SnapshotContext {
-            name: "my-snapshot".to_string(),
-            parent_chain: Vec::new(),
+            .push(Message::system("later work"));
+
+        let auto_path = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(manual_path, auto_path);
+        assert_eq!(fs::read(&manual_path).unwrap(), manual_before);
+        let auto = read_snapshot(&auto_path);
+        assert_eq!(auto.kind, SnapshotKind::Auto);
+        assert_eq!(
+            auto.base_manual
+                .as_ref()
+                .map(|base| base.snapshot_id.as_str()),
+            Some(manual_id.as_str())
+        );
+    }
+
+    #[test]
+    fn autosave_rolls_forward_one_slot_per_manual_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("rolling auto save");
+        let (_, first_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("first")).unwrap();
+        state.current_snapshot_context = Some(first_context);
+        let first_auto = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        let first_auto_id = read_snapshot(&first_auto).snapshot_id;
+
+        state
+            .chat_state
+            .messages
+            .push(Message::system("newer content"));
+        let repeated_auto = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_auto, repeated_auto);
+        assert_eq!(read_snapshot(&repeated_auto).snapshot_id, first_auto_id);
+
+        let (_, second_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("second")).unwrap();
+        state.current_snapshot_context = Some(second_context);
+        let second_auto = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        assert_ne!(first_auto, second_auto);
+
+        let catalog = list_session_snapshots_in_dir(temp.path()).unwrap();
+        assert_eq!(catalog.manual.len(), 2);
+        assert_eq!(catalog.automatic.len(), 2);
+        assert!(catalog
+            .automatic
+            .iter()
+            .any(|entry| entry.base_manual_name.as_deref() == Some("second")));
+    }
+
+    #[test]
+    fn named_load_matches_manual_snapshots_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("named load");
+        let (_, manual_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("checkpoint")).unwrap();
+        state.current_snapshot_context = Some(manual_context);
+        let auto_path = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        let mut auto = read_snapshot(&auto_path);
+        auto.name = "checkpoint".to_string();
+        save_snapshot_at_path(&auto_path, &auto).unwrap();
+
+        let matches = load_snapshot_in_dir(temp.path(), "checkpoint").unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].1.kind, SnapshotKind::Manual);
+    }
+
+    #[test]
+    fn loaded_auto_snapshot_overwrites_itself() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("unbound work");
+        let first_path = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        let first = read_snapshot(&first_path);
+        state.current_snapshot_context = Some(SnapshotContext::from_snapshot(
+            snapshot_key_from_path(&first_path).unwrap().to_string(),
+            &first,
+        ));
+        state.chat_state.messages.push(Message::system("continued"));
+
+        let second_path = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first_path, second_path);
+        assert_eq!(json_file_count(temp.path()), 1);
+        assert_eq!(read_snapshot(&second_path).snapshot_id, first.snapshot_id);
+    }
+
+    #[test]
+    fn explicit_same_name_overwrites_exact_nested_manual_and_preserves_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("manual branches");
+        let (_, root_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("root")).unwrap();
+        state.current_snapshot_context = Some(root_context);
+        let (child_path, child_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("child")).unwrap();
+        let child_id = child_context.snapshot_id.clone();
+        state.current_snapshot_context = Some(child_context);
+        state
+            .chat_state
+            .messages
+            .push(Message::system("updated child"));
+
+        let (overwritten_path, overwritten_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("child")).unwrap();
+
+        assert_eq!(child_path, overwritten_path);
+        assert_eq!(overwritten_context.snapshot_id, child_id);
+        assert_eq!(overwritten_context.parent_chain, vec!["root".to_string()]);
+        assert!(!temp.path().join("child.json").exists());
+    }
+
+    #[test]
+    fn save_from_auto_uses_its_manual_source_as_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("resume and checkpoint");
+        let (manual_path, manual_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("base")).unwrap();
+        state.current_snapshot_context = Some(manual_context);
+        let auto_path = autosave_on_interrupt_in_dir(temp.path(), &state, None)
+            .unwrap()
+            .unwrap();
+        let auto = read_snapshot(&auto_path);
+        state.current_snapshot_context = Some(SnapshotContext::from_snapshot(
+            snapshot_key_from_path(&auto_path).unwrap().to_string(),
+            &auto,
+        ));
+
+        let (updated_base, _) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("base")).unwrap();
+        assert_eq!(updated_base, manual_path);
+
+        let (_, auto_context) =
+            load_snapshot_by_key_in_dir(temp.path(), snapshot_key_from_path(&auto_path).unwrap())
+                .unwrap();
+        assert!(auto_context.is_empty());
+        let auto = read_snapshot(&auto_path);
+        state.current_snapshot_context = Some(SnapshotContext::from_snapshot(
+            snapshot_key_from_path(&auto_path).unwrap().to_string(),
+            &auto,
+        ));
+        let (branch_path, branch_context) =
+            save_manual_snapshot_in_dir(temp.path(), &state, None, Some("branch")).unwrap();
+        assert_eq!(branch_path.file_name().unwrap(), "base_branch.json");
+        assert_eq!(branch_context.parent_chain, vec!["base".to_string()]);
+    }
+
+    #[test]
+    fn unnamed_manual_saves_generate_unique_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = state_with_prompt("same second");
+        let (_, first) = save_manual_snapshot_in_dir(temp.path(), &state, None, None).unwrap();
+        state.current_snapshot_context = Some(first.clone());
+        let (_, second) = save_manual_snapshot_in_dir(temp.path(), &state, None, None).unwrap();
+
+        assert_ne!(first.name, second.name);
+        assert!(second.name.starts_with(&format!("{}-", first.name)));
+    }
+
+    #[test]
+    fn legacy_v1_snapshots_are_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy_path = temp.path().join("legacy.json");
+        fs::write(
+            &legacy_path,
+            r#"{"version":1,"saved_at_ms":1,"session_id":"legacy","workspace":""}"#,
+        )
+        .unwrap();
+        let before = fs::read(&legacy_path).unwrap();
+
+        let catalog = list_session_snapshots_in_dir(temp.path()).unwrap();
+        assert!(catalog.is_empty());
+        assert!(load_snapshot_in_dir(temp.path(), "legacy").is_err());
+        let state = state_with_prompt("do not touch legacy data");
+        assert!(save_manual_snapshot_in_dir(temp.path(), &state, None, Some("legacy")).is_err());
+        assert_eq!(fs::read(&legacy_path).unwrap(), before);
+    }
+
+    #[test]
+    fn dialog_defaults_to_manual_and_toggles_non_empty_panes() {
+        fn entry(kind: SnapshotKind, name: &str) -> SessionSnapshotListEntry {
+            SessionSnapshotListEntry {
+                kind,
+                name: name.to_string(),
+                snapshot_key: name.to_string(),
+                saved_at_ms: 0,
+                parent_name: None,
+                parent_chain: Vec::new(),
+                depth: 0,
+                base_manual_name: None,
+            }
+        }
+
+        let mut dialog = SessionSnapshotDialog::new(SessionSnapshotCatalog {
+            manual: vec![
+                entry(SnapshotKind::Manual, "manual-1"),
+                entry(SnapshotKind::Manual, "manual-2"),
+            ],
+            automatic: vec![entry(SnapshotKind::Auto, "auto")],
         });
+        assert_eq!(dialog.active_pane, SessionSnapshotPane::Manual);
+        dialog.move_down();
+        assert_eq!(dialog.selected_entry().unwrap().name, "manual-2");
+        for _ in 0..10 {
+            dialog.move_down();
+        }
+        assert_eq!(dialog.manual_selected, 1);
+        dialog.toggle_pane();
+        assert_eq!(dialog.active_pane, SessionSnapshotPane::Automatic);
+        assert_eq!(dialog.selected_entry().unwrap().name, "auto");
 
-        let path = autosave_on_interrupt(&state, None)
-            .expect("autosave ok")
-            .expect("path");
-
-        assert_eq!(path.file_name().unwrap(), "my-snapshot.json");
-        let _ = fs::remove_file(&path);
+        let automatic_only = SessionSnapshotDialog::new(SessionSnapshotCatalog {
+            manual: Vec::new(),
+            automatic: vec![entry(SnapshotKind::Auto, "auto")],
+        });
+        assert_eq!(automatic_only.active_pane, SessionSnapshotPane::Automatic);
     }
 }
