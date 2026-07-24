@@ -42,7 +42,7 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
     }
 
     async fn create_with_root_span(
-        agent_id: String,
+        _agent_id: String,
         storage: Arc<S>,
         span_type: impl Into<String>,
         extras: serde_json::Value,
@@ -71,7 +71,6 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
 
         let inner = Inner {
             trace_id: trace_id.clone(),
-            agent_id,
             chronology_tail_span_id: span_id.clone(),
             root_span_start_time: now,
             open_spans: Vec::new(),

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,8 +17,6 @@ use super::DurableMemoryStore;
 
 pub struct SqliteDurableMemoryStore {
     conn: Arc<Mutex<Connection>>,
-    #[allow(dead_code)]
-    db_path: PathBuf,
     embedder: Arc<dyn EmbeddingProvider>,
     vector_weight: f32,
     keyword_weight: f32,
@@ -48,7 +46,6 @@ impl SqliteDurableMemoryStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            db_path,
             embedder,
             vector_weight,
             keyword_weight,

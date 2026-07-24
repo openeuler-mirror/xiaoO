@@ -49,9 +49,7 @@ pub struct RemoteRuntimeConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum RemoteSseEvent {
     TurnStart {
-        #[allow(dead_code)]
         agent_id: String,
-        #[allow(dead_code)]
         turn: u32,
     },
     TextDelta {

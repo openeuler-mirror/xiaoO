@@ -28,8 +28,3 @@ pub struct OperationBackendBuildInput {
     pub channel: Option<String>,
     pub channel_instance_id: Option<String>,
 }
-
-#[allow(dead_code)]
-fn default_backend_options() -> Value {
-    Value::Object(serde_json::Map::new())
-}

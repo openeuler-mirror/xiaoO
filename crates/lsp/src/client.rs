@@ -135,12 +135,6 @@ impl LspClient {
         self.notification_tx.subscribe()
     }
 
-    #[allow(dead_code)]
-    pub async fn shutdown(&self) {
-        let _ = self.request("shutdown", Value::Null).await;
-        self.notify("exit", Value::Null);
-    }
-
     async fn write_message(&self, msg: &Value) -> Result<(), LspError> {
         let mut stdin = self.stdin.lock().await;
         write_framed(&mut *stdin, msg).await

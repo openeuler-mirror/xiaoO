@@ -735,9 +735,6 @@ impl App {
             return Ok(());
         }
 
-        // NOTE: /create-skill is not yet implemented; disabled until ready.
-        // if user_input.trim().starts_with("/create-skill") { ... }
-
         // External commands from ~/.xiaoo/commands/
         if let Some((body, command_context)) = self.external_command_body(trimmed) {
             self.state.chat_state.input.reset();

@@ -17,8 +17,6 @@ use xiaoo_shared::gateway::{
 /// Manages a set of cron job timers.
 pub struct CronScheduler {
     cancel_token: CancellationToken,
-    #[allow(dead_code)]
-    concurrency_limiter: Arc<Semaphore>,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -69,7 +67,6 @@ impl CronScheduler {
 
         Self {
             cancel_token,
-            concurrency_limiter,
             handles: Mutex::new(handles),
         }
     }
@@ -98,7 +95,6 @@ struct CronJob {
     config: CronJobConfig,
     session_service: Arc<dyn SessionService>,
     cancel_token: CancellationToken,
-    #[allow(dead_code)]
     concurrency_limiter: Arc<Semaphore>,
     last_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     next_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,

@@ -10,7 +10,7 @@ pub(crate) mod tool;
 pub(crate) use format::WireResponseFormat;
 pub(crate) use message::WireMessage;
 pub(crate) use request::WireRequest;
-pub(crate) use response::{Warning, WireChoice, WireResponse, WireUsage};
+pub(crate) use response::{WireChoice, WireResponse, WireUsage};
 pub(crate) use stream::{ChatCompletionChunk, ParsedChunk};
 pub(crate) use temperature::Temperature;
 pub(crate) use tool::{

@@ -4,14 +4,10 @@ use agent_types::hook::HookPointId;
 pub(crate) struct ParsedPluginHookPoint {
     pub(crate) agent: AgentId,
     pub(crate) action: PluginHookAction,
-    pub(crate) detail: PluginHookDetail,
     pub(crate) stage: PluginHookStage,
 }
 
 pub(crate) struct PluginHookAction(pub(crate) String);
-
-#[allow(dead_code)]
-pub(crate) struct PluginHookDetail(pub(crate) String);
 
 pub(crate) struct PluginHookStage(pub(crate) String);
 
@@ -48,7 +44,6 @@ pub(crate) fn parse_plugin_hook_point(
     Ok(ParsedPluginHookPoint {
         agent: AgentId(agent.to_string()),
         action: PluginHookAction(action.to_lowercase()),
-        detail: PluginHookDetail(detail.to_string()),
         stage: PluginHookStage(stage.to_lowercase()),
     })
 }

@@ -43,7 +43,7 @@ xiaoO 已从原先相对集中的 `apps/xiaoo-app` 演进为面向端侧、服�
 
 | 主题 | v1.0 | v1.1 当前实现 |
 | --- | --- | --- |
-| 资源上限 | daemon 内 `max_active_e2b_sandboxes` 计数 | `~/.config/xiaoo/sandbox.toml` 的 `max_sandbox_cnt`；同一宿主机、同一 Unix 用户下跨进程共享，并按 sandbox 类型和 provider key 维度计数 |
+| 资源上限 | daemon 内进程内 sandbox 计数 | `~/.config/xiaoo/sandbox.toml` 的 `max_sandbox_cnt`；同一宿主机、同一 Unix 用户下跨进程共享，并按 sandbox 类型和 provider key 维度计数 |
 | 配额耗尽 | 直接返回资源限制错误 | 优先驱逐最早创建且全部 session idle 的 sandbox；支持跨进程通知、孤儿回收、checkpoint 后恢复 |
 | 共享状态 | 进程内 backend map | 增加 `~/.xiaoo/backend_registry.json`、`sandbox_counts.json` 及文件锁；敏感 provider key 只保存派生哈希 |
 | 观测 | 日志和 API 响应 | 增加独立端口、只读 session/sandbox dashboard |
@@ -500,14 +500,7 @@ default_shell = "/bin/sh"
 max_sandbox_cnt = 20
 ```
 
-当前 `ServerConfig` 只解析 `operation_backend`。旧文档中的：
-
-```toml
-[server.resource_limits]
-max_active_e2b_sandboxes = 20
-```
-
-不会被当前 daemon 读取，不应再作为有效配置示例。
+`ServerConfig` 只解析 `operation_backend`，不再读取旧的 `[server.resource_limits]` 配置段。
 
 #### 4.4.2 SandboxCounter
 

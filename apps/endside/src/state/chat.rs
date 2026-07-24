@@ -31,7 +31,6 @@ pub struct ToolExecutionUpdate {
     pub file_change: Option<FileChangeDelta>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoDisplayStatus {
     Pending,
@@ -39,26 +38,16 @@ pub enum TodoDisplayStatus {
     Completed,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotItem {
     pub status: TodoDisplayStatus,
     pub content: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TodoSnapshotUpdate {
     pub title: String,
     pub items: Vec<TodoSnapshotItem>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CompletionCheckUpdate {
-    pub reason: String,
-    pub missing_information: String,
-    pub next_step_hint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -200,24 +189,6 @@ impl Message {
                 duration_ms: update.duration_ms,
             }),
             completion_check_state: None,
-            render_revision: 0,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn completion_check(update: CompletionCheckUpdate) -> Self {
-        Self {
-            role: MessageRole::System,
-            content: String::new(),
-            thinking_content: String::new(),
-            timestamp: chrono::Local::now(),
-            is_streaming: false,
-            tool_state: None,
-            completion_check_state: Some(CompletionCheckMessageState {
-                reason: update.reason,
-                missing_information: update.missing_information,
-                next_step_hint: update.next_step_hint,
-            }),
             render_revision: 0,
         }
     }

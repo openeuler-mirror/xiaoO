@@ -76,16 +76,6 @@ impl PluginToolHookerAdaptor {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn command(&self) -> &str {
-        &self.command
-    }
-
-    #[allow(dead_code)]
-    pub fn definition(&self) -> &serde_json::Value {
-        &self.definition
-    }
-
     async fn invoke_for_category(
         &self,
         category: HookPointCategory,
@@ -183,7 +173,6 @@ impl PluginToolHookerAdaptor {
             .clone()
             .unwrap_or_else(|| input.call.call_id.clone());
 
-        // Get recent_messages from runtime_view
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
         // Get the first user message as prompt_session (for intent consistency check)

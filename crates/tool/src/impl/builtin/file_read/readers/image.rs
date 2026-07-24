@@ -1,5 +1,4 @@
 use std::io::Cursor;
-use std::path::Path;
 
 use base64::Engine;
 use image::GenericImageView;
@@ -18,69 +17,8 @@ fn media_type_for_extension(extension: &str) -> Option<&'static str> {
     }
 }
 
-#[allow(dead_code)]
-pub fn is_supported_image_extension(extension: &str) -> bool {
-    media_type_for_extension(extension).is_some()
-}
-
 fn estimate_tokens_for_base64(base64_len: usize) -> usize {
     (base64_len as f64 / IMAGE_BYTES_PER_TOKEN_ESTIMATE).ceil() as usize
-}
-
-#[allow(dead_code)]
-pub fn read_image_file<P: AsRef<Path>>(
-    file_path: P,
-    max_tokens: Option<usize>,
-) -> std::io::Result<ImageOutput> {
-    let file_path = file_path.as_ref();
-    let extension = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Missing file extension")
-        })?;
-
-    let media_type = media_type_for_extension(extension).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Unsupported image extension: {}", extension),
-        )
-    })?;
-
-    let image_bytes = std::fs::read(file_path)?;
-    let original_size = image_bytes.len() as u64;
-
-    let img = image::load_from_memory(&image_bytes).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Failed to decode image: {}", e),
-        )
-    })?;
-
-    let (width, height) = img.dimensions();
-
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-    let max_tokens = max_tokens.unwrap_or(DEFAULT_IMAGE_MAX_TOKENS);
-    let estimated_tokens = estimate_tokens_for_base64(base64_data.len());
-
-    let final_base64 = if estimated_tokens > max_tokens {
-        compress_image(&image_bytes, media_type, max_tokens)?
-    } else {
-        base64_data
-    };
-
-    Ok(ImageOutput {
-        base64: final_base64,
-        media_type: media_type.to_string(),
-        original_size,
-        dimensions: Some(ImageDimensions {
-            original_width: width,
-            original_height: height,
-            display_width: None,
-            display_height: None,
-        }),
-    })
 }
 
 pub fn read_image_from_bytes(

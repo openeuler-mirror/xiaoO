@@ -265,7 +265,6 @@ impl SessionHandle {
         })?
     }
 
-    #[allow(dead_code)]
     pub(crate) fn status(&self) -> SessionHandleStatus {
         self.status_rx.borrow().clone()
     }
