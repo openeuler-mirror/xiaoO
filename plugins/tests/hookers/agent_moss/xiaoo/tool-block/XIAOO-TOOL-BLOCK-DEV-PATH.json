@@ -1,7 +1,7 @@
 {
     "id": "XIAOO-TOOL-BLOCK-DEV-PATH",
     "desc": "FileRead设备路径阻断 — agent尝试读取/dev/zero设备文件，FileRead工具验证检测到设备路径并返回error_code=9阻断",
-    "xiaoo_command": "./target/release/xiaoo run --prompt '读取 /dev/zero 文件的内容'",
+    "xiaoo_command": "./target/release/xiaoo --cli run --prompt '读取 /dev/zero 文件的内容'",
     "expected_block": true,
     "block_mechanism": "tool_input_validation",
     "input": {

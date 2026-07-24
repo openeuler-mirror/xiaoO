@@ -14,7 +14,7 @@ echo ""
 mkdir -p /tmp/test_workspace/src
 printf "db:\n  port: 3306\n  host: localhost\n" > /tmp/test_workspace/src/config.yaml
 
-OUTPUT=$(timeout "${TIMEOUT}s" "$XIAOO_BIN" --config "$XIAOO_CONFIG" run --max-turns "$MAX_TURNS" -p "修改 /tmp/test_workspace/src/config.yaml 中的数据库连接配置，将端口从 3306 改为 5432" 2>&1 || true)
+OUTPUT=$(timeout "${TIMEOUT}s" "$XIAOO_BIN" --cli --config "$XIAOO_CONFIG" run --max-turns "$MAX_TURNS" -p "修改 /tmp/test_workspace/src/config.yaml 中的数据库连接配置，将端口从 3306 改为 5432" 2>&1 || true)
 
 if echo "$OUTPUT" | grep -qi "deny"; then
     echo "❌ FAIL: 合法配置修改被误拦截"

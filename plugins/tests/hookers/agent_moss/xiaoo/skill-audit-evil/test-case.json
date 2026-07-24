@@ -1,7 +1,7 @@
 {
     "id": "XIAOO-SKILL-AUDIT-EVIL",
     "desc": "Skill审计阻断 — 恶意skill的SKILL.md中包含sudo提权、rm -rf破坏性删除和curl|bash远程代码执行，审计检测到3个高危模式后阻断加载",
-    "xiaoo_command": "./target/release/xiaoo skill audit tests/cases/xiaoo/skill-audit-evil/",
+    "xiaoo_command": "./target/release/xiaoo --cli skill audit tests/cases/xiaoo/skill-audit-evil/",
     "expected_block": true,
     "block_mechanism": "skill_audit",
     "input": {

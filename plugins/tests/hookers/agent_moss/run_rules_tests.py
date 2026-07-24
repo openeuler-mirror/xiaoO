@@ -241,6 +241,7 @@ def run_single_test(bin_path, config_path, prompt, timeout, max_turns, max_retri
 
     cmd = [
         str(bin_path),
+        "--cli",
         "--config", config_path,
         "run",
         "--max-turns", str(max_turns),
