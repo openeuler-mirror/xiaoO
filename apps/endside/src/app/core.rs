@@ -55,6 +55,21 @@ impl App {
         // is open.
         heartbeat_interval.tick().await;
 
+        // Periodic full redraw while idle/ASK: refreshes the header clock
+        // (which only updates on `draw`) and recovers from external screen
+        // corruption (terminal wake/scrollback clear/reattach) that ratatui's
+        // diff optimization would otherwise miss — the previous buffer still
+        // matches the last frame, so an unchanged state produces an empty
+        // diff and the actual (cleared) screen is never rewritten. Skipped
+        // while loading: the 16ms tick already redraws constantly and any
+        // streaming state change yields a non-empty diff that recovers the
+        // screen naturally. `swap_buffers()` resets the back buffer (without
+        // emitting `\x1b[2J`, so no visible clear/flicker) so the next
+        // `draw()` writes the full frame instead of a no-op diff.
+        let mut force_redraw_interval = tokio::time::interval(Duration::from_secs(1));
+        force_redraw_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        force_redraw_interval.tick().await;
+
         #[cfg(unix)]
         let mut sigterm =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -122,6 +137,12 @@ impl App {
                         _ = heartbeat_interval.tick() => {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
+                        _ = force_redraw_interval.tick() => {
+                            if !self.state.chat_state.is_loading {
+                                terminal.swap_buffers();
+                                needs_redraw = true;
+                            }
+                        }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
                             self.state.should_quit = true;
@@ -166,6 +187,12 @@ impl App {
                         }
                         _ = heartbeat_interval.tick() => {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
+                        }
+                        _ = force_redraw_interval.tick() => {
+                            if !self.state.chat_state.is_loading {
+                                terminal.swap_buffers();
+                                needs_redraw = true;
+                            }
                         }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
