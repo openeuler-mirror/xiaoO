@@ -251,6 +251,32 @@ const result = await resp.json();
 
 AgentMoss 的三层防御中，层3（LLM 语义分析）是可选的。层1+层2 的静态规则可以独立运行。
 
+### L3 输入构成与 token 消耗（为什么不会上下文爆炸）
+
+客户常有的顾虑：最坏情况下一个 session 里的每个 tool call 都会走到 L3 LLM 分析，会不会像 Agent 主循环那样把历史会话不断叠加导致上下文爆炸？**不会**。AgentMoss 的 L3 每次调用都是**有界的独立请求**，输入只包含当前这次判定的必要上下文，不随 session 长度无限累积。
+
+**每次 L3 调用的输入构成**（固定模板 + 当前判定要素）：
+
+| 组成部分 | 内容 | 是否有界 |
+|---------|------|---------|
+| 固定 prompt 模板 | 安全审计员角色 + 判定维度 + JSON 输出格式 | ✓ 固定 |
+| 原始用户 prompt | `prompt_session`（本次 session 的用户意图） | 有界（用户单次输入） |
+| 待执行动作 | `action_type` + `action_detail`（当前这一次 tool call） | ✓ 单次动作 |
+| 执行理由 | `reason` | ✓ 当前动作的理由 |
+| 历史动作序列 | `action_history`（本次 session 已执行的动作，每条仅 name + action_detail） | 有界（本次 session 的有限动作） |
+| 安全检测规则 | **最多 3 个 Skill**（按关键词相关度从全集选 top-3，每个 Skill 29-39 行） | ✓ 最多 3 个 |
+| 前置检测结果 | L1/L2 的命中提示（仅命中时才有） | ✓ 按需 |
+| 脚本内容分析 | 内联脚本/管道的静态分析（仅脚本类动作才有） | ✓ 按需 |
+
+**关键边界**：
+
+- **Skill 最多 3 个**：L3 从全部安全 Skill 中按关键词相关度评分取 top-3 注入 prompt（无匹配时兜底 `general_tool_risk_guard` 1 个），不会把全部 Skill 都塞进去。每个 Skill 文件 29-39 行。
+- **每次调用独立**：L3 是"判定单个待执行动作 a_next"的独立请求，**不是**把 agent 的全部历史对话叠加进上下文。每次输入 = 固定模板 + 本次 a_next + 本次 session 的历史动作 + ≤3 个 Skill，彼此之间无累积。
+- **实测输入大小**：典型 L3 调用 prompt 长度约 **3500-3700 字符（~1k-1.5k token）**，多次调用稳定在该量级，不随 session 延长而膨胀。
+- **与 Agent 主循环的区别**：Agent 主循环调 LLM 时通常把全部历史对话（user/assistant 往返）叠加进上下文，session 越长 token 越大；AgentMoss L3 每次只判一个动作，历史只传"已执行动作的摘要"（name + action_detail），且本次判定完即丢弃，不在 L3 侧累积。
+
+> 最坏情况（session 内每个 tool call 都走 L3）下，**单次 L3 的输入 token 仍有界**（~1.5k token 量级），代价是调用次数 × 单次 token，而非单次 token 随历史爆炸。结果缓存（200 条 FIFO）会进一步消减重复调用的实际 LLM 消耗。
+
 ### 启用 LLM
 
 **方式 1：环境变量（推荐）**
