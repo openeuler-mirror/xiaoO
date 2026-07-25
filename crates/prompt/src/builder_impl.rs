@@ -236,7 +236,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn build_projects_tools_into_llm_request() {
         let builder = PromptBuilderImpl::new();
         let input = PromptBuildInput {
@@ -296,7 +295,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn build_fails_fast_when_budget_is_zero() {
         let builder = PromptBuilderImpl::new();
         let input = PromptBuildInput {
