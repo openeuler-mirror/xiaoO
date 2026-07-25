@@ -1099,6 +1099,7 @@ impl CoreBackedSessionService {
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         let hooks_enabled = !matches!(
             (
@@ -1117,6 +1118,9 @@ impl CoreBackedSessionService {
             .resolve(&runtime_input, existing.as_ref())
             .await?;
         resolved.bindings.cancel_token = cancellation_token;
+        if let Some(tool_event_sink) = tool_event_sink {
+            resolved.bindings.tool_event_sink = Some(tool_event_sink);
+        }
 
         let mut seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
@@ -1524,7 +1528,8 @@ impl SessionService for CoreBackedSessionService {
         &self,
         request: AppTurnRequest,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, None, None, None, None).await
+        self.run_turn_inner(request, None, None, None, None, None)
+            .await
     }
 
     async fn run_turn_with_events(
@@ -1532,7 +1537,7 @@ impl SessionService for CoreBackedSessionService {
         request: AppTurnRequest,
         event_sink: Option<Arc<dyn LoopEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
-        self.run_turn_inner(request, event_sink, None, None, None)
+        self.run_turn_inner(request, event_sink, None, None, None, None)
             .await
     }
 
@@ -1543,6 +1548,7 @@ impl SessionService for CoreBackedSessionService {
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
+        tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.run_turn_inner(
             request,
@@ -1550,6 +1556,7 @@ impl SessionService for CoreBackedSessionService {
             interaction_handle,
             channel_file_sender,
             cancellation_token,
+            tool_event_sink,
         )
         .await
     }

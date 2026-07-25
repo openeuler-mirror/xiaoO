@@ -1,10 +1,9 @@
 use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
@@ -173,24 +172,7 @@ pub struct SlashState {
     pub dismissed_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SessionFileChangeStats {
-    pub additions: u32,
-    pub deletions: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionFileChangeEntry {
-    pub file_path: String,
-    pub additions: u32,
-    pub deletions: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolFileBaseline {
-    file_path: String,
-    absolute_path: PathBuf,
-}
+pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeStats};
 
 pub struct AppState {
     pub theme: Theme,
@@ -232,10 +214,7 @@ pub struct AppState {
     /// Set when text is copied to clipboard; drives the toast notification.
     pub copy_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
-    pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
-    pub tool_file_changes: HashMap<String, crate::chat::FileChangeDelta>,
-    tool_file_baselines: HashMap<String, ToolFileBaseline>,
-    session_file_content_baselines: HashMap<String, Option<String>>,
+    pub diff_tracker: SessionDiffTracker,
 }
 
 impl AppState {
@@ -260,7 +239,7 @@ impl AppState {
             active_agent_role: None,
             reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
-            workspace,
+            workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -273,10 +252,7 @@ impl AppState {
             transcript_selection: None,
             copy_notice: None,
             external_commands: load_external_commands(),
-            session_file_changes: BTreeMap::new(),
-            tool_file_changes: HashMap::new(),
-            tool_file_baselines: HashMap::new(),
-            session_file_content_baselines: HashMap::new(),
+            diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
 
@@ -311,7 +287,7 @@ impl AppState {
             active_agent_role: None,
             reasoning_effort: config.llm.reasoning_effort,
             config_path,
-            workspace,
+            workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -326,10 +302,7 @@ impl AppState {
             external_commands: load_external_commands(),
             transcript_selection: None,
             copy_notice: None,
-            session_file_changes: BTreeMap::new(),
-            tool_file_changes: HashMap::new(),
-            tool_file_baselines: HashMap::new(),
-            session_file_content_baselines: HashMap::new(),
+            diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
 
@@ -359,10 +332,7 @@ impl AppState {
         self.transcript_selection = None;
         self.copy_notice = None;
         self.external_commands = load_external_commands();
-        self.session_file_changes.clear();
-        self.tool_file_changes.clear();
-        self.tool_file_baselines.clear();
-        self.session_file_content_baselines.clear();
+        self.diff_tracker.clear();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -543,154 +513,75 @@ impl AppState {
         }
     }
 
-    pub fn reconcile_tool_file_change(
-        &mut self,
-        call_id: &str,
-        next: Option<crate::chat::FileChangeDelta>,
-    ) {
-        if let Some(previous) = self.tool_file_changes.remove(call_id) {
-            self.adjust_session_file_change(
-                &previous.file_path,
-                previous.additions,
-                previous.deletions,
-                false,
-            );
-        }
-
-        let Some(next) = next.filter(|change| change.additions > 0 || change.deletions > 0) else {
-            return;
-        };
-
-        self.adjust_session_file_change(&next.file_path, next.additions, next.deletions, true);
-        self.tool_file_changes.insert(call_id.to_string(), next);
-    }
-
-    pub fn capture_tool_file_baseline(&mut self, call_id: &str, tool: &str, args_preview: &str) {
-        if self.tool_file_baselines.contains_key(call_id) {
-            return;
-        }
-        let Some(file_path) = parse_tool_target_file_path(tool, args_preview) else {
-            return;
-        };
-        let absolute_path = resolve_workspace_file_path(&self.workspace, &file_path);
-        let current_content = read_file_if_exists(&absolute_path);
-        self.session_file_content_baselines
-            .entry(file_path.clone())
-            .or_insert_with(|| current_content.clone());
-        self.tool_file_baselines.insert(
-            call_id.to_string(),
-            ToolFileBaseline {
-                file_path,
-                absolute_path,
-            },
-        );
-    }
-
-    pub fn reconcile_tool_file_change_from_baseline(
-        &mut self,
-        call_id: &str,
-        fallback: Option<crate::chat::FileChangeDelta>,
-    ) {
-        let Some(baseline) = self.tool_file_baselines.remove(call_id) else {
-            if !self.tool_file_changes.contains_key(call_id) {
-                self.reconcile_tool_file_change(call_id, fallback);
-            }
-            return;
-        };
-
-        let current_content = read_file_if_exists(&baseline.absolute_path);
-        let computed = self
-            .session_file_content_baselines
-            .get(&baseline.file_path)
-            .and_then(|initial_content| {
-                if initial_content.is_none() && current_content.is_none() {
-                    None
-                } else {
-                    Some(file_content_delta(
-                        &baseline.file_path,
-                        initial_content.as_deref(),
-                        current_content.as_deref(),
-                    ))
-                }
-            });
-        if let Some(delta) = computed.or(fallback) {
-            self.session_file_changes.insert(
-                delta.file_path.clone(),
-                SessionFileChangeStats {
-                    additions: delta.additions,
-                    deletions: delta.deletions,
-                },
-            );
-            if delta.additions == 0 && delta.deletions == 0 {
-                self.session_file_changes.remove(&delta.file_path);
-            }
-        } else {
-            self.reconcile_tool_file_change(call_id, None);
-        }
-    }
-
-    pub fn discard_tool_file_baseline(&mut self, call_id: &str) {
-        self.tool_file_baselines.remove(call_id);
-    }
-
     pub fn clear_tool_file_baselines(&mut self) {
-        self.tool_file_baselines.clear();
+        self.diff_tracker.clear_tool_file_baselines();
+    }
+
+    /// High-level entry: tool transitioned to Running.
+    pub fn on_tool_running(&mut self, call_id: &str, tool: &str, args_preview: &str) {
+        self.diff_tracker
+            .on_tool_running(call_id, tool, args_preview);
+    }
+
+    /// High-level entry: tool transitioned to Completed. Returns the computed
+    /// delta (used in remote mode to forward to the TUI; local callers may
+    /// discard it).
+    pub fn on_tool_completed(
+        &mut self,
+        call_id: &str,
+        tool: &str,
+        args_preview: &str,
+        file_change: Option<crate::chat::FileChangeDelta>,
+    ) -> Option<crate::chat::FileChangeDelta> {
+        self.diff_tracker
+            .on_tool_completed(call_id, tool, args_preview, file_change.map(Into::into))
+            .map(Into::into)
+    }
+
+    /// High-level entry: tool transitioned to Failed.
+    pub fn on_tool_failed(
+        &mut self,
+        call_id: &str,
+        file_change: Option<crate::chat::FileChangeDelta>,
+    ) -> Option<crate::chat::FileChangeDelta> {
+        self.diff_tracker
+            .on_tool_failed(call_id, file_change.map(Into::into))
+            .map(Into::into)
+    }
+
+    /// Remote-mode entry: directly apply a delta precomputed by the daemon.
+    pub fn apply_remote_delta(&mut self, call_id: &str, delta: crate::chat::FileChangeDelta) {
+        self.diff_tracker.apply_remote_delta(call_id, delta.into());
+    }
+
+    /// Replace the tracker's session changes (used by snapshot restore).
+    pub fn restore_session_file_changes(
+        &mut self,
+        snapshot: std::collections::BTreeMap<String, SessionFileChangeStats>,
+    ) {
+        self.diff_tracker.restore(snapshot);
+    }
+
+    pub fn session_file_changes(
+        &self,
+    ) -> &std::collections::BTreeMap<String, SessionFileChangeStats> {
+        self.diff_tracker.session_file_changes()
     }
 
     pub fn sorted_session_file_changes(&self) -> Vec<SessionFileChangeEntry> {
-        let mut entries = self
-            .session_file_changes
-            .iter()
-            .map(|(file_path, stats)| SessionFileChangeEntry {
-                file_path: file_path.clone(),
-                additions: stats.additions,
-                deletions: stats.deletions,
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            let left_total = left.additions + left.deletions;
-            let right_total = right.additions + right.deletions;
-            right_total
-                .cmp(&left_total)
-                .then(right.additions.cmp(&left.additions))
-                .then(left.file_path.cmp(&right.file_path))
-        });
-        entries
+        self.diff_tracker.sorted_session_file_changes()
+    }
+
+    /// Synchronize the diff tracker's workspace with `self.workspace`.
+    /// Must be called whenever `self.workspace` is mutated externally so
+    /// that [`Self::display_file_path`] strips prefixes against the active
+    /// workspace rather than a stale one captured at construction time.
+    pub fn sync_diff_tracker_workspace(&mut self) {
+        self.diff_tracker.set_workspace(self.workspace.clone());
     }
 
     pub fn display_file_path(&self, file_path: &str) -> String {
-        let path = Path::new(file_path);
-        if let Ok(relative) = path.strip_prefix(&self.workspace) {
-            let display = relative.display().to_string();
-            if !display.is_empty() {
-                return display;
-            }
-        }
-        file_path.to_string()
-    }
-
-    fn adjust_session_file_change(
-        &mut self,
-        file_path: &str,
-        additions: u32,
-        deletions: u32,
-        add: bool,
-    ) {
-        let entry = self
-            .session_file_changes
-            .entry(file_path.to_string())
-            .or_default();
-        if add {
-            entry.additions = entry.additions.saturating_add(additions);
-            entry.deletions = entry.deletions.saturating_add(deletions);
-        } else {
-            entry.additions = entry.additions.saturating_sub(additions);
-            entry.deletions = entry.deletions.saturating_sub(deletions);
-        }
-
-        if entry.additions == 0 && entry.deletions == 0 {
-            self.session_file_changes.remove(file_path);
-        }
+        self.diff_tracker.display_file_path(file_path)
     }
 
     /// Extract the plain text covered by the current transcript selection.
@@ -938,16 +829,6 @@ impl AppState {
     }
 }
 
-fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
-    match tool {
-        "file_edit" | "file_write" => {
-            let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
-            value.get("file_path")?.as_str().map(ToOwned::to_owned)
-        }
-        _ => None,
-    }
-}
-
 fn short_agent_id(agent_id: &str) -> String {
     let trimmed = agent_id.trim();
     if trimmed.chars().count() <= 8 {
@@ -961,141 +842,7 @@ pub(crate) fn file_change_delta_from_tool_args(
     tool: &str,
     args_preview: &str,
 ) -> Option<crate::chat::FileChangeDelta> {
-    let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
-    let file_path = value.get("file_path")?.as_str()?.to_string();
-    let (additions, deletions) = match tool {
-        "file_edit" => {
-            let old_string = value.get("old_string")?.as_str()?;
-            let new_string = value.get("new_string")?.as_str()?;
-            line_change_counts(old_string, new_string)
-        }
-        "file_write" => {
-            let content = value.get("content")?.as_str()?;
-            (text_line_count(content), 0)
-        }
-        _ => return None,
-    };
-
-    if additions == 0 && deletions == 0 {
-        return None;
-    }
-
-    Some(crate::chat::FileChangeDelta {
-        file_path,
-        additions,
-        deletions,
-    })
-}
-
-fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
-    let path = Path::new(file_path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace.join(path)
-    }
-}
-
-fn read_file_if_exists(path: &Path) -> Option<String> {
-    match fs::read_to_string(path) {
-        Ok(content) => Some(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => None,
-    }
-}
-
-fn file_content_delta(
-    file_path: &str,
-    before: Option<&str>,
-    after: Option<&str>,
-) -> crate::chat::FileChangeDelta {
-    let (additions, deletions) = match (before, after) {
-        (Some(before), Some(after)) => line_change_counts(before, after),
-        (None, Some(after)) => (text_line_count(after), 0),
-        (Some(before), None) => (0, text_line_count(before)),
-        (None, None) => (0, 0),
-    };
-
-    crate::chat::FileChangeDelta {
-        file_path: file_path.to_string(),
-        additions,
-        deletions,
-    }
-}
-
-fn line_change_counts(before: &str, after: &str) -> (u32, u32) {
-    if before == after {
-        return (0, 0);
-    }
-
-    let before_lines = text_lines(before);
-    let after_lines = text_lines(after);
-    if before_lines.is_empty() {
-        return (after_lines.len() as u32, 0);
-    }
-    if after_lines.is_empty() {
-        return (0, before_lines.len() as u32);
-    }
-
-    let cell_count = before_lines.len().saturating_mul(after_lines.len());
-    let common = if cell_count > 20_000 {
-        coarse_common_line_count(&before_lines, &after_lines)
-    } else {
-        lcs_line_count(&before_lines, &after_lines)
-    };
-
-    (
-        after_lines.len().saturating_sub(common) as u32,
-        before_lines.len().saturating_sub(common) as u32,
-    )
-}
-
-fn lcs_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
-    let mut previous = vec![0usize; after_lines.len() + 1];
-    let mut current = vec![0usize; after_lines.len() + 1];
-    for before_line in before_lines {
-        for (after_index, after_line) in after_lines.iter().enumerate() {
-            current[after_index + 1] = if before_line == after_line {
-                previous[after_index] + 1
-            } else {
-                current[after_index].max(previous[after_index + 1])
-            };
-        }
-        std::mem::swap(&mut previous, &mut current);
-        current.fill(0);
-    }
-    previous[after_lines.len()]
-}
-
-fn coarse_common_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
-    let mut prefix = 0usize;
-    while prefix < before_lines.len().min(after_lines.len())
-        && before_lines[prefix] == after_lines[prefix]
-    {
-        prefix += 1;
-    }
-
-    let mut suffix = 0usize;
-    while suffix < before_lines.len().saturating_sub(prefix)
-        && suffix < after_lines.len().saturating_sub(prefix)
-        && before_lines[before_lines.len() - 1 - suffix]
-            == after_lines[after_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-    prefix + suffix
-}
-
-fn text_line_count(text: &str) -> u32 {
-    text_lines(text).len() as u32
-}
-
-fn text_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        text.lines().collect()
-    }
+    xiaoo_shared::session_diff::file_change_delta_from_tool_args(tool, args_preview).map(Into::into)
 }
 
 pub(crate) fn build_chat_state(config: &Config) -> ChatState {
@@ -1431,13 +1178,13 @@ mod tests {
 
         let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
             .expect("app state should initialize");
-        state.capture_tool_file_baseline("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
+        state.on_tool_running("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
 
         fs::write(&file, "one\ntwo\nTHREE\nfour\nfive\n").expect("modified");
-        state.reconcile_tool_file_change_from_baseline("call-1", None);
+        state.on_tool_completed("call-1", "file_edit", r#"{"file_path":"README.md"}"#, None);
 
         let stats = state
-            .session_file_changes
+            .session_file_changes()
             .get("README.md")
             .expect("session stats should be tracked");
         assert_eq!(stats.additions, 1);

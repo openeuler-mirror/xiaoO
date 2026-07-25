@@ -713,6 +713,7 @@ impl App {
                 Ok(path) => {
                     self.state.workspace = path;
                     self.state.status_panel.set_workspace(&self.state.workspace);
+                    self.state.sync_diff_tracker_workspace();
                     self.state
                         .chat_state
                         .messages

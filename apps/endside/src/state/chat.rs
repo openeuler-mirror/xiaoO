@@ -1,6 +1,7 @@
 use crate::input::Input;
 use ratatui::widgets::ScrollbarState;
 use std::collections::{BTreeMap, VecDeque};
+use xiaoo_shared::session_diff::FileChangeDelta as SharedFileChangeDelta;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionStatus {
@@ -14,6 +15,26 @@ pub struct FileChangeDelta {
     pub file_path: String,
     pub additions: u32,
     pub deletions: u32,
+}
+
+impl From<SharedFileChangeDelta> for FileChangeDelta {
+    fn from(delta: SharedFileChangeDelta) -> Self {
+        Self {
+            file_path: delta.file_path,
+            additions: delta.additions,
+            deletions: delta.deletions,
+        }
+    }
+}
+
+impl From<FileChangeDelta> for SharedFileChangeDelta {
+    fn from(delta: FileChangeDelta) -> Self {
+        Self {
+            file_path: delta.file_path,
+            additions: delta.additions,
+            deletions: delta.deletions,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -31,24 +52,7 @@ pub struct ToolExecutionUpdate {
     pub file_change: Option<FileChangeDelta>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TodoDisplayStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-#[derive(Debug, Clone)]
-pub struct TodoSnapshotItem {
-    pub status: TodoDisplayStatus,
-    pub content: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TodoSnapshotUpdate {
-    pub title: String,
-    pub items: Vec<TodoSnapshotItem>,
-}
+pub use xiaoo_shared::plan::{TodoDisplayStatus, TodoSnapshotUpdate};
 
 #[derive(Debug, Clone)]
 pub struct ToolMessageState {
@@ -1020,6 +1024,34 @@ impl ChatState {
             })
             .or_insert_with(|| {
                 SubagentLaneState::new(agent_id, parent_agent_id, title, description, task_goal)
+            })
+    }
+
+    /// Like [`Self::ensure_subagent_lane`] but never invokes
+    /// [`SubagentLaneState::update_metadata`] on an existing lane: returns
+    /// a `&mut` without touching title/description/task_goal; otherwise
+    /// inserts a new lane with the supplied fallback metadata. Use this in
+    /// handlers that only need the lane present (e.g. `TurnStart` /
+    /// `SetAssistantContent` / `Tool` for a subagent whose metadata was
+    /// already populated by an earlier `SubagentSpawn` SSE event).
+    pub fn ensure_subagent_lane_preserve_metadata(
+        &mut self,
+        agent_id: String,
+        fallback_parent_agent_id: Option<String>,
+        fallback_title: String,
+        fallback_description: String,
+        fallback_task_goal: String,
+    ) -> &mut SubagentLaneState {
+        self.subagent_lanes
+            .entry(agent_id.clone())
+            .or_insert_with(|| {
+                SubagentLaneState::new(
+                    agent_id,
+                    fallback_parent_agent_id,
+                    fallback_title,
+                    fallback_description,
+                    fallback_task_goal,
+                )
             })
     }
 }

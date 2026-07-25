@@ -139,6 +139,7 @@ pub trait SessionService: Send + Sync {
         _interaction_handle: Option<Arc<dyn InteractionHandle>>,
         _channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
         _cancellation_token: Option<CancellationToken>,
+        _tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.run_turn_with_events(request, event_sink).await
     }
