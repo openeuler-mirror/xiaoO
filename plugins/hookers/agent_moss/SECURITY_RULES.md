@@ -109,7 +109,7 @@ AgentMoss 对每个待执行动作依次过三层，命中即决策：
 
 ## 规则管控
 
-规则可通过 Policy Console（`http://127.0.0.1:9090/console`）动态增删/开关，详见 [README.md](README.md) 的 "Policy Console" 与 "runtime_config" 章节，及 [`AUDIT_DASHBOARD_SUMMARY.md`](AUDIT_DASHBOARD_SUMMARY.md)。
+规则可通过 Policy Console（`http://127.0.0.1:9090/console`）动态增删/开关，详见 [README.md](README.md) 的 "Policy Console" 与 "runtime_config" 章节，及 [`POLICY_CONSOLE_SUMMARY.md`](POLICY_CONSOLE_SUMMARY.md)。
 
 ---
 

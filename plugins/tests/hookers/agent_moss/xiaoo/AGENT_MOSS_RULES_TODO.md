@@ -75,7 +75,7 @@
 | `git_push_force.json` | expected 改为 Allow |
 | `dangerous_patterns.json` | expected 改为 Allow |
 | `intent_consistency.json` | prompt 改为 /tmp/config.txt |
-| `AUDIT_RULES_TODO.md` | 标记全部已完成 ✅ |
+| `AGENT_MOSS_RULES_TODO.md` | 标记全部已完成 ✅ |
 
 > **agent_moss 迁移后的预期调整（2026-07）**：上述表格为旧 audit_agent 时代的记录。
 > 迁移到 agent_moss（常驻 HTTP 服务 + L3 LLM 分析）后，以下用例预期因 L3 安全收紧而变化：
