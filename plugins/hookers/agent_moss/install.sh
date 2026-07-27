@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # AgentMoss 版本（单一定义，多处使用）
-AM_VERSION="0.8.5"
+AM_VERSION="0.9.1"
 
 # venv 路径（sudo 模式用 /opt/agent_moss/venv/，非 sudo 模式 fallback 到用户目录）
 # 如果 venv 已存在，优先使用已有的，避免重复创建
