@@ -79,8 +79,7 @@ impl App {
             return Ok(());
         }
 
-        if key.code == KeyCode::Up
-            && key.modifiers.contains(event::KeyModifiers::SHIFT)
+        if is_leave_subagent_view_key(&key)
             && self.state.is_subagent_view_active()
             && self.state.api_key_dialog.is_none()
             && self.state.provider_dialog.is_none()
@@ -1657,6 +1656,10 @@ fn editing_key_inserts_newline(code: KeyCode, modifiers: event::KeyModifiers) ->
     }
 }
 
+fn is_leave_subagent_view_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Left && key.modifiers.is_empty()
+}
+
 fn is_named_slash_command(trimmed: &str, command: &str) -> bool {
     let Some(first) = trimmed.split_whitespace().next() else {
         return false;
@@ -1809,6 +1812,30 @@ mod tests {
             KeyCode::Char('j'),
             event::KeyModifiers::ALT
         ));
+    }
+
+    #[test]
+    fn plain_left_leaves_subagent_view() {
+        assert!(is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Left,
+            event::KeyModifiers::empty()
+        )));
+    }
+
+    #[test]
+    fn modified_left_does_not_leave_subagent_view() {
+        assert!(!is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Left,
+            event::KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn former_shift_up_shortcut_does_not_leave_subagent_view() {
+        assert!(!is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Up,
+            event::KeyModifiers::SHIFT
+        )));
     }
 
     #[test]

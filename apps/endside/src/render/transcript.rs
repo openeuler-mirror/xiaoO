@@ -35,7 +35,7 @@ impl App {
         let title = self
             .state
             .active_subagent_title()
-            .map(|title| format!(" {title} | Shift+↑ Back "))
+            .map(|title| format!(" {title} | ← Back "))
             .unwrap_or_else(|| " Messages ".to_string());
         let block = Block::default()
             .borders(Borders::ALL)
