@@ -1553,6 +1553,18 @@ impl SessionService for CoreBackedSessionService {
         )
         .await
     }
+
+    async fn export_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        match self.session_store.load(session_id).await {
+            Some(record) => Ok(record),
+            None => Err(SessionServiceError::SessionNotFound {
+                session_id: session_id.to_string(),
+            }),
+        }
+    }
 }
 
 #[async_trait]

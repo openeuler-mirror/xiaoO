@@ -280,7 +280,8 @@ fn create_router_from_state(
             .route(
                 "/api/v1/runtimes/write-file",
                 post(handle_runtime_write_file),
-            ),
+            )
+            .route("/api/v1/runtimes/export/:session_id", get(handle_session_export)),
         bearer_auth.clone(),
     );
 
@@ -767,6 +768,16 @@ async fn handle_runtime_checkout(
     // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_export(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+) -> Response {
+    match state.session_service.export_session(&session_id).await {
+        Ok(session_data) => Json(session_data).into_response(),
         Err(error) => map_session_error(error),
     }
 }

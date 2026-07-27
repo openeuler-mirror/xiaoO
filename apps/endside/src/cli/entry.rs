@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -38,8 +39,12 @@ struct Args {
     #[arg(long, global = true)]
     debug: bool,
 
+    /// Show version number
+    #[arg(short = 'v', long = "version", global = true, action = clap::ArgAction::SetTrue)]
+    version: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(clap::Subcommand)]
@@ -47,8 +52,8 @@ enum Command {
     /// Run a single prompt through the AgentLoop
     Run {
         /// The prompt to send to the agent
-        #[arg(short, long)]
-        prompt: String,
+        #[arg(short, long, num_args = 1..)]
+        prompt: Vec<String>,
 
         /// LLM provider (overrides config file)
         #[arg(long)]
@@ -88,12 +93,66 @@ enum Command {
         /// Reasoning effort: off, high, or max
         #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
         reasoning_effort: Option<ReasoningEffort>,
+
+        /// Output format for results
+        #[arg(long, value_parser = clap::value_parser!(OutputFormat), default_value = "default")]
+        format: OutputFormat,
+
+        /// Human-readable session title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Resume an existing session by ID
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Agent ID to use for this run
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Attach to a running daemon at the given URL instead of running locally
+        #[arg(long)]
+        attach: Option<String>,
+    },
+    /// Start a local daemon server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 4096)]
+        port: u16,
+
+        /// Hostname to bind
+        #[arg(long, default_value_t = String::from("127.0.0.1"))]
+        hostname: String,
+    },
+    /// Export a session transcript from a running daemon
+    Export {
+        /// ID of the session to export
+        session_id: String,
+    },
+    /// Inspect resolved configuration and internal state
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommands,
     },
     /// Manage skills
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
+}
+
+#[derive(clap::Subcommand)]
+enum DebugCommands {
+    /// Show resolved configuration
+    Config,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+enum OutputFormat {
+    /// Human-readable text output
+    Default,
+    /// Machine-readable JSON output (one event object per line)
+    Json,
 }
 
 #[derive(clap::Subcommand)]
@@ -126,8 +185,18 @@ where
     let debug = args.debug;
     let config_path = FileConfig::resolve_path(args.config.as_deref());
 
+    if args.version {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     match args.command {
-        Command::Run {
+        None => {
+            eprintln!("error: 'xiaoo' requires a subcommand but one was not provided");
+            eprintln!("  [subcommands: run, serve, export, debug, skill, help]");
+            std::process::exit(1);
+        }
+        Some(Command::Run {
             prompt,
             provider,
             model,
@@ -138,7 +207,13 @@ where
             no_tools,
             tools,
             reasoning_effort,
-        } => {
+            format,
+            title,
+            session,
+            agent,
+            attach,
+        }) => {
+            let prompt = prompt.join(" ");
             if let Some(path) = config_path.as_ref() {
                 if let Err(error) = xiaoo_shared::llm_secrets::init_on_demand_secret_provider(path)
                 {
@@ -202,9 +277,29 @@ where
                 mcp_servers: file_cfg.mcp.servers.clone(),
             };
 
-            run_once(config, prompt, debug).await;
+let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
+            
+            run_once(
+                config,
+                prompt,
+                debug,
+                format,
+                session_title,
+                session,
+                agent,
+                attach,
+            ).await;
         }
-        Command::Skill { command } => {
+        Some(Command::Serve { port, hostname }) => {
+            handle_serve_command(port, hostname).await;
+        }
+        Some(Command::Export { session_id }) => {
+            handle_export_command(session_id);
+        }
+        Some(Command::Debug { command }) => {
+            handle_debug_command(command, config_path.as_ref(), debug);
+        }
+        Some(Command::Skill { command }) => {
             handle_skill_command(command);
         }
     }
@@ -766,12 +861,38 @@ fn reject_nested_copy(src: &std::path::Path, dest: &std::path::Path) -> std::io:
     Ok(())
 }
 
-async fn run_once(config: CliConfig, prompt: String, debug: bool) {
+async fn run_once(
+    config: CliConfig,
+    prompt: String,
+    debug: bool,
+    format: OutputFormat,
+    title: Option<String>,
+    session: Option<String>,
+    agent: Option<String>,
+    attach: Option<String>,
+) {
     if debug {
         eprintln!(
-            "[config] provider={}, model={}, max_turns={}",
-            config.provider, config.model, config.max_turns
+            "[config] provider={}, model={}, max_turns={}, format={:?}",
+            config.provider, config.model, config.max_turns, format
         );
+        if let Some(title) = &title {
+            eprintln!("[config] title={}", title);
+        }
+        if let Some(session) = &session {
+            eprintln!("[config] session={}", session);
+        }
+        if let Some(agent) = &agent {
+            eprintln!("[config] agent={}", agent);
+        }
+        if let Some(attach) = &attach {
+            eprintln!("[config] attach={}", attach);
+        }
+    }
+
+if let Some(attach_url) = &attach {
+        run_with_attach(attach_url, prompt, format, title, session, agent, debug).await;
+        return;
     }
 
     // 1. LLM provider (shared with compression pipeline)
@@ -799,7 +920,12 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
-            agent_id: AgentId("defaultagent".into()),
+            agent_id: AgentId(
+                agent
+                    .as_ref()
+                    .map(|a| a.clone())
+                    .unwrap_or_else(|| "defaultagent".into()),
+            ),
             model: config.model.clone(),
             llm: Some(LlmRuntimeConfig {
                 provider: Some(config.provider.clone()),
@@ -903,8 +1029,8 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         }
     };
 
-    // 6. Turn request
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // 6. Turn request - use provided session ID or create new one
+    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext::cli(),
@@ -912,7 +1038,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         message_id: None,
         conversation_id: session_id.clone(),
         sender_id: "cli-user".into(),
-        text: prompt,
+        text: prompt.clone(),
         channel_instance_id: None,
         channel_identity_prompt: None,
         reply_to_message_id: None,
@@ -930,6 +1056,24 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         client_id: None,
     };
 
+    // Print session info
+    if debug || format == OutputFormat::Json {
+        let session_info = serde_json::json!({
+            "session_id": session_id,
+            "title": title,
+            "agent": agent,
+        });
+        if format == OutputFormat::Json {
+            println!("{}", serde_json::to_string(&serde_json::json!({
+                "type": "session_start",
+                "data": session_info
+            })).unwrap());
+            let _ = std::io::stdout().flush();
+        } else if debug {
+            eprintln!("[session] {}", serde_json::to_string_pretty(&session_info).unwrap());
+        }
+    }
+
     // 7. Run turn via gateway session service, then explicitly close the
     // session so SessionClosed lifecycle hookers fire in CLI mode as well.
     let turn_result = deps.session_service.run_turn(request).await;
@@ -938,17 +1082,189 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         .force_close_session(&session_id)
         .await
     {
-        eprintln!("[warn] failed to close session: {}", err);
+        if format == OutputFormat::Json {
+            println!("{}", serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "data": {
+                    "message": format!("failed to close session: {}", err)
+                }
+            })).unwrap());
+            let _ = std::io::stdout().flush();
+        } else {
+            eprintln!("[warn] failed to close session: {}", err);
+        }
     }
 
     match turn_result {
         Ok(result) => {
-            if !result.raw_reply.is_empty() {
-                println!("{}", result.raw_reply);
+            if format == OutputFormat::Json {
+                println!("{}", serde_json::to_string(&serde_json::json!({
+                    "type": "response",
+                    "data": {
+                        "raw_reply": result.raw_reply,
+                        "session_id": session_id,
+                    }
+                })).unwrap());
+                let _ = std::io::stdout().flush();
+            } else {
+                if !result.raw_reply.is_empty() {
+                    println!("{}", result.raw_reply);
+                }
             }
         }
         Err(e) => {
-            eprintln!("[error] {}", e);
+            if format == OutputFormat::Json {
+                println!("{}", serde_json::to_string(&serde_json::json!({
+                    "type": "error",
+                    "data": {
+                        "message": e.to_string()
+                    }
+                })).unwrap());
+                let _ = std::io::stdout().flush();
+            } else {
+                eprintln!("[error] {}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate_title_from_prompt(prompt: &str) -> Option<String> {
+    let words = prompt.split_whitespace().take(10).collect::<Vec<_>>();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+async fn handle_serve_command(port: u16, hostname: String) {
+    eprintln!("Starting xiaoo daemon server on {}:{}", hostname, port);
+    eprintln!("Use 'xiaoo-daemon' binary directly for full daemon functionality");
+    let status = std::process::Command::new("xiaoo-daemon")
+        .args([
+            "--port", &port.to_string(),
+            "--host", &hostname,
+        ])
+        .status();
+    
+    match status {
+        Ok(s) if s.success() => std::process::exit(0),
+        Ok(s) => {
+            eprintln!("xiaoo-daemon exited with status: {}", s);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to start xiaoo-daemon: {}", e);
+            eprintln!("Make sure 'xiaoo-daemon' binary is installed");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_with_attach(
+    url: &str,
+    prompt: String,
+    format: OutputFormat,
+    title: Option<String>,
+    session: Option<String>,
+    agent: Option<String>,
+    debug: bool,
+) {
+    if debug {
+        eprintln!("Attaching to daemon at: {}", url);
+    }
+    
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}/api/run", url.trim_end_matches('/'));
+    
+    let mut body = serde_json::Map::new();
+    body.insert("prompt".to_string(), Value::String(prompt));
+    if let Some(t) = title {
+        body.insert("title".to_string(), Value::String(t));
+    }
+    if let Some(s) = session {
+        body.insert("session_id".to_string(), Value::String(s));
+    }
+    if let Some(a) = agent {
+        body.insert("agent".to_string(), Value::String(a));
+    }
+    
+    let response = client
+        .post(&endpoint)
+        .json(&Value::Object(body))
+        .send()
+        .await;
+    
+    match response {
+        Ok(resp) => {
+            if format == OutputFormat::Json {
+                let text = resp.text().await.unwrap_or_default();
+                println!("{}", text);
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                if !text.is_empty() {
+                    println!("{}", text);
+                }
+            }
+        }
+        Err(e) => {
+            if format == OutputFormat::Json {
+                println!("{}", serde_json::to_string(&serde_json::json!({
+                    "type": "error",
+                    "data": { "message": e.to_string() }
+                })).unwrap());
+            } else {
+                eprintln!("Failed to connect to daemon: {}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, debug: bool) {
+    match command {
+        DebugCommands::Config => {
+            let file_cfg = config_path
+                .map(|path| FileConfig::load_from_path(path, debug))
+                .unwrap_or_default();
+            
+            let mut config_json = serde_json::Map::new();
+            config_json.insert("$schema".to_string(), Value::String("https://xiaoo.ai/config.json".to_string()));
+
+            if let Some(llm) = &file_cfg.llm {
+                let provider = llm.provider.as_deref().unwrap_or("openai");
+                let model = llm.model.as_deref().unwrap_or("");
+                config_json.insert("model".to_string(), Value::String(format!("{}/{}", provider, model)));
+            }
+
+            println!("{}", serde_json::to_string_pretty(&Value::Object(config_json)).unwrap());
+        }
+    }
+
+}
+fn handle_export_command(session_id: String) {
+    let url = format!("http://127.0.0.1:4096/api/v1/runtimes/export/{}", session_id);
+    
+    let output = std::process::Command::new("curl")
+        .arg("-s")
+        .arg(&url)
+        .output();
+    
+    match output {
+        Ok(result) if result.status.success() && !result.stdout.is_empty() => {
+            println!("{}", String::from_utf8_lossy(&result.stdout));
+        }
+        Ok(result) => {
+            eprintln!("Error: Failed to export session '{}'", session_id);
+            if !result.stderr.is_empty() {
+                eprintln!("Details: {}", String::from_utf8_lossy(&result.stderr));
+            }
+            eprintln!("Make sure xiaoo-daemon is running on port 4096");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to call export API: {}", e);
+            eprintln!("Make sure xiaoo-daemon is running on port 4096");
             std::process::exit(1);
         }
     }
@@ -956,7 +1272,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_dir_recursive;
+    use super::*;
     use std::fs;
     use tempfile::tempdir;
 
@@ -971,4 +1287,36 @@ mod tests {
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
+
+    #[test]
+    fn test_generate_title_from_prompt() {
+        let prompt = "Fix the bug in authentication module related to JWT token validation";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(
+            title,
+            Some("Fix the bug in authentication module related to JWT token".to_string())
+        );
+    }
+
+    #[test]
+    fn test_generate_title_from_short_prompt() {
+        let prompt = "Hello world";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_generate_title_from_empty_prompt() {
+        let prompt = "";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn test_generate_title_from_whitespace_prompt() {
+        let prompt = "   ";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, None);
+    }
 }
+
