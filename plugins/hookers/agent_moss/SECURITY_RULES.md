@@ -7,12 +7,12 @@ AgentMoss 判定逻辑迁出为独立常驻 HTTP 服务，规则定义见本目�
 
 ## 三层防御体系
 
-AgentMoss 对每个待执行动作依次过三层，命中即决策：
+AgentMoss 对每个待执行动作 `a_next`（含 `action_type` + `action_detail`）依次过三层，命中即决策。判断依据来自**当前操作系统 Profile**（Linux/Windows 自动识别，可强制）和**用户运行时配置**（runtime_config，Policy Console 可热改）。
 
 | 层 | 名称 | 机制 | 命中后 |
 |----|------|------|--------|
-| L1 | 启发式静态检测 | 正则匹配危险命令 + 注入关键词 + 用户敏感规则（`rules/user_rules.json`） | critical/high → Deny（短路） |
-| L2 | 逻辑规则检测 | read_before_write、意图一致性、敏感路径、密码/用户删除等上下文逻辑 | critical/high → Deny（短路） |
+| L1 | 启发式静态检测 | 正则匹配危险命令 + 注入关键词 + 用户敏感规则 + 敏感路径/危险模式/横向移动（**只看 a_next 本身**） | critical/high → Deny（短路） |
+| L2 | 逻辑规则检测 | read_before_write、意图一致性、间接文件访问、密码/用户删除授权、提权（**需要 action_history / prompt_session / cwd**） | critical/high → Deny（短路） |
 | L3 | LLM + Skill 深度分析 | 13 个安全 Skill 规则（`skills/*_guard.md`）+ LLM 语义判断 | 按风险等级决策 |
 
 ### 风险等级与拦截策略
@@ -26,11 +26,30 @@ AgentMoss 对每个待执行动作依次过三层，命中即决策：
 | **medium** | 不拦截，传 L3 | 作为提示注入 LLM prompt，由 LLM 决定 |
 | **low** | 不拦截，传 L3 | 作为提示注入 LLM prompt，由 LLM 决定 |
 
-> **fail-closed 原则**：AgentMoss 服务不可达或 L3 LLM 分析失败时，按 fail-closed 拒绝（`AGENT_MOSS_*` 超时/异常 → `{"result":"deny"}`），避免"服务挂了静默放行所有危险操作"。
+> **fail-closed 原则**：AgentMoss 服务不可达或 L3 LLM 分析失败时，按配置的 `fail_mode` 决策——默认 `fail_open`（前两层未拦截时 Allow + 警告，可用性优先），可配 `fail_closed`（Deny，安全优先）。L3 失败 + 前两层已拦截时无论 fail_mode 都 Deny。
 
 ---
 
-## L1：用户敏感规则（`rules/user_rules.json`）
+## L1：启发式静态检测
+
+L1 由 `HeuristicDetector`（`agent_moss/engine/heuristic.py`）协调，按优先级依次调用子检测器，**短路返回**（命中即返回，不再跑后续）。所有子检测器**只看 a_next 本身**（action_type + action_detail），不看历史动作，这是 L1 与 L2 的分界。
+
+子检测器执行顺序：
+
+| # | 子检测器 | 检测内容 | 风险等级 |
+|---|---------|---------|---------|
+| 1 | 安全工具白名单跳过 | action_type 精确匹配 profile 的 `safe_action_types`（glob/list_dir 等纯元数据工具）→ 直接放行 | — |
+| 2 | 环境变量自定义规则 | `AGENT_MOSS_CUSTOM_RULES` 用户正则，命中 Deny | high |
+| 3 | 用户敏感规则 | `rules/user_rules.json` 通配符敏感动作 + 精确敏感工具名 | high |
+| 4 | 危险命令正则 | profile 的 `dangerous_commands`，正则 `re.search`（大小写不敏感） | critical/high |
+| 5 | Prompt 注入关键词 | profile 的 `injection_keywords`，子串匹配（中英文） | critical/high |
+| 6 | 敏感路径访问 | profile 的 `sensitive_paths`，按 `deny_mode` 区分读写、边界匹配 | critical/high |
+| 7 | 危险操作模式 | 通配符+删除、重定向覆盖 `/etc`/`/boot`/`/proc` 等关键目录 | high/critical |
+| 8 | 横向移动 | ssh/scp/rsync 到非本机主机 | medium（传 L3） |
+
+> 注：敏感路径/危险模式/横向移动三类已从 L2 重分类到 L1（只看 a_next 本身，不需历史上下文）。
+
+### L1：用户敏感规则（`rules/user_rules.json`）
 
 用户可配置的敏感动作与敏感工具白名单，命中即触发 L1 拦截：
 
@@ -66,16 +85,18 @@ AgentMoss 对每个待执行动作依次过三层，命中即决策：
 
 ## L2：逻辑规则检测
 
-基于上下文和行为链的逻辑分析，超越简单模式匹配：
+基于上下文和行为链的逻辑分析，超越简单模式匹配（需要 action_history / prompt_session / cwd 之一或多个）：
 
 | 规则 | 说明 |
 |------|------|
 | read_before_write | 写已存在文件前必须先读 |
 | intent_consistency | 动作与 prompt 意图一致性 |
-| sensitive_paths | 敏感路径访问（.ssh、.env、credentials 等区分读写） |
-| dangerous_patterns | 危险操作模式（凭据区分、临时目录排除） |
+| indirect_file_access | 内联脚本动态遍历目录读凭据（listdir/glob 等 + 文件读写） |
 | 密码修改授权 | 非交互式密码修改（passwd/chpasswd 等需确认） |
 | 用户/组删除授权 | userdel/groupdel 等需确认 |
+| privilege_escalation | sudo/su 提权检测（sudo 后跟包管理/服务管理命令直接放行，非运维命令查历史上下文） |
+
+> 注：敏感路径/危险模式/横向移动三类已从 L2 重分类到 L1（只看 a_next 本身，不需历史上下文）。
 
 ---
 
