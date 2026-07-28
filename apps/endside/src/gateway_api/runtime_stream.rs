@@ -1,11 +1,9 @@
 use crate::app_state::{AppState, InputMode};
-use crate::chat::{
-    Message, TodoDisplayStatus, TodoSnapshotItem, TodoSnapshotUpdate, ToolExecutionStatus,
-    ToolExecutionUpdate,
-};
+use crate::chat::{Message, TodoSnapshotUpdate, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::debug_log;
 use crate::session_gateway::SessionTurnUpdate;
 use agent_types::common::ids::AgentId;
+use xiaoo_shared::plan::todo_snapshot_from_tool_args;
 
 use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_TICK};
 
@@ -26,7 +24,10 @@ impl GatewayRuntime {
             match update {
                 SessionTurnUpdate::TurnStart { agent_id, turn } => {
                     if !is_root_stream_agent(&agent_id, state) {
-                        let lane = state.chat_state.ensure_subagent_lane(
+                        // Use the preserve-metadata variant so a `SubagentSpawn`
+                        // SSE event's title is not clobbered by the generic
+                        // "Subagent xxx" fallback.
+                        let lane = state.chat_state.ensure_subagent_lane_preserve_metadata(
                             agent_id.0.clone(),
                             None,
                             format!("Subagent {}", short_agent_id(&agent_id.0)),
@@ -73,6 +74,21 @@ impl GatewayRuntime {
                         self.apply_subagent_tool_update(state, &agent_id.0, update);
                     }
                 }
+                SessionTurnUpdate::ToolFileChange { call_id, delta } => {
+                    state.apply_remote_delta(&call_id, delta);
+                }
+                SessionTurnUpdate::PlanUpdate { snapshot } => {
+                    self.apply_todo_snapshot(state, snapshot);
+                }
+                SessionTurnUpdate::SubagentSpawn { metadata } => {
+                    state.chat_state.ensure_subagent_lane(
+                        metadata.agent_id,
+                        metadata.parent_agent_id,
+                        metadata.title,
+                        metadata.description,
+                        metadata.task_goal,
+                    );
+                }
                 SessionTurnUpdate::LoopEnd { agent_id, summary } => {
                     let _ = summary.turn_count;
                     if !is_root_stream_agent(&agent_id, state) {
@@ -89,6 +105,10 @@ impl GatewayRuntime {
                             }
                         }
                     }
+                    // Drop per-call state so the tracker's per-call maps do
+                    // not grow unboundedly across turns; per-file totals and
+                    // session-start baselines are retained.
+                    state.diff_tracker.clear_per_turn_state();
                 }
                 SessionTurnUpdate::InteractionPrompt(request) => {
                     if let Err(error) = state.open_interaction_prompt(request, true) {
@@ -356,11 +376,7 @@ impl GatewayRuntime {
         self.finalize_stream_message_before_aux(state);
         match update.status {
             ToolExecutionStatus::Running => {
-                state.capture_tool_file_baseline(
-                    &update.call_id,
-                    &update.tool,
-                    &update.args_preview,
-                );
+                state.on_tool_running(&update.call_id, &update.tool, &update.args_preview);
             }
             ToolExecutionStatus::Completed => {
                 let fallback_file_change = update.file_change.clone().or_else(|| {
@@ -369,14 +385,15 @@ impl GatewayRuntime {
                         &update.args_preview,
                     )
                 });
-                state.reconcile_tool_file_change_from_baseline(
+                state.on_tool_completed(
                     &update.call_id,
+                    &update.tool,
+                    &update.args_preview,
                     fallback_file_change,
                 );
             }
             ToolExecutionStatus::Failed => {
-                state.discard_tool_file_baseline(&update.call_id);
-                state.reconcile_tool_file_change(&update.call_id, update.file_change.clone());
+                state.on_tool_failed(&update.call_id, update.file_change.clone());
             }
         }
 
@@ -418,7 +435,19 @@ impl GatewayRuntime {
         let Some(agent_id) = parse_spawn_subagent_agent_id_from_detail(&update.detail) else {
             return;
         };
-        let metadata = parse_spawn_subagent_metadata_from_args(&update.args_preview);
+        // Remote mode: `args_preview` is stripped, so parsing yields `None`.
+        // The lane was already populated by the earlier `SubagentSpawn` SSE
+        // event; use the preserve-metadata variant to avoid clobbering it.
+        let Some(metadata) = parse_spawn_subagent_metadata_from_args(&update.args_preview) else {
+            state.chat_state.ensure_subagent_lane_preserve_metadata(
+                agent_id.clone(),
+                parent_agent_id,
+                format!("Subagent {}", short_agent_id(&agent_id)),
+                String::new(),
+                String::new(),
+            );
+            return;
+        };
         state.chat_state.ensure_subagent_lane(
             agent_id.clone(),
             parent_agent_id,
@@ -431,7 +460,7 @@ impl GatewayRuntime {
     }
 
     fn ensure_subagent_stream_message(&mut self, state: &mut AppState, agent_id: &str) {
-        let lane = state.chat_state.ensure_subagent_lane(
+        let lane = state.chat_state.ensure_subagent_lane_preserve_metadata(
             agent_id.to_string(),
             None,
             format!("Subagent {}", short_agent_id(agent_id)),
@@ -495,7 +524,7 @@ impl GatewayRuntime {
         agent_id: &str,
         message: Message,
     ) {
-        let lane = state.chat_state.ensure_subagent_lane(
+        let lane = state.chat_state.ensure_subagent_lane_preserve_metadata(
             agent_id.to_string(),
             None,
             format!("Subagent {}", short_agent_id(agent_id)),
@@ -561,11 +590,7 @@ impl GatewayRuntime {
         self.finalize_subagent_stream_message_before_aux(state, agent_id);
         match update.status {
             ToolExecutionStatus::Running => {
-                state.capture_tool_file_baseline(
-                    &update.call_id,
-                    &update.tool,
-                    &update.args_preview,
-                );
+                state.on_tool_running(&update.call_id, &update.tool, &update.args_preview);
             }
             ToolExecutionStatus::Completed => {
                 let fallback_file_change = update.file_change.clone().or_else(|| {
@@ -574,18 +599,19 @@ impl GatewayRuntime {
                         &update.args_preview,
                     )
                 });
-                state.reconcile_tool_file_change_from_baseline(
+                state.on_tool_completed(
                     &update.call_id,
+                    &update.tool,
+                    &update.args_preview,
                     fallback_file_change,
                 );
             }
             ToolExecutionStatus::Failed => {
-                state.discard_tool_file_baseline(&update.call_id);
-                state.reconcile_tool_file_change(&update.call_id, update.file_change.clone());
+                state.on_tool_failed(&update.call_id, update.file_change.clone());
             }
         }
 
-        let lane = state.chat_state.ensure_subagent_lane(
+        let lane = state.chat_state.ensure_subagent_lane_preserve_metadata(
             agent_id.to_string(),
             None,
             format!("Subagent {}", short_agent_id(agent_id)),
@@ -701,6 +727,11 @@ impl GatewayRuntime {
                 input_context_tokens_estimated,
             );
         }
+        // Remote mode: SSE emits `Done` but no `LoopEnd`, so the per-turn
+        // cleanup wired into `LoopEnd` never runs. Drop per-call state here;
+        // per-file totals are retained. In local mode this is a redundant
+        // no-op since `LoopEnd` already cleared the maps.
+        state.diff_tracker.clear_per_turn_state();
     }
 }
 
@@ -713,7 +744,6 @@ fn is_root_stream_agent(agent_id: &AgentId, state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Default)]
 struct SpawnSubagentMetadata {
     title: Option<String>,
     description: Option<String>,
@@ -737,10 +767,8 @@ fn parse_spawn_subagent_agent_id_from_detail(detail: &str) -> Option<String> {
     value.get("agent_id")?.as_str().map(ToOwned::to_owned)
 }
 
-fn parse_spawn_subagent_metadata_from_args(args_preview: &str) -> SpawnSubagentMetadata {
-    let Ok(args) = serde_json::from_str::<SpawnSubagentArgs>(args_preview) else {
-        return SpawnSubagentMetadata::default();
-    };
+fn parse_spawn_subagent_metadata_from_args(args_preview: &str) -> Option<SpawnSubagentMetadata> {
+    let args: SpawnSubagentArgs = serde_json::from_str(args_preview).ok()?;
     let description = non_empty(args.description);
     let task_goal = non_empty(args.task_goal);
     let task_context = non_empty(args.task_context);
@@ -753,11 +781,11 @@ fn parse_spawn_subagent_metadata_from_args(args_preview: &str) -> SpawnSubagentM
                 .map(str::to_string)
         })
         .or_else(|| args.subagent_role_id.map(|role| format!("Subagent {role}")));
-    SpawnSubagentMetadata {
+    Some(SpawnSubagentMetadata {
         title,
         description: description.or(task_context),
         task_goal,
-    }
+    })
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -780,53 +808,6 @@ fn short_agent_id(agent_id: &str) -> String {
     } else {
         trimmed.chars().take(8).collect::<String>()
     }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TodoWriteArgs {
-    todos: Vec<TodoWriteArgItem>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TodoWriteArgItem {
-    content: String,
-    status: TodoWriteArgStatus,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TodoWriteArgStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-fn todo_snapshot_from_tool_args(args_preview: &str) -> Option<TodoSnapshotUpdate> {
-    let args: TodoWriteArgs = serde_json::from_str(args_preview).ok()?;
-    let items = args
-        .todos
-        .into_iter()
-        .filter_map(|item| {
-            let content = item.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-            let status = match item.status {
-                TodoWriteArgStatus::Pending => TodoDisplayStatus::Pending,
-                TodoWriteArgStatus::InProgress => TodoDisplayStatus::InProgress,
-                TodoWriteArgStatus::Completed => TodoDisplayStatus::Completed,
-            };
-            Some(TodoSnapshotItem {
-                status,
-                content: content.to_string(),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Some(TodoSnapshotUpdate {
-        title: "Current task list".to_string(),
-        items,
-    })
 }
 
 #[cfg(test)]
@@ -1098,6 +1079,171 @@ mod tests {
     }
 
     #[test]
+    fn remote_tool_result_does_not_clobber_subagent_spawn_metadata() {
+        // Simulates the remote-mode event ordering: the daemon first forwards
+        // a `SubagentSpawn` SSE event carrying full metadata, then a `ToolResult`
+        // SSE event whose `args_preview` is stripped to an empty string. The
+        // `ToolResult` must not overwrite the title/description/task_goal set
+        // by `SubagentSpawn` with fallback "Subagent xxx" values.
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        // Step 1: simulate `SubagentSpawn` populating the lane with full
+        // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
+        state.chat_state.ensure_subagent_lane(
+            "child-3".to_string(),
+            Some("root".to_string()),
+            "Refactor module boundaries".to_string(),
+            "Split the god module into focused crates".to_string(),
+            " Land the split behind a feature flag".to_string(),
+        );
+
+        // Step 2: simulate the trailing `ToolResult` event with empty
+        // `args_preview` (as `remote.rs` constructs it from the SSE event).
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "spawn-3".to_string(),
+                tool: "spawn_subagent".to_string(),
+                summary: String::new(),
+                args_preview: String::new(),
+                command_preview: None,
+                command: None,
+                detail: r#"{"agent_id":"child-3"}"#.to_string(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            },
+            Some("root".to_string()),
+        );
+
+        let lane = state
+            .chat_state
+            .subagent_lanes
+            .get("child-3")
+            .expect("lane should still exist after ToolResult");
+        assert_eq!(lane.title, "Refactor module boundaries");
+        assert_eq!(lane.description, "Split the god module into focused crates");
+        assert_eq!(lane.task_goal, " Land the split behind a feature flag");
+    }
+
+    #[test]
+    fn remote_turn_start_does_not_clobber_subagent_spawn_metadata() {
+        // Simulates the remote-mode event ordering: the daemon first forwards
+        // a `SubagentSpawn` SSE event carrying full metadata, then the child
+        // agent's `TurnStart` arrives. The `TurnStart` handler must NOT call
+        // `ensure_subagent_lane` with the generic "Subagent xxx" fallback
+        // title (which would clobber the real title via `update_metadata`).
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        // Step 1: simulate `SubagentSpawn` populating the lane with full
+        // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
+        state.chat_state.ensure_subagent_lane(
+            "child-3".to_string(),
+            Some("root".to_string()),
+            "Refactor module boundaries".to_string(),
+            "Split the god module into focused crates".to_string(),
+            " Land the split behind a feature flag".to_string(),
+        );
+
+        // Step 2: feed a `TurnStart` event for the spawned child via the
+        // stream channel, then drain it through `poll_stream_updates`.
+        let (tx, rx) = mpsc::unbounded_channel::<SessionTurnUpdate>();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::TurnStart {
+            agent_id: AgentId("child-3".to_string()),
+            turn: 1,
+        })
+        .expect("send TurnStart");
+        drop(tx);
+        let changed = runtime.poll_stream_updates(&mut state);
+        assert!(changed, "poll_stream_updates should report a change");
+
+        let lane = state
+            .chat_state
+            .subagent_lanes
+            .get("child-3")
+            .expect("lane should still exist after TurnStart");
+        assert_eq!(lane.title, "Refactor module boundaries");
+        assert_eq!(lane.description, "Split the god module into focused crates");
+        assert_eq!(lane.task_goal, " Land the split behind a feature flag");
+        assert!(lane.is_running);
+        assert_eq!(lane.last_turn, Some(1));
+    }
+
+    #[test]
+    fn remote_subagent_events_do_not_clobber_subagent_spawn_metadata() {
+        // End-to-end verification that the generic "Subagent xxx" fallback
+        // title passed by downstream event handlers (TurnStart,
+        // SetAssistantContent, Tool) does not clobber the title/description/
+        // task_goal populated earlier by a `SubagentSpawn` SSE event. Each
+        // handler must use `ensure_subagent_lane_preserve_metadata` (or
+        // equivalent) so the lane metadata set by `SubagentSpawn` survives
+        // the child agent's entire turn.
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        // Step 1: simulate `SubagentSpawn` populating the lane with full
+        // metadata (as the daemon-side `SubagentMetaComputingLoopSink` would).
+        state.chat_state.ensure_subagent_lane(
+            "child-4".to_string(),
+            Some("root".to_string()),
+            "Refactor module boundaries".to_string(),
+            "Split the god module into focused crates".to_string(),
+            " Land the split behind a feature flag".to_string(),
+        );
+
+        // Step 2: feed the child agent's turn lifecycle through the stream
+        // channel: TurnStart → SetAssistantContent → Tool(Completed).
+        let (tx, rx) = mpsc::unbounded_channel::<SessionTurnUpdate>();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::TurnStart {
+            agent_id: AgentId("child-4".to_string()),
+            turn: 1,
+        })
+        .expect("send TurnStart");
+        tx.send(SessionTurnUpdate::SetAssistantContent {
+            agent_id: AgentId("child-4".to_string()),
+            text: "Working on the refactor...".to_string(),
+        })
+        .expect("send SetAssistantContent");
+        tx.send(SessionTurnUpdate::Tool {
+            agent_id: AgentId("child-4".to_string()),
+            update: ToolExecutionUpdate {
+                call_id: "child-4-call-1".to_string(),
+                tool: "shell".to_string(),
+                summary: "ls".to_string(),
+                args_preview: String::new(),
+                command_preview: None,
+                command: None,
+                detail: "src\ntests".to_string(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: Some(0),
+                duration_ms: Some(12),
+                file_change: None,
+            },
+        })
+        .expect("send Tool");
+        drop(tx);
+
+        // Drain all queued events.
+        while runtime.poll_stream_updates(&mut state) {}
+
+        // The metadata populated by `SubagentSpawn` must survive every
+        // downstream event in the child's turn.
+        let lane = state
+            .chat_state
+            .subagent_lanes
+            .get("child-4")
+            .expect("lane should still exist after child turn");
+        assert_eq!(lane.title, "Refactor module boundaries");
+        assert_eq!(lane.description, "Split the god module into focused crates");
+        assert_eq!(lane.task_goal, " Land the split behind a feature flag");
+    }
+
+    #[test]
     fn tool_update_drops_empty_streaming_placeholder() {
         let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
@@ -1167,7 +1313,7 @@ mod tests {
         );
 
         let stats = state
-            .session_file_changes
+            .session_file_changes()
             .get("src/main.rs")
             .expect("file stats should be tracked");
         assert_eq!(stats.additions, 2);
@@ -1209,10 +1355,70 @@ mod tests {
         );
 
         let stats = state
-            .session_file_changes
+            .session_file_changes()
             .get("README.md")
             .expect("file stats should be tracked from args");
         assert_eq!(stats.additions, 1);
+        assert_eq!(stats.deletions, 1);
+    }
+
+    #[test]
+    fn finish_stream_done_clears_per_call_state_but_preserves_file_totals() {
+        // Regression for remote-mode memory leak: the SSE stream emits a
+        // `Done` event but no `LoopEnd` (the daemon's `SseLoopEventSink`
+        // only stores the summary without forwarding it). Without this
+        // cleanup in `finish_stream_done`, `tool_file_changes` /
+        // `tool_file_baselines` would grow unboundedly across turns. The
+        // per-file totals (`session_file_changes`) must survive so the diff
+        // panel keeps showing the session's cumulative changes.
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace dir");
+
+        let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
+            .expect("test app state should initialize");
+        state.chat_state.messages.clear();
+
+        runtime.apply_tool_update(
+            &mut state,
+            ToolExecutionUpdate {
+                call_id: "remote-call-1".to_string(),
+                tool: "file_edit".to_string(),
+                summary: String::new(),
+                args_preview: "{\n  \"file_path\": \"src/main.rs\"\n}".to_string(),
+                command_preview: None,
+                command: None,
+                detail: String::new(),
+                status: ToolExecutionStatus::Completed,
+                exit_code: None,
+                duration_ms: None,
+                file_change: Some(crate::chat::FileChangeDelta {
+                    file_path: "src/main.rs".to_string(),
+                    additions: 2,
+                    deletions: 1,
+                }),
+            },
+            None,
+        );
+
+        runtime.finish_stream_done(
+            &mut state,
+            PendingStreamDone {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_input_tokens: 0,
+                messages: Vec::new(),
+            },
+        );
+
+        // Per-file totals survive `finish_stream_done`.
+        let stats = state
+            .session_file_changes()
+            .get("src/main.rs")
+            .expect("file totals should survive finish_stream_done");
+        assert_eq!(stats.additions, 2);
         assert_eq!(stats.deletions, 1);
     }
 

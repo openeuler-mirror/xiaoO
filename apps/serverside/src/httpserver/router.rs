@@ -27,17 +27,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
-use xiaoo_shared::gateway::{is_daemon_principal, SessionService};
+use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
+use xiaoo_shared::plan::{
+    PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
+};
+use xiaoo_shared::session_diff::{
+    DiffComputingLoopSink, DiffComputingToolSink, SessionDiffForwarder, SessionDiffTracker,
+};
 
 #[derive(Clone)]
 pub struct GatewayAppState {
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Option<Arc<dyn xiaoo_shared::gateway::SessionControlPlane>>,
+    session_control_plane: Option<Arc<dyn SessionControlPlane>>,
     channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
     channel_processor: ChannelRuntimeProcessor,
     remote_interactions: Arc<RemoteInteractionStore>,
     action_sink: Option<Arc<dyn agent_contracts::HookActionSink>>,
+    session_diff_trackers: SessionDiffTrackerMap,
 }
+
+/// Per-session `SessionDiffTracker` map. Shared between the request path
+/// (which creates/reads trackers) and the background sweep task (which
+/// evicts trackers for sessions that no longer have a runtime handle).
+type SessionDiffTrackerMap =
+    Arc<std::sync::RwLock<HashMap<String, Arc<std::sync::Mutex<SessionDiffTracker>>>>>;
+
+/// How often the background sweep checks for stale diff trackers.
+const DIFF_TRACKER_SWEEP_INTERVAL_SECS: u64 = 300;
+
+/// Per-session timeout for the liveness probe in `sweep_stale_diff_trackers`.
+/// Bounds the worst case where a single unresponsive `resume_session` call
+/// (lock contention, I/O stall, downstream hang) would otherwise block the
+/// sweep loop indefinitely, letting stale trackers accumulate.
+const DIFF_TRACKER_SWEEP_PROBE_TIMEOUT_SECS: u64 = 5;
 
 impl GatewayAppState {
     pub fn new(session_service: Arc<dyn SessionService>) -> Self {
@@ -48,12 +70,13 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(HashMap::new()),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
     pub fn with_control_plane(
         session_service: Arc<dyn SessionService>,
-        session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
+        session_control_plane: Arc<dyn SessionControlPlane>,
     ) -> Self {
         let mut state = Self::new(session_service);
         state.session_control_plane = Some(session_control_plane.clone());
@@ -77,6 +100,7 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(runtimes),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -102,12 +126,13 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(runtime_map),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
 
     pub fn with_channel_runtimes_and_control_plane(
         session_service: Arc<dyn SessionService>,
-        session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
+        session_control_plane: Arc<dyn SessionControlPlane>,
         runtimes: Vec<ChannelRuntime>,
     ) -> ChannelResult<Self> {
         let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
@@ -123,6 +148,149 @@ impl GatewayAppState {
             self.session_service.clone(),
             interaction_timeout_secs,
         );
+    }
+
+    /// Look up (or lazily create) the per-session [`SessionDiffTracker`].
+    /// The `workspace` argument is only used when the tracker needs to be
+    /// created; subsequent calls for the same `session_id` reuse the existing
+    /// tracker so file baselines accumulate across turns.
+    pub fn diff_tracker_for(
+        &self,
+        session_id: &str,
+        workspace: std::path::PathBuf,
+    ) -> Arc<std::sync::Mutex<SessionDiffTracker>> {
+        if let Some(tracker) = self
+            .session_diff_trackers
+            .read()
+            .ok()
+            .and_then(|g| g.get(session_id).cloned())
+        {
+            return tracker;
+        }
+        let mut write_guard = write_trackers(&self.session_diff_trackers, " for insert");
+        if let Some(existing) = write_guard.get(session_id) {
+            return Arc::clone(existing);
+        }
+        let tracker = Arc::new(std::sync::Mutex::new(SessionDiffTracker::new(workspace)));
+        write_guard.insert(session_id.to_string(), Arc::clone(&tracker));
+        tracker
+    }
+
+    /// Drop the per-session [`SessionDiffTracker`] associated with `session_id`.
+    /// Called when a session is closed so the daemon does not leak tracker
+    /// state (and its accumulated per-call maps) across long-running processes.
+    /// Returns `true` when a tracker was actually present.
+    pub fn evict_diff_tracker(&self, session_id: &str) -> bool {
+        let mut write_guard = write_trackers(&self.session_diff_trackers, " for evict");
+        write_guard.remove(session_id).is_some()
+    }
+}
+
+/// Spawn a background task that periodically evicts diff trackers for
+/// sessions whose runtime handle no longer exists (e.g. the client
+/// disconnected without calling `/close`, and the session was later
+/// hibernated by the idle reaper). This is a safety net complementing the
+/// explicit `evict_diff_tracker` call in the `force_close_session` path —
+/// it catches cleanup paths the router does not directly observe.
+///
+/// The sweep calls `resume_session` for each tracked session id; a `None`
+/// result means the session handle is gone (closed or hibernated) and the
+/// tracker should be evicted.
+fn spawn_diff_tracker_sweep(
+    trackers: SessionDiffTrackerMap,
+    session_control_plane: Arc<dyn SessionControlPlane>,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            DIFF_TRACKER_SWEEP_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            sweep_stale_diff_trackers(&trackers, &session_control_plane).await;
+        }
+    });
+}
+
+async fn sweep_stale_diff_trackers(
+    trackers: &SessionDiffTrackerMap,
+    session_control_plane: &Arc<dyn SessionControlPlane>,
+) {
+    let session_ids: Vec<String> = {
+        let guard = match trackers.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!(
+                    "session_diff_trackers lock poisoned during sweep; \
+                     recovering and skipping this cycle"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.keys().cloned().collect()
+    };
+    if session_ids.is_empty() {
+        return;
+    }
+    let mut evicted = 0usize;
+    for session_id in &session_ids {
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(DIFF_TRACKER_SWEEP_PROBE_TIMEOUT_SECS),
+            session_control_plane.resume_session(session_id),
+        );
+        match probe.await {
+            Ok(Ok(None)) => {
+                evict_tracker_from_map(trackers, session_id);
+                evicted += 1;
+            }
+            Ok(Ok(Some(_))) => {} // Session still active; keep tracker.
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to check session liveness during diff tracker sweep; \
+                     keeping tracker"
+                );
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    timeout_secs = DIFF_TRACKER_SWEEP_PROBE_TIMEOUT_SECS,
+                    "resume_session timed out during diff tracker sweep; \
+                     keeping tracker this cycle"
+                );
+            }
+        }
+    }
+    if evicted > 0 {
+        tracing::info!(
+            evicted,
+            total_checked = session_ids.len(),
+            "swept stale diff trackers"
+        );
+    }
+}
+
+/// Remove a single tracker entry from the map (best-effort; ignores
+/// lock poisoning by recovering).
+fn evict_tracker_from_map(trackers: &SessionDiffTrackerMap, session_id: &str) {
+    let mut write_guard = write_trackers(trackers, " during sweep evict");
+    write_guard.remove(session_id);
+}
+
+/// Acquire a write lock on the shared diff-tracker map, recovering from
+/// poisoning so the daemon keeps operating. `context` is appended to the
+/// poison log so the call site can be identified in logs.
+fn write_trackers<'a>(
+    trackers: &'a SessionDiffTrackerMap,
+    context: &str,
+) -> std::sync::RwLockWriteGuard<'a, HashMap<String, Arc<std::sync::Mutex<SessionDiffTracker>>>> {
+    match trackers.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::error!("session_diff_trackers lock poisoned{context}; recovering");
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -232,7 +400,7 @@ pub fn create_router_with_auth(
 
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
+    session_control_plane: Arc<dyn SessionControlPlane>,
     runtimes: Vec<ChannelRuntime>,
     interaction_timeout_secs: u64,
     bearer_auth: Option<HttpBearerAuthConfig>,
@@ -240,10 +408,11 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
 ) -> ChannelResult<Router> {
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
-        session_control_plane,
+        session_control_plane.clone(),
         runtimes,
     )?;
     state.set_channel_interaction_timeout(interaction_timeout_secs);
+    spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
 
@@ -301,15 +470,13 @@ fn create_router_from_state(
 
 pub fn create_router_with_control_plane_and_auth(
     session_service: Arc<dyn SessionService>,
-    session_control_plane: Arc<dyn xiaoo_shared::gateway::SessionControlPlane>,
+    session_control_plane: Arc<dyn SessionControlPlane>,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
 ) -> Router {
-    create_router_from_state(
-        GatewayAppState::with_control_plane(session_service, session_control_plane),
-        bearer_auth,
-        rate_limit,
-    )
+    let state = GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
+    spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
+    create_router_from_state(state, bearer_auth, rate_limit)
 }
 
 fn apply_http_bearer_auth<S>(
@@ -453,6 +620,54 @@ async fn recheck_lease_or_emit_sse_error(
     std::ops::ControlFlow::Continue(())
 }
 
+/// Resolve the workspace path to use for the per-session diff tracker.
+///
+/// Priority:
+/// 1. The session record's `workspace_root` (authoritative — set by the
+///    resolver when the session was opened, reflects the actual workspace
+///    the agent's tools operate on).
+/// 2. The client-supplied `payload.workspace` hint (used only when the
+///    control plane is unavailable or the session handle is gone).
+/// 3. `"."` (last resort — baseline reads will miss and the tracker
+///    degrades to args estimation; a warning is logged).
+async fn resolve_session_workspace(
+    state: &GatewayAppState,
+    session_id: &str,
+    payload_workspace: &Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if let Some(control_plane) = state.session_control_plane.as_ref() {
+        match control_plane.resume_session(session_id).await {
+            Ok(Some(record)) => {
+                return record.runtime.workspace_root;
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    session_id = %session_id,
+                    "session handle not found for workspace resolution; \
+                     falling back to payload workspace",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "failed to resume session for workspace resolution; \
+                     falling back to payload workspace",
+                );
+            }
+        }
+    }
+    if let Some(workspace) = payload_workspace {
+        return workspace.clone();
+    }
+    tracing::warn!(
+        session_id = %session_id,
+        "no authoritative workspace and no payload hint; \
+         diff tracker will use current directory",
+    );
+    std::path::PathBuf::from(".")
+}
+
 async fn handle_session_open(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::gateway::RuntimeOpenRequest>,
@@ -498,6 +713,46 @@ async fn stream_session_input(
     }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseStreamEvent>();
     let sink = Arc::new(SseLoopEventSink::new(tx.clone()));
+    // Resolve the session's workspace root from the session record
+    // (authoritative — set by the resolver when the session was opened) so
+    // the diff tracker reads the right files and displays workspace-relative
+    // paths. Falls back to the client-supplied `payload.workspace` when the
+    // control plane is unavailable, and finally to `"."` with a warning so
+    // the tracker can still operate (baseline reads will simply miss and
+    // degrade to args estimation).
+    let workspace = resolve_session_workspace(&state, &session_id, &payload.workspace).await;
+    let diff_tracker = state.diff_tracker_for(&session_id, workspace);
+    let diff_forwarder = Arc::new(crate::httpserver::sse_sink::SseDeltaForwarder::new(
+        tx.clone(),
+    ));
+    let plan_forwarder = Arc::new(crate::httpserver::sse_sink::SsePlanForwarder::new(
+        tx.clone(),
+    ));
+    let subagent_forwarder = Arc::new(crate::httpserver::sse_sink::SseSubagentMetaForwarder::new(
+        tx.clone(),
+    ));
+    // Compose the per-turn sink chain. The order (outermost first) is:
+    // `SubagentMeta` -> `Plan` -> `Diff` -> `SseLoopEventSink`. Each layer
+    // intercepts `on_tool_result` to compute its derived payload and forwards
+    // to the inner sink. Tool-lifecycle events (Running) go through the
+    // separately-injected `DiffComputingToolSink` baked into the runtime's
+    // `bindings.tool_event_sink`.
+    let diff_loop_sink: Arc<dyn agent_contracts::LoopEventSink> =
+        Arc::new(DiffComputingLoopSink::new(
+            Arc::clone(&sink) as Arc<dyn agent_contracts::LoopEventSink>,
+            Arc::clone(&diff_tracker),
+            diff_forwarder as Arc<dyn SessionDiffForwarder>,
+        ));
+    let plan_loop_sink: Arc<dyn agent_contracts::LoopEventSink> = Arc::new(
+        PlanComputingLoopSink::new(diff_loop_sink, plan_forwarder as Arc<dyn PlanForwarder>),
+    );
+    let composed_loop_sink: Arc<dyn agent_contracts::LoopEventSink> =
+        Arc::new(SubagentMetaComputingLoopSink::new(
+            plan_loop_sink,
+            subagent_forwarder as Arc<dyn SubagentMetaForwarder>,
+        ));
+    let diff_tool_sink: Arc<dyn agent_contracts::ToolEventSink> =
+        Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
         session_id: session_id.clone(),
         tx: tx.clone(),
@@ -520,10 +775,11 @@ async fn stream_session_input(
         match session_service
             .run_turn_with_interaction(
                 payload,
-                Some(sink.clone()),
+                Some(composed_loop_sink),
                 Some(interaction_handle),
                 None,
                 None,
+                Some(diff_tool_sink),
             )
             .await
         {
@@ -660,7 +916,13 @@ async fn handle_session_close(
         .force_close_session_with_lease(&payload.session_id, payload.client_id.as_deref())
         .await
     {
-        Ok(record) => Json(record).into_response(),
+        Ok(record) => {
+            // Release the per-session diff tracker so its accumulated state
+            // (per-call maps, file baselines) does not leak across the
+            // daemon's lifetime.
+            state.evict_diff_tracker(&payload.session_id);
+            Json(record).into_response()
+        }
         Err(error) => map_session_error(error),
     }
 }

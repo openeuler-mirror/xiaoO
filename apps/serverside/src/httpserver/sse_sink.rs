@@ -11,6 +11,11 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use xiaoo_shared::plan::{
+    PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotItem,
+    TodoSnapshotUpdate,
+};
+use xiaoo_shared::session_diff::{FileChangeDelta, SessionDiffForwarder};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -35,6 +40,32 @@ pub enum SseStreamEvent {
         tool_name: String,
         output_preview: String,
         is_error: bool,
+    },
+    /// Per-call file change delta computed by the daemon's
+    /// `SessionDiffTracker`. Forwarded to the TUI so the remote-mode session
+    /// diff panel mirrors the local-mode computation exactly.
+    ToolFileChange {
+        call_id: String,
+        file_path: String,
+        additions: u32,
+        deletions: u32,
+    },
+    /// Plan snapshot parsed by the daemon from the `todo_write` tool's args.
+    /// Forwarded to the TUI so the remote-mode plan panel mirrors the
+    /// local-mode computation exactly.
+    PlanUpdate {
+        title: String,
+        items: Vec<TodoSnapshotItem>,
+    },
+    /// Subagent lane metadata parsed by the daemon from the `spawn_subagent`
+    /// tool's args + output. Forwarded to the TUI so the remote-mode
+    /// subagent lanes mirror the local-mode computation exactly.
+    SubagentSpawn {
+        agent_id: String,
+        parent_agent_id: Option<String>,
+        title: String,
+        description: String,
+        task_goal: String,
     },
     InteractionRequested {
         request: InteractionRequest,
@@ -71,6 +102,9 @@ impl SseStreamEvent {
             SseStreamEvent::TextDelta { .. } => "text_delta",
             SseStreamEvent::ThinkingDelta { .. } => "thinking_delta",
             SseStreamEvent::ToolResult { .. } => "tool_result",
+            SseStreamEvent::ToolFileChange { .. } => "tool_file_change",
+            SseStreamEvent::PlanUpdate { .. } => "plan_update",
+            SseStreamEvent::SubagentSpawn { .. } => "subagent_spawn",
             SseStreamEvent::InteractionRequested { .. } => "interaction_requested",
             SseStreamEvent::Done { .. } => "done",
             SseStreamEvent::Error { .. } => "error",
@@ -186,6 +220,82 @@ pub fn sse_stream_from_receiver(
             serde_json::to_string(&event).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"));
         Ok(sse::Event::default().event(name).data(data))
     })
+}
+
+/// Bridges computed [`FileChangeDelta`]s into the
+/// SSE stream by emitting [`SseStreamEvent::ToolFileChange`] events on the
+/// same `mpsc` channel that carries the rest of the SSE traffic. Used by the
+/// daemon-side `DiffComputingLoopSink` so the remote TUI can render session
+/// diff without re-reading the daemon's filesystem.
+#[derive(Clone)]
+pub struct SseDeltaForwarder {
+    tx: mpsc::UnboundedSender<SseStreamEvent>,
+}
+
+impl SseDeltaForwarder {
+    pub fn new(tx: mpsc::UnboundedSender<SseStreamEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl SessionDiffForwarder for SseDeltaForwarder {
+    fn forward_delta(&self, call_id: &str, delta: FileChangeDelta) {
+        let _ = self.tx.send(SseStreamEvent::ToolFileChange {
+            call_id: call_id.to_string(),
+            file_path: delta.file_path,
+            additions: delta.additions,
+            deletions: delta.deletions,
+        });
+    }
+}
+
+/// Bridges computed [`TodoSnapshotUpdate`]s into the SSE
+/// stream by emitting [`SseStreamEvent::PlanUpdate`] events. Mirrors
+/// [`SseDeltaForwarder`].
+#[derive(Clone)]
+pub struct SsePlanForwarder {
+    tx: mpsc::UnboundedSender<SseStreamEvent>,
+}
+
+impl SsePlanForwarder {
+    pub fn new(tx: mpsc::UnboundedSender<SseStreamEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl PlanForwarder for SsePlanForwarder {
+    fn forward_plan(&self, snapshot: TodoSnapshotUpdate) {
+        let _ = self.tx.send(SseStreamEvent::PlanUpdate {
+            title: snapshot.title,
+            items: snapshot.items,
+        });
+    }
+}
+
+/// Bridges computed [`SpawnSubagentMetadata`]s into the
+/// SSE stream by emitting [`SseStreamEvent::SubagentSpawn`] events. Mirrors
+/// [`SseDeltaForwarder`].
+#[derive(Clone)]
+pub struct SseSubagentMetaForwarder {
+    tx: mpsc::UnboundedSender<SseStreamEvent>,
+}
+
+impl SseSubagentMetaForwarder {
+    pub fn new(tx: mpsc::UnboundedSender<SseStreamEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl SubagentMetaForwarder for SseSubagentMetaForwarder {
+    fn forward_subagent_meta(&self, metadata: SpawnSubagentMetadata) {
+        let _ = self.tx.send(SseStreamEvent::SubagentSpawn {
+            agent_id: metadata.agent_id,
+            parent_agent_id: metadata.parent_agent_id,
+            title: metadata.title,
+            description: metadata.description,
+            task_goal: metadata.task_goal,
+        });
+    }
 }
 
 #[cfg(test)]

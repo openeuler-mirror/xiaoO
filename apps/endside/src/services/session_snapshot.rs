@@ -359,7 +359,7 @@ fn build_snapshot(
             .filter(|message| !message.is_streaming)
             .map(SavedMessage::from_message)
             .collect(),
-        session_file_changes: state.session_file_changes.clone(),
+        session_file_changes: state.session_file_changes().clone(),
         session_record,
         status_metrics: Some(status_metrics),
     }
@@ -776,14 +776,14 @@ pub fn apply_snapshot(
 ) -> Option<SessionRecord> {
     state.workspace = snapshot.workspace;
     state.status_panel.set_workspace(&state.workspace);
+    state.sync_diff_tracker_workspace();
     state.session_id = snapshot.session_id;
     state.current_snapshot_context = None;
     state.active_agent_role = snapshot.active_agent_role;
     state.reasoning_effort = snapshot.reasoning_effort;
     state.session_messages = snapshot.session_messages;
     state.plan_state = snapshot.plan_state.map(Into::into);
-    state.session_file_changes = snapshot.session_file_changes;
-    state.tool_file_changes.clear();
+    state.restore_session_file_changes(snapshot.session_file_changes);
     state.clear_tool_file_baselines();
     state.input_mode = crate::app_state::InputMode::Editing;
     state.provider_dialog = None;

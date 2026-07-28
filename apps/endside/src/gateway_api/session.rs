@@ -5,12 +5,13 @@ use async_trait::async_trait;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::backend::BackendManager;
-use crate::chat::ToolExecutionUpdate;
+use crate::chat::{FileChangeDelta, ToolExecutionUpdate};
 use crate::gateway::{InMemorySessionStore, SessionControlPlane, SessionStore};
 use crate::interaction_prompt::PromptRequest;
 
 use agent_types::common::ids::AgentId;
 use agent_types::events::LoopEndSummary;
+use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotUpdate};
 
 #[derive(Debug)]
 pub enum SessionTurnUpdate {
@@ -29,6 +30,27 @@ pub enum SessionTurnUpdate {
     Tool {
         agent_id: AgentId,
         update: ToolExecutionUpdate,
+    },
+    /// Per-call file change delta forwarded from the daemon in remote mode.
+    /// The TUI applies it directly to its session-diff tracker, bypassing
+    /// the baseline/args computation that only the daemon can do (since it
+    /// owns the filesystem where the tool ran).
+    ToolFileChange {
+        call_id: String,
+        delta: FileChangeDelta,
+    },
+    /// Plan snapshot forwarded from the daemon in remote mode. The TUI
+    /// applies it directly to `state.plan_state`, bypassing the
+    /// `todo_write` args parsing that only the daemon can do (since the
+    /// SSE `ToolResult` event strips `args_preview`).
+    PlanUpdate {
+        snapshot: TodoSnapshotUpdate,
+    },
+    /// Subagent lane metadata forwarded from the daemon in remote mode. The
+    /// TUI creates/updates the subagent lane directly, bypassing the
+    /// `spawn_subagent` args parsing that only the daemon can do.
+    SubagentSpawn {
+        metadata: SpawnSubagentMetadata,
     },
     LoopEnd {
         agent_id: AgentId,

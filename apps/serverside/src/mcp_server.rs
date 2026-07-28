@@ -813,6 +813,7 @@ async fn run_mcp_turn(
             None,
             None,
             Some(cancellation_token),
+            None,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -957,6 +958,7 @@ async fn start_mcp_agent_operation(
                 None,
                 None,
                 Some(cancellation_token),
+                None,
             )
             .await
     });
@@ -1341,6 +1343,7 @@ mod tests {
             _interaction_handle: Option<Arc<dyn agent_contracts::InteractionHandle>>,
             _channel_file_sender: Option<Arc<dyn agent_contracts::ChannelFileSender>>,
             _cancellation_token: Option<CancellationToken>,
+            _tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
         ) -> Result<AppTurnResult, SessionServiceError> {
             if let Some(sink) = event_sink {
                 let root = AgentId("core".to_string());

@@ -40,6 +40,7 @@ impl GatewayService {
                 interaction_handle,
                 channel_file_sender,
                 None,
+                None,
             )
             .await?
             .visible_reply;

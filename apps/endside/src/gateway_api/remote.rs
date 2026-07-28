@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUpdate};
 
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
@@ -73,6 +74,33 @@ enum RemoteSseEvent {
         tool_name: String,
         output_preview: String,
         is_error: bool,
+    },
+    /// Per-call file change delta precomputed by the daemon. The TUI applies
+    /// it directly to its session-diff tracker via `apply_remote_delta`,
+    /// mirroring what the local-mode computation would have produced.
+    ToolFileChange {
+        call_id: String,
+        file_path: String,
+        additions: u32,
+        deletions: u32,
+    },
+    /// Plan snapshot precomputed by the daemon from the `todo_write` tool's
+    /// args. The TUI applies it directly to `state.plan_state`, mirroring
+    /// what the local-mode `todo_snapshot_from_tool_args` would produce.
+    PlanUpdate {
+        title: String,
+        items: Vec<TodoSnapshotItem>,
+    },
+    /// Subagent lane metadata precomputed by the daemon from the
+    /// `spawn_subagent` tool's args + output. The TUI creates/updates the
+    /// subagent lane directly, mirroring what the local-mode
+    /// `parse_spawn_subagent_metadata_from_args` would produce.
+    SubagentSpawn {
+        agent_id: String,
+        parent_agent_id: Option<String>,
+        title: String,
+        description: String,
+        task_goal: String,
     },
     InteractionRequested {
         request: InteractionRequest,
@@ -706,6 +734,43 @@ async fn handle_remote_event(
                     exit_code: None,
                     duration_ms: None,
                     file_change: None,
+                },
+            });
+        }
+        RemoteSseEvent::ToolFileChange {
+            call_id,
+            file_path,
+            additions,
+            deletions,
+        } => {
+            let _ = updates_tx.send(SessionTurnUpdate::ToolFileChange {
+                call_id,
+                delta: crate::chat::FileChangeDelta {
+                    file_path,
+                    additions,
+                    deletions,
+                },
+            });
+        }
+        RemoteSseEvent::PlanUpdate { title, items } => {
+            let _ = updates_tx.send(SessionTurnUpdate::PlanUpdate {
+                snapshot: TodoSnapshotUpdate { title, items },
+            });
+        }
+        RemoteSseEvent::SubagentSpawn {
+            agent_id,
+            parent_agent_id,
+            title,
+            description,
+            task_goal,
+        } => {
+            let _ = updates_tx.send(SessionTurnUpdate::SubagentSpawn {
+                metadata: SpawnSubagentMetadata {
+                    agent_id,
+                    parent_agent_id,
+                    title,
+                    description,
+                    task_goal,
                 },
             });
         }
