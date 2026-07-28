@@ -646,6 +646,27 @@ impl SessionSupervisor {
             self.session_store.save(snapshot).await;
         }
 
+        // Backend is now bound. Re-report Running so the shared registry
+        // flips from its default "idle" to "running": `report_session_status`
+        // silently no-ops if no lease exists yet (it didn't before this turn
+        // leased one), but now that the binding is in place the call will
+        // succeed and update the registry entry's session status. This closes
+        // the race where another process evicts the freshly-bound sandbox
+        // before the turn re-reports Running. Only e2b/conch backends are
+        // tracked in the shared registry; local backends skip the registry
+        // write (avoiding needless `IN_PROCESS_LOCK` + flock contention on
+        // the local-backend hot path).
+        let should_report_running = resolved
+            .operation_backend
+            .as_ref()
+            .map(|config| crate::backend::BackendManager::is_counted_kind(&config.kind))
+            .unwrap_or(false);
+        if should_report_running {
+            let session_id_for_report = self.snapshot().await.session_id.clone();
+            self.report_session_status(&session_id_for_report, &SessionLifecycleStatus::Running)
+                .await;
+        }
+
         Ok(operation_backend)
     }
 

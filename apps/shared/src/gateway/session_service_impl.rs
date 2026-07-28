@@ -722,6 +722,7 @@ impl CoreBackedSessionService {
                     self.session_store.clone(),
                     request.metadata.clone(),
                     &CheckoutEvictionContext::runtime_checkout(),
+                    None,
                 )
                 .await?,
             )
@@ -909,6 +910,7 @@ impl CoreBackedSessionService {
                             metadata: request.metadata,
                             resource_limits: Default::default(),
                             options: None,
+                            initial_session_status: None,
                         })
                         .await
                         .map_err(|error| {

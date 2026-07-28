@@ -65,6 +65,13 @@ pub struct BackendEnsureSessionRequest {
     pub workspace_root: PathBuf,
     pub session_id: String,
     pub e2b_bootstrap: Option<Arc<crate::backend::E2bBootstrapArchive>>,
+    /// Initial session status to write into the shared
+    /// `BackendRegistry` when this call creates a new backend entry, and to
+    /// re-assert on the fast path when the backend already exists. Callers
+    /// about to run a turn should pass `Some(("running", 1))` so the freshly
+    /// registered backend is not eligible for eviction while the turn is
+    /// still in flight. `None` keeps the historical `"idle"` / `0` default.
+    pub initial_session_status: Option<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,6 +230,12 @@ pub struct BackendCheckoutRequest {
     pub resource_limits: BackendResourceLimits,
     #[serde(default)]
     pub options: Option<Value>,
+    /// Initial session status to write into the shared `BackendRegistry`
+    /// when this checkout creates a new backend entry. Callers about to run
+    /// a turn on the resumed sandbox should pass `Some(("running", 1))` so
+    /// it is not eligible for eviction while the turn is in flight.
+    #[serde(default)]
+    pub initial_session_status: Option<(String, usize)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
