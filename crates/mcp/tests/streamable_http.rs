@@ -234,7 +234,10 @@ impl FixtureServer {
             release_first_stale_request: Arc::clone(&release_first_stale_request),
         };
         let app = Router::new()
-            .route("/mcp", post(handle_request).get(handle_get))
+            .route(
+                "/mcp",
+                post(handle_request).get(handle_get).delete(handle_delete),
+            )
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -807,6 +810,15 @@ async fn handle_get(State(state): State<FixtureState>, headers: HeaderMap) -> Re
     (StatusCode::OK, [("content-type", content_type)], body).into_response()
 }
 
+async fn handle_delete(State(state): State<FixtureState>, headers: HeaderMap) -> Response {
+    state.requests.lock().await.push(CapturedRequest {
+        method: "DELETE".to_string(),
+        headers,
+        body: json!({}),
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
 #[tokio::test]
 async fn initialize_captures_session_and_subsequent_calls_send_streamable_headers() {
     let _environment = ENV_LOCK.lock().await;
@@ -867,6 +879,86 @@ async fn initialize_captures_session_and_subsequent_calls_send_streamable_header
     let tool_result = client.call_tool("structured", json!({})).await.unwrap();
     assert_eq!(tool_result.structured_content, Some(json!({"answer": 42})));
     assert_eq!(tool_result.flatten_text(), r#"{"answer":42}"#);
+    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+}
+
+#[tokio::test]
+async fn close_deletes_the_active_streamable_http_session_once() {
+    let _environment = ENV_LOCK.lock().await;
+    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    let server = FixtureServer::json_then_sse().await;
+    let client = McpClient::connect(&server.config()).await.unwrap();
+    client.initialize().await.unwrap();
+
+    client.close().await.unwrap();
+    client.close().await.unwrap();
+
+    assert_eq!(server.count_method("DELETE").await, 1);
+    assert_eq!(
+        server
+            .last_header("DELETE", "mcp-session-id")
+            .await
+            .as_deref(),
+        Some("fixture-session")
+    );
+    assert_eq!(
+        server
+            .last_header("DELETE", "mcp-protocol-version")
+            .await
+            .as_deref(),
+        Some("2025-11-25")
+    );
+    assert_eq!(
+        server
+            .last_header("DELETE", "authorization")
+            .await
+            .as_deref(),
+        Some("Bearer test-token")
+    );
+    assert_eq!(
+        server.last_header("DELETE", "x-agent-id").await.as_deref(),
+        Some("xiaoo-test-agent")
+    );
+    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+}
+
+#[tokio::test]
+async fn close_waits_for_session_recovery_then_deletes_the_recovered_session() {
+    let _environment = ENV_LOCK.lock().await;
+    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    let server = FixtureServer::recovery_blocks_concurrent_request().await;
+    let client = Arc::new(McpClient::connect(&server.config()).await.unwrap());
+    client.initialize().await.unwrap();
+
+    let recovering_request = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.list_tools().await }
+    });
+    server.recovery_started.notified().await;
+    let close = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move { client.close().await }
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(server.count_method("DELETE").await, 0);
+
+    server.release_recovery.notify_one();
+    assert!(recovering_request.await.unwrap().is_ok());
+    assert!(close.await.unwrap().is_ok());
+    assert_eq!(server.count_method("DELETE").await, 1);
+    assert_eq!(
+        server
+            .last_header("DELETE", "mcp-session-id")
+            .await
+            .as_deref(),
+        Some("fixture-session-2")
+    );
+    assert!(matches!(
+        client.list_tools().await,
+        Err(McpError::Disconnected)
+    ));
     std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 

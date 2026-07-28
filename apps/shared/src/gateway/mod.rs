@@ -39,7 +39,9 @@ pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
-pub use memory_automation::{McpMemoryAutomation, MemoryAutomationConfig, TurnMemoryAutomation};
+pub use memory_automation::{
+    McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationHealth, TurnMemoryAutomation,
+};
 pub use progress_updates::ChannelProgressRelayHandle;
 pub use session_base::{
     channel_session_id, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest,

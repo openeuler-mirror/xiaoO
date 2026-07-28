@@ -31,6 +31,8 @@ pub struct StreamableHttpTransport {
     headers: HeaderMap,
     session: StdMutex<SessionState>,
     session_recovery: Mutex<()>,
+    close_gate: Mutex<()>,
+    active_requests_changed: Notify,
     recovery_changed: Notify,
     initialize_params: Mutex<Option<Value>>,
     initialize_id: Mutex<Option<u64>>,
@@ -42,6 +44,8 @@ struct SessionState {
     protocol_version: Option<HeaderValue>,
     generation: u64,
     recovery: RecoveryState,
+    closing: bool,
+    active_requests: usize,
 }
 
 impl Default for SessionState {
@@ -51,6 +55,8 @@ impl Default for SessionState {
             protocol_version: None,
             generation: 0,
             recovery: RecoveryState::Idle,
+            closing: false,
+            active_requests: 0,
         }
     }
 }
@@ -83,6 +89,24 @@ struct RecoveryLease<'a> {
     transport: &'a StreamableHttpTransport,
     generation: u64,
     finished: bool,
+}
+
+struct RequestLease<'a> {
+    transport: &'a StreamableHttpTransport,
+}
+
+impl Drop for RequestLease<'_> {
+    fn drop(&mut self) {
+        let mut session = self
+            .transport
+            .session
+            .lock()
+            .expect("session mutex poisoned");
+        session.active_requests = session.active_requests.saturating_sub(1);
+        if session.active_requests == 0 {
+            self.transport.active_requests_changed.notify_waiters();
+        }
+    }
 }
 
 impl RecoveryLease<'_> {
@@ -155,6 +179,8 @@ impl StreamableHttpTransport {
             headers,
             session: StdMutex::new(SessionState::default()),
             session_recovery: Mutex::new(()),
+            close_gate: Mutex::new(()),
+            active_requests_changed: Notify::new(),
             recovery_changed: Notify::new(),
             initialize_params: Mutex::new(None),
             initialize_id: Mutex::new(None),
@@ -168,6 +194,31 @@ impl StreamableHttpTransport {
     ) -> Result<SentResponse, McpError> {
         let session = self.session_snapshot(deadline).await?;
         self.post_with_session(body, deadline, session).await
+    }
+
+    fn begin_request(&self) -> Result<RequestLease<'_>, McpError> {
+        let mut session = self.session.lock().expect("session mutex poisoned");
+        if session.closing {
+            return Err(McpError::Disconnected);
+        }
+        session.active_requests += 1;
+        Ok(RequestLease { transport: self })
+    }
+
+    async fn wait_for_active_requests(&self) {
+        loop {
+            let changed = self.active_requests_changed.notified();
+            if self
+                .session
+                .lock()
+                .expect("session mutex poisoned")
+                .active_requests
+                == 0
+            {
+                return;
+            }
+            changed.await;
+        }
     }
 
     async fn post_with_session(
@@ -476,6 +527,68 @@ impl StreamableHttpTransport {
         Ok(SentResponse { response, session })
     }
 
+    async fn delete_session(&self, deadline: Instant) -> Result<(), McpError> {
+        let session = {
+            let session = self.session.lock().expect("session mutex poisoned");
+            SessionSnapshot {
+                session_id: session.session_id.clone(),
+                protocol_version: session.protocol_version.clone(),
+                generation: session.generation,
+            }
+        };
+        let Some(session_id) = session.session_id.as_ref() else {
+            return Ok(());
+        };
+
+        let mut request = self
+            .http
+            .delete(&self.url)
+            .headers(self.headers.clone())
+            .header(ACCEPT, "application/json, text/event-stream")
+            .header(MCP_SESSION_ID, session_id);
+        if let Some(protocol_version) = &session.protocol_version {
+            request = request.header(MCP_PROTOCOL_VERSION, protocol_version);
+        }
+        if let Some(agent_id) = &self.agent_id {
+            request = request.header(X_AGENT_ID, agent_id);
+        }
+        if let Some(env_var) = &self.bearer_token_env {
+            let token = std::env::var(env_var).map_err(|_| McpError::BearerTokenUnavailable {
+                env_var: env_var.clone(),
+            })?;
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = send_timed(request, deadline, self.timeout_ms).await?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(McpError::Http(format!(
+                "mcp session termination returned {}",
+                response.status()
+            )));
+        }
+        let mut current = self.session.lock().expect("session mutex poisoned");
+        if current.generation == session.generation && current.session_id == session.session_id {
+            current.session_id = None;
+            current.protocol_version = None;
+            current.generation = current.generation.wrapping_add(1);
+            current.recovery = RecoveryState::Idle;
+            self.recovery_changed.notify_waiters();
+        }
+        Ok(())
+    }
+
+    async fn close_session(&self) -> Result<(), McpError> {
+        let _close = self.close_gate.lock().await;
+        {
+            let mut session = self.session.lock().expect("session mutex poisoned");
+            if session.closing && session.session_id.is_none() {
+                return Ok(());
+            }
+            session.closing = true;
+        }
+        self.wait_for_active_requests().await;
+        self.delete_session(overall_deadline(self.timeout_ms)).await
+    }
+
     async fn read_sse_response(
         &self,
         response: Response,
@@ -701,6 +814,7 @@ impl McpTransport for StreamableHttpTransport {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, McpError> {
+        let _request = self.begin_request()?;
         let body = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: id.into(),
@@ -717,6 +831,7 @@ impl McpTransport for StreamableHttpTransport {
         result
     }
     async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
+        let _request = self.begin_request()?;
         self.send_notification_until(method, params, overall_deadline(self.timeout_ms))
             .await
     }
@@ -742,6 +857,10 @@ impl McpTransport for StreamableHttpTransport {
                 .expect("session mutex poisoned")
                 .protocol_version = Some(value);
         }
+    }
+
+    async fn close(&self) -> Result<(), McpError> {
+        self.close_session().await
     }
 }
 

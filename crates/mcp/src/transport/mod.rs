@@ -39,6 +39,13 @@ pub trait McpTransport: Send + Sync {
     /// Record the protocol version selected during initialisation. Transports
     /// that do not negotiate protocol headers deliberately ignore this.
     async fn set_protocol_version(&self, _protocol_version: &str) {}
+
+    /// Release transport-owned resources. Legacy transports do not require an
+    /// explicit close, while Streamable HTTP uses this to terminate its MCP
+    /// session before the process exits.
+    async fn close(&self) -> Result<(), McpError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,19 @@ use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_
 impl GatewayRuntime {
     pub fn poll_stream_updates(&mut self, state: &mut AppState) -> bool {
         let mut changed = false;
+        if self.remote.is_none() {
+            if let Some(health) = self.session_gateway.take_memory_health_update() {
+                state.status_panel.memory_status = match health {
+                    crate::gateway::MemoryAutomationHealth::Healthy => {
+                        crate::status_panel::MemoryStatus::Connected
+                    }
+                    crate::gateway::MemoryAutomationHealth::Degraded => {
+                        crate::status_panel::MemoryStatus::Degraded
+                    }
+                };
+                changed = true;
+            }
+        }
         while let Some(receiver) = &mut self.stream_rx {
             let update = match receiver.try_recv() {
                 Ok(update) => update,
@@ -139,6 +152,9 @@ impl GatewayRuntime {
                         self.insert_aux_message(state, Message::user(prompt));
                     }
                     state.chat_state.stick_to_bottom = true;
+                }
+                SessionTurnUpdate::MemoryStatus(memory_status) => {
+                    state.status_panel.memory_status = memory_status;
                 }
                 SessionTurnUpdate::Done {
                     prompt_tokens,
@@ -835,13 +851,15 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use agent_types::common::ids::AgentId;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
 
     use crate::app_state::AppState;
     use crate::chat::{
         Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolExecutionUpdate,
     };
+    use crate::gateway::MemoryAutomationHealth;
     use crate::session_gateway::SessionTurnUpdate;
+    use crate::status_panel::MemoryStatus;
 
     use super::{GatewayRuntime, PendingStreamDone};
 
@@ -997,6 +1015,49 @@ mod tests {
 
         assert!(state.chat_state.stick_to_bottom);
         assert_eq!(state.chat_state.messages[0].content, "answer");
+    }
+
+    #[test]
+    fn stream_updates_surface_memory_state_transitions() {
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Disabled))
+            .expect("memory status update should send");
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Disabled);
+
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Degraded))
+            .expect("memory status update should send");
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Degraded);
+
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Connected))
+            .expect("memory status update should send");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Connected);
+    }
+
+    #[test]
+    fn background_memory_health_change_updates_status_without_a_turn() {
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+        let (health_tx, health_rx) = watch::channel(MemoryAutomationHealth::Healthy);
+        *runtime
+            .session_gateway
+            .memory_health
+            .lock()
+            .expect("memory health lock should not be poisoned") = Some(health_rx);
+
+        health_tx
+            .send(MemoryAutomationHealth::Degraded)
+            .expect("memory health receiver should be present");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Degraded);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! data outside the user message: recalled text is rendered as untrusted
 //! system context and all failures are contained by its callers.
 use async_trait::async_trait;
+use chrono::{SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
@@ -13,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +115,16 @@ pub struct RecallMemory {
     #[serde(default)]
     pub source: Option<String>,
 }
+
+/// Last observed outcome of a RAM-A operation. It is deliberately coarse:
+/// callers must never treat it as a guarantee that the next operation will
+/// succeed, only as an operator-facing indication of the most recent result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryAutomationHealth {
+    Healthy,
+    Degraded,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletedTurnIngest {
     pub message_id: String,
@@ -161,6 +172,15 @@ pub trait TurnMemoryAutomation: Send + Sync {
     fn recall_token_budget(&self) -> usize;
     fn context_messages(&self) -> usize {
         0
+    }
+    fn health(&self) -> MemoryAutomationHealth {
+        MemoryAutomationHealth::Healthy
+    }
+    fn subscribe_health(&self) -> Option<watch::Receiver<MemoryAutomationHealth>> {
+        None
+    }
+    async fn close(&self) -> Result<(), MemoryAutomationError> {
+        Ok(())
     }
 }
 
@@ -458,6 +478,7 @@ pub struct McpMemoryAutomation {
     config: MemoryAutomationConfig,
     client: Arc<mcp::McpClient>,
     queue: Arc<DurableIngestQueue>,
+    health: watch::Sender<MemoryAutomationHealth>,
     _worker: DurableIngestWorker,
 }
 impl McpMemoryAutomation {
@@ -478,10 +499,20 @@ impl McpMemoryAutomation {
                 ))
             })?;
         let client = mcp::McpClient::connect(server).await?;
-        client.initialize().await?;
-        let tools = client.list_tools().await?;
+        if let Err(error) = client.initialize().await {
+            let _ = client.close().await;
+            return Err(error.into());
+        }
+        let tools = match client.list_tools().await {
+            Ok(tools) => tools,
+            Err(error) => {
+                let _ = client.close().await;
+                return Err(error.into());
+            }
+        };
         for required in ["memory_search", "memory_ingest"] {
             if !tools.iter().any(|tool| tool.name == required) {
+                let _ = client.close().await;
                 return Err(MemoryAutomationError::Config(format!(
                     "server `{}` does not expose `{required}`",
                     server.name
@@ -489,18 +520,27 @@ impl McpMemoryAutomation {
             }
         }
         let client = Arc::new(client);
-        let queue = Arc::new(
-            DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity).await?,
-        );
+        let queue = match DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
+            .await
+        {
+            Ok(queue) => Arc::new(queue),
+            Err(error) => {
+                let _ = client.close().await;
+                return Err(error);
+            }
+        };
+        let (health, _) = watch::channel(MemoryAutomationHealth::Healthy);
         let worker = queue.start_retry_worker(
             config.max_retries,
             config.retry_backoff_ms,
             Duration::from_millis(config.retry_backoff_ms.max(1)),
             {
                 let client = Arc::clone(&client);
+                let health = health.clone();
                 move |entry| {
                     let client = Arc::clone(&client);
-                    async move { ingest_via_mcp(client, entry).await }
+                    let health = health.clone();
+                    async move { ingest_via_mcp(client, entry, &health).await }
                 }
             },
         );
@@ -508,6 +548,7 @@ impl McpMemoryAutomation {
             config,
             client,
             queue,
+            health,
             _worker: worker,
         });
         Ok(Some(automation))
@@ -525,15 +566,22 @@ impl McpMemoryAutomation {
 async fn ingest_via_mcp(
     client: Arc<mcp::McpClient>,
     entry: CompletedTurnIngest,
+    health: &watch::Sender<MemoryAutomationHealth>,
 ) -> Result<(), MemoryAutomationError> {
-    let result = client
-        .call_tool("memory_ingest", ingest_args(&entry))
-        .await?;
+    let result = match client.call_tool("memory_ingest", ingest_args(&entry)).await {
+        Ok(result) => result,
+        Err(error) => {
+            health.send_replace(MemoryAutomationHealth::Degraded);
+            return Err(error.into());
+        }
+    };
     if result.is_error {
+        health.send_replace(MemoryAutomationHealth::Degraded);
         return Err(MemoryAutomationError::Config(
             "memory_ingest returned an error".to_string(),
         ));
     }
+    health.send_replace(MemoryAutomationHealth::Healthy);
     Ok(())
 }
 
@@ -546,12 +594,27 @@ impl TurnMemoryAutomation for McpMemoryAutomation {
         if !self.allowed(&context.agent_role) {
             return Ok(Vec::new());
         }
-        let response = self.client.call_tool("memory_search", json!({ "query": context.query, "top_k": self.config.recall_top_k, "source": { "conversation_id": context.conversation_id, "message_id": context.message_id, "sender_id": context.sender_id, "agent_role": context.agent_role, "timestamp_ms": context.timestamp_ms } })).await?;
+        let response = match self
+            .client
+            .call_tool(
+                "memory_search",
+                recall_args(context, self.config.recall_top_k),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.health.send_replace(MemoryAutomationHealth::Degraded);
+                return Err(error.into());
+            }
+        };
         if response.is_error {
+            self.health.send_replace(MemoryAutomationHealth::Degraded);
             return Err(MemoryAutomationError::Config(
                 "memory_search returned an error".into(),
             ));
         }
+        self.health.send_replace(MemoryAutomationHealth::Healthy);
         Ok(parse_memories(response.structured_content.as_ref()).unwrap_or_default())
     }
     async fn enqueue_ingest(
@@ -561,8 +624,13 @@ impl TurnMemoryAutomation for McpMemoryAutomation {
         if !self.allowed(&ingest.agent_role) {
             return Ok(());
         }
-        self.queue.enqueue(ingest).await?;
-        Ok(())
+        match self.queue.enqueue(ingest).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.health.send_replace(MemoryAutomationHealth::Degraded);
+                Err(error)
+            }
+        }
     }
 
     fn recall_token_budget(&self) -> usize {
@@ -571,6 +639,19 @@ impl TurnMemoryAutomation for McpMemoryAutomation {
 
     fn context_messages(&self) -> usize {
         self.config.context_messages
+    }
+
+    fn health(&self) -> MemoryAutomationHealth {
+        *self.health.borrow()
+    }
+
+    fn subscribe_health(&self) -> Option<watch::Receiver<MemoryAutomationHealth>> {
+        Some(self.health.subscribe())
+    }
+
+    async fn close(&self) -> Result<(), MemoryAutomationError> {
+        self.client.close().await?;
+        Ok(())
     }
 }
 fn parse_memories(value: Option<&Value>) -> Option<Vec<RecallMemory>> {
@@ -645,9 +726,54 @@ fn escape_memory_field(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn ingest_args(entry: &CompletedTurnIngest) -> Value {
-    json!({ "messages": [{ "id": entry.message_id, "text": entry.user_text, "candidate": true }, { "id": format!("{}:assistant", entry.message_id), "text": entry.assistant_text, "candidate": true }], "recent_messages": entry.recent_messages.iter().map(|text| json!({"text": text, "candidate": false})).collect::<Vec<_>>(), "source": { "conversation_id": entry.conversation_id, "sender_id": entry.sender_id, "agent_role": entry.agent_role, "timestamp_ms": entry.timestamp_ms } })
+pub(super) fn recall_args(context: &TurnMemoryContext, top_k: usize) -> Value {
+    json!({ "query": context.query, "top_k": top_k })
 }
+
+pub(super) fn ingest_args(entry: &CompletedTurnIngest) -> Value {
+    let mut messages = entry
+        .recent_messages
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            json!({
+                "id": format!("{}:context:{index}", entry.message_id),
+                "role": "system",
+                "speaker": "context",
+                "text": text,
+                "candidate": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let timestamp = rfc3339_timestamp(entry.timestamp_ms);
+    messages.extend([
+        json!({
+            "id": entry.message_id,
+            "role": "user",
+            "speaker": entry.sender_id,
+            "text": entry.user_text,
+            "timestamp": timestamp,
+            "candidate": true,
+        }),
+        json!({
+            "id": format!("{}:assistant", entry.message_id),
+            "role": "assistant",
+            "speaker": entry.agent_role,
+            "text": entry.assistant_text,
+            "timestamp": timestamp,
+            "candidate": true,
+        }),
+    ]);
+    json!({ "conversation_id": entry.conversation_id, "messages": messages })
+}
+
+fn rfc3339_timestamp(timestamp_ms: u64) -> Option<String> {
+    i64::try_from(timestamp_ms)
+        .ok()
+        .and_then(|timestamp_ms| Utc.timestamp_millis_opt(timestamp_ms).single())
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

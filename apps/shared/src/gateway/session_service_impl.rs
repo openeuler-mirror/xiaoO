@@ -1212,6 +1212,11 @@ impl CoreBackedSessionService {
         let idle_agent_id = resolved.descriptor.agent_id.0.clone();
         let idle_chain_depth = request.chain_depth;
 
+        let prior_memory_context = seed_session
+            .loop_state
+            .as_ref()
+            .map(|loop_state| loop_state.messages.clone())
+            .unwrap_or_default();
         let handle = self.get_or_create_session_handle(seed_session).await;
         let mut turn_result = handle
             .run_turn(
@@ -1276,7 +1281,7 @@ impl CoreBackedSessionService {
                 user_text: original_request.text.clone(),
                 assistant_text: turn.visible_reply.clone(),
                 recent_messages: recent_memory_context_messages(
-                    &turn.messages,
+                    &prior_memory_context,
                     automation.context_messages(),
                 ),
                 retries: 0,
@@ -2705,21 +2710,25 @@ mod tests {
                 .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("<untrusted_long_term_memory>"))),
             "failed recall must not add memory context"
         );
+        drop(requests);
 
         let contexts = automation.seen_contexts.lock().expect("seen contexts");
         assert_eq!(contexts[0].query, "hello");
+        drop(contexts);
         let enqueued = automation.enqueued.lock().expect("enqueued");
         assert_eq!(enqueued[0].user_text, "hello");
         assert_eq!(enqueued[0].assistant_text, "reply");
-        assert!(enqueued[0].recent_messages.len() <= 2);
-        assert!(enqueued[0]
-            .recent_messages
-            .iter()
-            .any(|text| text == "hello"));
-        assert!(enqueued[0]
-            .recent_messages
-            .iter()
-            .any(|text| text == "reply"));
+        assert!(enqueued[0].recent_messages.is_empty());
+        drop(enqueued);
+
+        dependencies
+            .session_service
+            .run_turn(test_open_request("memory-fail-open").into_turn_request("next".to_string()))
+            .await
+            .expect("second turn should continue after memory recall failure");
+        let enqueued = automation.enqueued.lock().expect("enqueued");
+        assert_eq!(enqueued.len(), 2);
+        assert_eq!(enqueued[1].recent_messages, vec!["hello", "reply"]);
     }
 
     #[tokio::test]

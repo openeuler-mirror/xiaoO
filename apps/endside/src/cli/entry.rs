@@ -1058,6 +1058,7 @@ if let Some(attach_url) = &attach {
             None
         }
     };
+    let memory_automation_for_shutdown = memory_automation.clone();
     let resolver: Arc<dyn SessionRuntimeResolver> =
         Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
     let deps = match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
@@ -1069,6 +1070,20 @@ if let Some(attach_url) = &attach {
     ) {
         Ok(d) => d,
         Err(e) => {
+            if let Some(automation) = memory_automation_for_shutdown {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    automation.close(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("[warn] failed to close MCP memory automation: {error}")
+                    }
+                    Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
+                }
+            }
             eprintln!("Failed to bootstrap session: {}", e);
             std::process::exit(1);
         }
@@ -1137,6 +1152,13 @@ if let Some(attach_url) = &attach {
             let _ = std::io::stdout().flush();
         } else {
             eprintln!("[warn] failed to close session: {}", err);
+        }
+    }
+    if let Some(automation) = memory_automation_for_shutdown {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("[warn] failed to close MCP memory automation: {error}"),
+            Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
         }
     }
 

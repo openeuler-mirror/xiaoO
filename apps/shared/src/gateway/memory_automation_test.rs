@@ -1,7 +1,8 @@
 use super::memory_automation::{
-    render_memory_context, CompletedTurnIngest, DurableIngestQueue, MemoryAutomationError,
-    RecallMemory,
+    ingest_args, recall_args, render_memory_context, CompletedTurnIngest, DurableIngestQueue,
+    MemoryAutomationError, RecallMemory, TurnMemoryContext,
 };
+use serde_json::json;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::sync::{
@@ -55,6 +56,46 @@ fn empty_memory_budget_renders_no_memory_block() {
     );
 
     assert!(block.is_empty());
+}
+
+#[test]
+fn ram_a_mcp_arguments_match_the_published_tool_schemas() {
+    let recall = TurnMemoryContext {
+        query: "remembered preference".into(),
+        conversation_id: "conversation-1".into(),
+        message_id: Some("message-1".into()),
+        sender_id: "sender-1".into(),
+        agent_role: "defaultagent".into(),
+        timestamp_ms: 42,
+    };
+    assert_eq!(
+        recall_args(&recall, 3),
+        json!({"query": "remembered preference", "top_k": 3})
+    );
+
+    let ingest = CompletedTurnIngest {
+        message_id: "message-1".into(),
+        conversation_id: "conversation-1".into(),
+        sender_id: "sender-1".into(),
+        agent_role: "defaultagent".into(),
+        timestamp_ms: 42,
+        user_text: "remember this".into(),
+        assistant_text: "acknowledged".into(),
+        recent_messages: vec!["older context".into()],
+        retries: 0,
+        next_attempt_ms: 0,
+    };
+    assert_eq!(
+        ingest_args(&ingest),
+        json!({
+            "conversation_id": "conversation-1",
+            "messages": [
+                {"id": "message-1:context:0", "role": "system", "speaker": "context", "text": "older context", "candidate": false},
+                {"id": "message-1", "role": "user", "speaker": "sender-1", "text": "remember this", "timestamp": "1970-01-01T00:00:00.042Z", "candidate": true},
+                {"id": "message-1:assistant", "role": "assistant", "speaker": "defaultagent", "text": "acknowledged", "timestamp": "1970-01-01T00:00:00.042Z", "candidate": true}
+            ]
+        })
+    );
 }
 
 #[tokio::test]

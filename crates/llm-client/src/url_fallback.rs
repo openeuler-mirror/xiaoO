@@ -6,6 +6,9 @@ use std::path::PathBuf;
 
 pub fn build_base_url_candidates(original_base: &str) -> Vec<String> {
     let base = original_base.trim_end_matches('/');
+    if is_chat_completions_endpoint(base) {
+        return vec![base.to_string()];
+    }
     let mut candidates = Vec::new();
 
     // B1: 用户原始配置（最高优先级）
@@ -50,6 +53,9 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     for base in base_candidates {
+        if is_chat_completions_endpoint(base) {
+            continue;
+        }
         let paths = build_endpoint_paths(base);
         for path in paths {
             let url = format!("{}{}", base.trim_end_matches('/'), path);
@@ -63,6 +69,14 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     final_urls
+}
+
+fn is_chat_completions_endpoint(base: &str) -> bool {
+    base.split(['?', '#'])
+        .next()
+        .unwrap_or(base)
+        .trim_end_matches('/')
+        .ends_with("/chat/completions")
 }
 
 fn has_version_path(base: &str) -> bool {
@@ -449,6 +463,22 @@ mod tests {
         assert_eq!(final_urls.len(), 2);
         assert_eq!(final_urls[0], "http://example.com/v1");
         assert_eq!(final_urls[1], "http://example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn full_chat_completions_endpoint_is_not_extended_again() {
+        for endpoint in [
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions/",
+            "https://api.example.com/v1/chat/completions?api-version=2026-01-01",
+        ] {
+            let expected = endpoint.trim_end_matches('/');
+            let bases = build_base_url_candidates(endpoint);
+            assert_eq!(bases, vec![expected]);
+
+            let final_urls = build_final_candidates(&bases);
+            assert_eq!(final_urls, vec![expected]);
+        }
     }
 
     #[test]

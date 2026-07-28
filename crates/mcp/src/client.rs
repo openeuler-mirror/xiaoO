@@ -95,6 +95,13 @@ impl McpClient {
         Ok(init)
     }
 
+    /// Release the connected transport. For Streamable HTTP this sends the
+    /// MCP session-termination DELETE request; older transports retain their
+    /// existing no-op close behaviour.
+    pub async fn close(&self) -> Result<(), McpError> {
+        self.transport.close().await
+    }
+
     /// List all tools exposed by the server, following pagination cursors.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let mut tools = Vec::new();
