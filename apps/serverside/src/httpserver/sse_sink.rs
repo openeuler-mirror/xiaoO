@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use agent_contracts::LoopEventSink;
+use agent_contracts::{LoopEventSink, ToolEventSink};
 use agent_types::common::ids::AgentId;
-use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::events::{LoopEndSummary, ToolLifecycleEvent, ToolResultEvent};
 use agent_types::interaction::InteractionRequest;
 use axum::response::sse;
 use futures_util::StreamExt;
@@ -40,6 +40,10 @@ pub enum SseStreamEvent {
         tool_name: String,
         output_preview: String,
         is_error: bool,
+        /// Args JSON preview for tool card rendering; backward compatible
+        /// (older TUIs ignore unknown fields).
+        #[serde(default)]
+        args_preview: String,
     },
     /// Per-call file change delta computed by the daemon's
     /// `SessionDiffTracker`. Forwarded to the TUI so the remote-mode session
@@ -66,6 +70,35 @@ pub enum SseStreamEvent {
         title: String,
         description: String,
         task_goal: String,
+    },
+    /// Tool lifecycle event forwarded so the remote TUI can drive the
+    /// same tool-card state machine as local mode. `agent_id` routes
+    /// to root message list or subagent lane.
+    ToolCall {
+        agent_id: String,
+        call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        args_preview: String,
+        /// Lifecycle status carried over the wire. Mirrors the local
+        /// `ToolExecutionStatus` enum.
+        status: ToolCallStatus,
+        /// Populated for `denied` / `failed` statuses (denial reason
+        /// / executor error).
+        #[serde(default)]
+        detail: String,
+    },
+    /// Per-agent loop-end marker so the TUI clears `is_running` on the
+    /// matching lane. Summary fields default to zero/empty for backward
+    /// compat with older daemons.
+    LoopEnd {
+        agent_id: String,
+        #[serde(default)]
+        turn_count: u32,
+        #[serde(default)]
+        total_tokens: usize,
+        #[serde(default)]
+        stop_reason: String,
     },
     InteractionRequested {
         request: InteractionRequest,
@@ -95,6 +128,21 @@ pub enum SseStreamEvent {
     },
 }
 
+/// Wire-format mirror of `agent_types::tool::ToolExecutionStatus`,
+/// kept independent so the daemon ↔ TUI contract survives TUI renames.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    /// Tool args received, executor about to run.
+    Running,
+    /// Executor returned successfully.
+    Completed,
+    /// Executor returned an error.
+    Failed,
+    /// Tool args were rejected by the policy layer before execution.
+    Denied,
+}
+
 impl SseStreamEvent {
     fn event_name(&self) -> &'static str {
         match self {
@@ -105,6 +153,8 @@ impl SseStreamEvent {
             SseStreamEvent::ToolFileChange { .. } => "tool_file_change",
             SseStreamEvent::PlanUpdate { .. } => "plan_update",
             SseStreamEvent::SubagentSpawn { .. } => "subagent_spawn",
+            SseStreamEvent::ToolCall { .. } => "tool_call",
+            SseStreamEvent::LoopEnd { .. } => "loop_end",
             SseStreamEvent::InteractionRequested { .. } => "interaction_requested",
             SseStreamEvent::Done { .. } => "done",
             SseStreamEvent::Error { .. } => "error",
@@ -194,6 +244,12 @@ impl LoopEventSink for SseLoopEventSink {
         });
     }
 
+    /// Forwards a `ToolResultEvent` as an SSE `ToolResult` event. The
+    /// tool framework guarantees this is called AFTER the corresponding
+    /// `ToolLifecycleEvent::Running` (which `SseToolEventSink::emit`
+    /// forwards as a `ToolCall(running)` SSE event), so the TUI's
+    /// tool-card state machine sees `Running` -> `Completed`/`Failed`
+    /// in order.
     fn on_tool_result(&self, agent_id: &AgentId, event: &ToolResultEvent) {
         let _ = self.tx.send(SseStreamEvent::ToolResult {
             agent_id: agent_id.0.clone(),
@@ -201,13 +257,23 @@ impl LoopEventSink for SseLoopEventSink {
             tool_name: event.tool_name.clone(),
             output_preview: event.output_preview.clone(),
             is_error: event.is_error,
+            args_preview: event.args_preview.clone(),
         });
     }
 
-    fn on_loop_end(&self, _agent_id: &AgentId, summary: &LoopEndSummary) {
+    fn on_loop_end(&self, agent_id: &AgentId, summary: &LoopEndSummary) {
         if let Ok(mut stored) = self.loop_summary.lock() {
             *stored = Some(summary.clone());
         }
+        // Emit a per-agent `LoopEnd` marker so the TUI clears
+        // `is_running` on the matching lane. Summary fields forward the
+        // per-agent `LoopEndSummary`.
+        let _ = self.tx.send(SseStreamEvent::LoopEnd {
+            agent_id: agent_id.0.clone(),
+            turn_count: summary.turn_count,
+            total_tokens: summary.total_tokens,
+            stop_reason: summary.stop_reason.clone(),
+        });
     }
 }
 
@@ -298,6 +364,135 @@ impl SubagentMetaForwarder for SseSubagentMetaForwarder {
     }
 }
 
+/// Forwards tool-lifecycle events to the remote TUI as
+/// [`SseStreamEvent::ToolCall`] SSE events. Wraps an inner
+/// [`ToolEventSink`] so its side effects (e.g. diff baseline capture)
+/// keep firing alongside the SSE forwarding.
+///
+/// Only `Running`/`Pending` lifecycle events are forwarded as SSE
+/// `ToolCall` events; terminal states (`Completed`/`Failed`/`Denied`)
+/// are conveyed by the subsequent `ToolResult` SSE event emitted by
+/// `SseLoopEventSink::on_tool_result`, which also carries
+/// `output_preview`. This avoids duplicate terminal updates and
+/// ordering races between the two sinks.
+pub struct SseToolEventSink {
+    tx: mpsc::UnboundedSender<SseStreamEvent>,
+    inner: Option<Arc<dyn ToolEventSink>>,
+}
+
+impl SseToolEventSink {
+    /// Wrap an existing [`ToolEventSink`] so its side effects (e.g. diff
+    /// baseline capture) keep firing alongside the new SSE forwarding.
+    pub fn with_inner(
+        tx: mpsc::UnboundedSender<SseStreamEvent>,
+        inner: Arc<dyn ToolEventSink>,
+    ) -> Self {
+        Self {
+            tx,
+            inner: Some(inner),
+        }
+    }
+}
+
+/// Recursively unwrap `AgentScoped` layers and extract wire-format
+/// fields. The innermost `agent_id` wins; `fallback_agent_id` is used
+/// for un-scoped root events.
+fn flatten_tool_lifecycle(
+    event: ToolLifecycleEvent,
+    fallback_agent_id: AgentId,
+) -> (AgentId, String, String, String, ToolCallStatus, String) {
+    match event {
+        ToolLifecycleEvent::AgentScoped { agent_id, event } => {
+            flatten_tool_lifecycle(*event, agent_id)
+        }
+        ToolLifecycleEvent::Pending {
+            call_id,
+            tool_name,
+            args_preview,
+        }
+        | ToolLifecycleEvent::Running {
+            call_id,
+            tool_name,
+            args_preview,
+        } => (
+            fallback_agent_id,
+            call_id,
+            tool_name,
+            args_preview,
+            ToolCallStatus::Running,
+            String::new(),
+        ),
+        ToolLifecycleEvent::Completed {
+            call_id,
+            tool_name,
+            args_preview,
+        } => (
+            fallback_agent_id,
+            call_id,
+            tool_name,
+            args_preview,
+            ToolCallStatus::Completed,
+            String::new(),
+        ),
+        ToolLifecycleEvent::Failed {
+            call_id,
+            tool_name,
+            error,
+            args_preview,
+        } => (
+            fallback_agent_id,
+            call_id,
+            tool_name,
+            args_preview,
+            ToolCallStatus::Failed,
+            error,
+        ),
+        ToolLifecycleEvent::Denied {
+            call_id,
+            tool_name,
+            reason,
+            args_preview,
+        } => (
+            fallback_agent_id,
+            call_id,
+            tool_name,
+            args_preview,
+            ToolCallStatus::Denied,
+            reason,
+        ),
+    }
+}
+
+/// Fallback `agent_id` for un-scoped root tool-lifecycle events. Using
+/// `"root"` instead of an empty string ensures the TUI routes the event
+/// to the root message list rather than silently dropping it.
+const ROOT_FALLBACK_AGENT_ID: &str = "root";
+
+impl ToolEventSink for SseToolEventSink {
+    fn emit(&self, event: ToolLifecycleEvent) {
+        // Delegate to inner first so its side effects fire even if the
+        // SSE send drops the event on a closed channel.
+        if let Some(inner) = self.inner.as_ref() {
+            inner.emit(event.clone());
+        }
+        let (agent_id, call_id, tool_name, args_preview, status, detail) =
+            flatten_tool_lifecycle(event, AgentId(ROOT_FALLBACK_AGENT_ID.to_string()));
+        // Skip terminal states — the subsequent `ToolResult` SSE event
+        // conveys them with `output_preview` (see struct doc).
+        if status != ToolCallStatus::Running {
+            return;
+        }
+        let _ = self.tx.send(SseStreamEvent::ToolCall {
+            agent_id: agent_id.0,
+            call_id,
+            tool_name,
+            args_preview,
+            status,
+            detail,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +506,163 @@ mod tests {
 
         assert_eq!(value["runtime_id"], "runtime-1");
         assert!(value.get("session_id").is_none());
+    }
+
+    #[test]
+    fn tool_call_event_serializes_snake_case_status() {
+        let value = serde_json::to_value(SseStreamEvent::ToolCall {
+            agent_id: "child-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            args_preview: "{}".to_string(),
+            status: ToolCallStatus::Running,
+            detail: String::new(),
+        })
+        .expect("event should serialize");
+
+        assert_eq!(value["type"], "tool_call");
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["agent_id"], "child-1");
+    }
+
+    #[test]
+    fn loop_end_event_carries_agent_id() {
+        let value = serde_json::to_value(SseStreamEvent::LoopEnd {
+            agent_id: "child-1".to_string(),
+            turn_count: 3,
+            total_tokens: 1024,
+            stop_reason: "end_turn".to_string(),
+        })
+        .expect("event should serialize");
+
+        assert_eq!(value["type"], "loop_end");
+        assert_eq!(value["agent_id"], "child-1");
+        assert_eq!(value["turn_count"], 3);
+        assert_eq!(value["total_tokens"], 1024);
+        assert_eq!(value["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn tool_result_event_carries_args_preview() {
+        let value = serde_json::to_value(SseStreamEvent::ToolResult {
+            agent_id: "root".to_string(),
+            call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            output_preview: "done".to_string(),
+            is_error: false,
+            args_preview: "{\"command\":\"ls\"}".to_string(),
+        })
+        .expect("event should serialize");
+
+        assert_eq!(value["type"], "tool_result");
+        assert_eq!(value["args_preview"], "{\"command\":\"ls\"}");
+    }
+
+    /// Inner sink should still receive the event after the wrapper
+    /// forwards it to SSE.
+    #[test]
+    fn sse_tool_event_sink_delegates_to_inner() {
+        #[derive(Default)]
+        struct Recorder {
+            seen: Mutex<Vec<ToolLifecycleEvent>>,
+        }
+        impl ToolEventSink for Recorder {
+            fn emit(&self, event: ToolLifecycleEvent) {
+                self.seen.lock().unwrap().push(event);
+            }
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel::<SseStreamEvent>();
+        let recorder = Arc::new(Recorder::default());
+        let sink = SseToolEventSink::with_inner(tx, recorder.clone() as Arc<dyn ToolEventSink>);
+        sink.emit(ToolLifecycleEvent::Running {
+            call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            args_preview: "{}".to_string(),
+        });
+
+        let seen = recorder.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(matches!(seen[0], ToolLifecycleEvent::Running { .. }));
+    }
+
+    /// Drives a subagent lifecycle sequence (`tool_call(running)` ->
+    /// `tool_call(completed)` [skipped: terminal] -> `loop_end`)
+    /// through `SseToolEventSink` + `SseLoopEventSink` and asserts the
+    /// SSE channel receives the events in order. Terminal lifecycle
+    /// events (`Completed`) are NOT forwarded as `ToolCall` SSE events
+    /// — the subsequent `ToolResult` SSE event conveys the terminal
+    /// state, avoiding duplicate updates.
+    #[tokio::test]
+    async fn sse_subagent_lifecycle_events_reach_channel_in_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SseStreamEvent>();
+        // Inner sink is a no-op; diff-tracker delegation is covered
+        // separately by `sse_tool_event_sink_delegates_to_inner`.
+        struct NoopSink;
+        impl ToolEventSink for NoopSink {
+            fn emit(&self, _event: ToolLifecycleEvent) {}
+        }
+
+        let loop_sink = SseLoopEventSink::new(tx.clone());
+        let tool_sink =
+            SseToolEventSink::with_inner(tx, Arc::new(NoopSink) as Arc<dyn ToolEventSink>);
+
+        // tool call (running) -> tool call (completed, skipped) -> loop end
+        // mirrors a real subagent turn on the wire.
+        tool_sink.emit(
+            ToolLifecycleEvent::Running {
+                call_id: "child-call-1".to_string(),
+                tool_name: "bash".to_string(),
+                args_preview: r#"{"command":"ls"}"#.to_string(),
+            }
+            .scoped(AgentId("child-1".to_string())),
+        );
+        tool_sink.emit(
+            ToolLifecycleEvent::Completed {
+                call_id: "child-call-1".to_string(),
+                tool_name: "bash".to_string(),
+                args_preview: r#"{"command":"ls"}"#.to_string(),
+            }
+            .scoped(AgentId("child-1".to_string())),
+        );
+        loop_sink.on_loop_end(
+            &AgentId("child-1".to_string()),
+            &LoopEndSummary {
+                turn_count: 1,
+                total_tokens: 0,
+                stop_reason: "end_turn".to_string(),
+            },
+        );
+
+        // Drain the channel and assert the wire-format sequence.
+        let mut received = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            received.push(event);
+        }
+        // Expect: tool_call(running) + loop_end. The `Completed`
+        // lifecycle event is NOT forwarded as SSE (terminal state is
+        // conveyed by the subsequent `ToolResult` SSE event).
+        assert_eq!(
+            received.len(),
+            2,
+            "expected running + loop_end (completed is skipped); got {received:?}"
+        );
+        assert!(matches!(
+            received[0],
+            SseStreamEvent::ToolCall {
+                ref agent_id,
+                status: ToolCallStatus::Running,
+                ..
+            } if agent_id == "child-1"
+        ));
+        assert!(matches!(
+            received[1],
+            SseStreamEvent::LoopEnd {
+                ref agent_id,
+                turn_count: 1,
+                total_tokens: 0,
+                ref stop_reason,
+            } if agent_id == "child-1" && stop_reason == "end_turn"
+        ));
     }
 }

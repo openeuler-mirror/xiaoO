@@ -36,6 +36,24 @@ impl GatewayRuntime {
                         );
                         lane.is_running = true;
                         lane.last_turn = Some(turn);
+                    } else {
+                        // Root agent entering a new turn: finalize the
+                        // previous turn's stream message (if it has
+                        // content) so the next `TextDelta` creates a new
+                        // message instead of replacing the previous
+                        // turn's content. The `has_content` guard
+                        // preserves the empty placeholder message (loading
+                        // indicator) created before the first `TextDelta`.
+                        let has_content = self
+                            .stream_message_index
+                            .and_then(|index| state.chat_state.messages.get(index))
+                            .map_or(false, |message| {
+                                !message.content.trim().is_empty()
+                                    || !message.thinking_content.trim().is_empty()
+                            });
+                        if has_content {
+                            self.finalize_stream_message_before_aux(state);
+                        }
                     }
                 }
                 SessionTurnUpdate::SetAssistantContent {
