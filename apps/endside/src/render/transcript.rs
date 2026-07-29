@@ -440,7 +440,13 @@ pub(crate) fn build_transcript_cache(
         message_layouts.push(CachedMessageLayout {
             message_index,
             start_visual_row: absolute_visual_row,
-            tool_toggle_row_offset: render.tool_toggle_row_offset,
+            tool_toggle_row_offset: render.tool_toggle_row_offset.map(|logical_offset| {
+                wrapped_lines
+                    .iter()
+                    .take(logical_offset)
+                    .map(|wrapped| wrapped.len())
+                    .sum()
+            }),
             subagent_open_target: render.subagent_open_target.as_ref().map(|target| {
                 let visual_offset = wrapped_lines
                     .iter()
