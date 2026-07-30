@@ -7,7 +7,7 @@ use reqwest::{Client as HttpClient, RequestBuilder, Response};
 use serde_json::Value;
 use std::sync::Mutex as StdMutex;
 use tokio::sync::{Mutex, Notify};
-use tokio::time::{timeout, Instant};
+use tokio::time::{sleep, timeout, Instant};
 
 use crate::config::{validate_fixed_headers, McpServerConfig};
 use crate::error::McpError;
@@ -18,6 +18,9 @@ const MCP_SESSION_ID: &str = "mcp-session-id";
 const MCP_PROTOCOL_VERSION: &str = "mcp-protocol-version";
 const X_AGENT_ID: &str = "x-agent-id";
 const MAX_CANCELLATION_TIMEOUT_MS: u64 = 100;
+const MAX_INITIALIZE_RATE_LIMIT_RETRIES: u8 = 1;
+const DEFAULT_INITIALIZE_RATE_LIMIT_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 /// MCP's request/response HTTP transport. It keeps only configuration names
 /// and negotiated state; bearer values are read from the environment for each
@@ -136,6 +139,10 @@ impl Drop for RecoveryLease<'_> {
 
 enum RequestAttemptError {
     Mcp(McpError),
+    RateLimited {
+        retry_after: std::time::Duration,
+        error: McpError,
+    },
     SessionNotFound {
         session: SessionSnapshot,
         error: McpError,
@@ -386,19 +393,17 @@ impl StreamableHttpTransport {
             method: "initialize".to_string(),
             params: Some(params),
         };
-        let response = self
-            .post_with_session(
+        let parsed = self
+            .request_initialize_with_rate_limit_retry(
                 &body,
+                id,
                 deadline,
-                SessionSnapshot {
+                Some(SessionSnapshot {
                     session_id: None,
                     protocol_version: None,
                     generation: stale_session.generation,
-                },
+                }),
             )
-            .await?;
-        let parsed = self
-            .response_for_id(response, id, deadline)
             .await
             .map_err(request_attempt_into_mcp)?;
         if let Some(error) = parsed.response.error {
@@ -450,6 +455,14 @@ impl StreamableHttpTransport {
             let error = response.error_for_status().unwrap_err();
             return Err(RequestAttemptError::SessionNotFound {
                 session,
+                error: McpError::Http(format_error(&error)),
+            });
+        }
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = retry_after_delay(response.headers());
+            let error = response.error_for_status().unwrap_err();
+            return Err(RequestAttemptError::RateLimited {
+                retry_after,
                 error: McpError::Http(format_error(&error)),
             });
         }
@@ -693,6 +706,54 @@ impl StreamableHttpTransport {
         self.response_for_id(response, id, deadline).await
     }
 
+    async fn request_with_session_once(
+        &self,
+        body: &JsonRpcRequest,
+        id: u64,
+        deadline: Instant,
+        session: SessionSnapshot,
+    ) -> Result<ParsedResponse, RequestAttemptError> {
+        let response = self.post_with_session(body, deadline, session).await?;
+        self.response_for_id(response, id, deadline).await
+    }
+
+    /// An initialize request is safe to retry once after a server-provided
+    /// rate limit. We deliberately do not apply this to arbitrary MCP tool
+    /// calls because a server may have performed a side effect before it
+    /// returned 429.
+    async fn request_initialize_with_rate_limit_retry(
+        &self,
+        body: &JsonRpcRequest,
+        id: u64,
+        deadline: Instant,
+        session: Option<SessionSnapshot>,
+    ) -> Result<ParsedResponse, RequestAttemptError> {
+        let mut retries = 0;
+        loop {
+            let attempt = match &session {
+                Some(session) => {
+                    self.request_with_session_once(body, id, deadline, session.clone())
+                        .await
+                }
+                None => self.request_once(body, id, deadline).await,
+            };
+            match attempt {
+                Err(RequestAttemptError::RateLimited {
+                    retry_after,
+                    error: _,
+                }) if retries < MAX_INITIALIZE_RATE_LIMIT_RETRIES
+                    && retry_after < remaining(deadline) =>
+                {
+                    retries += 1;
+                    if !retry_after.is_zero() {
+                        sleep(retry_after).await;
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
     async fn send_request_until(
         &self,
         body: JsonRpcRequest,
@@ -700,7 +761,13 @@ impl StreamableHttpTransport {
         method: &str,
         deadline: Instant,
     ) -> Result<Value, McpError> {
-        let parsed = match self.request_once(&body, id, deadline).await {
+        let first_attempt = if method == "initialize" {
+            self.request_initialize_with_rate_limit_retry(&body, id, deadline, None)
+                .await
+        } else {
+            self.request_once(&body, id, deadline).await
+        };
+        let parsed = match first_attempt {
             Ok(parsed) => parsed,
             Err(RequestAttemptError::SessionNotFound { session, .. }) if method != "initialize" => {
                 self.recover_session(&session, deadline).await?;
@@ -866,9 +933,9 @@ impl McpTransport for StreamableHttpTransport {
 
 fn request_attempt_into_mcp(error: RequestAttemptError) -> McpError {
     match error {
-        RequestAttemptError::Mcp(error) | RequestAttemptError::SessionNotFound { error, .. } => {
-            error
-        }
+        RequestAttemptError::Mcp(error)
+        | RequestAttemptError::RateLimited { error, .. }
+        | RequestAttemptError::SessionNotFound { error, .. } => error,
     }
 }
 
@@ -892,6 +959,15 @@ fn remaining(deadline: Instant) -> std::time::Duration {
     deadline
         .checked_duration_since(Instant::now())
         .unwrap_or(std::time::Duration::ZERO)
+}
+
+fn retry_after_delay(headers: &HeaderMap) -> std::time::Duration {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_INITIALIZE_RATE_LIMIT_RETRY_DELAY)
 }
 
 fn validate_response_session_id(headers: &HeaderMap) -> Result<Option<HeaderValue>, McpError> {
@@ -1046,7 +1122,10 @@ fn format_error(error: &reqwest::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{overall_deadline, remaining};
+    use super::{
+        overall_deadline, remaining, retry_after_delay, DEFAULT_INITIALIZE_RATE_LIMIT_RETRY_DELAY,
+    };
+    use reqwest::header::{HeaderMap, HeaderValue};
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -1059,6 +1138,19 @@ mod tests {
 
         assert!(request_deadline >= earliest);
         assert!(request_deadline <= latest);
+    }
+
+    #[test]
+    fn rate_limit_retry_delay_uses_retry_after_seconds_or_a_small_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("2"));
+        assert_eq!(retry_after_delay(&headers), Duration::from_secs(2));
+
+        headers.insert("retry-after", HeaderValue::from_static("invalid"));
+        assert_eq!(
+            retry_after_delay(&headers),
+            DEFAULT_INITIALIZE_RATE_LIMIT_RETRY_DELAY
+        );
     }
 
     #[test]

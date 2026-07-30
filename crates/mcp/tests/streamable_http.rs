@@ -87,6 +87,7 @@ enum ListResponse {
     FailedInitializeSession,
     EmptySessionId,
     InvalidSessionId,
+    RateLimitsInitializeOnce,
     ServerRequestThenResponse,
     EmptyEventIdResets,
 }
@@ -202,6 +203,10 @@ impl FixtureServer {
 
     async fn invalid_session_id() -> Self {
         Self::start(ListResponse::InvalidSessionId, "2025-11-25").await
+    }
+
+    async fn rate_limits_initialize_once() -> Self {
+        Self::start(ListResponse::RateLimitsInitializeOnce, "2025-11-25").await
     }
 
     async fn server_request_then_response() -> Self {
@@ -421,6 +426,19 @@ async fn handle_request(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             let initialize_call = state.initialize_calls.fetch_add(1, Ordering::SeqCst);
+            if matches!(state.list_response, ListResponse::RateLimitsInitializeOnce)
+                && initialize_call == 0
+            {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [
+                        ("retry-after", "0"),
+                        ("x-ram-a-limit-reason", "initialize_rate_limit"),
+                    ],
+                    "too many requests",
+                )
+                    .into_response();
+            }
             if matches!(
                 state.list_response,
                 ListResponse::GetSessionRecoveryExceedsDeadline
@@ -663,7 +681,7 @@ async fn handle_request(
                     .into_response();
             }
             let events = match state.list_response {
-                ListResponse::Correct => format!(
+                ListResponse::Correct | ListResponse::RateLimitsInitializeOnce => format!(
                     "event: message\ndata: {}\n\n",
                     response(request["id"].clone())
                 ),
@@ -972,6 +990,20 @@ async fn rejects_an_unsupported_streamable_http_protocol_version() {
 
     let error = client.initialize().await.unwrap_err();
     assert!(matches!(error, McpError::HandshakeFailed(message) if message.contains("2024-11-05")));
+    std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
+}
+
+#[tokio::test]
+async fn retries_a_rate_limited_initialize_once_within_the_request_deadline() {
+    let _environment = ENV_LOCK.lock().await;
+    std::env::set_var("MCP_STREAMABLE_HTTP_TEST_TOKEN", "test-token");
+    std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
+    let server = FixtureServer::rate_limits_initialize_once().await;
+    let client = McpClient::connect(&server.config()).await.unwrap();
+
+    assert!(client.initialize().await.is_ok());
+    assert_eq!(server.count_method("initialize").await, 2);
+    assert_eq!(server.count_method("notifications/initialized").await, 1);
     std::env::remove_var("MCP_STREAMABLE_HTTP_TEST_TOKEN");
 }
 
