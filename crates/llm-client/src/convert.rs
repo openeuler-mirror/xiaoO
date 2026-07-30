@@ -575,9 +575,14 @@ mod tests {
         // 4. xiaoo sends next request with conversation history
         // 5. function.arguments should be "{}" not "null"
 
-        let broken_arguments = r#"{"description":"incomplete"#;  // invalid JSON
+        // Empty/blank arguments parse to Null — the case that must round-trip
+        // as `"{}"` (not the bare JSON `null` literal) when re-serialized.
+        // Note: malformed-but-closable JSON (e.g. `{"a":"b`) is *repaired* by
+        // `repair_unclosed_json` into a valid object, so it would NOT reach
+        // Null and must not be used to assert the Null path.
+        let broken_arguments = "";
         let parsed = parse_tool_arguments(broken_arguments);
-        assert!(parsed.is_null(), "broken JSON should parse to Null");
+        assert!(parsed.is_null(), "blank arguments should parse to Null");
 
         let msg = ChatMessage::new(
             MessageRole::Assistant,

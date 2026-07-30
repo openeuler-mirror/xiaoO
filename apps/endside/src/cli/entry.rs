@@ -9,6 +9,7 @@ use crate::cli::{
 };
 use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
+use futures_util::StreamExt;
 use operation_backend::process_group::ProcessGroupCleanupGuard;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
@@ -17,8 +18,8 @@ use skill::types::config::SkillsConfig;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    LlmRuntimeConfig, SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver,
-    SessionStore,
+    LlmRuntimeConfig, SessionDetachRequest, SessionOpenRequest,
+    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -1180,72 +1181,235 @@ async fn run_with_attach(
     agent: Option<String>,
     debug: bool,
 ) {
+    let base_url = url.trim_end_matches('/').to_string();
     if debug {
-        eprintln!("Attaching to daemon at: {}", url);
+        eprintln!("Attaching to daemon at: {base_url}");
     }
-    
-    let client = reqwest::Client::new();
-    let endpoint = format!("{}/api/run", url.trim_end_matches('/'));
-    
-    let mut body = serde_json::Map::new();
-    body.insert("prompt".to_string(), Value::String(prompt));
-    if let Some(t) = title {
-        body.insert("title".to_string(), Value::String(t));
+
+    // Optional bearer token so attach also works against daemons that enable
+    // HTTP bearer auth (mirrors the TUI's resolve_bearer_token).
+    let bearer_token = std::env::var("XIAOO_DAEMON_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // This process's identity for the daemon's attach-lease table.
+    let client_id = format!("cli-{}", std::process::id());
+    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let is_json = format == OutputFormat::Json;
+
+    if is_json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "type": "session_start",
+                "data": {
+                    "session_id": &session_id,
+                    "title": &title,
+                    "agent": &agent,
+                }
+            }))
+            .unwrap()
+        );
+        let _ = std::io::stdout().flush();
     }
-    if let Some(s) = session {
-        body.insert("session_id".to_string(), Value::String(s));
+
+    // 1. Open (or re-open) the session so this process holds the lease --
+    //    required before submitting a turn when the daemon enforces lease
+    //    ownership (`XIAOO_ENFORCE_LEASE=on`).
+    let open_request = SessionOpenRequest {
+        session_id: session_id.clone(),
+        conversation_id: session_id.clone(),
+        sender_id: "cli-user".to_string(),
+        entry: GatewayEntryContext::cli(),
+        channel: None,
+        channel_instance_id: None,
+        llm: None,
+        workspace: None,
+        skills: None,
+        client_id: Some(client_id.clone()),
+        client_pid: Some(std::process::id()),
+        client_hostname: None,
+    };
+    let open_url = format!("{base_url}/api/v1/runtimes/open");
+    let mut open_req = client.post(&open_url).json(&open_request);
+    if let Some(token) = bearer_token.as_ref() {
+        open_req = open_req.bearer_auth(token);
     }
-    if let Some(a) = agent {
-        body.insert("agent".to_string(), Value::String(a));
-    }
-    
-    let response = client
-        .post(&endpoint)
-        .json(&Value::Object(body))
-        .send()
-        .await;
-    
-    match response {
-        Ok(resp) => {
+    match open_req.send().await {
+        Ok(resp) if !resp.status().is_success() => {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-
-            if !status.is_success() {
-                if format == OutputFormat::Json {
-                    println!("{}", serde_json::to_string(&serde_json::json!({
-                        "type": "error",
-                        "data": { "message": format!("HTTP {}: {}", status.as_u16(), text) }
-                    })).unwrap());
-                    let _ = std::io::stdout().flush();
-                } else {
-                    eprintln!("Daemon returned HTTP {}: {}", status.as_u16(), text);
-                }
-                std::process::exit(1);
-            }
-
-            if format == OutputFormat::Json {
-                println!("{}", text);
-                let _ = std::io::stdout().flush();
-            } else {
-                if !text.is_empty() {
-                    println!("{}", text);
-                }
-            }
+            let body = resp.text().await.unwrap_or_default();
+            attach_fail(format!("session open failed: HTTP {status} {body}"), is_json);
         }
-        Err(e) => {
-            if format == OutputFormat::Json {
-                println!("{}", serde_json::to_string(&serde_json::json!({
-                    "type": "error",
-                    "data": { "message": e.to_string() }
-                })).unwrap());
-                let _ = std::io::stdout().flush();
-            } else {
-                eprintln!("Failed to connect to daemon: {}", e);
+        Ok(_) => {}
+        Err(error) => attach_fail(format!("failed to connect to daemon: {error}"), is_json),
+    }
+
+    // 2. Submit the turn; the daemon replies with an SSE event stream.
+    let turn_request = AppTurnRequest {
+        session_id: session_id.clone(),
+        entry: GatewayEntryContext::cli(),
+        channel: None,
+        message_id: None,
+        conversation_id: session_id.clone(),
+        sender_id: "cli-user".to_string(),
+        text: prompt,
+        channel_instance_id: None,
+        channel_identity_prompt: None,
+        reply_to_message_id: None,
+        root_message_id: None,
+        mentions: Vec::new(),
+        reasoning_effort: ReasoningEffort::default(),
+        llm: None,
+        workspace: None,
+        skills: None,
+        command_context: None,
+        chain_depth: 0,
+        client_id: Some(client_id.clone()),
+    };
+    let input_url = format!("{base_url}/api/v1/runtimes/input");
+    let mut input_req = client.post(&input_url).json(&turn_request);
+    if let Some(token) = bearer_token.as_ref() {
+        input_req = input_req.bearer_auth(token);
+    }
+    let response = match input_req.send().await {
+        Ok(response) => response,
+        Err(error) => attach_fail(format!("failed to submit turn: {error}"), is_json),
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        attach_fail(format!("turn submission failed: HTTP {status} {body}"), is_json);
+    }
+
+    // 3. Consume the SSE event stream emitted by /api/v1/runtimes/input.
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut printed_any_text = false;
+    let mut saw_done = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => attach_fail(format!("stream read error: {error}"), is_json),
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(frame) = take_sse_frame(&mut buffer) {
+            let Some(event) = parse_sse_event(&frame) else {
+                continue;
+            };
+            let typ = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match typ {
+                "text_delta" => {
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    } else if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                        print!("{delta}");
+                        let _ = std::io::stdout().flush();
+                        printed_any_text = true;
+                    }
+                }
+                "done" => {
+                    saw_done = true;
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    } else if !printed_any_text {
+                        // Daemon sent no incremental deltas; emit the final reply.
+                        if let Some(reply) = event.get("reply").and_then(|v| v.as_str()) {
+                            println!("{reply}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                }
+                "error" => {
+                    let message = event
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown daemon error");
+                    attach_fail(message.to_string(), is_json);
+                }
+                _ => {
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    }
+                }
             }
-            std::process::exit(1);
         }
     }
+
+    if !saw_done {
+        attach_fail("daemon stream ended without a completion event".to_string(), is_json);
+    }
+
+    // 4. Best-effort detach so the daemon releases this process's lease
+    //    promptly instead of waiting for the staleness timeout. Errors are
+    //    ignored -- the turn already completed successfully.
+    let detach_request = SessionDetachRequest {
+        session_id: session_id.clone(),
+        client_id: Some(client_id),
+    };
+    let detach_url = format!("{base_url}/api/v1/runtimes/detach");
+    let mut detach_req = client.post(&detach_url).json(&detach_request);
+    if let Some(token) = bearer_token.as_ref() {
+        detach_req = detach_req.bearer_auth(token);
+    }
+    let _ = detach_req.send().await;
 }
+
+/// Report an attach-mode failure to stderr (text) or stdout (JSON), then exit.
+fn attach_fail(message: String, is_json: bool) -> ! {
+    if is_json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "data": { "message": message }
+            }))
+            .unwrap()
+        );
+        let _ = std::io::stdout().flush();
+    } else {
+        eprintln!("{message}");
+    }
+    std::process::exit(1);
+}
+
+/// Extract a single SSE frame (text up to a blank line) from the buffer.
+fn take_sse_frame(buffer: &mut String) -> Option<String> {
+    let index = buffer.find("\n\n")?;
+    let frame = buffer[..index].to_string();
+    buffer.drain(..index + 2);
+    Some(frame)
+}
+
+/// Parse an SSE frame's `data:` lines into a single JSON value. Returns
+/// `None` for keep-alive/comment frames or malformed JSON.
+fn parse_sse_event(frame: &str) -> Option<Value> {
+    let mut data_lines = Vec::new();
+    for line in frame.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(':') || line.is_empty() {
+            continue;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start());
+        }
+    }
+    if data_lines.is_empty() {
+        return None;
+    }
+    let data = data_lines.join("\n");
+    serde_json::from_str(&data).ok()
+}
+
+
 fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, debug: bool) {
     match command {
         DebugCommands::Config => {
@@ -1363,3 +1527,49 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod attach_sse_tests {
+    use super::{parse_sse_event, take_sse_frame};
+
+    #[test]
+    fn take_sse_frame_extracts_frame_and_drains() {
+        let mut buf = String::from("data: {\"type\":\"x\"}\n\nleftover");
+        let frame = take_sse_frame(&mut buf).unwrap();
+        assert_eq!(frame, "data: {\"type\":\"x\"}");
+        assert_eq!(buf, "leftover");
+    }
+
+    #[test]
+    fn take_sse_frame_returns_none_without_blank_line() {
+        let mut buf = String::from("data: partial");
+        assert!(take_sse_frame(&mut buf).is_none());
+        assert_eq!(buf, "data: partial");
+    }
+
+    #[test]
+    fn parse_sse_event_parses_data_json() {
+        let frame = "data: {\"type\":\"text_delta\",\"delta\":\"hi\"}";
+        let event = parse_sse_event(frame).unwrap();
+        assert_eq!(event["type"], "text_delta");
+        assert_eq!(event["delta"], "hi");
+    }
+
+    #[test]
+    fn parse_sse_event_joins_multi_line_data() {
+        let frame = "data: {\"type\":\"done\",\ndata: \"reply\":\"ok\"}";
+        let event = parse_sse_event(frame).unwrap();
+        assert_eq!(event["type"], "done");
+        assert_eq!(event["reply"], "ok");
+    }
+
+    #[test]
+    fn parse_sse_event_ignores_comments_and_blank_lines() {
+        assert!(parse_sse_event(": keepalive\n\n").is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_returns_none_for_malformed_json() {
+        assert!(parse_sse_event("data: {not json").is_none());
+    }
+}
