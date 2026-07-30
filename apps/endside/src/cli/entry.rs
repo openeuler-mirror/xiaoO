@@ -297,7 +297,7 @@ let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
             handle_serve_command(port, hostname).await;
         }
         Some(Command::Export { session_id, port }) => {
-            handle_export_command(session_id, port);
+            handle_export_command(session_id, port).await;
         }
         Some(Command::Debug { command }) => {
             handle_debug_command(command, config_path.as_ref(), debug);
@@ -1210,6 +1210,7 @@ async fn run_with_attach(
                         "type": "error",
                         "data": { "message": format!("HTTP {}: {}", status.as_u16(), text) }
                     })).unwrap());
+                    let _ = std::io::stdout().flush();
                 } else {
                     eprintln!("Daemon returned HTTP {}: {}", status.as_u16(), text);
                 }
@@ -1218,6 +1219,7 @@ async fn run_with_attach(
 
             if format == OutputFormat::Json {
                 println!("{}", text);
+                let _ = std::io::stdout().flush();
             } else {
                 if !text.is_empty() {
                     println!("{}", text);
@@ -1230,6 +1232,7 @@ async fn run_with_attach(
                     "type": "error",
                     "data": { "message": e.to_string() }
                 })).unwrap());
+                let _ = std::io::stdout().flush();
             } else {
                 eprintln!("Failed to connect to daemon: {}", e);
             }
@@ -1258,23 +1261,22 @@ fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, d
     }
 
 }
-fn handle_export_command(session_id: String, port: u16) {
+async fn handle_export_command(session_id: String, port: u16) {
     let url = format!("http://127.0.0.1:{}/api/v1/runtimes/export/{}", port, session_id);
-    
-    let output = std::process::Command::new("curl")
-        .arg("-s")
-        .arg(&url)
-        .output();
-    
-    match output {
-        Ok(result) if result.status.success() && !result.stdout.is_empty() => {
-            println!("{}", String::from_utf8_lossy(&result.stdout));
-        }
-        Ok(result) => {
-            eprintln!("Error: Failed to export session '{}'", session_id);
-            if !result.stderr.is_empty() {
-                eprintln!("Details: {}", String::from_utf8_lossy(&result.stderr));
+
+    let client = reqwest::Client::new();
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(text) if !text.is_empty() => println!("{}", text),
+            _ => {
+                eprintln!("Error: Empty response exporting session '{}'", session_id);
+                eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                std::process::exit(1);
             }
+        },
+        Ok(resp) => {
+            eprintln!("Error: Failed to export session '{}'", session_id);
+            eprintln!("Details: HTTP {}", resp.status().as_u16());
             eprintln!("Make sure xiaoo-daemon is running on port {}", port);
             std::process::exit(1);
         }
