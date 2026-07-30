@@ -266,23 +266,18 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => {
                 self.state.set_active_transcript_scrollbar_dragging(false);
                 // Auto copy-on-select: mirrors opencode's onMouseUp handler.
-                // Any non-empty selection is automatically copied when the mouse is released,
-                // and the selection is cleared to confirm the action.
+                // Any non-empty selection is automatically copied when the mouse is released.
                 if let Some(text) = self.state.transcript_selected_text() {
                     if let Err(e) = copy_to_clipboard(&text) {
                         tracing::warn!("copy_to_clipboard failed: {}", e);
                     } else {
                         self.state.set_copy_notice();
                     }
-                    self.state.transcript_selection = None;
-                } else if self
-                    .state
-                    .transcript_selection
-                    .as_ref()
-                    .is_some_and(|s| s.is_empty())
-                {
-                    self.state.transcript_selection = None;
                 }
+                // Always clear: a non-empty selection that yields no extractable text
+                // (e.g. a drag confined to header lines) must not linger, otherwise the
+                // dismiss-guard at the next Down swallows the first toggle click.
+                self.state.transcript_selection = None;
             }
             _ => {}
         }
