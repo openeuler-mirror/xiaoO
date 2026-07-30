@@ -156,6 +156,7 @@ except Exception as e:
 fi
 
 # 检测是否有服务已在运行（无论什么模式）
+# 注意：仅判断 healthy，不校验 instance 归属（安装期探测，bridge 运行期才过滤）
 EXISTING_PORT=""
 for port in 9090 9091 9092 9093 9094 9095; do
     if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null | grep -q '"healthy"'; then
@@ -194,11 +195,25 @@ fi
 # 步骤 3：安装 systemd service
 echo ""
 echo "步骤 3/5：安装 systemd service..."
+# 注入归属实例标识 AGENT_MOSS_INSTANCE=xiaoo。
+# 多个 agentmoss 同机并存时，bridge 探测靠此字段过滤，避免漂移到别人的进程。
+# systemd 模式：service 的 EnvironmentFile=-/etc/agent_moss/agent_moss.env 读这个文件；
+# nohup 模式：下方 export 让进程继承。两种模式都覆盖。
+AM_INSTANCE="xiaoo"
+sudo mkdir -p /etc/agent_moss
+if [ -f /etc/agent_moss/agent_moss.env ]; then
+    # 已有 env 文件：删旧的同名行（避免重复），再追加
+    sudo sed -i '/^AGENT_MOSS_INSTANCE=/d' /etc/agent_moss/agent_moss.env
+    echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee -a /etc/agent_moss/agent_moss.env > /dev/null
+else
+    echo "AGENT_MOSS_INSTANCE=${AM_INSTANCE}" | sudo tee /etc/agent_moss/agent_moss.env > /dev/null
+fi
+export AGENT_MOSS_INSTANCE="${AM_INSTANCE}"
 if [ "$USE_SYSTEMD" = true ] && command -v systemctl &>/dev/null; then
     echo "正在安装 systemd service（${AM_BIN}）..."
     sudo "$AM_BIN" install --enable 2>&1
     if [ $? -eq 0 ]; then
-        echo "✅ systemd service 已安装"
+        echo "✅ systemd service 已安装（instance=${AM_INSTANCE}）"
     else
         echo "⚠️  systemd service 安装失败，将以后台模式启动"
     fi

@@ -71,6 +71,12 @@ _HEALTH_TIMEOUT = float(os.getenv("AGENT_MOSS_HEALTH_TIMEOUT", "2"))
 _LOG_PATH = os.getenv("AGENT_MOSS_LOG_PATH", "")
 _CHECK_SOURCE = os.getenv("AGENT_MOSS_CHECK_SOURCE", "") == "1"
 
+# 归属实例标识：bridge 只认自己起的 agentmoss（instance 字段 == _EXPECT_INSTANCE），
+# 避免漂移到同机其他 agent（如 OpenDesk）spawn 的 agentmoss——后者会用错 agent 规则判定 xiaoo 请求。
+# 值来自 env AGENT_MOSS_INSTANCE（install.sh 注入=xiaoo），默认 xiaoo。
+# 用户显式设 AGENT_MOSS_URL/PORT 时跳过探测，此值不生效（尊重显式配置）。
+_EXPECT_INSTANCE = os.getenv("AGENT_MOSS_INSTANCE", "xiaoo")
+
 # 探测端口范围（学 OpenDesk hook.ts GATE_PROBE_RANGE，6 个够用且快）。
 # AgentMoss 默认 9090，findFreePort 从 9090 往上找空闲，所以探测扫 9090-9095。
 _PROBE_PORTS = [9090, 9091, 9092, 9093, 9094, 9095]
@@ -144,11 +150,12 @@ def _log(tag: str, payload: object) -> None:
 
 
 def _probe_service_url() -> str | None:
-    """探测本地端口找 AgentMoss（返回 healthy 的那个）。
+    """探测本地端口找 AgentMoss（返回 healthy 且归属匹配的实例）。
 
-    扫 _PROBE_PORTS，GET /api/v1/health，status=='healthy' 即命中。
+    扫 _PROBE_PORTS，GET /api/v1/health，要求 status=='healthy' 且
+    instance 字段 == _EXPECT_INSTANCE（避免漂移到同机其他 agent 的 agentmoss）。
     找不到返回 None（调用方走默认 9090，让 fail-closed 逻辑生效）。
-    与 OpenDesk hook.ts probeGateUrl 一致。
+    与 OpenDesk hook.ts probeGateUrl 探测范围一致，但增加归属过滤。
     """
     for port in _PROBE_PORTS:
         url = f"http://{_HOST}:{port}/api/v1/health"
@@ -157,8 +164,13 @@ def _probe_service_url() -> str | None:
             with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    if data.get("status") == "healthy":
-                        return f"http://{_HOST}:{port}"
+                    if data.get("status") != "healthy":
+                        continue
+                    # 归属过滤：未带 instance（旧版/未配置）或不匹配 → 跳过。
+                    # 宁可探测不到走 fail-closed，也不漂移到别人的进程用错规则。
+                    if data.get("instance", "") != _EXPECT_INSTANCE:
+                        continue
+                    return f"http://{_HOST}:{port}"
         except Exception:
             # 端口未监听或非 AgentMoss，继续探测下一个
             continue
