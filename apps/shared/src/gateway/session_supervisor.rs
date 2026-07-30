@@ -7,7 +7,7 @@ use crate::gateway::{
     TurnOutcome,
 };
 use agent_contracts::backend::OperationBackend;
-use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
+use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink, ToolEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::outcome::AgentOutcome;
@@ -38,6 +38,14 @@ struct PendingJoinWaiter {
 struct PendingInteractionWaiter {
     agent_id: AgentId,
     response_tx: oneshot::Sender<InteractionResponse>,
+}
+
+/// Root turn's sinks, inherited by spawned subagent lanes in remote
+/// (daemon) mode where the resolver returns default bindings. Set in
+/// `run_root_turn`, read in `run_lane_until_terminal`, cleared on exit.
+struct RootTurnSinks {
+    loop_event_sink: Option<Arc<dyn LoopEventSink>>,
+    tool_event_sink: Option<Arc<dyn ToolEventSink>>,
 }
 
 struct LaneRunInput {
@@ -71,6 +79,12 @@ pub struct SessionSupervisor {
     pending_interactions: Mutex<HashMap<String, PendingInteractionWaiter>>,
     interaction_semaphore: Arc<tokio::sync::Semaphore>,
     root_turn_lock: Mutex<()>,
+    /// Root turn's sinks, inherited by spawned subagent lanes in remote
+    /// (daemon) mode where the resolver returns default bindings. Set
+    /// in `run_root_turn`, read in `run_lane_until_terminal`, cleared
+    /// on exit. Kept as a single `Mutex<Option<RootTurnSinks>>` so the
+    /// pair is always set/cleared atomically.
+    current_root_sinks: Mutex<Option<RootTurnSinks>>,
 }
 
 impl SessionSupervisor {
@@ -90,6 +104,7 @@ impl SessionSupervisor {
             pending_interactions: Mutex::new(HashMap::new()),
             interaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             root_turn_lock: Mutex::new(()),
+            current_root_sinks: Mutex::new(None),
         }
     }
 
@@ -325,6 +340,19 @@ impl SessionSupervisor {
         self.set_session_status(SessionLifecycleStatus::Running, None)
             .await;
 
+        // Store the parent turn's sinks so spawned subagent lanes can
+        // inherit them in remote (daemon) mode. Store the MERGED loop
+        // sink so subagents inherit the same effective sink the root
+        // lane uses.
+        let stored_root_sinks = RootTurnSinks {
+            loop_event_sink: super::session_worker::merge_loop_event_sinks(
+                resolved_runtime.bindings.loop_event_sink.clone(),
+                loop_event_sink_override.clone(),
+            ),
+            tool_event_sink: resolved_runtime.bindings.tool_event_sink.clone(),
+        };
+        *self.current_root_sinks.lock().await = Some(stored_root_sinks);
+
         let root_agent_id = {
             let session = self.session.lock().await;
             session.runtime.agent_id.clone()
@@ -350,6 +378,11 @@ impl SessionSupervisor {
                 command_context: request.command_context,
             })
             .await;
+
+        // Clear stored sinks so a subsequent root turn does not inherit
+        // stale ones. Cleared in all branches since this is the single
+        // exit point for `run_root_turn`.
+        *self.current_root_sinks.lock().await = None;
 
         match result {
             Ok(terminal) => {
@@ -402,6 +435,13 @@ impl SessionSupervisor {
         let mut tool_manifest = self.load_lane_tool_manifest(&input.agent_id).await?;
         let mut next_resolved_runtime = input.resolved_runtime;
 
+        // Determine once whether this lane is the root lane; the root
+        // agent_id is stable for the session's lifetime.
+        let is_root_lane = {
+            let session = self.session.lock().await;
+            input.agent_id == session.runtime.agent_id
+        };
+
         loop {
             let mut resolved_runtime = match next_resolved_runtime.take() {
                 Some(resolved_runtime) => resolved_runtime,
@@ -412,7 +452,27 @@ impl SessionSupervisor {
                         .await?
                 }
             };
-            let loop_event_sink = resolved_runtime.bindings.loop_event_sink.clone();
+
+            // Inject the parent turn's sinks for non-root lanes in
+            // remote mode, where the resolver returns default (None)
+            // bindings.
+            if !is_root_lane {
+                if let Some(ref sinks) = *self.current_root_sinks.lock().await {
+                    if resolved_runtime.bindings.loop_event_sink.is_none() {
+                        resolved_runtime.bindings.loop_event_sink = sinks.loop_event_sink.clone();
+                    }
+                    if resolved_runtime.bindings.tool_event_sink.is_none() {
+                        resolved_runtime.bindings.tool_event_sink = sinks.tool_event_sink.clone();
+                    }
+                }
+            }
+
+            // Merge the override into the bindings-level sink so
+            // "Waiting for subagents..." messages reach SSE in remote mode.
+            let loop_event_sink = super::session_worker::merge_loop_event_sinks(
+                resolved_runtime.bindings.loop_event_sink.clone(),
+                input.loop_event_sink_override.clone(),
+            );
             let operation_backend = self.lease_backend_for_lane(&resolved_runtime).await?;
             crate::gateway::finalize_e2b_runtime(
                 &mut resolved_runtime,
@@ -1199,4 +1259,83 @@ fn current_time_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::{
+        InMemorySessionStore, SessionRuntimeBuildInput, SessionRuntimeResolveError,
+    };
+    use std::collections::BTreeMap;
+
+    /// Pins that `SessionSupervisor::new` initializes both sink fields
+    /// to `None`, so `run_lane_until_terminal`'s `is_none()` guard
+    /// correctly skips injection when no root turn is in progress.
+    #[tokio::test]
+    async fn new_initializes_sink_inheritance_fields_to_none() {
+        let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+        let resolver: Arc<dyn SessionRuntimeResolver> = Arc::new(NoopRuntimeResolver);
+        let backend_manager = Arc::new(BackendManager::new());
+        let session = SessionRecord {
+            session_id: "test-session".to_string(),
+            conversation_id: "test-session".to_string(),
+            sender_id: "test-user".to_string(),
+            entry: crate::gateway::GatewayEntryContext::tui(None),
+            channel: None,
+            channel_instance_id: None,
+            status: SessionLifecycleStatus::Idle,
+            runtime: crate::gateway::session_record::SessionRuntimeSnapshot {
+                agent_id: AgentId("root-agent".to_string()),
+                model: "stub-model".to_string(),
+                llm: None,
+                system_prompt: String::new(),
+                feature_flags: agent_types::context::FeatureFlags::default(),
+                token_budget: agent_types::context::TokenBudgetConfig {
+                    total_budget: 4096,
+                    reserved_for_output: 1024,
+                    reserved_for_system: 256,
+                    hard_limit_ratio: 0.9,
+                },
+                workspace_root: std::path::PathBuf::from("/tmp"),
+                max_turns: None,
+                tool_manifest: None,
+                subagent_roles: BTreeMap::new(),
+                bootstrap_binding: None,
+            },
+            backend_instance: None,
+            paused_backend_checkpoint: None,
+            loop_state: None,
+            memory_snapshot: None,
+            agents: BTreeMap::new(),
+            subagent_state: Default::default(),
+            last_error: None,
+            parent_runtime_id: None,
+            forked_from_checkpoint_id: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let supervisor = SessionSupervisor::new(store, resolver, backend_manager, session);
+
+        assert!(
+            supervisor.current_root_sinks.lock().await.is_none(),
+            "current_root_sinks should start as None"
+        );
+    }
+
+    /// Stub resolver for tests that do not exercise `resolve()`.
+    struct NoopRuntimeResolver;
+
+    #[async_trait::async_trait]
+    impl SessionRuntimeResolver for NoopRuntimeResolver {
+        async fn resolve(
+            &self,
+            _request: &SessionRuntimeBuildInput,
+            _existing: Option<&SessionRecord>,
+        ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+            Err(SessionRuntimeResolveError::ResolveFailed {
+                message: "NoopRuntimeResolver does not resolve".to_string(),
+            })
+        }
+    }
 }

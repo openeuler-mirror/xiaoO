@@ -2,7 +2,9 @@ use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRunti
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
-use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
+use crate::httpserver::sse_sink::{
+    sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent, SseToolEventSink,
+};
 use crate::httpserver::GatewayServiceError;
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -752,7 +754,11 @@ async fn stream_session_input(
             subagent_forwarder as Arc<dyn SubagentMetaForwarder>,
         ));
     let diff_tool_sink: Arc<dyn agent_contracts::ToolEventSink> =
-        Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)));
+        Arc::new(SseToolEventSink::with_inner(
+            tx.clone(),
+            Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)))
+                as Arc<dyn agent_contracts::ToolEventSink>,
+        ));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
         session_id: session_id.clone(),
         tx: tx.clone(),

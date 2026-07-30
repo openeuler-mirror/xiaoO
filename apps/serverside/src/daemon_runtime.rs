@@ -26,6 +26,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
+use subagent::SubagentControl;
 use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
     ToolRuntimeServices,
@@ -149,6 +150,10 @@ pub struct ConfiguredRuntimeResolver {
     mcp_servers: Vec<mcp::McpServerConfig>,
     mcp_tools: Arc<RwLock<Option<Vec<mcp::McpServerWithTools>>>>,
     mcp_init: tokio::sync::Mutex<()>,
+    /// Bound by `AppBootstrap` after construction; injected into
+    /// `ToolRuntimeServices` so daemon-side `spawn_subagent` /
+    /// `join_subagent` see the same control plane as the local TUI.
+    subagent_control: Arc<RwLock<Option<Arc<dyn SubagentControl>>>>,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -224,6 +229,7 @@ impl ConfiguredRuntimeResolver {
             mcp_servers: config.app.mcp.servers.clone(),
             mcp_tools: Arc::new(RwLock::new(None)),
             mcp_init: tokio::sync::Mutex::new(()),
+            subagent_control: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -419,7 +425,49 @@ impl ConfiguredRuntimeResolver {
         agent_role: Option<&AgentRoleConfig>,
         workspace_root: PathBuf,
         disable_plugin_tools: bool,
+        resolved_agent_id: &AgentId,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
+        let services =
+            self.build_tool_runtime_services(profile, workspace_root, disable_plugin_tools);
+        let tool_sources = load_tool_sources_with_services(services);
+        let all_tool_names: Vec<ToolName> = tool_sources
+            .iter()
+            .flat_map(|source| source.discover())
+            .map(|tool| tool.spec.name().clone())
+            .collect();
+        let allowed_tool_names =
+            resolve_profile_allowed_tool_names(&all_tool_names, profile, agent_role);
+        // Insert the resolved agent_id (root or subagent override) so
+        // `filter_for(resolved_agent_id)` in `AppRuntimeFactory::build`
+        // finds the entry.
+        let mut per_agent_allowed_tools = HashMap::new();
+        per_agent_allowed_tools.insert(resolved_agent_id.clone(), allowed_tool_names);
+
+        let registry = ToolRegistryBuilderImpl::new()
+            .with_sources(tool_sources)
+            .with_config(ToolRegistryConfig {
+                visibility: ToolVisibilityConfig {
+                    per_agent_allowed_tools,
+                },
+            })
+            .build()
+            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                message: format!("failed to build tool registry: {error}"),
+            })?;
+
+        Ok(Some(Arc::from(registry)))
+    }
+
+    /// Construct the `ToolRuntimeServices` that `build_tool_registry`
+    /// injects into tool sources. Extracted so tests can verify the
+    /// bound `SubagentControl` actually propagates into the services
+    /// struct, not just the resolver's internal field.
+    fn build_tool_runtime_services(
+        &self,
+        profile: RuntimeCapabilityProfile,
+        workspace_root: PathBuf,
+        disable_plugin_tools: bool,
+    ) -> ToolRuntimeServices {
         let subagent_roles: BTreeMap<String, SubagentRoleConfig> =
             if profile == RuntimeCapabilityProfile::McpChatbot {
                 BTreeMap::new()
@@ -439,7 +487,13 @@ impl ConfiguredRuntimeResolver {
                     })
                     .collect()
             };
-        let services = ToolRuntimeServices {
+        // Inject the bound control (see field docstring).
+        let subagent_control = self
+            .subagent_control
+            .read()
+            .expect("subagent_control lock should not be poisoned")
+            .clone();
+        ToolRuntimeServices {
             disable_plugin_tools: disable_plugin_tools
                 || profile == RuntimeCapabilityProfile::McpChatbot,
             lsp_registry: (profile != RuntimeCapabilityProfile::McpChatbot)
@@ -447,6 +501,7 @@ impl ConfiguredRuntimeResolver {
                 .flatten(),
             workspace_root: Some(workspace_root),
             subagent_roles,
+            subagent_control,
             mcp_servers: if profile == RuntimeCapabilityProfile::McpChatbot {
                 None
             } else {
@@ -456,31 +511,7 @@ impl ConfiguredRuntimeResolver {
                     .clone()
             },
             ..ToolRuntimeServices::default()
-        };
-        let tool_sources = load_tool_sources_with_services(services);
-        let all_tool_names: Vec<ToolName> = tool_sources
-            .iter()
-            .flat_map(|source| source.discover())
-            .map(|tool| tool.spec.name().clone())
-            .collect();
-        let allowed_tool_names =
-            resolve_profile_allowed_tool_names(&all_tool_names, profile, agent_role);
-        let mut per_agent_allowed_tools = HashMap::new();
-        per_agent_allowed_tools.insert(AgentId(self.agent.id.clone()), allowed_tool_names);
-
-        let registry = ToolRegistryBuilderImpl::new()
-            .with_sources(tool_sources)
-            .with_config(ToolRegistryConfig {
-                visibility: ToolVisibilityConfig {
-                    per_agent_allowed_tools,
-                },
-            })
-            .build()
-            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-                message: format!("failed to build tool registry: {error}"),
-            })?;
-
-        Ok(Some(Arc::from(registry)))
+        }
     }
 }
 
@@ -687,6 +718,15 @@ fn optional_non_empty(value: Option<&String>) -> Option<String> {
 
 #[async_trait]
 impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
+    fn bind_subagent_control(&self, control: Arc<dyn SubagentControl>) {
+        // Store the bound control so `build_tool_registry` can inject
+        // it into every `ToolRuntimeServices` it constructs.
+        self.subagent_control
+            .write()
+            .expect("subagent_control lock should not be poisoned")
+            .replace(control);
+    }
+
     async fn resolve(
         &self,
         request: &SessionRuntimeBuildInput,
@@ -814,9 +854,22 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             }
         }
 
+        // Honor `agent_id_override` so a subagent lane's tool-lifecycle
+        // events are scoped with the subagent's id, not the root's.
+        let resolved_agent_id = request
+            .agent_id_override
+            .clone()
+            .unwrap_or_else(|| AgentId(self.agent.id.clone()));
+        let tool_registry = self.build_tool_registry(
+            profile,
+            agent_role,
+            effective_workspace_root.clone(),
+            is_e2b,
+            &resolved_agent_id,
+        )?;
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
-                agent_id: AgentId(self.agent.id.clone()),
+                agent_id: resolved_agent_id,
                 model: llm_runtime.model.clone(),
                 llm: Some(llm_runtime.llm_config.clone()),
                 system_prompt: if profile == RuntimeCapabilityProfile::McpChatbot {
@@ -840,12 +893,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             },
             entry_kind: request.entry.kind.clone(),
             llm_provider: llm_runtime.llm_provider,
-            tool_registry: self.build_tool_registry(
-                profile,
-                agent_role,
-                effective_workspace_root.clone(),
-                is_e2b,
-            )?,
+            tool_registry,
             skill_registry: if is_e2b || profile == RuntimeCapabilityProfile::McpChatbot {
                 Some(Arc::new(FileSkillRegistry::from_skills(Vec::new())))
             } else {
@@ -1149,18 +1197,24 @@ mod tests {
     use super::{
         build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
         resolve_allowed_tool_names, resolve_effective_provider_config, resolve_local_workspace,
-        resolve_profile_allowed_tool_names, validate_existing_e2b_binding, EffectiveLlmConfig,
-        RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
+        resolve_profile_allowed_tool_names, validate_existing_e2b_binding,
+        ConfiguredRuntimeResolver, EffectiveLlmConfig, RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
-    use crate::daemon_config::AgentRoleConfig;
-    use agent_types::common::ids::ToolName;
+    use crate::daemon_config::{AgentRoleConfig, DaemonConfig};
+    use agent_types::common::ids::{AgentId, ToolName};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
-    use tempfile::tempdir;
+    use std::sync::Arc;
+    use subagent::{
+        JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
+        SubagentControl, SubagentControlError,
+    };
+    use tempfile::{tempdir, TempDir};
     use xiaoo_shared::backend::GatewayBackendConfig;
     use xiaoo_shared::gateway::{
         GatewayEntryContext, SessionRuntimeBuildInput, SessionRuntimeResolveError,
+        SessionRuntimeResolver,
     };
 
     #[test]
@@ -1445,5 +1499,165 @@ mod tests {
         assert!(backend.options.get("workspaceRoot").is_none());
         assert!(backend.options.get("homeDir").is_none());
         assert_eq!(backend.options["api_key_env"], "E2B_API_KEY");
+    }
+
+    /// Pins that `bind_subagent_control` propagates to the
+    /// `ToolRuntimeServices` constructed by `build_tool_runtime_services`
+    /// (the method `build_tool_registry` calls internally). Verifying
+    /// the services struct — not just the resolver's internal field —
+    /// ensures the bound control actually reaches tool sources.
+    #[tokio::test]
+    async fn bind_subagent_control_propagates_to_tool_runtime_services() {
+        struct StubControl;
+        #[async_trait::async_trait]
+        impl SubagentControl for StubControl {
+            async fn spawn(
+                &self,
+                _request: SpawnSubagentRequest,
+            ) -> Result<SpawnSubagentResult, SubagentControlError> {
+                Err(SubagentControlError::Unavailable {
+                    message: "stub".to_string(),
+                })
+            }
+            async fn join(
+                &self,
+                _request: JoinSubagentRequest,
+            ) -> Result<JoinSubagentResult, SubagentControlError> {
+                Err(SubagentControlError::Unavailable {
+                    message: "stub".to_string(),
+                })
+            }
+        }
+
+        let (config, _workspace_temp) = minimal_test_config().await;
+        let resolver = ConfiguredRuntimeResolver::from_config(&config)
+            .await
+            .expect("construct resolver from minimal config");
+
+        // Initially no control is bound, matching the
+        // `HostedSessionRuntimeResolver::new` initial state.
+        assert!(
+            resolver
+                .subagent_control
+                .read()
+                .expect("subagent_control lock should not be poisoned")
+                .is_none(),
+            "resolver should start with subagent_control = None"
+        );
+
+        // Before binding, `build_tool_runtime_services` must NOT
+        // inject any control.
+        let services_before = resolver.build_tool_runtime_services(
+            RuntimeCapabilityProfile::Default,
+            PathBuf::from("/tmp"),
+            false,
+        );
+        assert!(
+            services_before.subagent_control.is_none(),
+            "build_tool_runtime_services must not inject a control before bind_subagent_control"
+        );
+
+        // Bind a stub control, mirroring the daemon startup path.
+        let stub: Arc<dyn SubagentControl> = Arc::new(StubControl);
+        resolver.bind_subagent_control(stub.clone());
+
+        // After binding, `build_tool_runtime_services` MUST inject the
+        // same control instance into `ToolRuntimeServices`.
+        let services_after = resolver.build_tool_runtime_services(
+            RuntimeCapabilityProfile::Default,
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let bound = services_after
+            .subagent_control
+            .expect("build_tool_runtime_services must inject the bound control");
+        assert!(
+            Arc::ptr_eq(&bound, &stub),
+            "build_tool_runtime_services must inject the same SubagentControl instance that was bound"
+        );
+    }
+
+    /// Pins that when `agent_id_override` is set, the resolved
+    /// `descriptor.agent_id` equals the override (so
+    /// `SharedToolEventSink` scopes subagent tool-lifecycle events
+    /// with the subagent's id, not the root's), and the tool registry
+    /// exposes visible tools for the subagent's agent_id.
+    #[tokio::test]
+    async fn resolve_honors_agent_id_override_for_subagent_lanes() {
+        let (config, _workspace_temp) = minimal_test_config().await;
+        let resolver = ConfiguredRuntimeResolver::from_config(&config)
+            .await
+            .expect("construct resolver from minimal config");
+
+        let subagent_agent_id = AgentId(uuid::Uuid::new_v4().to_string());
+
+        let request = SessionRuntimeBuildInput {
+            session_id: "test-session".to_string(),
+            conversation_id: "test-session".to_string(),
+            sender_id: "test-user".to_string(),
+            channel: None,
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext::tui(None),
+            agent_id_override: Some(subagent_agent_id.clone()),
+            max_turns_override: None,
+            subagent_role_id: None,
+            llm: None,
+            workspace: None,
+            skills: None,
+        };
+
+        let resolved = resolver
+            .resolve(&request, None)
+            .await
+            .expect("resolve should succeed for subagent lane");
+
+        // `descriptor.agent_id` MUST equal the override so
+        // `SharedToolEventSink` scopes lifecycle events correctly.
+        assert_eq!(
+            resolved.descriptor.agent_id, subagent_agent_id,
+            "descriptor.agent_id must honor agent_id_override for subagent lanes"
+        );
+
+        // The tool registry MUST expose visible tools for the
+        // subagent's agent_id.
+        let registry = resolved
+            .tool_registry
+            .as_ref()
+            .expect("tool_registry must be Some for a subagent lane");
+        let filter = registry.filter_for(&subagent_agent_id);
+        let visible = filter.visible_tools();
+        assert!(
+            !visible.is_empty(),
+            "subagent lane must have visible tools after the build_tool_registry fix"
+        );
+    }
+
+    /// Minimal `DaemonConfig` for resolver tests. Uses the `ollama`
+    /// provider with `api_base` pointed at an unreachable loopback port
+    /// so the context-window probe fails instantly (no network wait)
+    /// and the static fallback kicks in. The agent's `workspace` is
+    /// set to a tempdir so the test does not pollute `$HOME/.xiaoo`.
+    async fn minimal_test_config() -> (DaemonConfig, TempDir) {
+        let temp = tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        let config_path = temp.path().join("config.toml");
+        let workspace_str = workspace.to_string_lossy().replace('\\', "\\\\");
+        std::fs::write(
+            &config_path,
+            &format!(
+                "[llm]\n\
+                 provider = \"ollama\"\n\
+                 model = \"llama3\"\n\
+                 api_base = \"http://127.0.0.1:1\"\n\
+                 [[agents.list]]\n\
+                 id = \"main\"\n\
+                 default = true\n\
+                 workspace = \"{workspace_str}\"\n"
+            ),
+        )
+        .expect("write minimal config");
+        let config = DaemonConfig::load_from(&config_path).expect("load minimal config");
+        (config, temp)
     }
 }

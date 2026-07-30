@@ -253,7 +253,7 @@ impl LoopEventSink for FanoutLoopEventSink {
     }
 }
 
-fn merge_loop_event_sinks(
+pub(crate) fn merge_loop_event_sinks(
     primary: Option<Arc<dyn LoopEventSink>>,
     secondary: Option<Arc<dyn LoopEventSink>>,
 ) -> Option<Arc<dyn LoopEventSink>> {
