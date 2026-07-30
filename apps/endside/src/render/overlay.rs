@@ -314,7 +314,7 @@ impl App {
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if readonly_subagent_view {
-            " Subagent view is read-only | Shift+↑ Back "
+            " Subagent view is read-only | ← Back "
         } else if self.state.chat_state.is_loading {
             " Enter 加入队列 | Esc 取消当前任务 "
         } else if has_tool_cards {
