@@ -131,6 +131,9 @@ enum Command {
         /// Port of the running daemon
         #[arg(long, default_value = "4096")]
         port: u16,
+        /// Optional client id for lease verification (when the daemon enforces session leases)
+        #[arg(long)]
+        client_id: Option<String>,
     },
     /// Inspect resolved configuration and internal state
     Debug {
@@ -296,8 +299,8 @@ let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
         Some(Command::Serve { port, hostname }) => {
             handle_serve_command(port, hostname).await;
         }
-        Some(Command::Export { session_id, port }) => {
-            handle_export_command(session_id, port).await;
+        Some(Command::Export { session_id, port, client_id }) => {
+            handle_export_command(session_id, port, client_id).await;
         }
         Some(Command::Debug { command }) => {
             handle_debug_command(command, config_path.as_ref(), debug);
@@ -899,7 +902,10 @@ if let Some(attach_url) = &attach {
     }
 
     // 1. LLM provider (shared with compression pipeline)
-    let llm_provider = match build_llm_provider(&config, Some("defaultagent".into())) {
+    let llm_provider = match build_llm_provider(
+        &config,
+        Some(agent.clone().unwrap_or_else(|| "defaultagent".into())),
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Failed to create LLM provider: {}", e);
@@ -1261,24 +1267,43 @@ fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, d
     }
 
 }
-async fn handle_export_command(session_id: String, port: u16) {
+async fn handle_export_command(session_id: String, port: u16, client_id: Option<String>) {
     let url = format!("http://127.0.0.1:{}/api/v1/runtimes/export/{}", port, session_id);
 
     let client = reqwest::Client::new();
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(text) if !text.is_empty() => println!("{}", text),
-            _ => {
-                eprintln!("Error: Empty response exporting session '{}'", session_id);
+    let mut req = client.get(&url);
+    if let Some(cid) = &client_id {
+        req = req.query(&[("client_id", cid)]);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await;
+            if status.is_success() {
+                match text {
+                    Ok(body) if !body.is_empty() => println!("{}", body),
+                    Ok(_) => {
+                        eprintln!("Error: Empty response exporting session '{}'", session_id);
+                        eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Failed to read export response body: {}", e);
+                        eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("Error: Failed to export session '{}'", session_id);
+                eprintln!("Details: HTTP {}", status.as_u16());
+                if let Ok(body) = &text {
+                    if !body.is_empty() {
+                        eprintln!("Response: {}", body);
+                    }
+                }
                 eprintln!("Make sure xiaoo-daemon is running on port {}", port);
                 std::process::exit(1);
             }
-        },
-        Ok(resp) => {
-            eprintln!("Error: Failed to export session '{}'", session_id);
-            eprintln!("Details: HTTP {}", resp.status().as_u16());
-            eprintln!("Make sure xiaoo-daemon is running on port {}", port);
-            std::process::exit(1);
         }
         Err(e) => {
             eprintln!("Error: Failed to call export API: {}", e);
