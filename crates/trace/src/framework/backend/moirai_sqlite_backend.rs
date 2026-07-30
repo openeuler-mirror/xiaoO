@@ -306,6 +306,23 @@ impl TraceBackend for MoiraiSqliteBackend {
     }
 }
 
+impl Drop for MoiraiSqliteBackend {
+    fn drop(&mut self) {
+        // Best-effort: mark the underlying moirai AgentContext as ended so
+        // its `Drop` impl does not warn about a missing `end()` call.
+        //
+        // This covers the case where the owning future (e.g. a session
+        // worker mid-turn) is cancelled while the daemon/runtime is
+        // shutting down, so the async `finalize_trace`/`force_finalize_trace`
+        // path never runs. The end span is not written to storage, but an
+        // abandoned trace has no meaningful end data anyway and its spans
+        // are already flushed incrementally (immediate_flush=true). When
+        // finalization did run, `ended` is already `true` and this is a
+        // no-op.
+        self.context.mark_ended();
+    }
+}
+
 fn span_kind_to_moirai_type(kind: TraceSpanKind) -> &'static str {
     match kind {
         TraceSpanKind::Turn => "TURN",

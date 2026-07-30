@@ -12,7 +12,7 @@ use agent_types::events::ToolLifecycleEvent;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::ToolStateStoreConfig;
 use async_trait::async_trait;
-use compact::{CompactionPolicy, PassthroughCompressionPipeline};
+use compact::{build_context_manager, CompactError, CompactionPolicy};
 use hook::framework::HookerRegistryBuilderImpl;
 use hook::HookerRegistryBuilder;
 use prompt::PromptBuilderImpl;
@@ -65,6 +65,8 @@ pub enum AppRuntimeFactoryError {
     CoreBuild(#[from] BuildError),
     #[error("trace config serialization failed: {0}")]
     TraceConfigSerialization(#[from] serde_json::Error),
+    #[error("compression pipeline build failed: {0}")]
+    CompactBuild(#[from] CompactError),
 }
 
 impl AppRuntimeFactory {
@@ -76,10 +78,19 @@ impl AppRuntimeFactory {
         operation_backend: Arc<dyn OperationBackend>,
     ) -> Result<AppRuntimeAssembly, AppRuntimeFactoryError> {
         let prompt_builder: Arc<dyn PromptBuilder> = Arc::new(PromptBuilderImpl::new());
-        let compression_pipeline: Arc<dyn CompressionPipeline> = resolved
-            .compression_pipeline
-            .clone()
-            .unwrap_or_else(|| Arc::new(PassthroughCompressionPipeline::new()));
+        // Defense-in-depth: every code path that resolves a session runtime
+        // should have already injected a real `ContextManager` (daemon:
+        // `build_compression_pipeline`, local CLI: ditto). If a caller forgets
+        // to set `compression_pipeline`, fall back to a real `ContextManager`
+        // built from the shared defaults instead of a silent no-op
+        // `PassthroughCompressionPipeline` — the no-op trap was what caused
+        // the daemon to emit `Pre-check failed` / `context compression
+        // triggered` with `removed=0` forever when `[compact]` was missing.
+        let compression_pipeline: Arc<dyn CompressionPipeline> =
+            match resolved.compression_pipeline.clone() {
+                Some(pipeline) => pipeline,
+                None => build_context_manager(None, Arc::clone(&resolved.llm_provider))?,
+            };
         let tool_registry: Arc<dyn ToolRegistry> = resolved
             .tool_registry
             .clone()

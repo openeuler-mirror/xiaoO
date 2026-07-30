@@ -9,10 +9,7 @@ use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use compact::{
-    ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
-    RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
-};
+use compact::{build_context_manager, CompactOverrides};
 use llm_client::{
     create_llm_provider_from_resolved, resolve_config, resolve_model_context_length,
     resolve_provider_profile, LlmProviderWrapper, ResolveInput,
@@ -1138,58 +1135,25 @@ fn build_compression_pipeline(
     compact: Option<&CompactConfig>,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> Result<Arc<dyn CompressionPipeline>> {
-    let compact = match compact {
-        Some(cc) => cc,
-        None => {
-            return Ok(Arc::from(compact::PassthroughCompressionPipeline::new())
-                as Arc<dyn CompressionPipeline>);
-        }
-    };
-
-    let estimator = Arc::new(
-        RoughTokenEstimator::try_new(RoughTokenEstimatorConfig {
-            chars_per_token: 4,
-            message_overhead_tokens: 4,
-            tool_use_overhead_tokens: 8,
-            tool_result_overhead_tokens: 8,
-            image_block_overhead_tokens: 256,
-            document_block_overhead_tokens: 256,
-        })
-        .map_err(|e| anyhow::anyhow!("token estimator: {e}"))?,
-    );
-    let cc = compact;
-    let context_manager_config = ContextManagerConfig {
-        thresholds: ContextThresholds {
-            warning_ratio: cc.warning_ratio.unwrap_or(0.6),
-            auto_compact_ratio: cc.auto_compact_ratio.unwrap_or(0.75),
-            blocking_ratio: cc.blocking_ratio.unwrap_or(0.9),
-        },
-        micro_policy: MicroCompactionPolicy {
-            stale_tool_pair_after_ms: 120_000,
-            preserve_recent_messages: 6,
-        },
-        summary_budget: SummaryCompressionBudget {
-            max_summary_tokens: cc.summary_max_tokens.unwrap_or(1024),
-            preserve_tail_messages: cc.summary_preserve_tail.unwrap_or(4),
-        },
-        snip_preserve_tail_messages: cc.snip_preserve_tail.unwrap_or(6),
-        collapse_preserve_tail_messages: cc.collapse_preserve_tail.unwrap_or(4),
-        session_memory_compaction: None,
-        snip_stale_after_ms: cc.snip_stale_after_ms.unwrap_or(3_600_000),
-    };
-    let compression_pipeline: Arc<dyn CompressionPipeline> = Arc::new(
-        ContextManager::new(
-            estimator,
-            context_manager_config,
-            Arc::clone(llm_provider),
-            agent_types::CompletionConfig {
-                max_tokens: cc.summary_llm_max_tokens.unwrap_or(4096),
-                temperature: 0.2,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("context manager: {e}"))?,
-    );
-    Ok(compression_pipeline)
+    // A missing `[compact]` section MUST NOT silently disable compression.
+    // Previously this fell back to `PassthroughCompressionPipeline` (a no-op),
+    // which left the agent loop emitting `Pre-check failed` / `context
+    // compression triggered` with `removed=0` forever. Now `None` simply
+    // means "use the shared defaults", producing a real `ContextManager`
+    // — exactly what the local CLI path does.
+    let overrides = compact.map(|c| CompactOverrides {
+        warning_ratio: c.warning_ratio,
+        auto_compact_ratio: c.auto_compact_ratio,
+        blocking_ratio: c.blocking_ratio,
+        snip_stale_after_ms: c.snip_stale_after_ms,
+        snip_preserve_tail: c.snip_preserve_tail,
+        collapse_preserve_tail: c.collapse_preserve_tail,
+        summary_max_tokens: c.summary_max_tokens,
+        summary_preserve_tail: c.summary_preserve_tail,
+        summary_llm_max_tokens: c.summary_llm_max_tokens,
+    });
+    build_context_manager(overrides.as_ref(), Arc::clone(llm_provider))
+        .map_err(|e| anyhow::anyhow!("context manager: {e}"))
 }
 
 #[cfg(test)]

@@ -214,10 +214,12 @@ For detailed skills usage instructions, please refer to [skill_usage.md](./skill
 
 **Applicable to**: CLI ✅ | TUI ❌ | Daemon ✅
 
-> **Note**: TUI does not read `[compact]` and always runs without a compression
-> pipeline (`compression_pipeline: None` in `apps/endside/src/gateway_api/runtime_request.rs`).
-> Long TUI conversations are not auto-compacted; rely on CLI or Daemon mode when
-> you need adaptive compression.
+> **Note**: TUI does not read `[compact]`; in remote (daemon) mode the daemon
+> builds the compression pipeline from its own `[compact]` section. The
+> `[compact]` section is **optional** in both CLI and Daemon configs: when it
+> is missing, a real `ContextManager` is constructed using built-in default
+> thresholds (0.6 / 0.75 / 0.9). Compression is never silently disabled —
+> omit the section to accept the defaults.
 
 Controls context management strategy for long conversations:
 
