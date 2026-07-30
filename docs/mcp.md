@@ -27,6 +27,10 @@ retry_backoff_ms = 250
 allowed_agent_roles = ["main"]
 ```
 
+`Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
+does not override `allowed_agent_roles`. A turn whose active role is not
+allowlisted deliberately skips both recall and ingest.
+
 ## Configuration
 
 Add an `[mcp]` section with a `[[mcp.servers]]` array entry per server. Place it in `~/.config/xiaoo/config.toml` (CLI/TUI) or the daemon config file.
@@ -108,6 +112,10 @@ max_retries = 5
 retry_backoff_ms = 250
 allowed_agent_roles = ["main"]
 ```
+
+`Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
+does not override `allowed_agent_roles`. A turn whose active role is not
+allowlisted deliberately skips both recall and ingest.
 
 RAM-A expects MCP protocol version `2025-11-25` and bearer auth on every MCP
 request. If `agent_id` is configured, xiaoO sends `X-Agent-ID`; it must match

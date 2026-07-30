@@ -94,6 +94,10 @@ original message. After a successful turn, xiaoO writes ingest work to a
 durable JSONL queue and retries with backoff. RAM-A/MCP failures degrade memory
 behavior but must not fail a normal completed reply.
 
+The TUI `Mem OK` indicator means the RAM-A connection and recent operations
+are healthy. It does not mean every role is enabled: a turn whose active role
+is absent from `allowed_agent_roles` deliberately skips recall and ingest.
+
 ---
 
 ## [llm] - LLM Provider Configuration
