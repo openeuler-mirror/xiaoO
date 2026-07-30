@@ -114,6 +114,11 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
+> **注**：上图是改造前的 audit_agent 旧架构（xiaoO 插件形态，stdin/stdout 触发），
+> 仅供回顾迁移起点。改造后的 agentmoss 实际结构见 [3.2 节](#32-agent_moss-内部架构)：
+> HTTP 服务形态，模块 `audit_agent.py`/`heuristic_detector.py`/`main.py` 已分别
+> 改为 `engine/coordinator.py`/`engine/heuristic.py`/`engine/analyzer.py`。
+
 ### 2.2 三层安全分析引擎（核心资产，需保留）
 
 ```
@@ -300,21 +305,22 @@ a_next (待执行动作)
 │  │         安全分析引擎 (Security Engine) [核心复用]         │  │
 │  │                                                        │  │
 │  │  ┌──────────────────────────────────────────────────┐  │  │
-│  │  │  main.py :: analyze()  重命名自 audit_action()     │  │  │
+│  │  │  analyzer.py :: analyze()  对外分析入口              │  │  │
 │  │  │                                                    │  │  │
-│  │  │  Step 1: 安全判断 (judge_security → 三层防御)       │  │  │
+│  │  │  Step 1: 安全判断 (coordinator 三层防御协调)        │  │  │
 │  │  │  Step 2: [可选] Policy 生成 + 缓存                  │  │  │
 │  │  └────────────────────┬─────────────────────────────┘  │  │
 │  │                       │                                 │  │
 │  │  ┌────────────────────▼─────────────────────────────┐  │  │
-│  │  │  security/ (三层防御引擎) [完整保留]               │  │  │
-│  │  │  ├── agent_moss.py  重命名自 audit_agent.py       │  │  │
-│  │  │  ├── heuristic_detector.py                        │  │  │
-│  │  │  ├── logic_rules.py                               │  │  │
-│  │  │  ├── llm_analyzer.py                              │  │  │
-│  │  │  ├── skill_engine.py                              │  │  │
-│  │  │  ├── script_content_analyzer.py                    │  │  │
-│  │  │  └── types.py                                     │  │  │
+│  │  │  engine/ (三层防御引擎)                            │  │  │
+│  │  │  ├── coordinator.py     协调器（三层串联）         │  │  │
+│  │  │  ├── heuristic.py       层1 特征匹配静态检测        │  │  │
+│  │  │  ├── logic_rules.py      层2 逻辑规则检测           │  │  │
+│  │  │  ├── llm_analyzer.py     层3 LLM+Skill 深度分析    │  │  │
+│  │  │  ├── skill_engine.py     Skill 匹配                │  │  │
+│  │  │  ├── script_content_analyzer.py  脚本内容预扫描    │  │  │
+│  │  │  ├── inline_analyzer.py  内联脚本语义判定          │  │  │
+│  │  │  └── types.py          类型定义                   │  │  │
 │  │  └──────────────────────────────────────────────────┘  │  │
 │  └──────────────────────┬─────────────────────────────────┘  │
 │                         │                                     │
