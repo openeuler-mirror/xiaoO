@@ -128,6 +128,9 @@ enum Command {
     Export {
         /// ID of the session to export
         session_id: String,
+        /// Port of the running daemon
+        #[arg(long, default_value = "4096")]
+        port: u16,
     },
     /// Inspect resolved configuration and internal state
     Debug {
@@ -293,8 +296,8 @@ let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
         Some(Command::Serve { port, hostname }) => {
             handle_serve_command(port, hostname).await;
         }
-        Some(Command::Export { session_id }) => {
-            handle_export_command(session_id);
+        Some(Command::Export { session_id, port }) => {
+            handle_export_command(session_id, port);
         }
         Some(Command::Debug { command }) => {
             handle_debug_command(command, config_path.as_ref(), debug);
@@ -1198,11 +1201,24 @@ async fn run_with_attach(
     
     match response {
         Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+
+            if !status.is_success() {
+                if format == OutputFormat::Json {
+                    println!("{}", serde_json::to_string(&serde_json::json!({
+                        "type": "error",
+                        "data": { "message": format!("HTTP {}: {}", status.as_u16(), text) }
+                    })).unwrap());
+                } else {
+                    eprintln!("Daemon returned HTTP {}: {}", status.as_u16(), text);
+                }
+                std::process::exit(1);
+            }
+
             if format == OutputFormat::Json {
-                let text = resp.text().await.unwrap_or_default();
                 println!("{}", text);
             } else {
-                let text = resp.text().await.unwrap_or_default();
                 if !text.is_empty() {
                     println!("{}", text);
                 }
@@ -1242,8 +1258,8 @@ fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, d
     }
 
 }
-fn handle_export_command(session_id: String) {
-    let url = format!("http://127.0.0.1:4096/api/v1/runtimes/export/{}", session_id);
+fn handle_export_command(session_id: String, port: u16) {
+    let url = format!("http://127.0.0.1:{}/api/v1/runtimes/export/{}", port, session_id);
     
     let output = std::process::Command::new("curl")
         .arg("-s")
@@ -1259,12 +1275,12 @@ fn handle_export_command(session_id: String) {
             if !result.stderr.is_empty() {
                 eprintln!("Details: {}", String::from_utf8_lossy(&result.stderr));
             }
-            eprintln!("Make sure xiaoo-daemon is running on port 4096");
+            eprintln!("Make sure xiaoo-daemon is running on port {}", port);
             std::process::exit(1);
         }
         Err(e) => {
             eprintln!("Error: Failed to call export API: {}", e);
-            eprintln!("Make sure xiaoo-daemon is running on port 4096");
+            eprintln!("Make sure xiaoo-daemon is running on port {}", port);
             std::process::exit(1);
         }
     }
