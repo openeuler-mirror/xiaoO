@@ -1286,6 +1286,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
+    let filtered_text_len = Mutex::new(0usize);
+    let filtered_reasoning_len = Mutex::new(0usize);
 
     // Extract secrets from message history to filter in assistant messages
     let messages = ctx.state.messages.read().clone();
@@ -1314,6 +1316,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                     &agent_id,
                     &streamed_text,
                     &streamed_reasoning,
+                    &filtered_text_len,
+                    &filtered_reasoning_len,
                     chunk,
                     &secrets,
                 );
@@ -1533,37 +1537,98 @@ fn stream_assistant_chunk(
     agent_id: &AgentId,
     streamed_text: &Mutex<String>,
     streamed_reasoning: &Mutex<String>,
+    filtered_text_len: &Mutex<usize>,
+    filtered_reasoning_len: &Mutex<usize>,
     chunk: StreamChunk,
     secrets: &[String],
 ) {
+    #[cfg(debug_assertions)]
+    let _start = std::time::Instant::now();
+    #[cfg(debug_assertions)]
+    let mut reasoning_len = 0usize;
+    #[cfg(debug_assertions)]
+    let mut text_len = 0usize;
+
     if let Some(delta_reasoning) = chunk.delta_reasoning {
-        let snapshot = {
-            let mut full_reasoning = streamed_reasoning
-                .lock()
-                .expect("assistant stream reasoning mutex should not be poisoned");
-            full_reasoning.push_str(&delta_reasoning);
-            full_reasoning.clone()
-        };
+        #[cfg(debug_assertions)]
+        { reasoning_len = delta_reasoning.len(); }
+        let mut full_reasoning = streamed_reasoning
+            .lock()
+            .expect("assistant stream reasoning mutex should not be poisoned");
+        full_reasoning.push_str(&delta_reasoning);
+
         if let Some(sink) = sink {
-            let filtered_reasoning = filter_secrets_in_text(&snapshot, secrets);
-            sink.on_assistant_reasoning(agent_id, &filtered_reasoning);
+            if sink.supports_message_delta() {
+                if secrets.is_empty() {
+                    sink.on_assistant_reasoning_delta(agent_id, &delta_reasoning);
+                } else {
+                    let filtered_full = filter_secrets_in_text(&full_reasoning, secrets);
+                    let mut prev_len = filtered_reasoning_len
+                        .lock()
+                        .expect("filtered reasoning len mutex should not be poisoned");
+                    if *prev_len < filtered_full.len() {
+                        let delta = &filtered_full[*prev_len..];
+                        if !delta.is_empty() {
+                            sink.on_assistant_reasoning_delta(agent_id, delta);
+                        }
+                    } else if *prev_len > filtered_full.len() {
+                        sink.on_assistant_reasoning(agent_id, &filtered_full);
+                    }
+                    *prev_len = filtered_full.len();
+                }
+            } else {
+                let snapshot = full_reasoning.clone();
+                let filtered = filter_secrets_in_text(&snapshot, secrets);
+                sink.on_assistant_reasoning(agent_id, &filtered);
+            }
         }
     }
 
     if let Some(delta_text) = chunk.delta_text {
-        let snapshot = {
-            let mut full_text = streamed_text
-                .lock()
-                .expect("assistant stream text mutex should not be poisoned");
-            full_text.push_str(&delta_text);
-            full_text.clone()
-        };
+        #[cfg(debug_assertions)]
+        { text_len = delta_text.len(); }
+        let mut full_text = streamed_text
+            .lock()
+            .expect("assistant stream text mutex should not be poisoned");
+        full_text.push_str(&delta_text);
 
         if let Some(sink) = sink {
-            let filtered_text = filter_secrets_in_text(&snapshot, secrets);
-            sink.on_assistant_message(agent_id, &filtered_text);
+            if sink.supports_message_delta() {
+                if secrets.is_empty() {
+                    sink.on_assistant_message_delta(agent_id, &delta_text);
+                } else {
+                    let filtered_full = filter_secrets_in_text(&full_text, secrets);
+                    let mut prev_len = filtered_text_len
+                        .lock()
+                        .expect("filtered text len mutex should not be poisoned");
+                    if *prev_len < filtered_full.len() {
+                        let delta = &filtered_full[*prev_len..];
+                        if !delta.is_empty() {
+                            sink.on_assistant_message_delta(agent_id, delta);
+                        }
+                    } else if *prev_len > filtered_full.len() {
+                        sink.on_assistant_message(agent_id, &filtered_full);
+                    }
+                    *prev_len = filtered_full.len();
+                }
+            } else {
+                let snapshot = full_text.clone();
+                let filtered = filter_secrets_in_text(&snapshot, secrets);
+                sink.on_assistant_message(agent_id, &filtered);
+            }
         }
     }
+
+    #[cfg(debug_assertions)]
+    tracing::debug!(
+        target: "perf",
+        delta_text_len = text_len,
+        delta_reasoning_len = reasoning_len,
+        supports_delta = sink.is_some_and(|s| s.supports_message_delta()),
+        accumulated_text_len = streamed_text.lock().map(|t| t.len()).unwrap_or(0),
+        elapsed_us = _start.elapsed().as_micros(),
+        "stream_assistant_chunk"
+    );
 }
 
 async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, AgentError> {
@@ -3843,6 +3908,149 @@ mod tests {
             vec!["call_a".to_string(), "call_b".to_string()],
             "every executed tool_use must keep its paired tool_result even when an \
              earlier call in the batch triggered the stop rule"
+        );
+    }
+
+    /// Microbenchmark comparing old (full-text clone) vs new (delta) streaming paths.
+    ///
+    /// Run with `--nocapture` to see per-chunk timing:
+    ///   cargo test stream_chunk_bench -- --nocapture
+    #[test]
+    fn stream_chunk_bench() {
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        // --- Old path sink: default supports_message_delta() = false ---
+        #[derive(Default)]
+        struct OldPathSink {
+            last_text: Mutex<String>,
+            last_reasoning: Mutex<String>,
+        }
+        impl LoopEventSink for OldPathSink {
+            fn on_turn_start(&self, _: &AgentId, _: u32) {}
+            fn on_assistant_message(&self, _: &AgentId, text: &str) {
+                *self.last_text.lock().unwrap() = text.to_string();
+            }
+            fn on_assistant_reasoning(&self, _: &AgentId, text: &str) {
+                *self.last_reasoning.lock().unwrap() = text.to_string();
+            }
+            fn on_tool_result(&self, _: &AgentId, _: &ToolResultEvent) {}
+            fn on_loop_end(&self, _: &AgentId, _: &LoopEndSummary) {}
+        }
+
+        // --- New path sink: supports_message_delta() = true ---
+        #[derive(Default)]
+        struct NewPathSink {
+            accumulated: Mutex<String>,
+        }
+        impl LoopEventSink for NewPathSink {
+            fn on_turn_start(&self, _: &AgentId, _: u32) {}
+            fn on_assistant_message(&self, _: &AgentId, text: &str) {
+                // Old path fallback: used when delta support unchecked
+                *self.accumulated.lock().unwrap() = text.to_string();
+            }
+            fn on_assistant_message_delta(&self, _: &AgentId, delta: &str) {
+                self.accumulated.lock().unwrap().push_str(delta);
+            }
+            fn on_assistant_reasoning(&self, _: &AgentId, text: &str) {
+                *self.accumulated.lock().unwrap() = text.to_string();
+            }
+            fn on_assistant_reasoning_delta(&self, _: &AgentId, delta: &str) {
+                self.accumulated.lock().unwrap().push_str(delta);
+            }
+            fn supports_message_delta(&self) -> bool {
+                true
+            }
+            fn on_tool_result(&self, _: &AgentId, _: &ToolResultEvent) {}
+            fn on_loop_end(&self, _: &AgentId, _: &LoopEndSummary) {}
+        }
+
+        // Generate test chunks: 500 chunks × 80 bytes = 40K response
+        let chunk_base = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ";
+        let num_chunks = 500;
+        let chunks: Vec<StreamChunk> = (0..num_chunks)
+            .map(|i| {
+                let offset = (i * 7) % (chunk_base.len() - 40);
+                let text = &chunk_base[offset..offset + 40];
+                StreamChunk {
+                    delta_text: Some(text.to_string()),
+                    delta_reasoning: None,
+                    delta_tool_call: None,
+                }
+            })
+            .collect();
+        let total_chars: usize = chunks.iter().filter_map(|c| c.delta_text.as_ref()).map(|t| t.len()).sum();
+        let agent_id = AgentId("bench".to_string());
+
+        // ---- Warmup ----
+        let old_sink = OldPathSink::default();
+        let new_sink = NewPathSink::default();
+        let old_text = Mutex::new(String::new());
+        let old_reasoning = Mutex::new(String::new());
+        let ft = Mutex::new(0usize);
+        let fr = Mutex::new(0usize);
+        for _ in 0..5 {
+            for chunk in &chunks {
+                stream_assistant_chunk(
+                    Some(&old_sink), &agent_id, &old_text, &old_reasoning, &ft, &fr, chunk.clone(), &[],
+                );
+            }
+        }
+        let new_text = Mutex::new(String::new());
+        let new_reasoning = Mutex::new(String::new());
+        let ft2 = Mutex::new(0usize);
+        let fr2 = Mutex::new(0usize);
+        for _ in 0..5 {
+            for chunk in &chunks {
+                stream_assistant_chunk(
+                    Some(&new_sink), &agent_id, &new_text, &new_reasoning, &ft2, &fr2, chunk.clone(), &[],
+                );
+            }
+        }
+
+        // ---- Measure old path (full-text clone) ----
+        let old_text = Mutex::new(String::new());
+        let old_reasoning = Mutex::new(String::new());
+        let ft3 = Mutex::new(0usize);
+        let fr3 = Mutex::new(0usize);
+        let old_start = Instant::now();
+        for chunk in &chunks {
+            stream_assistant_chunk(
+                Some(&old_sink), &agent_id, &old_text, &old_reasoning, &ft3, &fr3, chunk.clone(), &[],
+            );
+        }
+        let old_elapsed = old_start.elapsed();
+
+        // ---- Measure new path (delta) ----
+        let new_text = Mutex::new(String::new());
+        let new_reasoning = Mutex::new(String::new());
+        let ft4 = Mutex::new(0usize);
+        let fr4 = Mutex::new(0usize);
+        let new_start = Instant::now();
+        for chunk in &chunks {
+            stream_assistant_chunk(
+                Some(&new_sink), &agent_id, &new_text, &new_reasoning, &ft4, &fr4, chunk.clone(), &[],
+            );
+        }
+        let new_elapsed = new_start.elapsed();
+
+        let old_us = old_elapsed.as_micros();
+        let new_us = new_elapsed.as_micros();
+        let ratio = if new_us > 0 { old_us as f64 / new_us as f64 } else { f64::INFINITY };
+
+        eprintln!();
+        eprintln!("=== stream_assistant_chunk microbenchmark ===");
+        eprintln!("  Chunks: {num_chunks} × ~40 chars = ~{total_chars} chars total response");
+        eprintln!("  Old path (full-text clone): {old_us:>8} µs  ({:.2} µs/chunk)", old_us as f64 / num_chunks as f64);
+        eprintln!("  New path (delta):          {new_us:>8} µs  ({:.2} µs/chunk)", new_us as f64 / num_chunks as f64);
+        eprintln!("  Speedup: {ratio:.1}× faster");
+        eprintln!();
+
+        // Assert that new path is at least as fast (not significantly slower).
+        // Allow 20% tolerance for noise.
+        assert!(
+            new_us <= old_us + old_us / 5,
+            "New path ({new_us}µs) should not be significantly slower than old path ({old_us}µs)"
         );
     }
 }

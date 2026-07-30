@@ -412,6 +412,8 @@ fn render_message_entry(
 pub(crate) fn build_transcript_cache(
     message_renders: &[CachedMessageRender],
 ) -> TranscriptRenderCache {
+    #[cfg(debug_assertions)]
+    let _start = std::time::Instant::now();
     let mut all_lines = Vec::new();
     let mut visual_lines = Vec::new();
     let mut visual_line_backgrounds = Vec::new();
@@ -478,6 +480,14 @@ pub(crate) fn build_transcript_cache(
         }
     }
 
+    #[cfg(debug_assertions)]
+    {
+        let elapsed = _start.elapsed();
+        let total_visual_lines = absolute_visual_row;
+        if elapsed > std::time::Duration::from_micros(200) {
+            tracing::debug!(target: "perf", elapsed_us = elapsed.as_micros(), message_count = message_renders.len(), total_visual_lines, "build_transcript_cache");
+        }
+    }
     TranscriptRenderCache {
         all_lines,
         visual_lines,

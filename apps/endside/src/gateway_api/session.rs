@@ -27,6 +27,20 @@ pub enum SessionTurnUpdate {
         agent_id: AgentId,
         text: String,
     },
+    /// Incremental assistant content delta. Unlike `SetAssistantContent`
+    /// (which replaces the entire message text), this variant only carries
+    /// the new characters since the previous update; the TUI appends via
+    /// `Message::append_content`, avoiding a full-string allocation per
+    /// stream chunk.
+    AppendAssistantContent {
+        agent_id: AgentId,
+        delta: String,
+    },
+    /// Incremental reasoning content delta. See `AppendAssistantContent`.
+    AppendAssistantThinking {
+        agent_id: AgentId,
+        delta: String,
+    },
     Tool {
         agent_id: AgentId,
         update: ToolExecutionUpdate,

@@ -81,9 +81,20 @@ impl App {
         }
 
         loop {
+            #[cfg(debug_assertions)]
+            let _tick_start = std::time::Instant::now();
             if needs_redraw {
+                #[cfg(debug_assertions)]
+                let _draw_start = std::time::Instant::now();
                 terminal.draw(|frame| self.ui(frame))?;
                 needs_redraw = false;
+                #[cfg(debug_assertions)]
+                {
+                    let draw_elapsed = _draw_start.elapsed();
+                    if draw_elapsed > std::time::Duration::from_micros(500) {
+                        tracing::debug!(target: "perf", elapsed_us = draw_elapsed.as_micros(), "terminal_draw");
+                    }
+                }
             }
             if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
@@ -253,6 +264,13 @@ impl App {
                         self.state.chat_state.stick_to_bottom = true;
                         needs_redraw = true;
                     }
+                }
+            }
+            #[cfg(debug_assertions)]
+            {
+                let tick_elapsed = _tick_start.elapsed();
+                if tick_elapsed > std::time::Duration::from_millis(10) {
+                    tracing::debug!(target: "perf", elapsed_us = tick_elapsed.as_micros(), active_refresh = self.state.chat_state.is_loading, "event_loop_tick");
                 }
             }
         }
