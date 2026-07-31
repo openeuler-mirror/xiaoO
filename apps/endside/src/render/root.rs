@@ -13,8 +13,15 @@ const LOADING_SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '
 
 impl App {
     pub fn loading_animation(&self) -> String {
-        let spinner =
-            LOADING_SPINNER_FRAMES[self.state.loading_tick % LOADING_SPINNER_FRAMES.len()];
+        // Wall-clock driven: the spinner frame is derived from elapsed time
+        // since `animation_origin`, not from a per-tick counter. This decouples
+        // the animation rhythm from the event-loop cycle time — the frame
+        // advances at a steady 16ms cadence regardless of how long each
+        // draw/select takes, so a 60fps loop and a 30fps loop show the same
+        // spinner speed.
+        let elapsed_ms = self.animation_origin.elapsed().as_millis() as usize;
+        let frame = (elapsed_ms / 16) % LOADING_SPINNER_FRAMES.len();
+        let spinner = LOADING_SPINNER_FRAMES[frame];
         sanitize_terminal_text(&format!("{spinner} Thinking..."))
     }
 
