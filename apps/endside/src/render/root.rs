@@ -101,9 +101,17 @@ impl App {
             self.render_api_key_dialog(frame, frame.area(), &dialog);
         }
 
-        // Copy-to-clipboard toast (mirrors opencode's toast.show after copy).
+        // Copy-to-clipboard toasts (success mirrors opencode's
+        // toast.show after copy; error informs of unsupported terminals).
         if self.state.copy_notice_active() {
-            self.render_copy_toast(frame, size);
+            self.render_copy_toast(frame, size, " Copied to clipboard ");
+        }
+        if self.state.copy_error_notice_active() {
+            self.render_copy_toast(
+                frame,
+                size,
+                " Copy failed — terminal lacks OSC52 clipboard support ",
+            );
         }
     }
 
@@ -353,8 +361,7 @@ impl App {
         }
     }
 
-    fn render_copy_toast(&self, frame: &mut Frame, area: Rect) {
-        let message = " Copied to clipboard ";
+    fn render_copy_toast(&self, frame: &mut Frame, area: Rect, message: &str) {
         let width = message.chars().count() as u16;
         // Float in the bottom-right corner, just above the 3-row status bar.
         let x = area.x.saturating_add(area.width).saturating_sub(width + 1);

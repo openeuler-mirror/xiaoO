@@ -17,6 +17,22 @@ pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
     pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+    /// Deadline for discarding stray character events after an ESC key.
+    ///
+    /// When an ESC byte lands next to a mouse/scroll escape sequence
+    /// (`\x1b[<b;x;yM`), crossterm's parser can swallow the sequence head
+    /// and deliver the leftover `[<b;x;yM` as plain `KeyCode::Char` events.
+    /// Those always arrive back-to-back with the ESC event (same read
+    /// batch, <1ms apart), so any `Char` received within this window is a
+    /// sequence remnant, not real typing — discard it. Human key presses
+    /// are >50ms apart, so a 5ms window never eats legitimate input.
+    pub(crate) esc_discard_until: Option<Instant>,
+    /// True while a mouse drag that started inside the input box is in
+    /// progress. The input-box `Up` handler only auto-copies when this is
+    /// set, so a left-button release elsewhere (tool toggle, scrollbar,
+    /// transcript area) can never copy the input box's lingering selection
+    /// (e.g. one created with Ctrl+A).
+    pub(crate) input_drag_active: bool,
 }
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -33,6 +49,8 @@ impl App {
             state,
             gateway,
             pending_local_model_fetch: None,
+            esc_discard_until: None,
+            input_drag_active: false,
         })
     }
 

@@ -38,6 +38,13 @@ impl Input {
         self.cursor
     }
 
+    /// Move the cursor to a character index (clamped to the value length).
+    /// The selection anchor, if any, is left untouched — dragging uses this
+    /// to extend a selection.
+    pub fn set_cursor(&mut self, cursor: usize) {
+        self.cursor = cursor.min(self.value.chars().count());
+    }
+
     /// Get display value (for password input, return masked string like "****")
     pub fn display_value(&self, is_secret: bool) -> String {
         if is_secret {
@@ -78,23 +85,32 @@ impl Input {
     /// Returns the selected text slice, or `None` when nothing is selected.
     pub fn selected_text(&self) -> Option<&str> {
         let range = self.selected_range()?;
-        // Convert char indices to byte indices.
+        // Convert char indices to byte indices. A range boundary equal to
+        // the total char count has no `char_indices` entry (there is no
+        // index "one past the end"), so the byte offset falls back to the
+        // full byte length in that case.
         let mut byte_start = 0;
         let mut byte_end = 0;
+        let mut found_start = false;
+        let mut found_end = false;
         let mut char_idx = 0;
         for (byte_idx, _ch) in self.value.char_indices() {
-            if char_idx == range.start {
+            if char_idx == range.start && !found_start {
                 byte_start = byte_idx;
+                found_start = true;
             }
             if char_idx == range.end {
                 byte_end = byte_idx;
+                found_end = true;
                 break;
             }
             char_idx += 1;
         }
-        // Handle the case where end == value.len() in chars.
-        if char_idx < range.end {
+        if !found_end {
             byte_end = self.value.len();
+        }
+        if !found_start {
+            byte_start = self.value.len();
         }
         Some(&self.value[byte_start..byte_end])
     }
@@ -296,7 +312,12 @@ impl EventHandler for Input {
             }
             // Ignore all other Ctrl+letter combos (handled elsewhere).
             KeyCode::Char(_ch) if ctrl => {}
-            KeyCode::Char(ch) => self.insert_char(ch),
+            // Never insert control characters: some terminals/forwarders
+            // surface raw ASCII controls (e.g. ESC as `\u{1b}`, NUL) as
+            // `Char` events instead of dedicated key codes. Inserting them
+            // corrupts the input line. (Backspace-compat chars are handled
+            // by `is_backspace_compat` before the match.)
+            KeyCode::Char(ch) if !ch.is_control() => self.insert_char(ch),
             KeyCode::Delete => self.delete(),
             // Shift+Left – extend selection leftward
             KeyCode::Left if shift => {
@@ -447,5 +468,76 @@ mod tests {
 
         assert_eq!(input.value(), "hell");
         assert_eq!(input.cursor(), 4);
+    }
+
+    #[test]
+    fn esc_as_char_is_not_inserted() {
+        // Some terminals/forwarders surface raw ESC (0x1b) as a `Char`
+        // event instead of `KeyCode::Esc`. It must never reach the line.
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('\u{1b}'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "hello");
+        assert_eq!(input.cursor(), 5);
+    }
+
+    #[test]
+    fn nul_as_char_is_not_inserted() {
+        let mut input = Input::default().with_value("hello".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('\u{0}'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "hello");
+    }
+
+    #[test]
+    fn printable_chars_still_insert() {
+        let mut input = Input::default();
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::SHIFT,
+        )));
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "aA[");
+    }
+
+    #[test]
+    fn ctrl_a_still_selects_all() {
+        // Regression guard: the ESC-remnant fix must not drop Ctrl+A
+        // (select-all feeds Ctrl+C copy in the input box).
+        let mut input = Input::default().with_value("hello world".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(input.selected_text().as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn select_all_handles_multibyte_chars() {
+        // selected_text converts char indices to byte offsets; CJK chars
+        // are 3 bytes each, so a full selection must return the whole
+        // value, not a truncated one.
+        let mut input = Input::default().with_value("你好 world".to_string());
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(input.selected_text().as_deref(), Some("你好 world"));
     }
 }
