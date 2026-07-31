@@ -1,0 +1,51 @@
+# Build artifacts - keep them out of the build context
+target/
+target-musl-fresh/
+
+# Logs / DBs
+*.log
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local user config (must be supplied at runtime, not baked in)
+/config.toml
+
+# Editor / OS / AI tool caches
+.git/
+.gitattributes
+.idea/
+.vscode/
+.claude/
+.opencode/
+.mimocode/
+.DS_Store
+
+# xiaoo runtime state (per-container, not baked in)
+.xiaoo/
+
+# Python dev artifacts (audit_agent source IS shipped; only these caches
+# and dev venvs are kept out of the build context)
+__pycache__/
+*.pyc
+venv/
+**/venv/
+**/node_modules/
+**/build/
+**/*.egg-info/
+**/.atomcode/
+**/.mimocode/
+
+# Generated / scratch files
+AUDIT_AGENT_REPLY.md
+create_ppt.py
+test.json
+*.tar.gz
+
+# Tests not needed for the runtime image (build context only)
+plugins/tests/
+
+# Docker meta files (don't ship the Dockerfile itself into a layer)
+Dockerfile
+.dockerignore
