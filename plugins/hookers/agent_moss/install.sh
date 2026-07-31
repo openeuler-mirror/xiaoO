@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.10.4"
+AM_VERSION="0.10.5"
 
 # venv 路径（sudo 模式用 /opt/agent_moss/venv/，非 sudo 模式 fallback 到用户目录）
 # 如果 venv 已存在，优先使用已有的，避免重复创建

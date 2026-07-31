@@ -54,7 +54,7 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 | 变量 | 说明 | 默认值 |
 |---|---|---|
 | `AGENT_MOSS_DISABLE_LLM` | 设 `1` 禁用层3 LLM 深度分析（仅跑层1+层2）| 未设（启用 L3）|
-| `AGENT_MOSS_DISABLE_HEURISTIC` | 设 `1` 禁用层1 启发式静态检测 | 未设（启用 L1）|
+| `AGENT_MOSS_DISABLE_HEURISTIC` | 设 `1` 禁用层1 特征匹配静态检测 | 未设（启用 L1）|
 | `AGENT_MOSS_DISABLE_LOGIC_RULES` | 设 `1` 禁用层2 逻辑规则检测 | 未设（启用 L2）|
 | `AGENT_MOSS_LLM_FAIL_MODE` | LLM 失败策略：`fail_open`（默认，纯靠 L3 时 LLM 挂了→Allow+warn）/ `fail_closed`（→Deny）| `fail_open` |
 

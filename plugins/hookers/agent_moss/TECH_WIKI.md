@@ -65,7 +65,7 @@
 
 ### 1.3 核心目标
 
-1. **代码复用**：最大化复用现有三层安全分析引擎（启发式 + 逻辑规则 + LLM+Skill），避免重复开发。
+1. **代码复用**：最大化复用现有三层安全分析引擎（特征匹配 + 逻辑规则 + LLM+Skill），避免重复开发。
 2. **层级下沉**：将安全分析能力从应用层插件下沉到系统服务层，成为 AgentOS 基础设施的一部分。
 3. **接口标准化**：定义清晰的服务间通信协议，使"可观测"服务及其他 AgentOS 组件可以标准方式调用。
 4. **通用化**：移除 xiaoO 专属逻辑，使其适用于任何 AgentOS 中运行的 Agent。
@@ -126,10 +126,17 @@ a_next (待执行动作)
     │
     ▼
 ┌─────────────────────────────────────────────┐
-│ 层1: 启发式静态检测 (HeuristicDetector)       │
+│ 层1: 特征匹配静态检测 (HeuristicDetector)       │
+│ 只看 a_next（这一步动作）：                   │
 │ ├── UserRuleMatcher: 用户自定义规则匹配       │
 │ ├── CommandPatternScanner: 危险命令正则       │
-│ └── InjectionKeywordChecker: Prompt注入检测   │
+│ ├── InjectionKeywordChecker: Prompt注入检测   │
+│ ├── SensitivePathChecker: 敏感路径访问检测    │
+│ │   （含凭据文件，\b边界匹配，从 L2 搬入）     │
+│ ├── DangerousPatternChecker: 危险操作模式     │
+│ │   （通配符+删除、重定向覆盖，从 L2 搬入）    │
+│ └── LateralMovementChecker: 横向移动检测      │
+│     （ssh/scp/rsync 到非本机，原死代码启用）  │
 │     → high/critical → 直接 Deny (短路)        │
 │     → 内联脚本 file_access 转层3              │
 │       （避免 'cat /etc/shadow' 假阳性）       │
@@ -147,10 +154,20 @@ a_next (待执行动作)
                ▼
 ┌─────────────────────────────────────────────┐
 │ 层2: 逻辑规则检测 (LogicRulesChecker)         │
-│ ├── read_before_write 原则                   │
-│ ├── 意图一致性检测                            │
-│ ├── 敏感路径访问检测（含凭据文件，\b边界匹配）  │
-│ └── 危险操作模式检测                          │
+│ 需 action_history / prompt_session / cwd：   │
+│ ├── read_before_write 原则（看 history）     │
+│ │   ※ 仅对 bash/terminal 写工具生效；          │
+│ │   memory-/skill-/mailbox-/todomgr- 等数据   │
+│ │   工具前缀 + filemgr 只读工具豁免，避免参数  │
+│ │   关键词（搜索模式含 write/update/remove）误报│
+│ ├── 意图一致性检测（看 prompt_session）       │
+│ │   ※ dangerous_actions 精确匹配：中文子串    │
+│ │   英文词边界+排参数前缀，避免 --format= /   │
+│ │   搜索模式 NON_WRITE 含 write 误报修改/删除│
+│ ├── 间接文件访问检测（看 cwd 列实际文件）     │
+│ ├── 密码修改授权检测（看 history）            │
+│ ├── 用户/组删除授权检测（看 history）         │
+│ └── 提权检测（看 history，原死代码启用）      │
 │     → high/critical → 直接 Deny (短路)        │
 │     → 内联脚本 file_access 转层3              │
 │     → 凭据文件（credentials.yml 等）不转层3   │
@@ -257,7 +274,7 @@ a_next (待执行动作)
 │  │  │                      │                                 │ │ │
 │  │  │  ┌───────────────────▼─────────────────────────────┐  │ │ │
 │  │  │  │  安全分析引擎 (三层防御)                          │  │ │ │
-│  │  │  │  启发式 → 逻辑规则 → LLM+Skill                   │  │ │ │
+│  │  │  │  特征匹配 → 逻辑规则 → LLM+Skill                   │  │ │ │
 │  │  │  └─────────────────────────────────────────────────┘  │ │ │
 │  │  │                                                       │ │ │
 │  │  │  配置: /etc/agent_moss/agent_moss.yaml                │ │ │
@@ -367,7 +384,7 @@ Agent 沙箱中运行
 │                 │
 │  2. 请求校验     │  Pydantic 模型校验
 │  3. 格式适配     │  Observable格式 → 内部 AnalyzeRequest 格式
-│  4. 三层安全分析  │  启发式 → 逻辑规则 → LLM+Skill
+│  4. 三层安全分析  │  特征匹配 → 逻辑规则 → LLM+Skill
 │  5. Policy生成   │  [可选] Cerberus 沙箱 Policy
 │  6. 审计日志     │  记录完整分析过程
 │                 │
@@ -421,7 +438,7 @@ agent_moss/
 │   │   ├── __init__.py
 │   │   ├── analyzer.py            # 核心入口 analyze()（重命名自 main.py :: audit_action()）
 │   │   ├── coordinator.py         # 安全判断协调器（重命名自 security/audit_agent.py）
-│   │   ├── heuristic.py           # 层1: 启发式检测（原 heuristic_detector.py）
+│   │   ├── heuristic.py           # 层1: 特征匹配检测（原 heuristic_detector.py）
 │   │   ├── logic_rules.py         # 层2: 逻辑规则检测
 │   │   ├── llm_analyzer.py        # 层3: LLM 深度分析
 │   │   ├── skill_engine.py        # Skill 引擎
@@ -770,7 +787,7 @@ server:
 security:
   enabled: true
   
-  # 层1: 启发式检测
+  # 层1: 特征匹配检测
   heuristic:
     enabled: true
     rules_path: "/etc/agent_moss/rules/user_rules.json"
@@ -993,7 +1010,7 @@ curl -s -X POST http://localhost:9090/api/v1/analyze \
 | **可观测服务 (Observability)** | AgentOS 系统服务，收集 Agent syscall 数据 |
 | **agent_moss** | AgentOS 安全模块（原 audit_agent） |
 | **Cerberus** | xiaoO 的沙箱策略引擎 |
-| **三层防御** | 启发式检测 → 逻辑规则检测 → LLM+Skill 深度分析 |
+| **三层防御** | 特征匹配检测 → 逻辑规则检测 → LLM+Skill 深度分析 |
 | **Skill** | 用 Markdown 编写的安全检测规则，注入 LLM Prompt |
 | **Policy** | Cerberus 沙箱策略（TOML 格式），定义 Agent 的权限边界 |
 
@@ -1007,7 +1024,7 @@ curl -s -X POST http://localhost:9090/api/v1/analyze \
 | 分析入口 | `agent_moss/engine/analyzer.py` |
 | 三层防御协调器 | `agent_moss/engine/coordinator.py` |
 | 类型定义 | `agent_moss/engine/types.py` |
-| 启发式检测 | `agent_moss/engine/heuristic.py` |
+| 特征匹配检测 | `agent_moss/engine/heuristic.py` |
 | 逻辑规则检测 | `agent_moss/engine/logic_rules.py` |
 | LLM 分析器 | `agent_moss/engine/llm_analyzer.py` |
 | 服务 README | `~/gitcode/AgentMoss/README.md` |
