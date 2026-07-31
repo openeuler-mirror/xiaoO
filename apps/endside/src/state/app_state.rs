@@ -17,6 +17,7 @@ use crate::services::input_history::load_input_history;
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
+use crate::render::markdown::MarkdownIncrementalState;
 
 #[derive(PartialEq)]
 pub enum InputMode {
@@ -125,6 +126,12 @@ pub struct CachedMessageRender {
     pub wrapped_lines: Option<Vec<Vec<Line<'static>>>>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
+    /// `Some(n)` for the active streaming assistant message rendered via the
+    /// incremental markdown path: `lines` / `wrapped_lines` contain the
+    /// SUFFIX only (the frozen prefix of `n` logical lines is moved from the
+    /// previous tick's block by `build_transcript_cache`). `None` for every
+    /// other message — `lines` is the complete output.
+    pub frozen_prefix_line_count: Option<usize>,
 }
 
 /// Per-message visual render block stored inside [`TranscriptRenderCache`].
@@ -239,6 +246,15 @@ pub struct RenderState {
     /// fingerprint instead of the full render tree, and the render itself
     /// lives inside `TranscriptRenderCache::message_blocks`.
     pub message_render_revisions: Vec<Option<u64>>,
+    /// Incremental markdown render state for the single active streaming
+    /// message. Only one message streams at a time; invalidated on width /
+    /// theme / transcript changes (see `render_chat`). `None` for every
+    /// non-streaming message.
+    pub incremental_markdown: Option<MarkdownIncrementalState>,
+    /// Message index that `incremental_markdown` was produced for. When the
+    /// active streaming index moves (stream settles / switches), the state
+    /// is cleared so a stale cache is never reused.
+    pub incremental_markdown_index: Option<usize>,
     /// Width used to build the current `transcript_cache`. A change forces
     /// every message dirty (re-wrap).
     pub last_render_width: Option<u16>,

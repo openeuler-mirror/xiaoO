@@ -441,6 +441,7 @@ mod tests {
             subagent_open_target: None,
             wrapped_lines: Some(wrapped_lines),
             lines,
+            frozen_prefix_line_count: None,
         }
     }
 

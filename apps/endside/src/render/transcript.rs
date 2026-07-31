@@ -16,7 +16,7 @@ use crate::app_state::{
     ToolToggleRegion, TranscriptRenderCache,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
-use crate::markdown::{contains_markdown_table, render_markdown};
+use crate::markdown::{contains_markdown_table, render_markdown, render_markdown_incremental, MarkdownIncrementalState};
 use crate::theme::Theme;
 
 use super::utils::{
@@ -77,6 +77,8 @@ impl App {
                 render_state.last_render_width = None;
                 render_state.last_render_theme = None;
                 render_state.transcript_cache = None;
+                render_state.incremental_markdown = None;
+                render_state.incremental_markdown_index = None;
                 render_state.active_transcript_key = Some(transcript_key.clone());
             }
 
@@ -106,6 +108,8 @@ impl App {
                 render_state.last_render_width = None;
                 render_state.last_render_theme = None;
                 render_state.transcript_cache = None;
+                render_state.incremental_markdown = None;
+                render_state.incremental_markdown_index = None;
             } else if prev_count < message_count {
                 // Messages appended: extend revision slots with `None` so the
                 // new tail is dirty. Prior blocks stay valid (append preserves
@@ -116,6 +120,15 @@ impl App {
 
             let width_changed = render_state.last_render_width != Some(inner_area.width);
             let theme_changed = render_state.last_render_theme != Some(theme);
+
+            // The incremental markdown cache belongs only to the active
+            // streaming message. If the stream moved to a different index
+            // (settled / switched / none), clear it so a stale cache is
+            // never reused.
+            if render_state.incremental_markdown_index != active_stream_index {
+                render_state.incremental_markdown = None;
+                render_state.incremental_markdown_index = active_stream_index;
+            }
 
             // A None `transcript_cache` (first tick, post-switch, post-shrink)
             // forces every message dirty; width/theme changes likewise.
@@ -133,13 +146,21 @@ impl App {
                 let is_dirty = should_bypass_cache || revision_changed || width_changed || theme_changed;
 
                 if is_dirty {
-                    let rendered = render_message_entry(
+                    // Only the active streaming message uses the incremental
+                    // markdown cache; every other dirty message renders fresh.
+                    let prev_markdown_state = if is_active_stream_message {
+                        render_state.incremental_markdown.take()
+                    } else {
+                        None
+                    };
+                    let (rendered, new_markdown_state) = render_message_entry(
                         message,
                         &theme,
                         inner_area.width,
                         is_active_stream_message,
                         chat_is_loading,
                         &loading_animation,
+                        prev_markdown_state,
                     );
                     // Persist the fingerprint only for non-bypass messages:
                     // bypass (active stream) messages are recomputed every
@@ -150,6 +171,9 @@ impl App {
                     if !should_bypass_cache {
                         render_state.message_render_revisions[message_index] =
                             Some(message.render_revision);
+                    }
+                    if is_active_stream_message {
+                        render_state.incremental_markdown = new_markdown_state;
                     }
                     renders.push(Some(rendered));
                     any_dirty = true;
@@ -419,18 +443,19 @@ fn render_message_entry(
     is_active_stream_message: bool,
     chat_is_loading: bool,
     loading_animation: &str,
-) -> CachedMessageRender {
+    incremental_markdown: Option<MarkdownIncrementalState>,
+) -> (CachedMessageRender, Option<MarkdownIncrementalState>) {
     let mut tool_toggle_row_offset = None;
     let mut subagent_open_target = None;
 
-    let lines = if let Some(tool) = &message.tool_state {
+    if let Some(tool) = &message.tool_state {
         let tool_color = match tool.status {
             ToolExecutionStatus::Running => theme.accent,
             ToolExecutionStatus::Completed => theme.success,
             ToolExecutionStatus::Failed => theme.error,
         };
         let timestamp = message.timestamp.format("%H:%M:%S").to_string();
-        if is_subagent_tool(&tool.tool) {
+        let lines = if is_subagent_tool(&tool.tool) {
             tool_toggle_row_offset = Some(if tool.expanded { 1 } else { 0 });
             let mut lines = render_subagent_tool_lines(tool, &timestamp, tool_color, theme, width);
             if tool.tool == "spawn_subagent" && tool.expanded {
@@ -451,10 +476,44 @@ fn render_message_entry(
         } else {
             tool_toggle_row_offset = Some(if tool.expanded { 2 } else { 1 });
             render_tool_message_lines(message, tool, tool_color, theme, width)
-        }
-    } else if let Some(checker) = &message.completion_check_state {
-        render_completion_check_lines(message, checker, theme)
-    } else {
+        };
+        let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+            .iter()
+            .map(|line| wrap_line_to_visual_lines(line, width))
+            .collect();
+        return (
+            CachedMessageRender {
+                width,
+                tool_toggle_row_offset,
+                subagent_open_target,
+                wrapped_lines: Some(wrapped_lines),
+                lines,
+                frozen_prefix_line_count: None,
+            },
+            None,
+        );
+    }
+
+    if let Some(checker) = &message.completion_check_state {
+        let lines = render_completion_check_lines(message, checker, theme);
+        let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+            .iter()
+            .map(|line| wrap_line_to_visual_lines(line, width))
+            .collect();
+        return (
+            CachedMessageRender {
+                width,
+                tool_toggle_row_offset,
+                subagent_open_target,
+                wrapped_lines: Some(wrapped_lines),
+                lines,
+                frozen_prefix_line_count: None,
+            },
+            None,
+        );
+    }
+
+    let (lines, wrapped_lines, new_markdown_state, frozen_prefix_line_count) =
         render_standard_message_lines(
             message,
             theme,
@@ -462,21 +521,20 @@ fn render_message_entry(
             is_active_stream_message,
             chat_is_loading,
             loading_animation,
-        )
-    };
+            incremental_markdown,
+        );
 
-    let wrapped_lines: Vec<Vec<Line<'static>>> = lines
-        .iter()
-        .map(|line| wrap_line_to_visual_lines(line, width))
-        .collect();
-
-    CachedMessageRender {
-        width,
-        tool_toggle_row_offset,
-        subagent_open_target,
-        wrapped_lines: Some(wrapped_lines),
-        lines,
-    }
+    (
+        CachedMessageRender {
+            width,
+            tool_toggle_row_offset,
+            subagent_open_target,
+            wrapped_lines: Some(wrapped_lines),
+            lines,
+            frozen_prefix_line_count,
+        },
+        new_markdown_state,
+    )
 }
 
 pub(crate) fn build_transcript_cache(
@@ -506,54 +564,164 @@ pub(crate) fn build_transcript_cache(
 
     for (message_index, render_opt) in renders.into_iter().enumerate() {
         let block = if let Some(render) = render_opt {
-            // Dirty: rebuild from the freshly-computed render (move, no clone
-            // of the wrapped `Line` trees).
-            let lines = render.lines;
-            let wrapped_lines = render.wrapped_lines.unwrap_or_else(|| {
-                lines
-                    .iter()
-                    .map(|line| wrap_line_to_visual_lines(line, render.width))
-                    .collect::<Vec<_>>()
-            });
+            if let Some(freeze_n) = render.frozen_prefix_line_count {
+                // Incremental streaming: move the frozen prefix (`freeze_n`
+                // logical lines) from the previous tick's block, then append
+                // the freshly rendered suffix. Zero `Line` clone for the
+                // frozen prefix — this is what makes per-tick work O(suffix)
+                // instead of O(total).
+                let prev_b = prev_blocks
+                    .get_mut(message_index)
+                    .and_then(Option::take);
+                match prev_b {
+                    Some(MessageVisualBlock {
+                        mut lines,
+                        mut logical_to_visual_offset,
+                        mut visual_lines,
+                        ..
+                    }) => {
+                        debug_assert!(
+                            lines.len() >= freeze_n,
+                            "build_transcript_cache: prev block for message {message_index} \
+                             has {} lines but freeze_n={freeze_n}",
+                            lines.len()
+                        );
+                        // Trim the prev block to the frozen prefix (drop the
+                        // old suffix — it is re-rendered this tick).
+                        let visual_freeze_n = logical_to_visual_offset
+                            .get(freeze_n)
+                            .copied()
+                            .unwrap_or(visual_lines.len());
+                        lines.truncate(freeze_n);
+                        logical_to_visual_offset.truncate(freeze_n);
+                        visual_lines.truncate(visual_freeze_n);
 
-            // Per-logical-line visual row offset within this block; needed both
-            // to convert `tool_toggle_row_offset` / `subagent_open_target`
-            // (logical → visual) and to fill the flat
-            // `logical_line_visual_starts` index without re-wrapping.
-            let mut logical_to_visual_offset: Vec<usize> = Vec::with_capacity(wrapped_lines.len());
-            let mut acc = 0usize;
-            for wl in &wrapped_lines {
-                logical_to_visual_offset.push(acc);
-                acc += wl.len();
-            }
+                        // Append the freshly rendered suffix.
+                        let suffix_lines = render.lines;
+                        let suffix_wrapped = render
+                            .wrapped_lines
+                            .unwrap_or_else(|| {
+                                suffix_lines
+                                    .iter()
+                                    .map(|l| wrap_line_to_visual_lines(l, render.width))
+                                    .collect::<Vec<_>>()
+                            });
+                        let mut acc = visual_freeze_n;
+                        for wl in &suffix_wrapped {
+                            logical_to_visual_offset.push(acc);
+                            acc += wl.len();
+                        }
+                        for wl in suffix_wrapped {
+                            visual_lines.extend(wl);
+                        }
+                        lines.extend(suffix_lines);
 
-            let mut visual_lines: Vec<Line<'static>> = Vec::with_capacity(acc);
-            for wl in wrapped_lines {
-                visual_lines.extend(wl);
-            }
-
-            let tool_toggle_row_offset = render
-                .tool_toggle_row_offset
-                .map(|logical_offset| logical_to_visual_offset.get(logical_offset).copied().unwrap_or(acc));
-            let subagent_open_target = render.subagent_open_target.as_ref().map(|target| {
-                SubagentOpenTarget {
-                    agent_id: target.agent_id.clone(),
-                    row_offset: logical_to_visual_offset
-                        .get(target.row_offset)
-                        .copied()
-                        .unwrap_or(acc),
+                        MessageVisualBlock {
+                            message_index,
+                            start_visual_row: absolute_visual_row,
+                            logical_line_start: absolute_logical_row,
+                            lines,
+                            visual_lines,
+                            logical_to_visual_offset,
+                            tool_toggle_row_offset: None,
+                            subagent_open_target: None,
+                        }
+                    }
+                    None => {
+                        // Invariant: Some(freeze_n) implies a prev block
+                        // exists (established in render_chat — the active
+                        // stream message is always dirty, so it has a block
+                        // from the prior tick). If we get here, fall back to a
+                        // suffix-only block; the prefix is missing this tick
+                        // but corrected on the next.
+                        debug_assert!(
+                            false,
+                            "build_transcript_cache: incremental render for message \
+                             {message_index} has frozen_prefix_line_count={freeze_n} \
+                             but no prev block"
+                        );
+                        let suffix_lines = render.lines;
+                        let suffix_wrapped = render
+                            .wrapped_lines
+                            .unwrap_or_else(|| {
+                                suffix_lines
+                                    .iter()
+                                    .map(|l| wrap_line_to_visual_lines(l, render.width))
+                                    .collect::<Vec<_>>()
+                            });
+                        let mut l2v = Vec::with_capacity(suffix_wrapped.len());
+                        let mut acc = 0usize;
+                        for wl in &suffix_wrapped {
+                            l2v.push(acc);
+                            acc += wl.len();
+                        }
+                        let mut vl: Vec<Line<'static>> = Vec::with_capacity(acc);
+                        for wl in suffix_wrapped {
+                            vl.extend(wl);
+                        }
+                        MessageVisualBlock {
+                            message_index,
+                            start_visual_row: absolute_visual_row,
+                            logical_line_start: absolute_logical_row,
+                            lines: suffix_lines,
+                            visual_lines: vl,
+                            logical_to_visual_offset: l2v,
+                            tool_toggle_row_offset: None,
+                            subagent_open_target: None,
+                        }
+                    }
                 }
-            });
+            } else {
+                // Full dirty rebuild: move the freshly-computed render
+                // (no `Line` clone of the wrapped trees).
+                let lines = render.lines;
+                let wrapped_lines = render.wrapped_lines.unwrap_or_else(|| {
+                    lines
+                        .iter()
+                        .map(|line| wrap_line_to_visual_lines(line, render.width))
+                        .collect::<Vec<_>>()
+                });
 
-            MessageVisualBlock {
-                message_index,
-                start_visual_row: absolute_visual_row,
-                logical_line_start: absolute_logical_row,
-                lines,
-                visual_lines,
-                logical_to_visual_offset,
-                tool_toggle_row_offset,
-                subagent_open_target,
+                // Per-logical-line visual row offset within this block; needed
+                // both to convert `tool_toggle_row_offset` /
+                // `subagent_open_target` (logical → visual) and to fill the
+                // flat `logical_line_visual_starts` index without re-wrapping.
+                let mut logical_to_visual_offset: Vec<usize> =
+                    Vec::with_capacity(wrapped_lines.len());
+                let mut acc = 0usize;
+                for wl in &wrapped_lines {
+                    logical_to_visual_offset.push(acc);
+                    acc += wl.len();
+                }
+
+                let mut visual_lines: Vec<Line<'static>> = Vec::with_capacity(acc);
+                for wl in wrapped_lines {
+                    visual_lines.extend(wl);
+                }
+
+                let tool_toggle_row_offset = render
+                    .tool_toggle_row_offset
+                    .map(|logical_offset| logical_to_visual_offset.get(logical_offset).copied().unwrap_or(acc));
+                let subagent_open_target = render.subagent_open_target.as_ref().map(|target| {
+                    SubagentOpenTarget {
+                        agent_id: target.agent_id.clone(),
+                        row_offset: logical_to_visual_offset
+                            .get(target.row_offset)
+                            .copied()
+                            .unwrap_or(acc),
+                    }
+                });
+
+                MessageVisualBlock {
+                    message_index,
+                    start_visual_row: absolute_visual_row,
+                    logical_line_start: absolute_logical_row,
+                    lines,
+                    visual_lines,
+                    logical_to_visual_offset,
+                    tool_toggle_row_offset,
+                    subagent_open_target,
+                }
             }
         } else {
             // Non-dirty: move the prior block out of prev_blocks. Its
@@ -1767,7 +1935,13 @@ fn render_standard_message_lines(
     is_active_stream_message: bool,
     chat_is_loading: bool,
     loading_animation: &str,
-) -> Vec<Line<'static>> {
+    incremental_markdown: Option<MarkdownIncrementalState>,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<Line<'static>>>,
+    Option<MarkdownIncrementalState>,
+    Option<usize>,
+) {
     #[cfg(debug_assertions)]
     let _start = std::time::Instant::now();
     let (indicator_color, role_label, role_style, content_style) = match message.role {
@@ -1814,70 +1988,162 @@ fn render_standard_message_lines(
         && message.is_streaming
         && is_active_stream_message
         && message.content.is_empty();
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            sanitize_terminal_text("▎ "),
-            Style::default().fg(indicator_color),
-        ),
-        Span::styled(role_label.to_string(), role_style),
-        Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
-    ])];
 
-    if !message.thinking_content.is_empty() {
-        let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
-        let thinking_header = if is_thinking {
-            format!("  {} {loading_animation}", sanitize_terminal_text("⭕️"))
-        } else {
-            format!("  {} Thought", sanitize_terminal_text("⭕️"))
-        };
-        lines.push(Line::styled(
-            thinking_header,
-            Style::default()
-                .fg(theme.muted)
-                .add_modifier(Modifier::ITALIC),
-        ));
-        let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
-        for line in message.thinking_content.lines() {
-            lines.push(Line::styled(
-                format!(
-                    "  {} {}",
-                    sanitize_terminal_text("│"),
-                    sanitize_terminal_text(line)
-                ),
-                thinking_style,
-            ));
+    // Thinking block occupies 1 header + N body + 1 blank line when present.
+    // It sits between the role header and the markdown; when the thinking
+    // length is unchanged across ticks it is part of the frozen prefix and
+    // is moved (not re-rendered) from the previous tick's block.
+    let thinking_len = message.thinking_content.len();
+    let thinking_block_lines = if message.thinking_content.is_empty() {
+        0
+    } else {
+        1 + message.thinking_content.lines().count() + 1
+    };
+
+    // Only reuse the incremental cache when the thinking block is unchanged
+    // (a mismatch would misalign the frozen prefix). Otherwise pass None to
+    // force a full fallback render for this tick.
+    let usable_prev = match incremental_markdown {
+        Some(ref s) if s.thinking_len() == thinking_len => incremental_markdown,
+        _ => None,
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut wrapped: Vec<Vec<Line<'static>>> = Vec::new();
+
+    // `push` a logical line together with its wrapped visual lines.
+    let push = |lines: &mut Vec<Line<'static>>,
+                wrapped: &mut Vec<Vec<Line<'static>>>,
+                line: Line<'static>| {
+        let w = wrap_line_to_visual_lines(&line, width);
+        lines.push(line);
+        wrapped.push(w);
+    };
+
+    // Markdown render (assistant with content). Determines whether the
+    // incremental path applies — if so the header/thinking prefix is moved
+    // from the previous tick's block and only the suffix is emitted here.
+    //
+    // The `!message.content.is_empty()` guard is intentional: during the
+    // pure-thinking phase the thinking header shows a per-tick spinner
+    // (`is_thinking` → "⭕️ ⠋ Thinking…"), so the block can never be frozen
+    // (it must re-render each tick). More importantly, on the empty→non-
+    // empty transition the header flips from the animated spinner to the
+    // static "⭕️ Thought"; if the state from the thinking tick were reused
+    // here, the incremental path would *move* the stale animated header
+    // from the prev block and the spinner would freeze. Clearing the state
+    // during thinking forces a full (cheap — no accumulated markdown yet)
+    // render on the first content tick, which correctly switches the header
+    // to "Thought". After that, subsequent content ticks reuse the state and
+    // move the (now static) prefix.
+    let mut new_markdown_state = None;
+    let (md_lines, md_wrapped, md_move_count) = match message.role {
+        MessageRole::Assistant if !message.content.is_empty() => {
+            let result = render_markdown_incremental(usable_prev, &message.content, theme, width);
+            let mut new_state = result.new_state;
+            new_state.set_thinking_len(thinking_len);
+            new_markdown_state = Some(new_state);
+            (result.lines, result.wrapped, result.frozen_markdown_move_count)
         }
-        lines.push(Line::raw(""));
+        _ => (Vec::new(), Vec::new(), None),
+    };
+    let is_incremental = md_move_count.is_some();
+    let frozen_prefix_line_count = md_move_count.map(|md_n| 1 + thinking_block_lines + md_n);
+
+    // Role header + thinking block: skipped on the incremental path (they
+    // are the frozen prefix moved from the previous block).
+    if !is_incremental {
+        push(
+            &mut lines,
+            &mut wrapped,
+            Line::from(vec![
+                Span::styled(
+                    sanitize_terminal_text("▎ "),
+                    Style::default().fg(indicator_color),
+                ),
+                Span::styled(role_label.to_string(), role_style),
+                Span::styled(format!("  {timestamp}"), Style::default().fg(theme.muted)),
+            ]),
+        );
+
+        if !message.thinking_content.is_empty() {
+            let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
+            let thinking_header = if is_thinking {
+                format!("  {} {loading_animation}", sanitize_terminal_text("⭕️"))
+            } else {
+                format!("  {} Thought", sanitize_terminal_text("⭕️"))
+            };
+            push(
+                &mut lines,
+                &mut wrapped,
+                Line::styled(
+                    thinking_header,
+                    Style::default()
+                        .fg(theme.muted)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            );
+            let thinking_style = Style::default().fg(theme.muted).add_modifier(Modifier::DIM);
+            for line in message.thinking_content.lines() {
+                push(
+                    &mut lines,
+                    &mut wrapped,
+                    Line::styled(
+                        format!(
+                            "  {} {}",
+                            sanitize_terminal_text("│"),
+                            sanitize_terminal_text(line)
+                        ),
+                        thinking_style,
+                    ),
+                );
+            }
+            push(&mut lines, &mut wrapped, Line::raw(""));
+        }
+
+        if show_stream_thinking {
+            push(
+                &mut lines,
+                &mut wrapped,
+                Line::styled(
+                    format!("  {loading_animation}"),
+                    Style::default().fg(theme.accent),
+                ),
+            );
+        }
     }
 
-    if show_stream_thinking {
-        lines.push(Line::styled(
-            format!("  {loading_animation}"),
-            Style::default().fg(theme.accent),
-        ));
-    }
-
+    // Markdown / plain content.
     match message.role {
         MessageRole::Assistant if !message.content.is_empty() => {
-            lines.extend(render_markdown(&message.content, theme, width));
+            lines.extend(md_lines);
+            wrapped.extend(md_wrapped);
         }
         _ => {
             for line in message.content.lines() {
-                lines.push(Line::styled(
-                    format!("  {}", sanitize_terminal_text(line)),
-                    content_style,
-                ));
+                push(
+                    &mut lines,
+                    &mut wrapped,
+                    Line::styled(
+                        format!("  {}", sanitize_terminal_text(line)),
+                        content_style,
+                    ),
+                );
             }
         }
     }
 
     if message.is_streaming && !show_stream_thinking {
-        lines.push(Line::styled(
-            format!("  {}", sanitize_terminal_text("▌")),
-            Style::default().fg(theme.accent),
-        ));
+        push(
+            &mut lines,
+            &mut wrapped,
+            Line::styled(
+                format!("  {}", sanitize_terminal_text("▌")),
+                Style::default().fg(theme.accent),
+            ),
+        );
     }
-    lines.push(Line::raw(""));
+    push(&mut lines, &mut wrapped, Line::raw(""));
     #[cfg(debug_assertions)]
     {
         let elapsed = _start.elapsed();
@@ -1885,7 +2151,7 @@ fn render_standard_message_lines(
             eprintln!("PERF render_standard_message_lines: {}µs, {} lines", elapsed.as_micros(), lines.len());
         }
     }
-    lines
+    (lines, wrapped, new_markdown_state, frozen_prefix_line_count)
 }
 
 /// Restyle the characters in `col_start..col_end` (char indices) within a
@@ -2231,6 +2497,7 @@ mod tests {
         wrap_line_to_visual_lines,
     };
     use crate::app_state::CachedMessageRender;
+    use crate::app_state::{MessageVisualBlock, TranscriptRenderCache};
 
     /// Regression test for the "missing last line" bug. `build_transcript_cache`
     /// must derive `total_lines` from the same `wrap_line_to_visual_lines` call
@@ -2259,6 +2526,7 @@ mod tests {
             subagent_open_target: None,
             wrapped_lines: Some(wrapped_lines),
             lines,
+            frozen_prefix_line_count: None,
         };
 
         let cache = build_transcript_cache(None, vec![Some(render)]);
@@ -2630,7 +2898,7 @@ mod tests {
             file_change: None,
         });
 
-        let collapsed = render_message_entry(&message, &theme, 80, false, false, "");
+        let (collapsed, _state) = render_message_entry(&message, &theme, 80, false, false, "", None);
         assert_eq!(collapsed.tool_toggle_row_offset, Some(1));
 
         message
@@ -2638,7 +2906,7 @@ mod tests {
             .as_mut()
             .expect("tool state should exist")
             .expanded = true;
-        let expanded = render_message_entry(&message, &theme, 80, false, false, "");
+        let (expanded, _state) = render_message_entry(&message, &theme, 80, false, false, "", None);
         assert_eq!(expanded.tool_toggle_row_offset, Some(2));
     }
 
@@ -2740,6 +3008,7 @@ mod tests {
             subagent_open_target: None,
             wrapped_lines,
             lines: lines.to_vec(),
+            frozen_prefix_line_count: None,
         }
     }
 
@@ -3066,7 +3335,201 @@ mod tests {
                 incr < full,
                 "scenario {label}: incremental step ({incr}µs) must be cheaper \
                  than full rebuild ({full}µs)",
-            );
+             );
         }
+    }
+
+    /// End-to-end test for the incremental block-move path in
+    /// `build_transcript_cache`: a dirty render with
+    /// `frozen_prefix_line_count = Some(n)` must move the first `n` logical
+    /// (and their visual) lines from the previous tick's block and append
+    /// the suffix, producing the same result as a full render.
+    #[test]
+    fn build_transcript_cache_incremental_moves_frozen_prefix() {
+        let width: u16 = 80;
+
+        // Previous tick: a full block [header, md1, md2, cursor, blank].
+        // Each short line wraps to exactly one visual line. The Vecs are
+        // constructed with spare capacity so the incremental path's
+        // `truncate` + `extend` does not reallocate — letting us verify the
+        // frozen prefix is MOVED (same heap allocation), not cloned.
+        let mut prev_lines: Vec<Line<'static>> = Vec::with_capacity(32);
+        prev_lines.push(Line::from("header"));
+        prev_lines.push(Line::from("md1"));
+        prev_lines.push(Line::from("md2"));
+        prev_lines.push(Line::from("▌"));
+        prev_lines.push(Line::raw(""));
+        let mut prev_visuals: Vec<Line<'static>> = Vec::with_capacity(32);
+        for l in &prev_lines {
+            prev_visuals.extend(wrap_line_to_visual_lines(l, width));
+        }
+        let prev_l2v: Vec<usize> = {
+            let mut v = Vec::new();
+            let mut acc = 0;
+            for l in &prev_lines {
+                let w = wrap_line_to_visual_lines(l, width);
+                v.push(acc);
+                acc += w.len();
+            }
+            v
+        };
+        let line_texts: Vec<String> = prev_lines.iter().map(rendered_line_text).collect();
+        let line_is_header: Vec<bool> = (0..prev_lines.len()).map(|i| i == 0).collect();
+        let total_lines = prev_visuals.len();
+        let visual_line_backgrounds = vec![None; total_lines];
+
+        let prev_block = MessageVisualBlock {
+            message_index: 0,
+            start_visual_row: 0,
+            logical_line_start: 0,
+            lines: prev_lines,
+            visual_lines: prev_visuals,
+            logical_to_visual_offset: prev_l2v.clone(),
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+        };
+        // Save the block's heap pointers before it is moved into the cache.
+        // Vec::as_ptr is stable across moves and `truncate` (no realloc), so
+        // the new block's moved prefix must share these exact allocations.
+        let prev_lines_ptr = prev_block.lines.as_ptr();
+        let prev_visuals_ptr = prev_block.visual_lines.as_ptr();
+        let prev_cache = TranscriptRenderCache {
+            message_blocks: vec![prev_block],
+            logical_line_visual_starts: prev_l2v,
+            line_texts,
+            line_is_header,
+            visual_line_backgrounds,
+            total_lines,
+        };
+
+        // This tick: frozen prefix = [header, md1, md2] (3 lines).
+        // Suffix = [md3, cursor, blank] (newly rendered).
+        let suffix_lines: Vec<Line<'static>> =
+            vec![Line::from("md3"), Line::from("▌"), Line::raw("")];
+        let suffix_wrapped: Vec<Vec<Line<'static>>> = suffix_lines
+            .iter()
+            .map(|l| wrap_line_to_visual_lines(l, width))
+            .collect();
+        let render = CachedMessageRender {
+            width,
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            wrapped_lines: Some(suffix_wrapped),
+            lines: suffix_lines,
+            frozen_prefix_line_count: Some(3),
+        };
+
+        let new_cache = build_transcript_cache(Some(prev_cache), vec![Some(render)]);
+        let block = &new_cache.message_blocks[0];
+
+        // Combined logical lines = moved prefix + suffix.
+        assert_eq!(block.lines.len(), 6, "prefix(3) + suffix(3)");
+        assert_eq!(rendered_line_text(&block.lines[0]), "header");
+        assert_eq!(rendered_line_text(&block.lines[1]), "md1");
+        assert_eq!(rendered_line_text(&block.lines[2]), "md2");
+        assert_eq!(rendered_line_text(&block.lines[3]), "md3");
+        assert_eq!(rendered_line_text(&block.lines[4]), "▌");
+        assert_eq!(rendered_line_text(&block.lines[5]), "");
+
+        // The frozen prefix lines must be MOVED from the prev block (same
+        // heap allocation), not cloned.
+        assert_eq!(
+            block.lines.as_ptr(),
+            prev_lines_ptr,
+            "frozen prefix lines must be moved (same allocation), not cloned"
+        );
+        assert_eq!(
+            block.visual_lines.as_ptr(),
+            prev_visuals_ptr,
+            "frozen prefix visual_lines must be moved (same allocation)"
+        );
+
+        // logical_to_visual_offset: 6 logical lines, each → 1 visual line.
+        assert_eq!(block.logical_to_visual_offset, vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(block.visual_lines.len(), 6);
+        assert_eq!(new_cache.total_lines, 6);
+    }
+
+    /// A block-move where the suffix wraps to multiple visual lines must
+    /// produce correct `logical_to_visual_offset` entries that continue from
+    /// the frozen prefix's visual count (not restart at 0).
+    #[test]
+    fn build_transcript_cache_incremental_offset_continues_from_prefix() {
+        let width: u16 = 10;
+
+        // Prev: [header, long_line_that_wraps_to_2] → 3 visual lines total.
+        let prev_lines: Vec<Line<'static>> =
+            vec![Line::from("hdr"), Line::from("a very long line that wraps")];
+        let prev_wrapped: Vec<Vec<Line<'static>>> = prev_lines
+            .iter()
+            .map(|l| wrap_line_to_visual_lines(l, width))
+            .collect();
+        let prev_visuals: Vec<Line<'static>> =
+            prev_wrapped.iter().flatten().cloned().collect();
+        let prev_l2v: Vec<usize> = {
+            let mut v = Vec::new();
+            let mut acc = 0;
+            for wl in &prev_wrapped {
+                v.push(acc);
+                acc += wl.len();
+            }
+            v
+        };
+        let prefix_visual_count = prev_l2v[1]; // visual count for header only
+        let prev_block = MessageVisualBlock {
+            message_index: 0,
+            start_visual_row: 0,
+            logical_line_start: 0,
+            lines: prev_lines.clone(),
+            visual_lines: prev_visuals.clone(),
+            logical_to_visual_offset: prev_l2v.clone(),
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+        };
+        let prev_cache = TranscriptRenderCache {
+            message_blocks: vec![prev_block],
+            logical_line_visual_starts: prev_l2v.clone(),
+            line_texts: prev_lines.iter().map(rendered_line_text).collect(),
+            line_is_header: vec![true, false],
+            visual_line_backgrounds: vec![None; prev_visuals.len()],
+            total_lines: prev_visuals.len(),
+        };
+
+        // Freeze only the header (1 line); suffix = another long line.
+        let suffix_lines: Vec<Line<'static>> =
+            vec![Line::from("another long wrapping suffix line")];
+        let suffix_wrapped: Vec<Vec<Line<'static>>> = suffix_lines
+            .iter()
+            .map(|l| wrap_line_to_visual_lines(l, width))
+            .collect();
+        let suffix_visual_count: usize = suffix_wrapped[0].len();
+        let render = CachedMessageRender {
+            width,
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            wrapped_lines: Some(suffix_wrapped),
+            lines: suffix_lines,
+            frozen_prefix_line_count: Some(1),
+        };
+
+        let new_cache = build_transcript_cache(Some(prev_cache), vec![Some(render)]);
+        let block = &new_cache.message_blocks[0];
+
+        assert_eq!(block.lines.len(), 2);
+        assert_eq!(rendered_line_text(&block.lines[0]), "hdr");
+        assert_eq!(rendered_line_text(&block.lines[1]), "another long wrapping suffix line");
+
+        // l2v[0] = 0 (header), l2v[1] = prefix_visual_count (suffix starts
+        // after the header's visual lines).
+        assert_eq!(block.logical_to_visual_offset.len(), 2);
+        assert_eq!(block.logical_to_visual_offset[0], 0);
+        assert_eq!(
+            block.logical_to_visual_offset[1], prefix_visual_count,
+            "suffix offset must continue from the frozen prefix's visual count"
+        );
+        assert_eq!(
+            block.visual_lines.len(),
+            prefix_visual_count + suffix_visual_count
+        );
     }
 }
