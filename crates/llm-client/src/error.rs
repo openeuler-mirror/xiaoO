@@ -14,6 +14,10 @@ pub(crate) fn map_reqwest_error(err: reqwest::Error) -> LlmError {
         LlmError::HttpError(format!("Request timeout: {}", err))
     } else if err.is_connect() {
         LlmError::HttpError(format!("Connection failed: {}", err))
+    } else if err.is_decode() {
+        LlmError::StreamError {
+            message: format!("error decoding response body: {}", err),
+        }
     } else {
         LlmError::HttpError(err.to_string())
     }

@@ -451,7 +451,8 @@ fn create_router_from_state(
             .route(
                 "/api/v1/runtimes/write-file",
                 post(handle_runtime_write_file),
-            ),
+            )
+            .route("/api/v1/runtimes/export/:session_id", get(handle_session_export)),
         bearer_auth.clone(),
     );
 
@@ -1035,6 +1036,32 @@ async fn handle_runtime_checkout(
     // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_export(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // Export returns the full SessionRecord (history, memory, agent state,
+    // resolved LLM config). Restrict it to the current lease holder,
+    // consistent with read_file/pause.
+    let client_id = query.get("client_id").map(String::as_str);
+    if let Err(response) = require_lease_holder(&state, &session_id, client_id).await {
+        return response;
+    }
+    match state.session_service.export_session(&session_id).await {
+        Ok(mut session_data) => {
+            // Drop the resolved LLM auth field from the export: the daemon
+            // resolves it from the runtime store per request, so it is not
+            // needed in the payload and should not be surfaced to callers.
+            if let Some(llm) = session_data.runtime.llm.as_mut() {
+                llm.api_key = None;
+            }
+            Json(session_data).into_response()
+        }
         Err(error) => map_session_error(error),
     }
 }

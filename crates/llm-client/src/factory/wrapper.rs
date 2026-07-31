@@ -906,6 +906,7 @@ fn retry_delay_ms(error: &LlmError) -> Option<u64> {
         LlmError::RateLimited { retry_after_ms, .. } if *retry_after_ms > 0 => {
             Some(*retry_after_ms)
         }
+        LlmError::StreamError { .. } => Some(1000),
         _ => None,
     }
 }
