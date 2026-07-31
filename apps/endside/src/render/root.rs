@@ -19,45 +19,74 @@ impl App {
     }
 
     pub fn ui(&mut self, frame: &mut Frame) {
+        #[cfg(debug_assertions)]
+        let _ui_start = std::time::Instant::now();
         let size = frame.area();
-        self.state.status_panel.set_workspace(&self.state.workspace);
+        let is_loading = self.state.chat_state.is_loading;
+
+        let (chunks, body_chunks, show_sidebar) = if self.state.render_state.cached_area == Some(size)
+        {
+            // Fast path: reuse cached layout (terminal has not resized).
+            let chunks: &[Rect; 4] = self.state.render_state.cached_chunks.as_slice().try_into().unwrap();
+            let body_chunks: &[Rect; 2] = self.state.render_state.cached_body_chunks.as_slice().try_into().unwrap();
+            (chunks, body_chunks, self.state.render_state.cached_show_sidebar)
+        } else {
+            // Slow path: recompute layout and cache it.
+            self.state.status_panel.set_workspace(&self.state.workspace);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(5),
+                    Constraint::Length(7),
+                    Constraint::Length(3),
+                ])
+                .split(size);
+            let body_area = chunks[1];
+            let show_sidebar =
+                body_area.width >= 72 || (self.state.plan_state.is_some() && body_area.width >= 60);
+            let sidebar_width = (body_area.width / 3).clamp(28, 40);
+            let body_chunks = if show_sidebar {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(32), Constraint::Length(sidebar_width)])
+                    .split(body_area)
+            } else {
+                Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Min(32)])
+                    .split(body_area)
+            };
+            self.state.render_state.cached_area = Some(size);
+            self.state.render_state.cached_chunks = chunks.to_vec();
+            self.state.render_state.cached_body_chunks = body_chunks.to_vec();
+            self.state.render_state.cached_show_sidebar = show_sidebar;
+            (&self.state.render_state.cached_chunks.as_slice().try_into().unwrap(),
+             &self.state.render_state.cached_body_chunks.as_slice().try_into().unwrap(),
+             show_sidebar)
+        };
+        let chunks = *chunks;
+        let body_chunks = *body_chunks;
+
         let background = Block::default().style(Style::default().bg(self.state.theme.background));
         frame.render_widget(background, size);
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(5),
-                Constraint::Length(7),
-                Constraint::Length(3),
-            ])
-            .split(size);
-
-        let body_area = chunks[1];
-        let show_sidebar =
-            body_area.width >= 72 || (self.state.plan_state.is_some() && body_area.width >= 60);
-        let sidebar_width = (body_area.width / 3).clamp(28, 40);
-        let body_chunks = if show_sidebar {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(32), Constraint::Length(sidebar_width)])
-                .split(body_area)
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(32)])
-                .split(body_area)
-        };
-
+        #[cfg(debug_assertions)]
+        let _t0 = std::time::Instant::now();
         self.render_header(frame, chunks[0]);
+        #[cfg(debug_assertions)]
+        let _t1 = std::time::Instant::now();
         self.render_chat(frame, body_chunks[0]);
+        #[cfg(debug_assertions)]
+        let _t2 = std::time::Instant::now();
         let input_chunk = chunks[2];
         self.state.render_state.interaction_prompt_list_area = None;
         self.state.render_state.interaction_prompt_supplement_area = None;
         self.state.render_state.slash_popup_inner = None;
         self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
+        #[cfg(debug_assertions)]
+        let _t3 = std::time::Instant::now();
         let pending_bounds = Rect {
             x: body_chunks[0].x,
             y: size.y,
@@ -68,7 +97,11 @@ impl App {
         if show_sidebar {
             self.render_sidebar(frame, body_chunks[1]);
         }
+        #[cfg(debug_assertions)]
+        let _t4 = std::time::Instant::now();
         self.render_status_bar(frame, chunks[3]);
+        #[cfg(debug_assertions)]
+        let _t5 = std::time::Instant::now();
 
         if self.state.provider_dialog.is_none()
             && self.state.sandbox_dialog.is_none()
@@ -104,6 +137,40 @@ impl App {
         // Copy-to-clipboard toast (mirrors opencode's toast.show after copy).
         if self.state.copy_notice_active() {
             self.render_copy_toast(frame, size);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // Use `Instant::duration_since` (saturates to zero on underflow)
+            // instead of `Duration` subtraction, which panics on underflow.
+            // The paired `Instant`s are nearly back-to-back when their guarded
+            // render is skipped (e.g. loading), so the second `.elapsed()` can
+            // exceed the first by a few ns — enough to underflow a naive `a - b`.
+            let total = _ui_start.elapsed();
+            let t_setup = _t0.duration_since(_ui_start);
+            let t_header = _t1.duration_since(_t0);
+            let t_chat = _t2.duration_since(_t1);
+            let t_input = _t3.duration_since(_t2);
+            let t_sidebar = _t4.duration_since(_t3);
+            let t_status = _t5.duration_since(_t4);
+            // dialogs = everything from _t5 (status_bar done) to now, including
+            // the dialog overlay renders + copy_toast. Using `Instant::now()`
+            // (not `_t5.elapsed() - total`) so the phases sum to `total`.
+            let t_dialogs = std::time::Instant::now().duration_since(_t5);
+            if total > std::time::Duration::from_micros(100) {
+                eprintln!(
+                    "PERF ui: total={}µs setup={}µs header={}µs chat={}µs input={}µs sidebar={}µs status={}µs dialogs={}µs loading={}",
+                    total.as_micros(),
+                    t_setup.as_micros(),
+                    t_header.as_micros(),
+                    t_chat.as_micros(),
+                    t_input.as_micros(),
+                    t_sidebar.as_micros(),
+                    t_status.as_micros(),
+                    t_dialogs.as_micros(),
+                    is_loading,
+                );
+            }
         }
     }
 

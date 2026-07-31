@@ -645,6 +645,11 @@ impl GatewayRuntime {
     }
 
     fn apply_todo_snapshot(&mut self, state: &mut AppState, update: TodoSnapshotUpdate) {
+        // `show_sidebar` in the root layout cache depends on
+        // `plan_state.is_some()` (see `App::ui`), so a Some<->None transition
+        // must invalidate the cached layout split. Content-only updates
+        // (still `Some`) don't change sidebar visibility, so the cache stays.
+        let plan_presence_changed = state.plan_state.is_some() != !update.items.is_empty();
         state.plan_state = if update.items.is_empty() {
             None
         } else {
@@ -657,6 +662,9 @@ impl GatewayRuntime {
                     .collect(),
             })
         };
+        if plan_presence_changed {
+            state.render_state.cached_area = None;
+        }
     }
 
     fn reveal_stream_chars(&mut self, state: &mut AppState) {
@@ -887,6 +895,89 @@ mod tests {
         assert_eq!(todo.items.len(), 2);
         assert_eq!(todo.items[0].0, TodoDisplayStatus::Completed);
         assert_eq!(todo.items[1].0, TodoDisplayStatus::InProgress);
+    }
+
+    /// Regression: `apply_todo_snapshot` must invalidate the root layout cache
+    /// (`cached_area`) on a Some<->None `plan_state` transition, because
+    /// sidebar visibility depends on `plan_state.is_some()` (see `App::ui`).
+    /// Content-only updates (still `Some`) must NOT invalidate, so the layout
+    /// isn't recomputed on every plan-item tick.
+    #[test]
+    fn apply_todo_snapshot_invalidates_layout_cache_on_presence_transition() {
+        use ratatui::layout::Rect;
+        use xiaoo_shared::plan::{TodoDisplayStatus as SharedTodoStatus, TodoSnapshotItem, TodoSnapshotUpdate};
+
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        // Simulate a prior layout pass that cached the terminal area.
+        let cached_rect = Rect::new(0, 0, 64, 24);
+        state.render_state.cached_area = Some(cached_rect);
+
+        // plan_state starts None; empty update -> no transition -> cache stays.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate { title: String::new(), items: vec![] },
+        );
+        assert!(state.plan_state.is_none());
+        assert_eq!(
+            state.render_state.cached_area,
+            Some(cached_rect),
+            "None->None transition must not invalidate layout cache"
+        );
+
+        // None -> Some transition: cache must be invalidated.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: "Plan".to_string(),
+                items: vec![TodoSnapshotItem {
+                    status: SharedTodoStatus::InProgress,
+                    content: "step 1".to_string(),
+                }],
+            },
+        );
+        assert!(state.plan_state.is_some());
+        assert!(
+            state.render_state.cached_area.is_none(),
+            "None->Some transition must invalidate layout cache (sidebar visibility changed)"
+        );
+
+        // Re-cache, then Some -> Some (content only): cache must stay.
+        state.render_state.cached_area = Some(cached_rect);
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: "Plan".to_string(),
+                items: vec![
+                    TodoSnapshotItem {
+                        status: SharedTodoStatus::Completed,
+                        content: "step 1".to_string(),
+                    },
+                    TodoSnapshotItem {
+                        status: SharedTodoStatus::InProgress,
+                        content: "step 2".to_string(),
+                    },
+                ],
+            },
+        );
+        assert!(state.plan_state.is_some());
+        assert_eq!(
+            state.render_state.cached_area,
+            Some(cached_rect),
+            "Some->Some (content-only) transition must NOT invalidate layout cache"
+        );
+
+        // Some -> None transition: cache must be invalidated.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate { title: String::new(), items: vec![] },
+        );
+        assert!(state.plan_state.is_none());
+        assert!(
+            state.render_state.cached_area.is_none(),
+            "Some->None transition must invalidate layout cache (sidebar visibility changed)"
+        );
     }
 
     #[test]

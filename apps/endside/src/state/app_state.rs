@@ -120,32 +120,112 @@ pub struct SubagentOpenTarget {
 
 #[derive(Clone)]
 pub struct CachedMessageRender {
-    pub revision: u64,
     pub width: u16,
-    pub theme: Theme,
     pub lines: Vec<Line<'static>>,
+    pub wrapped_lines: Option<Vec<Vec<Line<'static>>>>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
+/// Per-message visual render block stored inside [`TranscriptRenderCache`].
+///
+/// Non-dirty messages move their `lines` / `visual_lines` from the previous
+/// tick's cache into the new one (zero `Line` clone); only dirty messages
+/// re-wrap. `logical_to_visual_offset[i]` is the local visual row where
+/// logical line `i` begins within this block — kept so the flat
+/// `logical_line_visual_starts` index can be rebuilt without re-walking the
+/// (moved) `visual_lines`.
 #[derive(Clone)]
-pub struct CachedMessageLayout {
+pub struct MessageVisualBlock {
     pub message_index: usize,
     pub start_visual_row: usize,
+    pub logical_line_start: usize,
+    pub lines: Vec<Line<'static>>,
+    pub visual_lines: Vec<Line<'static>>,
+    pub logical_to_visual_offset: Vec<usize>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
 #[derive(Clone)]
 pub struct TranscriptRenderCache {
-    pub all_lines: Vec<Line<'static>>,
-    pub visual_lines: Vec<Line<'static>>,
-    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
-    pub line_texts: Vec<String>,
-    pub line_is_header: Vec<bool>,
+    pub message_blocks: Vec<MessageVisualBlock>,
+    /// Flat index: visual row where each logical line begins (global).
+    /// Rebuilt each tick from `message_blocks` (O(n_logical), no `Line` clone).
     pub logical_line_visual_starts: Vec<usize>,
-    pub message_layouts: Vec<CachedMessageLayout>,
+    /// Flat per-logical-line plain text (mouse / selection copy source).
+    pub line_texts: Vec<String>,
+    /// Flat per-logical-line "is role/tool header" flag.
+    pub line_is_header: Vec<bool>,
+    /// Flat per-visual-line background colour (`paint_visible_line_backgrounds`).
+    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
     pub total_lines: usize,
+}
+
+impl TranscriptRenderCache {
+    /// Number of logical lines across all blocks.
+    pub fn logical_line_count(&self) -> usize {
+        self.line_texts.len()
+    }
+
+    /// Borrow a single visual line by global visual row index.
+    pub fn visual_line(&self, visual_row: usize) -> Option<&Line<'static>> {
+        if visual_row >= self.total_lines {
+            return None;
+        }
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.start_visual_row <= visual_row)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = visual_row - block.start_visual_row;
+        block.visual_lines.get(local)
+    }
+
+    /// Borrow a single logical line by global logical line index.
+    pub fn logical_line(&self, logical_idx: usize) -> Option<&Line<'static>> {
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.logical_line_start <= logical_idx)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = logical_idx - block.logical_line_start;
+        block.lines.get(local)
+    }
+
+    /// Collect the visible visual-line window `[scroll_offset, visual_end)`
+    /// by cloning only the relevant slices from `message_blocks`. This is the
+    /// sole remaining `Line` clone site per frame, bounded by `inner_height`
+    /// instead of the full transcript.
+    pub fn collect_visible_visual_lines(
+        &self,
+        scroll_offset: usize,
+        visual_end: usize,
+    ) -> Vec<Line<'static>> {
+        if scroll_offset >= visual_end || scroll_offset >= self.total_lines {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(visual_end.saturating_sub(scroll_offset));
+        let mut row = scroll_offset;
+        while row < visual_end && row < self.total_lines {
+            let block_idx = self
+                .message_blocks
+                .partition_point(|b| b.start_visual_row <= row)
+                .saturating_sub(1);
+            let Some(block) = self.message_blocks.get(block_idx) else {
+                break;
+            };
+            let local = row - block.start_visual_row;
+            let block_remaining = block.visual_lines.len().saturating_sub(local);
+            let take = block_remaining.min(visual_end - row);
+            if take == 0 {
+                break;
+            }
+            out.extend(block.visual_lines[local..local + take].iter().cloned());
+            row += take;
+        }
+        out
+    }
 }
 
 #[derive(Default)]
@@ -153,7 +233,18 @@ pub struct RenderState {
     pub messages_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
     pub api_key_toggle_area: Option<Rect>,
-    pub message_renders: Vec<Option<CachedMessageRender>>,
+    /// Per-message last-applied `render_revision`. `None` means "not yet
+    /// rendered" (dirty). Replaces the former `message_renders:
+    /// Vec<Option<CachedMessageRender>>` — we now keep only the revision
+    /// fingerprint instead of the full render tree, and the render itself
+    /// lives inside `TranscriptRenderCache::message_blocks`.
+    pub message_render_revisions: Vec<Option<u64>>,
+    /// Width used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-wrap).
+    pub last_render_width: Option<u16>,
+    /// Theme used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-style).
+    pub last_render_theme: Option<Theme>,
     pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub subagent_open_regions: Vec<SubagentOpenRegion>,
@@ -164,6 +255,19 @@ pub struct RenderState {
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
     pub active_transcript_key: Option<String>,
+    /// Cached terminal area for layout reuse across ticks.
+    /// When `frame.area()` matches `cached_area`, layout splits are skipped.
+    pub cached_area: Option<Rect>,
+    /// Cached vertical layout chunks (header, body, input, status).
+    pub cached_chunks: Vec<Rect>,
+    /// Cached body chunks (chat, sidebar).
+    pub cached_body_chunks: Vec<Rect>,
+    /// Cached sidebar visibility computed from last layout.
+    ///
+    /// Depends on `AppState::plan_state.is_some()` (at terminal widths
+    /// 60..=71); a Some<->None transition must invalidate `cached_area` so the
+    /// body split is recomputed. See `apply_todo_snapshot`.
+    pub cached_show_sidebar: bool,
 }
 
 #[derive(Default)]
@@ -442,7 +546,9 @@ impl AppState {
     }
 
     pub fn invalidate_transcript_render_cache(&mut self) {
-        self.render_state.message_renders.clear();
+        self.render_state.message_render_revisions.clear();
+        self.render_state.last_render_width = None;
+        self.render_state.last_render_theme = None;
         self.render_state.transcript_cache = None;
         self.render_state.tool_toggle_regions.clear();
         self.render_state.subagent_open_regions.clear();

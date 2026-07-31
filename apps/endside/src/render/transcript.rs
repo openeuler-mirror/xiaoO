@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
 use crate::app_state::{
-    CachedMessageLayout, CachedMessageRender, SubagentOpenRegion, SubagentOpenTarget,
+    CachedMessageRender, MessageVisualBlock, SubagentOpenRegion, SubagentOpenTarget,
     ToolToggleRegion, TranscriptRenderCache,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
@@ -25,6 +25,14 @@ use super::utils::{
 
 impl App {
     pub(crate) fn render_chat(&mut self, frame: &mut Frame, area: Rect) {
+        #[cfg(debug_assertions)]
+        let _start = std::time::Instant::now();
+        #[cfg(debug_assertions)]
+        let mut _t_dirty: Option<std::time::Instant> = None;
+        #[cfg(debug_assertions)]
+        let mut _t_build: Option<std::time::Instant> = None;
+        #[cfg(debug_assertions)]
+        let mut _t_collect: Option<std::time::Instant> = None;
         let transcript_key = self.state.active_transcript_key();
         let active_agent_id = self
             .state
@@ -62,7 +70,12 @@ impl App {
             let chat_state = &self.state.chat_state;
             let render_state = &mut self.state.render_state;
             if render_state.active_transcript_key.as_deref() != Some(transcript_key.as_str()) {
-                render_state.message_renders.clear();
+                // Switched transcript (different session / subagent lane):
+                // full rebuild — prior blocks belong to a different message
+                // stream and must not be reused.
+                render_state.message_render_revisions.clear();
+                render_state.last_render_width = None;
+                render_state.last_render_theme = None;
                 render_state.transcript_cache = None;
                 render_state.active_transcript_key = Some(transcript_key.clone());
             }
@@ -83,67 +96,84 @@ impl App {
                 };
 
             let message_count = messages.len();
-            if render_state.message_renders.len() != message_count {
-                render_state.message_renders.resize(message_count, None);
+            let prev_count = render_state.message_render_revisions.len();
+            if prev_count > message_count {
+                // Messages removed from the middle/end: surviving indices may
+                // have shifted, so a per-index `render_revision` check could
+                // match a different message's block. Fall back to a full
+                // rebuild (rare path — deletions are uncommon).
+                render_state.message_render_revisions.clear();
+                render_state.last_render_width = None;
+                render_state.last_render_theme = None;
                 render_state.transcript_cache = None;
+            } else if prev_count < message_count {
+                // Messages appended: extend revision slots with `None` so the
+                // new tail is dirty. Prior blocks stay valid (append preserves
+                // indices), so `transcript_cache` is NOT cleared — the new
+                // messages are added incrementally on top.
+                render_state.message_render_revisions.resize(message_count, None);
             }
 
-            let mut transcript_dirty = render_state.transcript_cache.is_none();
+            let width_changed = render_state.last_render_width != Some(inner_area.width);
+            let theme_changed = render_state.last_render_theme != Some(theme);
+
+            // A None `transcript_cache` (first tick, post-switch, post-shrink)
+            // forces every message dirty; width/theme changes likewise.
+            let mut renders: Vec<Option<CachedMessageRender>> = Vec::with_capacity(message_count);
+            let mut any_dirty = render_state.transcript_cache.is_none()
+                || width_changed
+                || theme_changed;
+
             for message_index in 0..message_count {
                 let message = &messages[message_index];
                 let is_active_stream_message = active_stream_index == Some(message_index);
                 let should_bypass_cache = is_active_stream_message && chat_is_loading;
-                if should_bypass_cache {
-                    transcript_dirty = true;
-                    continue;
-                }
+                let revision_changed = render_state.message_render_revisions[message_index]
+                    != Some(message.render_revision);
+                let is_dirty = should_bypass_cache || revision_changed || width_changed || theme_changed;
 
-                let cache_slot = &mut render_state.message_renders[message_index];
-                let needs_rebuild = cache_slot.as_ref().is_none_or(|cached| {
-                    cached.revision != message.render_revision
-                        || cached.width != inner_area.width
-                        || cached.theme != theme
-                });
-                if needs_rebuild {
-                    *cache_slot = Some(render_message_entry(
+                if is_dirty {
+                    let rendered = render_message_entry(
                         message,
                         &theme,
                         inner_area.width,
                         is_active_stream_message,
                         chat_is_loading,
                         &loading_animation,
-                    ));
-                    transcript_dirty = true;
+                    );
+                    // Persist the fingerprint only for non-bypass messages:
+                    // bypass (active stream) messages are recomputed every
+                    // tick by definition, so leaving their slot untouched
+                    // keeps them dirty until the stream settles — at which
+                    // point `revision_changed` fires once and the slot is
+                    // updated.
+                    if !should_bypass_cache {
+                        render_state.message_render_revisions[message_index] =
+                            Some(message.render_revision);
+                    }
+                    renders.push(Some(rendered));
+                    any_dirty = true;
+                } else {
+                    // Non-dirty: `build_transcript_cache` will move the prior
+                    // block for this message out of the prev cache (zero
+                    // `Line` clone).
+                    renders.push(None);
                 }
             }
 
-            if transcript_dirty {
-                let mut current_renders = Vec::with_capacity(message_count);
-                for message_index in 0..message_count {
-                    let message = &messages[message_index];
-                    let is_active_stream_message = active_stream_index == Some(message_index);
-                    let should_bypass_cache = is_active_stream_message && chat_is_loading;
-                    if should_bypass_cache {
-                        current_renders.push(render_message_entry(
-                            message,
-                            &theme,
-                            inner_area.width,
-                            is_active_stream_message,
-                            chat_is_loading,
-                            &loading_animation,
-                        ));
-                    } else {
-                        current_renders.push(
-                            render_state.message_renders[message_index]
-                                .as_ref()
-                                .expect("message render cache must be populated")
-                                .clone(),
-                        );
-                    }
-                }
-                let transcript_cache = build_transcript_cache(&current_renders);
-                render_state.transcript_cache = Some(transcript_cache);
+            render_state.last_render_width = Some(inner_area.width);
+            render_state.last_render_theme = Some(theme);
+
+            #[cfg(debug_assertions)]
+            { _t_dirty = Some(std::time::Instant::now()); }
+            if any_dirty {
+                let prev = render_state.transcript_cache.take();
+                render_state.transcript_cache = Some(build_transcript_cache(prev, renders));
             }
+            #[cfg(debug_assertions)]
+            { _t_build = Some(std::time::Instant::now()); }
+            // `any_dirty == false` && prev cache present: nothing changed this
+            // tick — reuse the cache untouched (pure scroll / cursor blink).
         }
 
         let transcript_cache = self
@@ -186,12 +216,13 @@ impl App {
         let scroll_end = scroll_offset.saturating_add(inner_height);
         paint_visible_line_backgrounds(frame, inner_area, transcript_cache, scroll_offset);
         if let Some(sel) = &self.state.transcript_selection {
+            let logical_line_count = transcript_cache.logical_line_count();
             let start_line_index = transcript_cache
                 .logical_line_visual_starts
                 .partition_point(|start| *start <= scroll_offset)
                 .saturating_sub(1);
             let safe_start_line_index =
-                start_line_index.min(transcript_cache.all_lines.len().saturating_sub(1));
+                start_line_index.min(logical_line_count.saturating_sub(1));
             let slice_start_visual = transcript_cache
                 .logical_line_visual_starts
                 .get(safe_start_line_index)
@@ -200,16 +231,14 @@ impl App {
             let paragraph_scroll = scroll_offset.saturating_sub(slice_start_visual);
 
             let mut end_line_index = safe_start_line_index;
-            while end_line_index < transcript_cache.all_lines.len() {
+            while end_line_index < logical_line_count {
                 let line_start = transcript_cache.logical_line_visual_starts[end_line_index];
                 if line_start >= scroll_end {
                     break;
                 }
                 end_line_index += 1;
             }
-            if end_line_index == safe_start_line_index
-                && end_line_index < transcript_cache.all_lines.len()
-            {
+            if end_line_index == safe_start_line_index && end_line_index < logical_line_count {
                 end_line_index += 1;
             }
 
@@ -219,12 +248,11 @@ impl App {
                 .bg(self.state.theme.foreground)
                 .add_modifier(Modifier::BOLD);
             let mut selected_visual_lines = Vec::new();
-            for (visible_index, original_line) in transcript_cache.all_lines
-                [safe_start_line_index..end_line_index]
-                .iter()
-                .enumerate()
-            {
-                let global_line_index = safe_start_line_index + visible_index;
+            for visible_index in safe_start_line_index..end_line_index {
+                let global_line_index = visible_index;
+                let Some(original_line) = transcript_cache.logical_line(global_line_index) else {
+                    continue;
+                };
                 let line = if global_line_index < start_line || global_line_index > end_line {
                     original_line.clone()
                 } else {
@@ -270,21 +298,20 @@ impl App {
             let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         } else {
-            let visual_end = scroll_end.min(transcript_cache.visual_lines.len());
-            let visible_visual_lines = if scroll_offset < visual_end {
-                transcript_cache.visual_lines[scroll_offset..visual_end].to_vec()
-            } else {
-                Vec::new()
-            };
+            let visual_end = scroll_end.min(transcript_cache.total_lines);
+            #[cfg(debug_assertions)]
+            { _t_collect = Some(std::time::Instant::now()); }
+            let visible_visual_lines = transcript_cache
+                .collect_visible_visual_lines(scroll_offset, visual_end);
             let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         }
 
         self.state.render_state.tool_toggle_regions.clear();
         self.state.render_state.subagent_open_regions.clear();
-        for layout in &transcript_cache.message_layouts {
-            if let Some(open_target) = &layout.subagent_open_target {
-                let open_row = layout
+        for block in &transcript_cache.message_blocks {
+            if let Some(open_target) = &block.subagent_open_target {
+                let open_row = block
                     .start_visual_row
                     .saturating_add(open_target.row_offset);
                 if open_row >= scroll_offset && open_row < scroll_end {
@@ -303,14 +330,14 @@ impl App {
                 }
             }
 
-            if let Some(toggle_row_offset) = layout.tool_toggle_row_offset {
-                let toggle_row = layout.start_visual_row.saturating_add(toggle_row_offset);
+            if let Some(toggle_row_offset) = block.tool_toggle_row_offset {
+                let toggle_row = block.start_visual_row.saturating_add(toggle_row_offset);
                 if toggle_row >= scroll_offset && toggle_row < scroll_end {
                     self.state
                         .render_state
                         .tool_toggle_regions
                         .push(ToolToggleRegion {
-                            message_index: layout.message_index,
+                            message_index: block.message_index,
                             rect: Rect {
                                 x: inner_area.x,
                                 y: inner_area.y + (toggle_row.saturating_sub(scroll_offset) as u16),
@@ -342,6 +369,45 @@ impl App {
                 scrollbar_area,
                 &mut self.state.chat_state.scrollbar_state,
             );
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let elapsed = _start.elapsed();
+            // Phase breakdown (debug only). Phases:
+            //  - dirty:   dirty-detection loop + render_message_entry for dirty msgs
+            //  - build:   build_transcript_cache (incremental or full)
+            //  - collect: collect_visible_visual_lines (the sole per-frame Line clone)
+            //  - render:  Paragraph::render_widget + scrollbar + region scan
+            // `dirty`+`build` only accumulate when any_dirty; `collect`+`render`
+            // happen every frame. Phases are sequential and non-overlapping,
+            // so they sum to ~`elapsed`.
+            if elapsed > std::time::Duration::from_micros(500) {
+                let t_dirty = _t_dirty
+                    .map(|t| t.duration_since(_start))
+                    .unwrap_or_default();
+                let t_build = match (_t_dirty, _t_build) {
+                    (Some(d), Some(b)) => b.duration_since(d),
+                    _ => std::time::Duration::ZERO,
+                };
+                let t_collect = match (_t_build, _t_collect) {
+                    (Some(b), Some(c)) => c.duration_since(b),
+                    (None, Some(c)) => c.duration_since(_start),
+                    _ => std::time::Duration::ZERO,
+                };
+                let t_render = match _t_collect {
+                    Some(c) => _start.elapsed().saturating_sub(c.duration_since(_start)),
+                    None => std::time::Duration::ZERO,
+                };
+                eprintln!(
+                    "PERF render_chat: {}µs dirty={}µs build={}µs collect={}µs render={}µs",
+                    elapsed.as_micros(),
+                    t_dirty.as_micros(),
+                    t_build.as_micros(),
+                    t_collect.as_micros(),
+                    t_render.as_micros(),
+                );
+            }
         }
     }
 }
@@ -399,93 +465,176 @@ fn render_message_entry(
         )
     };
 
+    let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+        .iter()
+        .map(|line| wrap_line_to_visual_lines(line, width))
+        .collect();
+
     CachedMessageRender {
-        revision: message.render_revision,
         width,
-        theme: *theme,
         tool_toggle_row_offset,
         subagent_open_target,
+        wrapped_lines: Some(wrapped_lines),
         lines,
     }
 }
 
 pub(crate) fn build_transcript_cache(
-    message_renders: &[CachedMessageRender],
+    prev: Option<TranscriptRenderCache>,
+    renders: Vec<Option<CachedMessageRender>>,
 ) -> TranscriptRenderCache {
-    let mut all_lines = Vec::new();
-    let mut visual_lines = Vec::new();
-    let mut visual_line_backgrounds = Vec::new();
-    let mut line_texts = Vec::new();
-    let mut line_is_header = Vec::new();
-    let mut logical_line_visual_starts = Vec::new();
-    let mut message_layouts = Vec::with_capacity(message_renders.len());
+    #[cfg(debug_assertions)]
+    let _start = std::time::Instant::now();
+
+    // Take ownership of the previous cache's message blocks so non-dirty
+    // messages can be MOVED into the new cache (zero `Line` clone). Each slot
+    // is `Option` so we can `take()` exactly one block per non-dirty message.
+    let mut prev_blocks: Vec<Option<MessageVisualBlock>> = prev
+        .map(|c| {
+            let TranscriptRenderCache { message_blocks, .. } = c;
+            message_blocks.into_iter().map(Some).collect()
+        })
+        .unwrap_or_default();
+
+    let mut message_blocks: Vec<MessageVisualBlock> = Vec::with_capacity(renders.len());
+    let mut logical_line_visual_starts: Vec<usize> = Vec::new();
+    let mut line_texts: Vec<String> = Vec::new();
+    let mut line_is_header: Vec<bool> = Vec::new();
+    let mut visual_line_backgrounds: Vec<Option<Color>> = Vec::new();
     let mut absolute_visual_row = 0usize;
+    let mut absolute_logical_row = 0usize;
 
-    for (message_index, render) in message_renders.iter().enumerate() {
-        // Pre-wrap each logical line once and reuse the result both for
-        // `absolute_visual_row` (which becomes `total_lines` / `max_scroll`)
-        // and for `visual_lines`. Previously `total_lines` was derived from a
-        // character-based `div_ceil` predictor while `visual_lines` came from
-        // `wrap_line_to_visual_lines` (textwrap word-aware); for lines whose
-        // words do not pack neatly into `width` (long paths/URLs) the two
-        // disagreed, leaving the last visual line(s) stuck below the
-        // stick-to-bottom viewport until the user typed something to push them
-        // into view.
-        let wrapped_lines: Vec<Vec<Line<'static>>> = render
-            .lines
-            .iter()
-            .map(|line| wrap_line_to_visual_lines(line, render.width))
-            .collect();
+    for (message_index, render_opt) in renders.into_iter().enumerate() {
+        let block = if let Some(render) = render_opt {
+            // Dirty: rebuild from the freshly-computed render (move, no clone
+            // of the wrapped `Line` trees).
+            let lines = render.lines;
+            let wrapped_lines = render.wrapped_lines.unwrap_or_else(|| {
+                lines
+                    .iter()
+                    .map(|line| wrap_line_to_visual_lines(line, render.width))
+                    .collect::<Vec<_>>()
+            });
 
-        message_layouts.push(CachedMessageLayout {
-            message_index,
-            start_visual_row: absolute_visual_row,
-            tool_toggle_row_offset: render.tool_toggle_row_offset.map(|logical_offset| {
-                wrapped_lines
-                    .iter()
-                    .take(logical_offset)
-                    .map(|wrapped| wrapped.len())
-                    .sum()
-            }),
-            subagent_open_target: render.subagent_open_target.as_ref().map(|target| {
-                let visual_offset = wrapped_lines
-                    .iter()
-                    .take(target.row_offset)
-                    .map(|wrapped| wrapped.len())
-                    .sum();
+            // Per-logical-line visual row offset within this block; needed both
+            // to convert `tool_toggle_row_offset` / `subagent_open_target`
+            // (logical → visual) and to fill the flat
+            // `logical_line_visual_starts` index without re-wrapping.
+            let mut logical_to_visual_offset: Vec<usize> = Vec::with_capacity(wrapped_lines.len());
+            let mut acc = 0usize;
+            for wl in &wrapped_lines {
+                logical_to_visual_offset.push(acc);
+                acc += wl.len();
+            }
+
+            let mut visual_lines: Vec<Line<'static>> = Vec::with_capacity(acc);
+            for wl in wrapped_lines {
+                visual_lines.extend(wl);
+            }
+
+            let tool_toggle_row_offset = render
+                .tool_toggle_row_offset
+                .map(|logical_offset| logical_to_visual_offset.get(logical_offset).copied().unwrap_or(acc));
+            let subagent_open_target = render.subagent_open_target.as_ref().map(|target| {
                 SubagentOpenTarget {
                     agent_id: target.agent_id.clone(),
-                    row_offset: visual_offset,
+                    row_offset: logical_to_visual_offset
+                        .get(target.row_offset)
+                        .copied()
+                        .unwrap_or(acc),
                 }
-            }),
-        });
+            });
 
-        for (line_index, (line, wrapped)) in render.lines.iter().zip(wrapped_lines).enumerate() {
-            let visual_count = wrapped.len();
-            logical_line_visual_starts.push(absolute_visual_row);
-            absolute_visual_row += visual_count;
-            visual_line_backgrounds.extend(wrapped.iter().map(|line| line.style.bg));
-            visual_lines.extend(wrapped);
+            MessageVisualBlock {
+                message_index,
+                start_visual_row: absolute_visual_row,
+                logical_line_start: absolute_logical_row,
+                lines,
+                visual_lines,
+                logical_to_visual_offset,
+                tool_toggle_row_offset,
+                subagent_open_target,
+            }
+        } else {
+            // Non-dirty: move the prior block out of prev_blocks. Its
+            // `lines` / `visual_lines` / `logical_to_visual_offset` /
+            // `tool_toggle_row_offset` / `subagent_open_target` carry over
+            // untouched; only the global offsets need re-basing.
+            let mut moved = match prev_blocks
+                .get_mut(message_index)
+                .and_then(Option::take)
+            {
+                Some(b) => b,
+                None => {
+                    // Caller invariant: a `None` render requires a matching
+                    // prev block. If we get here the message_count shrank
+                    // without a full-rebuild fallback (see render_chat),
+                    // which is a bug. Fall back to an empty block to avoid a
+                    // panic; the assertion in debug builds catches the
+                    // upstream mistake.
+                    debug_assert!(
+                        false,
+                        "build_transcript_cache: non-dirty message {message_index} \
+                         has no prev block"
+                    );
+                    MessageVisualBlock {
+                        message_index,
+                        start_visual_row: absolute_visual_row,
+                        logical_line_start: absolute_logical_row,
+                        lines: Vec::new(),
+                        visual_lines: Vec::new(),
+                        logical_to_visual_offset: Vec::new(),
+                        tool_toggle_row_offset: None,
+                        subagent_open_target: None,
+                    }
+                }
+            };
+            moved.message_index = message_index;
+            moved.start_visual_row = absolute_visual_row;
+            moved.logical_line_start = absolute_logical_row;
+            moved
+        };
 
+        // Build flat indices from the (now settled) block. These are
+        // usize/String/bool/Color — cheap to clone vs `Line` trees.
+        // The first logical line of every message block is its role/tool
+        // header (see `render_message_entry`); subsequent lines are body.
+        const HEADER_LINE_INDEX: usize = 0;
+        for (line_index, line) in block.lines.iter().enumerate() {
+            let local_visual_start = block
+                .logical_to_visual_offset
+                .get(line_index)
+                .copied()
+                .unwrap_or(block.visual_lines.len());
+            logical_line_visual_starts.push(absolute_visual_row + local_visual_start);
             line_texts.push(
                 line.spans
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect::<String>(),
             );
-            line_is_header.push(line_index == 0);
-            all_lines.push(line.clone());
+            line_is_header.push(line_index == HEADER_LINE_INDEX);
         }
+        visual_line_backgrounds.extend(block.visual_lines.iter().map(|line| line.style.bg));
+
+        absolute_visual_row += block.visual_lines.len();
+        absolute_logical_row += block.lines.len();
+        message_blocks.push(block);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let _elapsed = _start.elapsed();
+        // Suppress unused variable warning - used implicitly
+        let _ = _elapsed;
     }
 
     TranscriptRenderCache {
-        all_lines,
-        visual_lines,
-        visual_line_backgrounds,
+        message_blocks,
+        logical_line_visual_starts,
         line_texts,
         line_is_header,
-        logical_line_visual_starts,
-        message_layouts,
+        visual_line_backgrounds,
         total_lines: absolute_visual_row,
     }
 }
@@ -687,7 +836,7 @@ fn wrap_line_by_character(line: &Line<'static>, width: u16) -> Vec<Line<'static>
     rows
 }
 
-fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
+pub(crate) fn wrap_line_to_visual_lines(line: &Line<'static>, width: u16) -> Vec<Line<'static>> {
     let width = width.max(1) as usize;
 
     if line.spans.is_empty() {
@@ -1619,6 +1768,8 @@ fn render_standard_message_lines(
     chat_is_loading: bool,
     loading_animation: &str,
 ) -> Vec<Line<'static>> {
+    #[cfg(debug_assertions)]
+    let _start = std::time::Instant::now();
     let (indicator_color, role_label, role_style, content_style) = match message.role {
         MessageRole::User => (
             theme.primary,
@@ -1727,6 +1878,13 @@ fn render_standard_message_lines(
         ));
     }
     lines.push(Line::raw(""));
+    #[cfg(debug_assertions)]
+    {
+        let elapsed = _start.elapsed();
+        if elapsed > std::time::Duration::from_micros(200) && is_active_stream_message {
+            eprintln!("PERF render_standard_message_lines: {}µs, {} lines", elapsed.as_micros(), lines.len());
+        }
+    }
     lines
 }
 
@@ -2083,36 +2241,47 @@ mod tests {
     /// trailing line stuck below the viewport.
     #[test]
     fn build_transcript_cache_keeps_total_lines_in_sync_with_visual_lines() {
-        let theme = Theme::for_test();
-        // Content that triggers the predictor/wrap mismatch at width 40: the
-        // long synthetic path (45 chars in parens, > width 40) forces textwrap
-        // to emit 3 visual lines while a character-based predictor only sees 2.
+        // Wrap width that triggers the predictor/wrap mismatch: the long
+        // synthetic path (45 chars in parens, > width) forces textwrap to emit
+        // 3 visual lines while a character-based predictor only sees 2.
+        let wrap_width: u16 = 40;
         let mismatch_text =
             "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
         let mismatch_line = Line::from(mismatch_text);
+        let lines = vec![Line::from("System header"), mismatch_line, Line::raw("")];
+        let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+            .iter()
+            .map(|line| wrap_line_to_visual_lines(line, wrap_width))
+            .collect();
         let render = CachedMessageRender {
-            revision: 0,
-            width: 40,
-            theme,
+            width: wrap_width,
             tool_toggle_row_offset: None,
             subagent_open_target: None,
-            lines: vec![Line::from("System header"), mismatch_line, Line::raw("")],
+            wrapped_lines: Some(wrapped_lines),
+            lines,
         };
 
-        let cache = build_transcript_cache(&[render]);
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
+        // `total_lines` must equal the actual number of visual lines across all
+        // blocks, so stick_to_bottom's `scroll_offset = total_lines -
+        // inner_height` never points past the last real visual line.
+        let actual_visual_lines: usize = cache
+            .message_blocks
+            .iter()
+            .map(|b| b.visual_lines.len())
+            .sum();
         assert_eq!(
-            cache.total_lines,
-            cache.visual_lines.len(),
-            "total_lines must match visual_lines.len() so stick_to_bottom \
-             scroll_offset (= total_lines - inner_height) never points past \
-             the last actual visual line"
+            cache.total_lines, actual_visual_lines,
+            "total_lines must match the sum of block visual_lines.len() so \
+             stick_to_bottom scroll_offset (= total_lines - inner_height) \
+             never points past the last actual visual line"
         );
-        // The last non-empty visual line (before the trailing spacer) must be
-        // the path tail that textwrap split off — the exact line that used to
-        // be hidden below the viewport.
-        let last_content_visual: String = cache
-            .visual_lines
+        let flat = cache.collect_visible_visual_lines(0, cache.total_lines);
+        // The last non-empty visual line (before the trailing empty spacer)
+        // must be the path tail that textwrap split off — the exact line that
+        // used to be hidden below the viewport.
+        let last_content_visual: String = flat
             .iter()
             .rev()
             .skip(1) // skip the trailing empty spacer
@@ -2548,5 +2717,356 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn make_bench_render(
+        lines: &[Line<'static>],
+        width: u16,
+        cache_wrapped: bool,
+    ) -> CachedMessageRender {
+        let wrapped_lines = if cache_wrapped {
+            Some(
+                lines
+                    .iter()
+                    .map(|l| wrap_line_to_visual_lines(l, width))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        CachedMessageRender {
+            width,
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            wrapped_lines,
+            lines: lines.to_vec(),
+        }
+    }
+
+    /// Build a `(renders_all_dirty, renders_partial)` pair for a bench scenario.
+    ///
+    /// `renders_all_dirty`: every slot is `Some` (freshly rendered) — used to
+    /// build the prev cache and to measure the full-rebuild path.
+    /// `renders_partial`: only the last `dirty_count` slots are `Some`; the
+    /// rest are `None` so their blocks MOVE from the prev cache. This models a
+    /// streaming tick where only the tail (and possibly a few recently-settled
+    /// messages) changed.
+    fn make_bench_renders(
+        num_messages: usize,
+        content_lines: &[Line<'static>],
+        width: u16,
+        dirty_count: usize,
+    ) -> (Vec<Option<CachedMessageRender>>, Vec<Option<CachedMessageRender>>) {
+        let all_dirty: Vec<Option<CachedMessageRender>> = (0..num_messages)
+            .map(|_| Some(make_bench_render(content_lines, width, true)))
+            .collect();
+        let dirty_tail_start = num_messages.saturating_sub(dirty_count);
+        let partial: Vec<Option<CachedMessageRender>> = (0..num_messages)
+            .map(|i| {
+                if i >= dirty_tail_start {
+                    Some(make_bench_render(content_lines, width, true))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        (all_dirty, partial)
+    }
+
+    /// Time the three `build_transcript_cache` paths and return per-run µs:
+    /// `(full_no_prev, incremental_step, full_with_prev)`.
+    ///
+    /// - `full_no_prev` (A): cold cache, every message dirty.
+    /// - `incremental_step` (B-A): pure incremental cost, isolated by
+    ///   subtracting A from B (B includes building the prev cache each
+    ///   iteration, which is A's cost, so B-A cancels it).
+    /// - `full_with_prev` (C): prev exists but every message is dirty
+    ///   (width/theme-change style) — measures the `Option::take` overhead
+    ///   on the non-moving path.
+    ///
+    /// All three include the cost of cloning the renders vec each iteration
+    /// (`build_transcript_cache` takes it by value); this is a constant
+    /// bias across paths and scenarios, so ratios and trends remain valid.
+    fn time_bench_paths(
+        all_dirty: &[Option<CachedMessageRender>],
+        partial: &[Option<CachedMessageRender>],
+        num_warmup: u32,
+        num_measure: u32,
+    ) -> (u128, u128, u128) {
+        use std::time::Instant;
+
+        for _ in 0..num_warmup {
+            let _ = build_transcript_cache(None, all_dirty.to_vec());
+            let prev = build_transcript_cache(None, all_dirty.to_vec());
+            let _ = build_transcript_cache(Some(prev), partial.to_vec());
+        }
+        let a_start = Instant::now();
+        for _ in 0..num_measure {
+            let _ = build_transcript_cache(None, all_dirty.to_vec());
+        }
+        let a_us = a_start.elapsed().as_micros() / num_measure as u128;
+        let b_start = Instant::now();
+        for _ in 0..num_measure {
+            let prev = build_transcript_cache(None, all_dirty.to_vec());
+            let _ = build_transcript_cache(Some(prev), partial.to_vec());
+        }
+        let b_us = b_start.elapsed().as_micros() / num_measure as u128;
+        let c_start = Instant::now();
+        for _ in 0..num_measure {
+            let prev = build_transcript_cache(None, all_dirty.to_vec());
+            let _ = build_transcript_cache(Some(prev), all_dirty.to_vec());
+        }
+        let c_us = c_start.elapsed().as_micros() / num_measure as u128;
+        (a_us, b_us.saturating_sub(a_us), c_us)
+    }
+
+    /// Short content fixture: each logical line fits in one visual line at
+    /// the bench widths, so wrapping is a no-op. Isolates the per-message /
+    /// per-logical-line overhead from the wrap cost.
+    fn short_content(lines_per_message: usize) -> Vec<Line<'static>> {
+        (0..lines_per_message)
+            .map(|i| Line::from(format!("Line {i}")))
+            .collect()
+    }
+
+    /// Long content fixture: each logical line wraps to several visual lines
+    /// at width 80, exercising `wrap_line_to_visual_lines` and the flat-index
+    /// rebuild over a larger `visual_lines` vec.
+    fn long_content(lines_per_message: usize) -> Vec<Line<'static>> {
+        (0..lines_per_message)
+            .map(|i| {
+                Line::from(format!(
+                    "Lorem ipsum dolor sit amet consectetur adipiscing elit adipiscing elit {i}"
+                ))
+            })
+            .collect()
+    }
+
+    /// Microbenchmark for incremental `build_transcript_cache`.
+    ///
+    /// Compares three paths:
+    ///  - A) Full rebuild, no prev (`None` for every message) — the
+    ///    worst-case cost when the cache is cold (first tick / post-switch).
+    ///  - B) Incremental rebuild: a prev cache exists, only the last message
+    ///    is dirty, the rest move from prev. This is the streaming hot path.
+    ///  - C) Full rebuild with a prev cache present (e.g. width change) —
+    ///    prev is taken but every message is dirty, so nothing moves.
+    ///
+    /// B includes the cost of building the prev cache each iteration (it is
+    /// consumed by `build_transcript_cache`), so `B - A` isolates the pure
+    /// incremental step. The move-verification assertion checks that non-dirty
+    /// blocks share the same `visual_lines` allocation as the prev cache
+    /// (i.e. moved, not cloned).
+    #[test]
+    fn build_transcript_cache_bench() {
+        // Bench fixture: 50 messages × 5 logical lines, wrapped at width 80.
+        let num_messages = 50usize;
+        let lines_per_message = 5usize;
+        // Terminal width used for wrapping throughout the bench.
+        let bench_width: u16 = 80;
+        // Warmup iterations to stabilise timings (JIT-less, but primes caches).
+        let num_warmup_runs = 10u32;
+        // Measured iterations averaged per path — large enough to dwarf the
+        // `Instant::now()` overhead at µs granularity.
+        let num_measure_runs = 100u32;
+
+        let content_lines = long_content(lines_per_message);
+
+        // Sanity: wrap_line_to_visual_lines works from test context.
+        let test_wrapped = wrap_line_to_visual_lines(&content_lines[0], bench_width);
+        assert!(
+            !test_wrapped.is_empty(),
+            "wrap_line_to_visual_lines should produce at least one visual line"
+        );
+        let test_miss = make_bench_render(&content_lines, bench_width, false);
+        assert!(
+            test_miss.wrapped_lines.is_none(),
+            "cache_wrapped=false should produce None"
+        );
+        let test_hit = make_bench_render(&content_lines, bench_width, true);
+        assert!(
+            test_hit.wrapped_lines.is_some(),
+            "cache_wrapped=true should produce Some(wrapped_lines)"
+        );
+
+        let (renders_all_dirty, renders_incremental) =
+            make_bench_renders(num_messages, &content_lines, bench_width, 1);
+        for (i, r) in renders_all_dirty.iter().enumerate() {
+            assert!(r.is_some(), "render {i} should be Some (dirty)");
+        }
+
+        let (a_us, incremental_step_us, c_us) = time_bench_paths(
+            &renders_all_dirty,
+            &renders_incremental,
+            num_warmup_runs,
+            num_measure_runs,
+        );
+
+        // Move verification: a non-dirty block's `visual_lines` must keep the
+        // same heap allocation across the incremental rebuild (moved, not
+        // cloned). `Vec::as_ptr` is stable across moves of the owning Vec.
+        // Block 0 is non-dirty (it is not the dirty tail), so it must be moved.
+        let moved_block_idx = 0usize;
+        let dirty_block_idx = num_messages - 1;
+        let prev_for_check = build_transcript_cache(None, renders_all_dirty.clone());
+        let moved_ptr = prev_for_check.message_blocks[moved_block_idx].visual_lines.as_ptr();
+        let new_cache = build_transcript_cache(Some(prev_for_check), renders_incremental.clone());
+        assert_eq!(
+            new_cache.message_blocks[moved_block_idx].visual_lines.as_ptr(),
+            moved_ptr,
+            "incremental rebuild must move (not clone) non-dirty visual_lines — \
+             pointer should be unchanged"
+        );
+        // The dirty (last) block, by contrast, is freshly built.
+        assert_ne!(
+            new_cache.message_blocks[dirty_block_idx].visual_lines.as_ptr(),
+            moved_ptr,
+            "dirty block should be a fresh allocation"
+        );
+
+        eprintln!();
+        eprintln!("=== build_transcript_cache microbenchmark (incremental) ===");
+        eprintln!("  Messages: {num_messages}, ~{lines_per_message} lines each, width {bench_width}");
+        eprintln!("  A) Full rebuild (no prev):       {a_us:>6} µs avg (over {num_measure_runs} runs)");
+        eprintln!("  B-A) Pure incremental step:      {incremental_step_us:>6} µs avg (1 dirty, prev exists)");
+        eprintln!("  C) Full rebuild with prev:       {c_us:>6} µs avg (over {num_measure_runs} runs, incl prev-build)");
+        eprintln!(
+            "  Speedup A vs (B-A):              {:.1}×",
+            if incremental_step_us > 0 {
+                a_us as f64 / incremental_step_us as f64
+            } else {
+                f64::INFINITY
+            }
+        );
+        eprintln!();
+
+        // The pure incremental step must be cheaper than a full rebuild.
+        assert!(
+            incremental_step_us < a_us,
+            "incremental step ({}µs) should be cheaper than full rebuild ({}µs)",
+            incremental_step_us,
+            a_us
+        );
+    }
+
+    /// Scalability matrix for `build_transcript_cache`.
+    ///
+    /// Sweeps four axes and prints one row per scenario, holding the others
+    /// fixed at the bench defaults (50 messages, long content, width 80, 1
+    /// dirty tail). Each row reports `full` (cold rebuild) and `incr` (the
+    /// pure incremental step, B-A) in µs, plus the speedup ratio. A high
+    /// `full/incr` ratio is the goal; it should stay well above 1× across
+    /// the matrix except the 100%-dirty degenerate case.
+    ///
+    /// Axes:
+    ///  1. Message count (10 / 50 / 200) at 1 dirty — does the incremental
+    ///     step stay flat (move-only) while full rebuild grows linearly?
+    ///  2. Dirty count (1 / 10% / 50% / 100%) at 50 messages — how does the
+    ///     incremental step degrade as more messages re-wrap? At 100% it
+    ///     approaches full rebuild (width-change worst case).
+    ///  3. Terminal width (40 / 80 / 120) at 50 messages, 1 dirty — wider
+    ///     terminals wrap less, so fewer visual lines per message.
+    ///  4. Content shape (short / long) at 50 messages, 1 dirty — short
+    ///     content skips wrapping, isolating per-logical-line overhead.
+    #[test]
+    fn build_transcript_cache_scalability() {
+        // Fewer runs than the main bench: the matrix has many scenarios and
+        // we care about the trend, not single-scenario precision.
+        let num_warmup_runs = 5u32;
+        let num_measure_runs = 30u32;
+        let default_messages = 50usize;
+        let default_lines = 5usize;
+        let default_width: u16 = 80;
+        let default_dirty = 1usize;
+
+        let mut rows: Vec<(String, u128, u128, f64)> = Vec::new();
+
+        // Axis 1: message count, 1 dirty tail, long content, width 80.
+        for &num_messages in &[10usize, 50usize, 200usize] {
+            let content = long_content(default_lines);
+            let (all, partial) =
+                make_bench_renders(num_messages, &content, default_width, default_dirty);
+            let (full, incr, _) =
+                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
+            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            rows.push((format!("msgs={num_messages:>3} dirty=1"), full, incr, speedup));
+        }
+
+        // Axis 2: dirty count (tail), 50 messages, long content, width 80.
+        for &dirty in &[1usize, 5usize, 25usize, 50usize] {
+            let content = long_content(default_lines);
+            let (all, partial) =
+                make_bench_renders(default_messages, &content, default_width, dirty);
+            let (full, incr, _) =
+                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
+            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            let pct = (dirty * 100) / default_messages;
+            rows.push((
+                format!("msgs=50 dirty={dirty:>2} ({pct}%)"),
+                full,
+                incr,
+                speedup,
+            ));
+        }
+
+        // Axis 3: terminal width, 50 messages, 1 dirty, long content.
+        for &width in &[40u16, 80u16, 120u16] {
+            let content = long_content(default_lines);
+            let (all, partial) =
+                make_bench_renders(default_messages, &content, width, default_dirty);
+            let (full, incr, _) =
+                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
+            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            rows.push((format!("msgs=50 dirty=1 w={width:>3}"), full, incr, speedup));
+        }
+
+        // Axis 4: content shape, 50 messages, 1 dirty, width 80.
+        for (label, content) in [
+            ("short", short_content(default_lines)),
+            ("long", long_content(default_lines)),
+        ] {
+            let (all, partial) =
+                make_bench_renders(default_messages, &content, default_width, default_dirty);
+            let (full, incr, _) =
+                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
+            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            rows.push((format!("msgs=50 dirty=1 {label}"), full, incr, speedup));
+        }
+
+        eprintln!();
+        eprintln!("=== build_transcript_cache scalability matrix ===");
+        eprintln!(
+            "  (full = cold rebuild µs, incr = pure incremental step µs, speedup = full/incr)"
+        );
+        eprintln!(
+            "  {:<22} {:>10} {:>10} {:>10}",
+            "scenario", "full", "incr", "speedup"
+        );
+        eprintln!(
+            "  {:-<22} {:-<10} {:-<10} {:-<10}",
+            "", "", "", ""
+        );
+        for (label, full, incr, speedup) in &rows {
+            eprintln!(
+                "  {:<22} {:>8}µs {:>8}µs {:>8.1}×",
+                label, full, incr, speedup
+            );
+        }
+        eprintln!();
+
+        // The incremental step must beat full rebuild in every scenario
+        // except the 100%-dirty degenerate case (where they are equal by
+        // construction: nothing moves). Assert the non-degenerate cases.
+        for (label, full, incr, _speedup) in &rows {
+            if label.contains("dirty=50 (100%)") {
+                // 100% dirty = width-change worst case; incr ≈ full is expected.
+                continue;
+            }
+            assert!(
+                incr < full,
+                "scenario {label}: incremental step ({incr}µs) must be cheaper \
+                 than full rebuild ({full}µs)",
+            );
+        }
     }
 }
