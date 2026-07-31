@@ -1,6 +1,6 @@
 # AgentMoss
 
-AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服务**。基于 OS Profile 机制，自动适配 Linux/Windows 的 syscall 检测模式，提供三层防御安全分析（启发式 → 逻辑规则 → LLM 语义分析）。
+AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服务**。基于 OS Profile 机制，自动适配 Linux/Windows 的 syscall 检测模式，提供三层防御安全分析（特征匹配 → 逻辑规则 → LLM 语义分析）。
 
 > v2 更新：新增 OS Profile 系统（Linux/Windows 自适应）、两级快速放行白名单、rm 命令分级检测、脚本内容预扫描、LLM 结果缓存、Provider 自动识别与 Header 注入、fail-closed 安全原则。
 >
@@ -44,11 +44,13 @@ AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服�
 │  完全安全 (ls/pwd/echo/whoami/hostname...) → 跳过 L2+L3     │
 │  只读敏感 (cat/grep/head...) → 跳过 L3，保留 L2              │
 │  内置安全 Skill (xiaoo-guardian) → 跳过 L2+L3                │
+│  ★ agent 定制白名单 (按 agent_id 加载，如 opendesk 的       │
+│    memory-*/todomgr-* 纯数据操作) → 跳过 L2+L3               │
 │  ★ 安全兜底: 完整命令管道尾部扫描，防止白名单绕过             │
 ├─────────────────────────────────────────────────────────────┤
 │          安全分析引擎 (三层防御)                               │
 │                                                              │
-│  层1: 启发式静态检测 (<1ms)                                   │
+│  层1: 特征匹配静态检测 (<1ms)                                   │
 │    ├── 用户自定义规则匹配                                     │
 │    ├── 危险命令正则 (38+ 模式，rm 分级检测，sudo 只拦截危险命令) │
 │    ├── 非交互式密码修改检测 (| passwd/chpasswd/newusers/lnewusers 等) │
@@ -400,6 +402,9 @@ AgentMoss 自带浏览器策略管控台，可视化调整三层开关、规则�
 | `PUT` | `/console/api/skill-categories/enabled` | 改 skill 分类开关 |
 | `POST` / `DELETE` | `/console/api/skills` | 增/删自定义 skill（写 markdown 文件）|
 | `GET` | `/console/api/skills/{id}/content` | 查 skill markdown 内容 |
+| `GET` | `/console/api/agents` | 查 agent 定制规则（按 agent_id 分区，含 enabled 状态）|
+| `PUT` | `/console/api/agents/rules/enabled` | 翻转某 agent 某条规则启停 |
+| `POST` / `DELETE` | `/console/api/agents/rules` | 增/删 agent 定制规则条目 |
 | `GET` | `/console/api/config` | 查完整 runtime config + 路径 |
 | `GET` | `/console/api/env-overrides` | 查被环境变量接管的开关（灰色不可改）|
 | `POST` | `/console/api/reset` | 重置为出厂默认 |
@@ -581,7 +586,8 @@ sudo firewall-cmd --reload
 | `reason` | string | 否 | 执行理由 |
 | `os_type` | string | 否 | `"linux"` / `"windows"`，留空自动检测 |
 | `cwd` | string | 否 | 当前工作目录 |
-| `metadata` | object | 否 | 扩展元数据 |
+| `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`）。留空走通用模式。详见[三方 agent 定制规则](#三方-agent-定制规则) |
+| `metadata` | object | 否 | 扩展元数据（`llm_config`/`llm_log_path` per-request LLM 配置） |
 
 **响应字段**：
 
@@ -617,7 +623,7 @@ sudo firewall-cmd --reload
 | `AGENT_MOSS_LLM_RETRIES` | LLM 调用重试次数 | `2`（共 3 次尝试） |
 | `AGENT_MOSS_LLM_FAIL_MODE` | LLM 失败策略：`fail_open`（默认 Allow+warn）/ `fail_closed`（Deny）| `fail_open` |
 | `AGENT_MOSS_DISABLE_LLM` | 设为 `1` 禁用层3 LLM | 未设置 |
-| `AGENT_MOSS_DISABLE_HEURISTIC` | 设为 `1` 禁用层1 启发式 | 未设置 |
+| `AGENT_MOSS_DISABLE_HEURISTIC` | 设为 `1` 禁用层1 特征匹配 | 未设置 |
 | `AGENT_MOSS_DISABLE_LOGIC_RULES` | 设为 `1` 禁用层2 逻辑规则 | 未设置 |
 | `AGENT_MOSS_LOG_PATH` | 全量 hook 日志 + LLM prompt 日志（bridge 记 HOOK_INPUT/OUTPUT，L3 记 prompt，写同文件；对应 audit_agent `AUDIT_LOG_PATH`）| 未设置（不记录）|
 | `AGENT_MOSS_CUSTOM_RULES` | 自定义规则 JSON 数组 | `[]` |
@@ -662,8 +668,6 @@ server:
 
 ## 项目结构
 
-> 下图是 **AgentMoss 服务仓库**（`~/gitcode/AgentMoss/`）的结构。xiaoO 侧只装一个瘦 bridge 插件（`plugins/hookers/agent_moss/bridge.py` + 本 README 等客户参考文档），判定逻辑在常驻 AgentMoss 服务里，不在 xiaoO 仓库内。
-
 ```
 AgentMoss/
 ├── agent_moss/               # Python 实现 (PyPI: agent-moss)
@@ -677,7 +681,7 @@ AgentMoss/
 │   ├── engine/               # 安全分析引擎
 │   │   ├── analyzer.py       # 分析入口
 │   │   ├── coordinator.py    # 三层协调器 + L1.5/L2.5 递归脚本链 + fail-open
-│   │   ├── heuristic.py      # 层1: 启发式检测 (危险命令 + 注入关键词，热重载 runtime_config)
+│   │   ├── heuristic.py      # 层1: 特征匹配检测 (危险命令 + 注入关键词，热重载 runtime_config)
 │   │   ├── logic_rules.py    # 层2: 逻辑规则 (敏感路径/意图/密码/用户删除，credential 区分)
 │   │   ├── llm_analyzer.py   # 层3: LLM + Skill 深度分析 (skip_l3_hints + token 记录)
 │   │   ├── script_analyzer.py        # 脚本预扫描
@@ -702,7 +706,7 @@ AgentMoss/
 │   ├── adapters/  # 适配器层 (observable)
 │   ├── skills/    # 安全 Skill 规则 (Markdown)
 │   ├── templates/ # Prompt 模板 + policy_mapping
-│   ├── agents/    # 三方 agent 定制化扩展 (xiaoO)
+│   ├── agents/    # 三方 agent 定制化扩展 (xiaoO / opendesk) — rules.json 单一事实源，py+ts 共享
 │   └── brain/     # 规则自学习/存储
 │
 ├── ts/                       # TypeScript 实现 (npm: @kenhkl/agent-moss) — 功能与 Python 对等
