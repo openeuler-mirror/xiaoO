@@ -452,7 +452,10 @@ fn create_router_from_state(
                 "/api/v1/runtimes/write-file",
                 post(handle_runtime_write_file),
             )
-            .route("/api/v1/runtimes/export/:session_id", get(handle_session_export)),
+            .route(
+                "/api/v1/runtimes/export/:session_id",
+                get(handle_session_export),
+            ),
         bearer_auth.clone(),
     );
 

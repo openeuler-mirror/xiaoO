@@ -347,18 +347,30 @@ impl DurableIngestQueue {
             tokio::fs::create_dir_all(parent).await?;
         }
         let lock_path = self.path.with_extension("lock");
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&lock_path)?;
         let deadline = tokio::time::Instant::now() + lock_wait_timeout();
         loop {
-            if try_lock_file(&file)? {
-                file.set_len(0)?;
-                writeln!(file, "pid={}", std::process::id())?;
-                return Ok(DurableQueueLock { file });
+            let attempt_path = lock_path.clone();
+            let attempt =
+                tokio::task::spawn_blocking(move || -> Result<_, MemoryAutomationError> {
+                    let mut file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(attempt_path)?;
+                    if !try_lock_file(&file)? {
+                        return Ok(None);
+                    }
+                    file.set_len(0)?;
+                    writeln!(file, "pid={}", std::process::id())?;
+                    Ok(Some(DurableQueueLock { file }))
+                })
+                .await
+                .map_err(|error| {
+                    MemoryAutomationError::Config(format!("memory queue lock task failed: {error}"))
+                })??;
+            if let Some(lock) = attempt {
+                return Ok(lock);
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(MemoryAutomationError::QueueLocked);

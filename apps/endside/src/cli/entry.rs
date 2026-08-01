@@ -315,12 +315,17 @@ where
                 session,
                 agent,
                 attach,
-            ).await;
+            )
+            .await;
         }
         Some(Command::Serve { port, hostname }) => {
             handle_serve_command(port, hostname).await;
         }
-        Some(Command::Export { session_id, port, client_id }) => {
+        Some(Command::Export {
+            session_id,
+            port,
+            client_id,
+        }) => {
             handle_export_command(session_id, port, client_id).await;
         }
         Some(Command::Debug { command }) => {
@@ -917,7 +922,7 @@ async fn run_once(
         }
     }
 
-if let Some(attach_url) = &attach {
+    if let Some(attach_url) = &attach {
         run_with_attach(attach_url, prompt, format, title, session, agent, debug).await;
         return;
     }
@@ -1124,13 +1129,20 @@ if let Some(attach_url) = &attach {
             "agent": agent,
         });
         if format == OutputFormat::Json {
-            println!("{}", serde_json::to_string(&serde_json::json!({
-                "type": "session_start",
-                "data": session_info
-            })).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "session_start",
+                    "data": session_info
+                }))
+                .unwrap()
+            );
             let _ = std::io::stdout().flush();
         } else if debug {
-            eprintln!("[session] {}", serde_json::to_string_pretty(&session_info).unwrap());
+            eprintln!(
+                "[session] {}",
+                serde_json::to_string_pretty(&session_info).unwrap()
+            );
         }
     }
 
@@ -1143,12 +1155,16 @@ if let Some(attach_url) = &attach {
         .await
     {
         if format == OutputFormat::Json {
-            println!("{}", serde_json::to_string(&serde_json::json!({
-                "type": "error",
-                "data": {
-                    "message": format!("failed to close session: {}", err)
-                }
-            })).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "error",
+                    "data": {
+                        "message": format!("failed to close session: {}", err)
+                    }
+                }))
+                .unwrap()
+            );
             let _ = std::io::stdout().flush();
         } else {
             eprintln!("[warn] failed to close session: {}", err);
@@ -1165,13 +1181,17 @@ if let Some(attach_url) = &attach {
     match turn_result {
         Ok(result) => {
             if format == OutputFormat::Json {
-                println!("{}", serde_json::to_string(&serde_json::json!({
-                    "type": "response",
-                    "data": {
-                        "raw_reply": result.raw_reply,
-                        "session_id": session_id,
-                    }
-                })).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "response",
+                        "data": {
+                            "raw_reply": result.raw_reply,
+                            "session_id": session_id,
+                        }
+                    }))
+                    .unwrap()
+                );
                 let _ = std::io::stdout().flush();
             } else {
                 if !result.raw_reply.is_empty() {
@@ -1181,12 +1201,16 @@ if let Some(attach_url) = &attach {
         }
         Err(e) => {
             if format == OutputFormat::Json {
-                println!("{}", serde_json::to_string(&serde_json::json!({
-                    "type": "error",
-                    "data": {
-                        "message": e.to_string()
-                    }
-                })).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "error",
+                        "data": {
+                            "message": e.to_string()
+                        }
+                    }))
+                    .unwrap()
+                );
                 let _ = std::io::stdout().flush();
             } else {
                 eprintln!("[error] {}", e);
@@ -1209,12 +1233,9 @@ async fn handle_serve_command(port: u16, hostname: String) {
     eprintln!("Starting xiaoo daemon server on {}:{}", hostname, port);
     eprintln!("Use 'xiaoo-daemon' binary directly for full daemon functionality");
     let status = std::process::Command::new("xiaoo-daemon")
-        .args([
-            "--port", &port.to_string(),
-            "--host", &hostname,
-        ])
+        .args(["--port", &port.to_string(), "--host", &hostname])
         .status();
-    
+
     match status {
         Ok(s) if s.success() => std::process::exit(0),
         Ok(s) => {
@@ -1301,7 +1322,10 @@ async fn run_with_attach(
         Ok(resp) if !resp.status().is_success() => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            attach_fail(format!("session open failed: HTTP {status} {body}"), is_json);
+            attach_fail(
+                format!("session open failed: HTTP {status} {body}"),
+                is_json,
+            );
         }
         Ok(_) => {}
         Err(error) => attach_fail(format!("failed to connect to daemon: {error}"), is_json),
@@ -1341,7 +1365,10 @@ async fn run_with_attach(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        attach_fail(format!("turn submission failed: HTTP {status} {body}"), is_json);
+        attach_fail(
+            format!("turn submission failed: HTTP {status} {body}"),
+            is_json,
+        );
     }
 
     // 3. Consume the SSE event stream emitted by /api/v1/runtimes/input.
@@ -1402,7 +1429,10 @@ async fn run_with_attach(
     }
 
     if !saw_done {
-        attach_fail("daemon stream ended without a completion event".to_string(), is_json);
+        attach_fail(
+            "daemon stream ended without a completion event".to_string(),
+            is_json,
+        );
     }
 
     // 4. Best-effort detach so the daemon releases this process's lease
@@ -1466,30 +1496,40 @@ fn parse_sse_event(frame: &str) -> Option<Value> {
     serde_json::from_str(&data).ok()
 }
 
-
 fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, debug: bool) {
     match command {
         DebugCommands::Config => {
             let file_cfg = config_path
                 .map(|path| FileConfig::load_from_path(path, debug))
                 .unwrap_or_default();
-            
+
             let mut config_json = serde_json::Map::new();
-            config_json.insert("$schema".to_string(), Value::String("https://xiaoo.ai/config.json".to_string()));
+            config_json.insert(
+                "$schema".to_string(),
+                Value::String("https://xiaoo.ai/config.json".to_string()),
+            );
 
             if let Some(llm) = &file_cfg.llm {
                 let provider = llm.provider.as_deref().unwrap_or("openai");
                 let model = llm.model.as_deref().unwrap_or("");
-                config_json.insert("model".to_string(), Value::String(format!("{}/{}", provider, model)));
+                config_json.insert(
+                    "model".to_string(),
+                    Value::String(format!("{}/{}", provider, model)),
+                );
             }
 
-            println!("{}", serde_json::to_string_pretty(&Value::Object(config_json)).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&Value::Object(config_json)).unwrap()
+            );
         }
     }
-
 }
 async fn handle_export_command(session_id: String, port: u16, client_id: Option<String>) {
-    let url = format!("http://127.0.0.1:{}/api/v1/runtimes/export/{}", port, session_id);
+    let url = format!(
+        "http://127.0.0.1:{}/api/v1/runtimes/export/{}",
+        port, session_id
+    );
 
     let client = reqwest::Client::new();
     let mut req = client.get(&url);
@@ -1601,7 +1641,6 @@ mod tests {
         assert_eq!(title, None);
     }
 }
-
 
 #[cfg(test)]
 mod attach_sse_tests {
