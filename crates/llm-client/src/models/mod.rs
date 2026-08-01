@@ -113,7 +113,7 @@ pub fn get_known_model_context_length(model: &str) -> Option<u64> {
     let models = KNOWN_MODELS.get_or_init(|| {
         let content = include_str!("known_models.toml");
         let parsed: toml::Value = toml::from_str(content).expect("Invalid known_models.toml");
-        parsed
+        let mut models: Vec<_> = parsed
             .get("models")
             .and_then(|v| v.as_table())
             .expect("known_models.toml must have a [models] section")
@@ -125,7 +125,16 @@ pub fn get_known_model_context_length(model: &str) -> Option<u64> {
                     as u64;
                 (normalize_model_id(pattern), context)
             })
-            .collect()
+            .collect();
+
+        // Model IDs may include provider prefixes or provider-specific suffixes,
+        // so matching intentionally uses `contains`. Prefer the most specific
+        // pattern to keep a family entry such as `glm-5` from shadowing
+        // versioned entries such as `glm-5.2`.
+        models.sort_by(|(left, _), (right, _)| {
+            right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+        });
+        models
     });
 
     let normalized = normalize_model_id(model);

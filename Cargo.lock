@@ -5160,6 +5160,7 @@ dependencies = [
  "serde_json",
  "shellexpand",
  "skill",
+ "subagent",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
