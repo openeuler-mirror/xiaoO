@@ -15,6 +15,10 @@
 "deepseek-reasoner" = 1_000_000 # alias for deepseek-v4-flash thinking mode, deprecated after 2026-07-24
 
 # === GLM / Zhipu ===
+# Official docs: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.2
+# Context: 1M tokens, Max output: 128K tokens
+"glm-5.2" = 1_000_000
+
 # Official docs: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.md
 # Context: 200K tokens, Max output: 128K tokens
 "glm-5" = 200_000
