@@ -48,6 +48,7 @@ struct McpRuntimeState {
     session_service: Arc<dyn SessionService>,
     session_store: Arc<dyn SessionStore>,
     chatbot_workspace: PathBuf,
+    agent_role: Option<String>,
     agent_operations: Arc<AgentOperationRegistry>,
 }
 
@@ -676,6 +677,7 @@ pub fn create_mcp_router(
         session_service,
         session_store,
         chatbot_workspace: config.chatbot_workspace,
+        agent_role: config.agent_role,
         agent_operations,
     };
 
@@ -840,40 +842,47 @@ async fn prepare_mcp_turn(
         return Err("message must not be empty".to_string());
     }
 
-    let (session_id, created, workspace) = match normalize_session_id(supplied_session_id)? {
-        Some(session_id) => {
-            let record = state
-                .session_store
-                .load(&session_id)
-                .await
-                .ok_or_else(|| format!("unknown session_id `{session_id}`"))?;
-            let workspace = validate_existing_session(
-                endpoint,
-                &record,
-                supplied_workspace.as_deref(),
-                &state.chatbot_workspace,
-            )?;
-            (session_id, false, workspace)
-        }
-        None => {
-            let workspace = validate_new_workspace(
-                endpoint,
-                supplied_workspace.as_deref(),
-                &state.chatbot_workspace,
-            )?;
-            (
-                format!("{}{}", endpoint.session_prefix(), uuid::Uuid::new_v4()),
-                true,
-                workspace,
-            )
-        }
-    };
+    let (session_id, created, workspace, runtime_profile_id) =
+        match normalize_session_id(supplied_session_id)? {
+            Some(session_id) => {
+                let record = state
+                    .session_store
+                    .load(&session_id)
+                    .await
+                    .ok_or_else(|| format!("unknown session_id `{session_id}`"))?;
+                let workspace = validate_existing_session(
+                    endpoint,
+                    &record,
+                    supplied_workspace.as_deref(),
+                    &state.chatbot_workspace,
+                )?;
+                let runtime_profile_id = record.entry.runtime_profile_id.clone();
+                (session_id, false, workspace, runtime_profile_id)
+            }
+            None => {
+                let workspace = validate_new_workspace(
+                    endpoint,
+                    supplied_workspace.as_deref(),
+                    &state.chatbot_workspace,
+                )?;
+                let runtime_profile_id = match endpoint {
+                    McpEndpoint::Chatbot => None,
+                    McpEndpoint::Agent => state.agent_role.clone(),
+                };
+                (
+                    format!("{}{}", endpoint.session_prefix(), uuid::Uuid::new_v4()),
+                    true,
+                    workspace,
+                    runtime_profile_id,
+                )
+            }
+        };
     let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext {
             kind: Some(GatewayEntryKind::Mcp),
             instance_id: Some(endpoint.instance_id().to_string()),
-            runtime_profile_id: None,
+            runtime_profile_id,
             build_tags: Vec::new(),
         },
         channel: None,
@@ -1576,6 +1585,7 @@ mod tests {
             }),
             session_store: Arc::new(InMemorySessionStore::default()),
             chatbot_workspace: workspace.path().to_path_buf(),
+            agent_role: Some("diagnostician".to_string()),
             agent_operations: Arc::new(AgentOperationRegistry::default()),
         };
 
@@ -1654,6 +1664,7 @@ mod tests {
                 }),
                 session_store: Arc::new(InMemorySessionStore::default()),
                 chatbot_workspace: workspace.path().to_path_buf(),
+                agent_role: None,
                 agent_operations: Arc::new(AgentOperationRegistry::default()),
             };
             let initial = start_mcp_agent_operation(
@@ -1681,6 +1692,7 @@ mod tests {
         session_id: &str,
         endpoint: McpEndpoint,
         workspace: PathBuf,
+        runtime_profile_id: Option<&str>,
     ) -> SessionRecord {
         SessionRecord {
             session_id: session_id.to_string(),
@@ -1689,7 +1701,7 @@ mod tests {
             entry: GatewayEntryContext {
                 kind: Some(GatewayEntryKind::Mcp),
                 instance_id: Some(endpoint.instance_id().to_string()),
-                runtime_profile_id: None,
+                runtime_profile_id: runtime_profile_id.map(ToString::to_string),
                 build_tags: Vec::new(),
             },
             channel: None,
@@ -1736,6 +1748,7 @@ mod tests {
             "mcp_agent_test",
             McpEndpoint::Agent,
             agent_workspace.path().canonicalize().expect("agent path"),
+            None,
         );
 
         let cross_endpoint = validate_existing_session(
@@ -1775,6 +1788,7 @@ mod tests {
                 chatbot_token: "chat-token".to_string(),
                 chatbot_workspace: workspace.to_path_buf(),
                 agent_token: "agent-token".to_string(),
+                agent_role: None,
             },
             sessions.clone(),
             sessions,
