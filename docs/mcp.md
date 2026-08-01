@@ -129,7 +129,7 @@ endpoints on the same host and port as the runtime API:
 | Endpoint | Exposed tool | Capability profile |
 |----------|--------------|--------------------|
 | `/mcp/chatbot` | `chat` | Only `web_search` and `webfetch` internally |
-| `/mcp/agent` | `agent` | Full local Core agent, excluding interactive `ask_user_question` and non-channel `send_file` |
+| `/mcp/agent` | `agent` | Full local Core agent, or a fixed configured agent role, excluding interactive `ask_user_question` and non-channel `send_file` |
 
 ```toml
 [mcp_server]
@@ -145,6 +145,8 @@ workspace = "~/.xiaoo/mcp-chatbot-empty"
 
 [mcp_server.agent]
 bearer_token_env = "XIAOO_MCP_AGENT_TOKEN"
+# Optional: bind every new /mcp/agent session to an [agent.<role>] preset.
+agent_role = "xuanyuan"
 
 # MCP agent mode requires the local backend. Omitting this section also
 # selects the implicit local backend.
@@ -172,6 +174,13 @@ directory. It is only a fixed runtime working directory: the chatbot has no
 file-read, file-search, file-write, or shell tools. Skills, plugins, upstream
 MCP tools, hooks, role switching, planning, subagents, and LSP are also
 disabled for this profile.
+
+`mcp_server.agent.agent_role` is optional. When set, it must name an existing
+`[agent.<role>]` section. New `/mcp/agent` sessions use that role's prompt,
+turn limit, and tool visibility policy; clients cannot override the role in a
+tool call. Existing sessions keep the role they were created with, so start a
+new MCP agent session after changing this setting. When omitted, `/mcp/agent`
+continues to use the role-neutral Core prompt.
 
 Tool inputs are:
 

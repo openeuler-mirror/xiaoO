@@ -733,20 +733,20 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
         existing: Option<&SessionRecord>,
     ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
         let profile = RuntimeCapabilityProfile::from_request(request)?;
-        if matches!(
-            profile,
-            RuntimeCapabilityProfile::McpChatbot | RuntimeCapabilityProfile::McpAgent
-        ) && request.entry.runtime_profile_id.is_some()
+        let is_subagent = request
+            .agent_id_override
+            .as_ref()
+            .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
+            .unwrap_or(false);
+        if profile == RuntimeCapabilityProfile::McpChatbot
+            && request.entry.runtime_profile_id.is_some()
         {
             return Err(SessionRuntimeResolveError::ResolveFailed {
-                message: "MCP sessions always use the fixed Core role".to_string(),
+                message: "MCP chatbot sessions always use the fixed Chatbot role".to_string(),
             });
         }
-        let agent_role = if profile == RuntimeCapabilityProfile::Default {
-            resolve_agent_role(&self.agent_roles, request)?
-        } else {
-            None
-        };
+        let agent_role =
+            resolve_profile_agent_role(&self.agent_roles, request, profile, is_subagent)?;
         let system_prompt = if profile == RuntimeCapabilityProfile::McpChatbot {
             MCP_CHATBOT_SYSTEM_PROMPT
         } else {
@@ -777,11 +777,6 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                     .collect()
             };
 
-        let is_subagent = request
-            .agent_id_override
-            .as_ref()
-            .map(|override_id| override_id != &AgentId(self.agent.id.clone()))
-            .unwrap_or(false);
         let llm_runtime = self.resolve_llm_runtime(request, existing).await?;
         let is_e2b = self
             .operation_backend
@@ -967,6 +962,21 @@ fn resolve_agent_role<'a>(
         })
 }
 
+fn resolve_profile_agent_role<'a>(
+    agent_roles: &'a BTreeMap<String, AgentRoleConfig>,
+    request: &SessionRuntimeBuildInput,
+    profile: RuntimeCapabilityProfile,
+    is_subagent: bool,
+) -> Result<Option<&'a AgentRoleConfig>, SessionRuntimeResolveError> {
+    match profile {
+        RuntimeCapabilityProfile::Default => resolve_agent_role(agent_roles, request),
+        RuntimeCapabilityProfile::McpAgent if !is_subagent => {
+            resolve_agent_role(agent_roles, request)
+        }
+        RuntimeCapabilityProfile::McpChatbot | RuntimeCapabilityProfile::McpAgent => Ok(None),
+    }
+}
+
 fn resolve_allowed_tool_names(
     all_tool_names: &[ToolName],
     agent_role: Option<&AgentRoleConfig>,
@@ -1010,11 +1020,12 @@ fn resolve_profile_allowed_tool_names(
             .filter(|name| MCP_CHATBOT_TOOLS.contains(&name.0.as_str()))
             .cloned()
             .collect(),
-        RuntimeCapabilityProfile::McpAgent => all_tool_names
-            .iter()
-            .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file"))
-            .cloned()
-            .collect(),
+        RuntimeCapabilityProfile::McpAgent => {
+            resolve_allowed_tool_names(all_tool_names, agent_role)
+                .into_iter()
+                .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file"))
+                .collect()
+        }
         RuntimeCapabilityProfile::Default => resolve_allowed_tool_names(all_tool_names, agent_role),
     }
 }
@@ -1197,8 +1208,9 @@ mod tests {
     use super::{
         build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
         resolve_allowed_tool_names, resolve_effective_provider_config, resolve_local_workspace,
-        resolve_profile_allowed_tool_names, validate_existing_e2b_binding,
-        ConfiguredRuntimeResolver, EffectiveLlmConfig, RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
+        resolve_profile_agent_role, resolve_profile_allowed_tool_names,
+        validate_existing_e2b_binding, ConfiguredRuntimeResolver, EffectiveLlmConfig,
+        RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::{AgentRoleConfig, DaemonConfig};
     use agent_types::common::ids::{AgentId, ToolName};
@@ -1347,6 +1359,24 @@ mod tests {
         assert!(agent.contains(&"plugin_custom".to_string()));
         assert!(!agent.contains(&"ask_user_question".to_string()));
         assert!(!agent.contains(&"send_file".to_string()));
+
+        let restricted_role = AgentRoleConfig {
+            description: String::new(),
+            prompt: None,
+            max_turns: None,
+            tools: BTreeMap::from([("spawn_subagent".to_string(), false)]),
+        };
+        let restricted = resolve_profile_allowed_tool_names(
+            &all,
+            RuntimeCapabilityProfile::McpAgent,
+            Some(&restricted_role),
+        )
+        .into_iter()
+        .map(|name| name.0)
+        .collect::<Vec<_>>();
+        assert!(!restricted.contains(&"spawn_subagent".to_string()));
+        assert!(restricted.contains(&"file_write".to_string()));
+        assert!(!restricted.contains(&"ask_user_question".to_string()));
     }
 
     #[test]
@@ -1420,6 +1450,65 @@ mod tests {
             .expect("agent role should resolve")
             .expect("agent role should exist");
         assert_eq!(resolved.prompt.as_deref(), Some("You are a code reviewer."));
+    }
+
+    #[test]
+    fn mcp_agent_role_applies_only_to_the_root_lane() {
+        let mut agent_roles = BTreeMap::new();
+        agent_roles.insert(
+            "xuanyuan".to_string(),
+            AgentRoleConfig {
+                description: "Operations controller".to_string(),
+                prompt: Some("Run the delegated operations workflow.".to_string()),
+                max_turns: Some(24),
+                tools: BTreeMap::new(),
+            },
+        );
+        let request = SessionRuntimeBuildInput {
+            session_id: "mcp-agent-session".to_string(),
+            conversation_id: "conversation".to_string(),
+            sender_id: "mcp-user".to_string(),
+            channel: None,
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext {
+                kind: Some(xiaoo_shared::gateway::GatewayEntryKind::Mcp),
+                instance_id: Some("agent".to_string()),
+                runtime_profile_id: Some("xuanyuan".to_string()),
+                build_tags: Vec::new(),
+            },
+            agent_id_override: None,
+            max_turns_override: None,
+            subagent_role_id: None,
+            llm: None,
+            workspace: None,
+            skills: None,
+        };
+
+        let root_role = resolve_profile_agent_role(
+            &agent_roles,
+            &request,
+            RuntimeCapabilityProfile::McpAgent,
+            false,
+        )
+        .expect("MCP root role should resolve")
+        .expect("MCP root should use the configured role");
+        assert_eq!(
+            root_role.prompt.as_deref(),
+            Some("Run the delegated operations workflow.")
+        );
+
+        let child_role = resolve_profile_agent_role(
+            &agent_roles,
+            &request,
+            RuntimeCapabilityProfile::McpAgent,
+            true,
+        )
+        .expect("MCP child role resolution should succeed");
+        assert!(
+            child_role.is_none(),
+            "subagent lanes must not inherit the root Xuanyuan prompt"
+        );
     }
 
     #[test]

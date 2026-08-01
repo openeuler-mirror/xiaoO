@@ -252,6 +252,12 @@ pub struct McpChatbotConfig {
 pub struct McpAgentConfig {
     #[serde(default)]
     pub bearer_token_env: Option<String>,
+    /// Optional fixed agent role preset for `/mcp/agent` sessions.
+    ///
+    /// This references an `[agent.<role_id>]` entry. MCP clients cannot
+    /// override it per request.
+    #[serde(default)]
+    pub agent_role: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +268,7 @@ pub struct ResolvedMcpServerConfig {
     pub chatbot_token: String,
     pub chatbot_workspace: PathBuf,
     pub agent_token: String,
+    pub agent_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -460,6 +467,12 @@ impl DaemonConfig {
             .unwrap_or_else(|| "XIAOO_MCP_CHATBOT_TOKEN".to_string());
         let agent_token_env = normalize_optional_string(config.agent.bearer_token_env.clone())
             .unwrap_or_else(|| "XIAOO_MCP_AGENT_TOKEN".to_string());
+        let agent_role = normalize_optional_string(config.agent.agent_role.clone());
+        if let Some(role_id) = agent_role.as_deref() {
+            if !self.app.agent.contains_key(role_id) {
+                bail!("mcp_server.agent.agent_role references unknown agent role `{role_id}`");
+            }
+        }
         let chatbot_token =
             required_env_secret("mcp_server.chatbot.bearer_token_env", &chatbot_token_env)?;
         let agent_token =
@@ -533,6 +546,7 @@ impl DaemonConfig {
             chatbot_token,
             chatbot_workspace,
             agent_token,
+            agent_role,
         }))
     }
 
@@ -1368,6 +1382,10 @@ mod tests {
                 provider = "openrouter"
                 model = "z-ai/glm-5"
 
+                [agent.xuanyuan]
+                description = "Operations controller"
+                prompt = "Delegate diagnostics to the configured subagents."
+
                 [mcp_server]
                 enabled = true
                 allowed_origins = ["https://example.com"]
@@ -1378,6 +1396,7 @@ mod tests {
 
                 [mcp_server.agent]
                 bearer_token_env = "{agent_env}"
+                agent_role = "xuanyuan"
             "#,
             workspace.display()
         );
@@ -1398,11 +1417,40 @@ mod tests {
         assert_eq!(resolved.reaper_interval_secs, 30);
         assert_eq!(resolved.chatbot_token, "chat-token");
         assert_eq!(resolved.agent_token, "agent-token");
+        assert_eq!(resolved.agent_role.as_deref(), Some("xuanyuan"));
         assert_eq!(resolved.allowed_origins, vec!["https://example.com"]);
         assert_eq!(
             resolved.chatbot_workspace,
             workspace.canonicalize().expect("canonical workspace")
         );
+    }
+
+    #[test]
+    fn rejects_unknown_mcp_agent_role() {
+        let content = r#"
+            [llm]
+            provider = "openrouter"
+            model = "z-ai/glm-5"
+
+            [mcp_server]
+            enabled = true
+
+            [mcp_server.agent]
+            agent_role = "missing-role"
+        "#;
+        let app: AppConfig = toml::from_str(content).expect("config should parse");
+        let daemon = DaemonConfig {
+            app,
+            config_path: "config.toml".into(),
+        };
+
+        let error = daemon
+            .resolve_mcp_server_config()
+            .expect_err("unknown MCP agent role must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("references unknown agent role `missing-role`"));
     }
 
     #[test]
