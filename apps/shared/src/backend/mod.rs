@@ -487,6 +487,7 @@ mod tests {
             workspace_root,
             session_id: session_id.to_string(),
             e2b_bootstrap: None,
+            initial_session_status: None,
         }
     }
 
@@ -601,6 +602,7 @@ mod tests {
             vec!["session-stale".to_string()],
             "dead_process".to_string(),
             "e2b-sandbox-stale".to_string(),
+            None,
         );
         entry.owner_heartbeat_ms =
             current_time_ms().saturating_sub(STALE_OWNER_THRESHOLD_MS + 60_000);
@@ -1096,6 +1098,7 @@ mod tests {
                 metadata: Value::Null,
                 resource_limits: BackendResourceLimits::default(),
                 options: None,
+                initial_session_status: None,
             })
             .await;
 
