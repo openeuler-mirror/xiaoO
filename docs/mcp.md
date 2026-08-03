@@ -1,12 +1,130 @@
 # MCP (Model Context Protocol) Support
 
-xiaoO can expose tools from any [Model Context Protocol](https://modelcontextprotocol.io/) server to the agent loop. Each connected MCP server's tools become first-class xiaoO tools, named `mcp__{server}__{tool}`, and are dispatched to the server via JSON-RPC over stdio or SSE.
+XiaoO can expose tools from any [Model Context Protocol](https://modelcontextprotocol.io/) server to the agent loop. Each connected MCP server's tools become first-class XiaoO tools, named `mcp__{server}__{tool}`, and are dispatched to the server via JSON-RPC over stdio, legacy SSE, or Streamable HTTP.
 
 This works in **all runtimes**: CLI, TUI, and daemon.
+
+## Opt-in long-term memory automation
+
+Set `[memory_automation] enabled = true` and select an existing `[[mcp.servers]]`
+entry with `server = "ram-a"`. The selected server must provide both
+`memory_search` and `memory_ingest`. Recall is appended as bounded
+`<untrusted_long_term_memory>` system context; it never modifies the user
+message. Ingest is queued durably and MCP failures only produce degraded logs,
+never a failed completed turn. Use `allowed_agent_roles` to limit automation.
+
+```toml
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 5
+recall_token_budget = 512
+context_messages = 4
+queue_path = "memory-queue.jsonl"
+queue_capacity = 256
+max_retries = 5
+retry_backoff_ms = 250
+allowed_agent_roles = ["main"]
+```
+
+`Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
+does not override `allowed_agent_roles`. A turn whose active role is not
+allowlisted deliberately skips both recall and ingest.
 
 ## Configuration
 
 Add an `[mcp]` section with a `[[mcp.servers]]` array entry per server. Place it in `~/.config/xiaoo/config.toml` (CLI/TUI) or the daemon config file.
+
+XiaoO also imports the standard `mcpServers` object from JSON. The lookup order
+is deterministic:
+
+1. `--mcp-config <path>`
+2. `XIAOO_MCP_CONFIG`
+3. `.mcp.json` in the current workspace
+4. `~/.config/xiaoo/mcp.json`
+
+An explicitly selected file must exist, and any selected file must parse and
+validate successfully. Invalid JSON is a startup error rather than an empty
+configuration. JSON entries are runtime-only: TUI configuration saves never
+copy them into `config.toml`. A server name present in both TOML and JSON is a
+startup error that identifies both source files; entries are never silently
+overwritten.
+
+### Standard `.mcp.json` Streamable HTTP server
+
+The key under `mcpServers` becomes the server name:
+
+```json
+{
+  "mcpServers": {
+    "ram-a": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:18081/mcp",
+      "bearer_token_env": "RAM_A_TOKEN",
+      "agent_id": "xiaoo",
+      "headers": {
+        "X-XiaoO-Client": "ram-a"
+      },
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+`transport` uses the exact string `streamable_http`. Unknown fields, invalid
+HTTP(S) URLs, zero timeouts, malformed headers, and secret-bearing headers
+such as `Authorization` are rejected. `bearer_token_env` stores only the name
+of an environment variable; put the token in that environment variable, never
+in JSON. Fixed `headers` are intended only for non-sensitive routing or client
+metadata.
+
+### RAM-A Streamable HTTP memory server
+
+For RAM-A, point xiaoO at the server's `/mcp` endpoint and read the bearer
+token from the environment:
+
+```json
+{
+  "mcpServers": {
+    "ram-a": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:18081/mcp",
+      "bearer_token_env": "RAM_A_XIAOO_TOKEN",
+      "agent_id": "xiaoo",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+Then enable automatic memory explicitly in `config.toml`:
+
+```toml
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 5
+recall_token_budget = 512
+context_messages = 4
+queue_path = "memory-automation-queue.jsonl"
+queue_capacity = 256
+max_retries = 5
+retry_backoff_ms = 250
+allowed_agent_roles = ["main"]
+```
+
+`Mem OK` in the TUI reports RAM-A connection and recent-operation health; it
+does not override `allowed_agent_roles`. A turn whose active role is not
+allowlisted deliberately skips both recall and ingest.
+
+RAM-A expects MCP protocol version `2025-11-25` and bearer auth on every MCP
+request. If `agent_id` is configured, xiaoO sends `X-Agent-ID`; it must match
+the RAM-A token binding. Do not put transport-managed headers such as
+`Origin`, `Authorization`, `X-Agent-ID`, `mcp-session-id`, or
+`mcp-protocol-version` in `.mcp.json` `headers`; xiaoO rejects them during
+config validation. A local non-browser xiaoO process normally omits `Origin`.
+Keep the RAM-A service on localhost or behind a TLS reverse proxy, and use the
+RAM-A deployment guide for SQLite, provider, and single-instance limits.
 
 ### stdio server (local subprocess)
 

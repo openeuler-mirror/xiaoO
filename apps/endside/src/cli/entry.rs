@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::config::FileConfig;
@@ -18,7 +18,7 @@ use skill::types::config::SkillsConfig;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    LlmRuntimeConfig, SessionDetachRequest, SessionOpenRequest,
+    LlmRuntimeConfig, McpMemoryAutomation, SessionDetachRequest, SessionOpenRequest,
     SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
@@ -35,6 +35,10 @@ struct Args {
     /// Path to config file (default: ~/.config/xiaoo/config.toml)
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// Path to standard MCP JSON config (default discovery uses .mcp.json)
+    #[arg(long, global = true)]
+    mcp_config: Option<PathBuf>,
 
     /// Show intermediate results (turns, tool calls, tokens)
     #[arg(long, global = true)]
@@ -191,6 +195,7 @@ where
     let args = Args::parse_from(args);
     let debug = args.debug;
     let config_path = FileConfig::resolve_path(args.config.as_deref());
+    let mcp_config_path = args.mcp_config;
 
     if args.version {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -255,6 +260,20 @@ where
             let reasoning_effort = reasoning_effort.unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let default_toml_source = Path::new("config.toml");
+            let mcp_servers = match file_cfg.resolve_mcp_servers(
+                mcp_config_path.as_deref(),
+                &workspace,
+                dirs::home_dir().as_deref(),
+                config_path.as_deref().unwrap_or(default_toml_source),
+            ) {
+                Ok(servers) => servers,
+                Err(error) => {
+                    eprintln!("Failed to load MCP config: {error}");
+                    std::process::exit(1);
+                }
+            };
 
             let config = CliConfig {
                 provider,
@@ -281,11 +300,12 @@ where
                 operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
-                mcp_servers: file_cfg.mcp.servers.clone(),
+                mcp_servers,
+                memory_automation: file_cfg.memory_automation.clone(),
             };
 
-let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
-            
+            let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
+
             run_once(
                 config,
                 prompt,
@@ -295,12 +315,17 @@ let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
                 session,
                 agent,
                 attach,
-            ).await;
+            )
+            .await;
         }
         Some(Command::Serve { port, hostname }) => {
             handle_serve_command(port, hostname).await;
         }
-        Some(Command::Export { session_id, port, client_id }) => {
+        Some(Command::Export {
+            session_id,
+            port,
+            client_id,
+        }) => {
             handle_export_command(session_id, port, client_id).await;
         }
         Some(Command::Debug { command }) => {
@@ -897,7 +922,7 @@ async fn run_once(
         }
     }
 
-if let Some(attach_url) = &attach {
+    if let Some(attach_url) = &attach {
         run_with_attach(attach_url, prompt, format, title, session, agent, debug).await;
         return;
     }
@@ -1009,6 +1034,7 @@ if let Some(attach_url) = &attach {
             })
             .collect(),
         mcp_servers: config.mcp_servers.clone(),
+        memory_automation: config.memory_automation.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)
@@ -1025,15 +1051,44 @@ if let Some(attach_url) = &attach {
 
     // 5. Bootstrap gateway
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let memory_automation = match McpMemoryAutomation::connect(
+        config.memory_automation.clone(),
+        &config.mcp_servers,
+    )
+    .await
+    {
+        Ok(automation) => automation,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory automation disabled after CLI startup error");
+            None
+        }
+    };
+    let memory_automation_for_shutdown = memory_automation.clone();
     let resolver: Arc<dyn SessionRuntimeResolver> =
         Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-    let deps = match AppBootstrap::from_session_components_with_hooks(
+    let deps = match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
         store,
         resolver,
         config.hooker.clone(),
+        Arc::new(xiaoo_shared::backend::BackendManager::new()),
+        memory_automation,
     ) {
         Ok(d) => d,
         Err(e) => {
+            if let Some(automation) = memory_automation_for_shutdown {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    automation.close(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("[warn] failed to close MCP memory automation: {error}")
+                    }
+                    Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
+                }
+            }
             eprintln!("Failed to bootstrap session: {}", e);
             std::process::exit(1);
         }
@@ -1074,13 +1129,20 @@ if let Some(attach_url) = &attach {
             "agent": agent,
         });
         if format == OutputFormat::Json {
-            println!("{}", serde_json::to_string(&serde_json::json!({
-                "type": "session_start",
-                "data": session_info
-            })).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "session_start",
+                    "data": session_info
+                }))
+                .unwrap()
+            );
             let _ = std::io::stdout().flush();
         } else if debug {
-            eprintln!("[session] {}", serde_json::to_string_pretty(&session_info).unwrap());
+            eprintln!(
+                "[session] {}",
+                serde_json::to_string_pretty(&session_info).unwrap()
+            );
         }
     }
 
@@ -1093,28 +1155,43 @@ if let Some(attach_url) = &attach {
         .await
     {
         if format == OutputFormat::Json {
-            println!("{}", serde_json::to_string(&serde_json::json!({
-                "type": "error",
-                "data": {
-                    "message": format!("failed to close session: {}", err)
-                }
-            })).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "error",
+                    "data": {
+                        "message": format!("failed to close session: {}", err)
+                    }
+                }))
+                .unwrap()
+            );
             let _ = std::io::stdout().flush();
         } else {
             eprintln!("[warn] failed to close session: {}", err);
+        }
+    }
+    if let Some(automation) = memory_automation_for_shutdown {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("[warn] failed to close MCP memory automation: {error}"),
+            Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
         }
     }
 
     match turn_result {
         Ok(result) => {
             if format == OutputFormat::Json {
-                println!("{}", serde_json::to_string(&serde_json::json!({
-                    "type": "response",
-                    "data": {
-                        "raw_reply": result.raw_reply,
-                        "session_id": session_id,
-                    }
-                })).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "response",
+                        "data": {
+                            "raw_reply": result.raw_reply,
+                            "session_id": session_id,
+                        }
+                    }))
+                    .unwrap()
+                );
                 let _ = std::io::stdout().flush();
             } else {
                 if !result.raw_reply.is_empty() {
@@ -1124,12 +1201,16 @@ if let Some(attach_url) = &attach {
         }
         Err(e) => {
             if format == OutputFormat::Json {
-                println!("{}", serde_json::to_string(&serde_json::json!({
-                    "type": "error",
-                    "data": {
-                        "message": e.to_string()
-                    }
-                })).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "error",
+                        "data": {
+                            "message": e.to_string()
+                        }
+                    }))
+                    .unwrap()
+                );
                 let _ = std::io::stdout().flush();
             } else {
                 eprintln!("[error] {}", e);
@@ -1152,12 +1233,9 @@ async fn handle_serve_command(port: u16, hostname: String) {
     eprintln!("Starting xiaoo daemon server on {}:{}", hostname, port);
     eprintln!("Use 'xiaoo-daemon' binary directly for full daemon functionality");
     let status = std::process::Command::new("xiaoo-daemon")
-        .args([
-            "--port", &port.to_string(),
-            "--host", &hostname,
-        ])
+        .args(["--port", &port.to_string(), "--host", &hostname])
         .status();
-    
+
     match status {
         Ok(s) if s.success() => std::process::exit(0),
         Ok(s) => {
@@ -1244,7 +1322,10 @@ async fn run_with_attach(
         Ok(resp) if !resp.status().is_success() => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            attach_fail(format!("session open failed: HTTP {status} {body}"), is_json);
+            attach_fail(
+                format!("session open failed: HTTP {status} {body}"),
+                is_json,
+            );
         }
         Ok(_) => {}
         Err(error) => attach_fail(format!("failed to connect to daemon: {error}"), is_json),
@@ -1284,7 +1365,10 @@ async fn run_with_attach(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        attach_fail(format!("turn submission failed: HTTP {status} {body}"), is_json);
+        attach_fail(
+            format!("turn submission failed: HTTP {status} {body}"),
+            is_json,
+        );
     }
 
     // 3. Consume the SSE event stream emitted by /api/v1/runtimes/input.
@@ -1345,7 +1429,10 @@ async fn run_with_attach(
     }
 
     if !saw_done {
-        attach_fail("daemon stream ended without a completion event".to_string(), is_json);
+        attach_fail(
+            "daemon stream ended without a completion event".to_string(),
+            is_json,
+        );
     }
 
     // 4. Best-effort detach so the daemon releases this process's lease
@@ -1409,30 +1496,40 @@ fn parse_sse_event(frame: &str) -> Option<Value> {
     serde_json::from_str(&data).ok()
 }
 
-
 fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, debug: bool) {
     match command {
         DebugCommands::Config => {
             let file_cfg = config_path
                 .map(|path| FileConfig::load_from_path(path, debug))
                 .unwrap_or_default();
-            
+
             let mut config_json = serde_json::Map::new();
-            config_json.insert("$schema".to_string(), Value::String("https://xiaoo.ai/config.json".to_string()));
+            config_json.insert(
+                "$schema".to_string(),
+                Value::String("https://xiaoo.ai/config.json".to_string()),
+            );
 
             if let Some(llm) = &file_cfg.llm {
                 let provider = llm.provider.as_deref().unwrap_or("openai");
                 let model = llm.model.as_deref().unwrap_or("");
-                config_json.insert("model".to_string(), Value::String(format!("{}/{}", provider, model)));
+                config_json.insert(
+                    "model".to_string(),
+                    Value::String(format!("{}/{}", provider, model)),
+                );
             }
 
-            println!("{}", serde_json::to_string_pretty(&Value::Object(config_json)).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&Value::Object(config_json)).unwrap()
+            );
         }
     }
-
 }
 async fn handle_export_command(session_id: String, port: u16, client_id: Option<String>) {
-    let url = format!("http://127.0.0.1:{}/api/v1/runtimes/export/{}", port, session_id);
+    let url = format!(
+        "http://127.0.0.1:{}/api/v1/runtimes/export/{}",
+        port, session_id
+    );
 
     let client = reqwest::Client::new();
     let mut req = client.get(&url);
@@ -1484,6 +1581,24 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn parses_explicit_mcp_config_path() {
+        let args = Args::try_parse_from([
+            "xiaoo",
+            "--mcp-config",
+            "/tmp/mcp.json",
+            "run",
+            "--prompt",
+            "hello",
+        ])
+        .expect("CLI should accept --mcp-config");
+
+        assert_eq!(
+            args.mcp_config.as_deref(),
+            Some(std::path::Path::new("/tmp/mcp.json"))
+        );
+    }
+
+    #[test]
     fn copy_dir_rejects_destination_inside_source() {
         let temp = tempdir().unwrap();
         let src = temp.path().join("skills");
@@ -1526,7 +1641,6 @@ mod tests {
         assert_eq!(title, None);
     }
 }
-
 
 #[cfg(test)]
 mod attach_sse_tests {

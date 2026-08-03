@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::gateway::{
     AppBootstrap, AppDependencies, AppTurnRequest, AppTurnResult, HostedSessionRuntimeConfig,
-    HostedSessionRuntimeResolver, SessionControlPlane, SessionOpenRequest, SessionRecord,
-    SessionRuntimeBindings, SessionStore,
+    HostedSessionRuntimeResolver, McpMemoryAutomation, MemoryAutomationHealth, SessionControlPlane,
+    SessionOpenRequest, SessionRecord, SessionRuntimeBindings, SessionStore,
 };
 use crate::interaction_prompt::UserPromptResult;
 
@@ -13,6 +13,13 @@ use super::session::{
     ChannelToolEventSink, SessionGateway, SessionTurnUpdate,
 };
 use xiaoo_core::spawn_prefetch;
+
+fn memory_status_from_health(health: MemoryAutomationHealth) -> crate::status_panel::MemoryStatus {
+    match health {
+        MemoryAutomationHealth::Healthy => crate::status_panel::MemoryStatus::Connected,
+        MemoryAutomationHealth::Degraded => crate::status_panel::MemoryStatus::Degraded,
+    }
+}
 
 impl SessionGateway {
     pub fn new() -> Self {
@@ -67,6 +74,77 @@ impl SessionGateway {
         self.session_store.load(session_id).await
     }
 
+    async fn get_or_init_memory_automation(
+        memory_automation: &tokio::sync::Mutex<
+            Option<Option<Arc<dyn crate::gateway::TurnMemoryAutomation>>>,
+        >,
+        config: &crate::gateway::HostedSessionRuntimeConfig,
+    ) -> (
+        Option<Arc<dyn crate::gateway::TurnMemoryAutomation>>,
+        Option<crate::status_panel::MemoryStatus>,
+    ) {
+        let mut state = memory_automation.lock().await;
+        if let Some(automation) = state.as_ref() {
+            return (automation.clone(), None);
+        }
+        if !config.memory_automation.enabled {
+            *state = Some(None);
+            return (None, Some(crate::status_panel::MemoryStatus::Disabled));
+        }
+        match McpMemoryAutomation::connect(config.memory_automation.clone(), &config.mcp_servers)
+            .await
+        {
+            Ok(automation) => {
+                *state = Some(automation.clone());
+                (
+                    automation,
+                    Some(crate::status_panel::MemoryStatus::Connected),
+                )
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "memory automation disabled after TUI startup error");
+                // Keep the state uninitialized: an optional MCP server can
+                // recover while the TUI is still open, so the next turn gets
+                // a fresh connection attempt instead of permanent fail-open.
+                (None, Some(crate::status_panel::MemoryStatus::Degraded))
+            }
+        }
+    }
+
+    fn register_memory_health_receiver(
+        memory_health: &Mutex<Option<tokio::sync::watch::Receiver<MemoryAutomationHealth>>>,
+        automation: Option<&Arc<dyn crate::gateway::TurnMemoryAutomation>>,
+    ) {
+        let Some(automation) = automation else {
+            return;
+        };
+        let Ok(mut receiver) = memory_health.lock() else {
+            tracing::warn!("memory health receiver lock poisoned");
+            return;
+        };
+        if receiver.is_none() {
+            *receiver = automation.subscribe_health();
+        }
+    }
+
+    pub(super) fn take_memory_health_update(&self) -> Option<MemoryAutomationHealth> {
+        let mut receiver = self.memory_health.lock().ok()?;
+        let receiver = receiver.as_mut()?;
+        match receiver.has_changed() {
+            Ok(true) => Some(*receiver.borrow_and_update()),
+            Ok(false) | Err(_) => None,
+        }
+    }
+
+    pub(super) fn current_memory_status(&self) -> crate::status_panel::MemoryStatus {
+        self.memory_health
+            .lock()
+            .ok()
+            .and_then(|receiver| receiver.as_ref().map(|receiver| *receiver.borrow()))
+            .map(memory_status_from_health)
+            .unwrap_or(crate::status_panel::MemoryStatus::Disabled)
+    }
+
     pub async fn import_session_snapshot(&self, record: SessionRecord) {
         let session_id = record.session_id.clone();
         let kvcache_enabled = record.runtime.feature_flags.kvcache_enabled;
@@ -99,6 +177,8 @@ impl SessionGateway {
     ) {
         let session_store: Arc<dyn SessionStore> = self.session_store.clone();
         let active_session_ids = Arc::clone(&self.active_session_ids);
+        let memory_automation_state = Arc::clone(&self.memory_automation);
+        let memory_health_state = Arc::clone(&self.memory_health);
         let backend_manager = self.backend_manager.clone();
         tokio::spawn(async move {
             active_session_ids
@@ -126,13 +206,22 @@ impl SessionGateway {
             };
 
             let hooker_config = runtime_config.hooker.clone();
+            let (memory_automation, memory_status) =
+                Self::get_or_init_memory_automation(&memory_automation_state, &runtime_config)
+                    .await;
+            Self::register_memory_health_receiver(&memory_health_state, memory_automation.as_ref());
+            if let Some(memory_status) = memory_status {
+                let _ = updates_tx.send(SessionTurnUpdate::MemoryStatus(memory_status));
+            }
             let resolver = Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
+            let memory_automation_for_status = memory_automation.clone();
             let dependencies =
-                match AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+                match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
                     session_store,
                     resolver,
                     hooker_config,
                     backend_manager,
+                    memory_automation,
                 ) {
                     Ok(dependencies) => dependencies,
                     Err(error) => {
@@ -142,6 +231,11 @@ impl SessionGateway {
                 };
 
             let result = dependencies.session_service.run_turn(request).await;
+            if let Some(automation) = memory_automation_for_status.as_ref() {
+                let _ = updates_tx.send(SessionTurnUpdate::MemoryStatus(
+                    memory_status_from_health(automation.health()),
+                ));
+            }
             match result {
                 Ok(AppTurnResult {
                     messages,
@@ -222,21 +316,52 @@ impl SessionGateway {
             lock.clear();
             ids
         };
-        if ids.is_empty() {
-            return;
-        }
         let cp = self.lifecycle_control_plane.lock().await.clone();
-        let Some(control_plane) = cp else {
-            return;
-        };
-        for session_id in ids {
-            if let Err(err) = control_plane.force_close_session(&session_id).await {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %err,
-                    "failed to close session on exit"
-                );
+        if let Some(control_plane) = cp {
+            for session_id in ids {
+                if let Err(err) = control_plane.force_close_session(&session_id).await {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %err,
+                        "failed to close session on exit"
+                    );
+                }
             }
         }
+        let automation = self.memory_automation.lock().await.take().flatten();
+        if let Ok(mut receiver) = self.memory_health.lock() {
+            *receiver = None;
+        }
+        if let Some(automation) = automation {
+            let close =
+                tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await;
+            match close {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(error = %error, "failed to close MCP memory automation")
+                }
+                Err(_) => tracing::warn!("MCP memory automation close timed out after 5 seconds"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::gateway::MemoryAutomationHealth;
+    use crate::status_panel::MemoryStatus;
+
+    use super::memory_status_from_health;
+
+    #[test]
+    fn memory_health_maps_to_operator_status() {
+        assert_eq!(
+            memory_status_from_health(MemoryAutomationHealth::Healthy),
+            MemoryStatus::Connected
+        );
+        assert_eq!(
+            memory_status_from_health(MemoryAutomationHealth::Degraded),
+            MemoryStatus::Degraded
+        );
     }
 }

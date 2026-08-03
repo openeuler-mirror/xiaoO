@@ -148,6 +148,8 @@ pub struct CallToolResult {
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default)]
+    pub structured_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

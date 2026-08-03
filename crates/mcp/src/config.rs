@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Top-level `[mcp]` configuration section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -30,6 +30,19 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub url: Option<String>,
 
+    /// Name of the environment variable containing the bearer token. The
+    /// secret itself is resolved by the HTTP transport at runtime.
+    #[serde(default)]
+    pub bearer_token_env: Option<String>,
+
+    /// Optional agent selector sent by Streamable HTTP transports.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Non-sensitive, fixed headers for HTTP transports.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+
     /// Override the enabled flag (defaults to true).
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -52,8 +65,46 @@ impl McpServerConfig {
     }
 }
 
-fn default_timeout_ms() -> u64 {
+pub(crate) fn default_timeout_ms() -> u64 {
     30_000
+}
+
+pub(crate) fn validate_fixed_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
+    for (name, value) in headers {
+        let parsed_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| format!("invalid header name `{name}`"))?;
+        let normalized = parsed_name.as_str();
+        if is_sensitive_header_name(normalized) {
+            return Err(format!(
+                "sensitive header `{name}` is not allowed; use bearer_token_env"
+            ));
+        }
+        if matches!(
+            normalized,
+            "origin"
+                | "mcp-session-id"
+                | "mcp-protocol-version"
+                | "accept"
+                | "content-type"
+                | "x-agent-id"
+                | "last-event-id"
+                | "mcp-method"
+                | "mcp-name"
+        ) {
+            return Err(format!("transport-managed header `{name}` is not allowed"));
+        }
+        reqwest::header::HeaderValue::from_str(value)
+            .map_err(|_| format!("invalid value for header `{name}`"))?;
+    }
+    Ok(())
+}
+
+fn is_sensitive_header_name(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    ) || name.contains("token")
+        || name.contains("api-key")
 }
 
 /// Effect profile for an MCP server's tools. The MCP protocol does not expose
@@ -96,17 +147,13 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Transport {
+    #[default]
     Stdio,
     Sse,
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        Self::Stdio
-    }
+    StreamableHttp,
 }
 
 #[cfg(test)]

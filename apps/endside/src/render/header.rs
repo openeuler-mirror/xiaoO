@@ -281,6 +281,13 @@ impl App {
             ),
             Span::styled("  WS ", Style::default().fg(self.state.theme.muted)),
             Span::styled(workspace, Style::default().fg(self.state.theme.foreground)),
+            Span::styled("  Mem ", Style::default().fg(self.state.theme.muted)),
+            Span::styled(
+                self.state.status_panel.memory_status.label(),
+                Style::default()
+                    .fg(self.state.theme.primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Tok ", Style::default().fg(self.state.theme.muted)),
             Span::styled(
                 StatusPanel::format_token_count(self.state.status_panel.total_tokens),

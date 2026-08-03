@@ -2,6 +2,26 @@ use crate::render::utils::sanitize_terminal_text;
 
 use std::path::Path;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryStatus {
+    #[default]
+    Disabled,
+    Unknown,
+    Connected,
+    Degraded,
+}
+
+impl MemoryStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "OFF",
+            Self::Unknown => "UNKNOWN",
+            Self::Connected => "OK",
+            Self::Degraded => "DEGRADED",
+        }
+    }
+}
+
 pub struct StatusPanel {
     pub model_name: String,
     pub provider_name: String,
@@ -15,6 +35,7 @@ pub struct StatusPanel {
     pub is_connected: bool,
     pub input_context_tokens: u64,
     pub input_context_tokens_estimated: bool,
+    pub memory_status: MemoryStatus,
 }
 
 impl Default for StatusPanel {
@@ -31,6 +52,7 @@ impl Default for StatusPanel {
             is_connected: false,
             input_context_tokens: 0,
             input_context_tokens_estimated: false,
+            memory_status: MemoryStatus::Disabled,
         }
     }
 }
@@ -108,7 +130,14 @@ fn shorten_path_display(path: &Path, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::StatusPanel;
+    use super::{MemoryStatus, StatusPanel};
+
+    #[test]
+    fn memory_status_labels_are_operator_readable() {
+        assert_eq!(MemoryStatus::Unknown.label(), "UNKNOWN");
+        assert_eq!(MemoryStatus::Connected.label(), "OK");
+        assert_eq!(MemoryStatus::Degraded.label(), "DEGRADED");
+    }
 
     #[test]
     fn format_context_usage_marks_estimated_values() {

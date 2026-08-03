@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
+use xiaoo_shared::gateway::MemoryAutomationConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
@@ -53,6 +54,8 @@ pub struct AppConfig {
     pub cron: Option<CronSectionRaw>,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub memory_automation: MemoryAutomationConfig,
     #[serde(default)]
     pub mcp_server: McpServerConfig,
 }
@@ -381,6 +384,27 @@ impl DaemonConfig {
         install_builtin_agent_roles(&mut app.agent)
             .with_context(|| format!("invalid config {}", config_path.display()))?;
         Ok(Self { app, config_path })
+    }
+
+    pub fn load_with_mcp_config(
+        path: impl AsRef<Path>,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+    ) -> Result<Self> {
+        let mut config = Self::load_from(path)?;
+        let json_source = mcp::resolve_json_config_path(explicit_path, workspace, home);
+        let json_servers = mcp::load_json_servers(explicit_path, workspace, home)
+            .context("failed to load MCP JSON config")?;
+        let fallback_json_source = workspace.join(".mcp.json");
+        config.app.mcp.servers = mcp::merge_server_configs(
+            std::mem::take(&mut config.app.mcp.servers),
+            json_servers,
+            &config.config_path,
+            json_source.as_deref().unwrap_or(&fallback_json_source),
+        )
+        .context("failed to merge MCP server configs")?;
+        Ok(config)
     }
 
     pub fn resolve_agent(&self) -> Result<ResolvedAgentConfig> {
@@ -1026,6 +1050,87 @@ fn default_retry_delay() -> u64 {
 mod tests {
     use super::{resolve_config_path, AppConfig, DaemonConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn parses_memory_automation_config() {
+        let content = r#"
+[llm]
+provider = "openai"
+model = "gpt-4o"
+
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 3
+recall_token_budget = 128
+context_messages = 2
+queue_path = "/tmp/xiaoo-memory-queue.jsonl"
+queue_capacity = 32
+max_retries = 4
+retry_backoff_ms = 50
+allowed_agent_roles = ["main", "researcher"]
+"#;
+
+        let config: AppConfig = toml::from_str(content).expect("config should parse");
+
+        assert!(config.memory_automation.enabled);
+        assert_eq!(config.memory_automation.server, "ram-a");
+        assert_eq!(config.memory_automation.recall_top_k, 3);
+        assert_eq!(config.memory_automation.recall_token_budget, 128);
+        assert_eq!(config.memory_automation.context_messages, 2);
+        assert_eq!(config.memory_automation.queue_capacity, 32);
+        assert_eq!(config.memory_automation.max_retries, 4);
+        assert_eq!(config.memory_automation.retry_backoff_ms, 50);
+        assert_eq!(
+            config.memory_automation.allowed_agent_roles,
+            vec!["main".to_string(), "researcher".to_string()]
+        );
+    }
+
+    #[test]
+    fn daemon_load_merges_runtime_json_mcp_servers() {
+        let temp = TempDir::new().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let json_path = temp.path().join("mcp.json");
+        std::fs::write(
+            &config_path,
+            r#"
+[llm]
+provider = "openrouter"
+model = "z-ai/glm-5"
+
+[[mcp.servers]]
+name = "toml-server"
+transport = "stdio"
+command = "toml-server"
+"#,
+        )
+        .expect("write TOML config");
+        std::fs::write(
+            &json_path,
+            r#"{"mcpServers":{"json-server":{"transport":"stdio","command":"json-server"}}}"#,
+        )
+        .expect("write JSON config");
+
+        let daemon = DaemonConfig::load_with_mcp_config(
+            &config_path,
+            Some(&json_path),
+            temp.path(),
+            Some(temp.path()),
+        )
+        .expect("load merged daemon config");
+
+        assert_eq!(
+            daemon
+                .app
+                .mcp
+                .servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["toml-server", "json-server"]
+        );
+    }
 
     #[test]
     fn parses_feishu_channel_config() {

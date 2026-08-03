@@ -205,6 +205,9 @@ impl GatewayRuntime {
             .status_panel
             .set_backend(format!("Remote: {base_url}"));
         state.status_panel.set_remote_workspace(&base_url);
+        // The remote SSE protocol does not yet publish RAM-A health. Do not
+        // imply that memory is disabled merely because this TUI cannot see it.
+        state.status_panel.memory_status = crate::status_panel::MemoryStatus::Unknown;
     }
 
     pub async fn connect_remote(
@@ -252,6 +255,7 @@ impl GatewayRuntime {
             .status_panel
             .set_backend(sandbox_display_name(&state.agent_config.operation_backend));
         state.status_panel.set_workspace(&state.workspace);
+        state.status_panel.memory_status = self.session_gateway.current_memory_status();
         Ok(())
     }
 
@@ -1282,7 +1286,46 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sse_frame, take_sse_frame, RemoteSseEvent};
+    use std::path::PathBuf;
+    use tokio::sync::watch;
+
+    use crate::app_state::AppState;
+    use crate::gateway::MemoryAutomationHealth;
+    use crate::status_panel::MemoryStatus;
+
+    use super::{parse_sse_frame, take_sse_frame, GatewayRuntime, RemoteSseEvent};
+
+    #[test]
+    fn configuring_remote_marks_memory_state_unknown() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("test app state should initialize");
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+
+        runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn disconnecting_remote_restores_cached_local_memory_health() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("test app state should initialize");
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let (_health_tx, health_rx) = watch::channel(MemoryAutomationHealth::Healthy);
+        *runtime
+            .session_gateway
+            .memory_health
+            .lock()
+            .expect("memory health lock should not be poisoned") = Some(health_rx);
+        runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+
+        runtime
+            .disconnect_remote(&mut state)
+            .await
+            .expect("remote disconnect should succeed");
+
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Connected);
+    }
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {

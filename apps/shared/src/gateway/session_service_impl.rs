@@ -36,6 +36,9 @@ use subagent::{
 use tokio::sync::Mutex;
 use xiaoo_core::NoopRuntimeView;
 
+use super::memory_automation::{
+    render_memory_context, CompletedTurnIngest, TurnMemoryAutomation, TurnMemoryContext,
+};
 use super::session_backend::{
     checkout_backend_with_eviction, lease_session_backend, sync_session_backend_instance,
     CheckoutEvictionContext,
@@ -89,6 +92,7 @@ pub struct CoreBackedSessionService {
     /// gradual rollout; flip via [`Self::set_enforce_anonymous_lease`]
     /// (typically driven by `XIAOO_ENFORCE_LEASE` in `AppBootstrap`).
     enforce_anonymous_lease: Arc<std::sync::atomic::AtomicBool>,
+    memory_automation: Option<Arc<dyn TurnMemoryAutomation>>,
 }
 
 impl CoreBackedSessionService {
@@ -98,6 +102,7 @@ impl CoreBackedSessionService {
         hooker_registry: Arc<dyn HookerRegistry>,
         backend_manager: Arc<BackendManager>,
         max_prompt_chain_depth: usize,
+        memory_automation: Option<Arc<dyn TurnMemoryAutomation>>,
     ) -> Self {
         Self {
             session_store,
@@ -110,6 +115,7 @@ impl CoreBackedSessionService {
             max_prompt_chain_depth,
             sessions_lease: SessionLeaseTable::new(),
             enforce_anonymous_lease: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            memory_automation,
         }
     }
 
@@ -1121,6 +1127,31 @@ impl CoreBackedSessionService {
         if let Some(tool_event_sink) = tool_event_sink {
             resolved.bindings.tool_event_sink = Some(tool_event_sink);
         }
+        let original_request = request.clone();
+        let resolved_agent_role = resolved.descriptor.agent_id.0.clone();
+        if let Some(automation) = &self.memory_automation {
+            let context = TurnMemoryContext {
+                query: request.text.clone(),
+                conversation_id: request.conversation_id.clone(),
+                message_id: request.message_id.clone(),
+                sender_id: request.sender_id.clone(),
+                agent_role: resolved_agent_role.clone(),
+                timestamp_ms: current_time_ms(),
+            };
+            match automation.recall(&context).await {
+                Ok(memories) if !memories.is_empty() => {
+                    let block = render_memory_context(&memories, automation.recall_token_budget());
+                    if !block.is_empty() {
+                        resolved.descriptor.system_prompt.push_str("\n\n");
+                        resolved.descriptor.system_prompt.push_str(&block);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "memory recall degraded; continuing turn")
+                }
+            }
+        }
 
         let mut seed_session =
             existing.unwrap_or_else(|| Self::build_session_for_turn(&request, &resolved));
@@ -1181,6 +1212,11 @@ impl CoreBackedSessionService {
         let idle_agent_id = resolved.descriptor.agent_id.0.clone();
         let idle_chain_depth = request.chain_depth;
 
+        let prior_memory_context = seed_session
+            .loop_state
+            .as_ref()
+            .map(|loop_state| loop_state.messages.clone())
+            .unwrap_or_default();
         let handle = self.get_or_create_session_handle(seed_session).await;
         let mut turn_result = handle
             .run_turn(
@@ -1230,6 +1266,29 @@ impl CoreBackedSessionService {
                     )
                     .await;
                 turn.hook_actions = actions;
+            }
+        }
+
+        if let (Some(automation), Ok(turn)) = (&self.memory_automation, &turn_result) {
+            let ingest = CompletedTurnIngest {
+                message_id: original_request.message_id.clone().unwrap_or_else(|| {
+                    format!("{}:{}", original_request.session_id, current_time_ms())
+                }),
+                conversation_id: original_request.conversation_id.clone(),
+                sender_id: original_request.sender_id.clone(),
+                agent_role: resolved_agent_role,
+                timestamp_ms: current_time_ms(),
+                user_text: original_request.text.clone(),
+                assistant_text: turn.visible_reply.clone(),
+                recent_messages: recent_memory_context_messages(
+                    &prior_memory_context,
+                    automation.context_messages(),
+                ),
+                retries: 0,
+                next_attempt_ms: 0,
+            };
+            if let Err(error) = automation.enqueue_ingest(ingest).await {
+                tracing::warn!(error = %error, "memory ingest degraded; completed turn preserved");
             }
         }
 
@@ -1561,10 +1620,7 @@ impl SessionService for CoreBackedSessionService {
         .await
     }
 
-    async fn export_session(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionRecord, SessionServiceError> {
+    async fn export_session(&self, session_id: &str) -> Result<SessionRecord, SessionServiceError> {
         match self.session_store.load(session_id).await {
             Some(record) => Ok(record),
             None => Err(SessionServiceError::SessionNotFound {
@@ -2089,6 +2145,34 @@ fn current_time_ms() -> u64 {
     })
 }
 
+fn recent_memory_context_messages(
+    messages: &[agent_types::ChatMessage],
+    limit: usize,
+) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut recent = messages
+        .iter()
+        .rev()
+        .filter_map(|message| {
+            let text = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    agent_types::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    recent.reverse();
+    recent
+}
+
 /// Build a `*.Session.lifecycle.<stage>` hook point id. Consolidates the
 /// inline `format!("{}.Session.lifecycle.<stage>", agent_id)` previously
 /// repeated across the session created/closed/state call sites.
@@ -2154,11 +2238,15 @@ mod tests {
     use agent_types::common::ids::AgentId;
     use agent_types::context::{FeatureFlags, TokenBudgetConfig};
     use agent_types::hook::HookerRegistryConfig;
-    use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
+    use agent_types::{
+        AssistantMessage, ChatMessage, ContentBlock, LlmError, LlmRequest, LlmResponse, StopReason,
+        StreamChunk, Usage,
+    };
     use hook::framework::HookerRegistryBuilderImpl;
     use hook::HookerRegistryBuilder;
     use llm_client::LlmProviderWrapper;
     use serde_json::{json, Value};
+    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
     use xiaoo_core::LoopStateSnapshot;
 
@@ -2379,7 +2467,7 @@ mod tests {
                 skill_registry: None,
                 bindings: SessionRuntimeBindings::default(),
                 compression_pipeline: None,
-                trace: Value::Null,
+                trace: json!({}),
                 hooker: Default::default(),
                 operation_backend: Some(GatewayBackendConfig::new(
                     "local",
@@ -2407,6 +2495,136 @@ mod tests {
             None,
             None,
         ))
+    }
+
+    struct ReplyingLlmProvider {
+        capabilities: ProviderCapabilities,
+        seen_requests: Arc<StdMutex<Vec<LlmRequest>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ReplyingLlmProvider {
+        async fn complete(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.seen_requests
+                .lock()
+                .expect("seen requests")
+                .push(request.clone());
+            Ok(reply_response())
+        }
+
+        async fn complete_stream(
+            &self,
+            request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            self.seen_requests
+                .lock()
+                .expect("seen requests")
+                .push(request.clone());
+            on_chunk(StreamChunk {
+                delta_text: Some("reply".to_string()),
+                delta_reasoning: None,
+                delta_tool_call: None,
+            });
+            Ok(reply_response())
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    fn reply_response() -> LlmResponse {
+        LlmResponse {
+            message: AssistantMessage {
+                text: Some("reply".to_string()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                usage: Usage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                },
+                stop_reason: StopReason::EndTurn,
+            },
+            kv_cache_chunk_hashes: Vec::new(),
+        }
+    }
+
+    fn replying_llm_provider(
+        seen_requests: Arc<StdMutex<Vec<LlmRequest>>>,
+    ) -> Arc<LlmProviderWrapper> {
+        Arc::new(LlmProviderWrapper::new(
+            Arc::new(ReplyingLlmProvider {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: false,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 4096,
+                    model_name: "stub-model".to_string(),
+                },
+                seen_requests,
+            }),
+            None,
+            None,
+        ))
+    }
+
+    #[derive(Default)]
+    struct FailingRecallAutomation {
+        seen_contexts: StdMutex<Vec<TurnMemoryContext>>,
+        enqueued: StdMutex<Vec<CompletedTurnIngest>>,
+        context_messages: usize,
+    }
+
+    #[async_trait]
+    impl TurnMemoryAutomation for FailingRecallAutomation {
+        async fn recall(
+            &self,
+            context: &TurnMemoryContext,
+        ) -> Result<
+            Vec<crate::gateway::memory_automation::RecallMemory>,
+            crate::gateway::memory_automation::MemoryAutomationError,
+        > {
+            self.seen_contexts
+                .lock()
+                .expect("seen contexts")
+                .push(context.clone());
+            Err(
+                crate::gateway::memory_automation::MemoryAutomationError::Config(
+                    "forced recall failure".to_string(),
+                ),
+            )
+        }
+
+        async fn enqueue_ingest(
+            &self,
+            ingest: CompletedTurnIngest,
+        ) -> Result<(), crate::gateway::memory_automation::MemoryAutomationError> {
+            self.enqueued.lock().expect("enqueued").push(ingest);
+            Ok(())
+        }
+
+        fn recall_token_budget(&self) -> usize {
+            80
+        }
+
+        fn context_messages(&self) -> usize {
+            self.context_messages
+        }
+    }
+
+    fn text_blocks(messages: &[ChatMessage], role: agent_types::MessageRole) -> Vec<String> {
+        messages
+            .iter()
+            .filter(|message| message.role == role)
+            .flat_map(|message| &message.blocks)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn test_open_request(session_id: &str) -> SessionOpenRequest {
@@ -2443,6 +2661,71 @@ mod tests {
         session.backend_instance = None;
         store.save(session.clone()).await;
         session
+    }
+
+    #[tokio::test]
+    async fn memory_automation_failed_recall_keeps_user_text_and_turn_execution_unchanged() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let seen_requests = Arc::new(StdMutex::new(Vec::new()));
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
+        });
+        let automation = Arc::new(FailingRecallAutomation {
+            context_messages: 2,
+            ..FailingRecallAutomation::default()
+        });
+        let dependencies =
+            AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+                store,
+                resolver,
+                HookerRegistryConfig::default(),
+                Arc::new(BackendManager::new()),
+                Some(automation.clone() as Arc<dyn TurnMemoryAutomation>),
+            )
+            .expect("dependencies");
+
+        let result = dependencies
+            .session_service
+            .run_turn(test_open_request("memory-fail-open").into_turn_request("hello".to_string()))
+            .await
+            .expect("turn should continue after memory recall failure");
+
+        assert_eq!(result.visible_reply, "reply");
+        let requests = seen_requests.lock().expect("seen requests");
+        assert_eq!(
+            text_blocks(&requests[0].messages, agent_types::MessageRole::User),
+            vec!["hello".to_string()]
+        );
+        assert!(
+            !requests[0]
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("<untrusted_long_term_memory>"))),
+            "failed recall must not add memory context"
+        );
+        drop(requests);
+
+        let contexts = automation.seen_contexts.lock().expect("seen contexts");
+        assert_eq!(contexts[0].query, "hello");
+        drop(contexts);
+        let enqueued = automation.enqueued.lock().expect("enqueued");
+        assert_eq!(enqueued[0].user_text, "hello");
+        assert_eq!(enqueued[0].assistant_text, "reply");
+        assert!(enqueued[0].recent_messages.is_empty());
+        drop(enqueued);
+
+        dependencies
+            .session_service
+            .run_turn(test_open_request("memory-fail-open").into_turn_request("next".to_string()))
+            .await
+            .expect("second turn should continue after memory recall failure");
+        let enqueued = automation.enqueued.lock().expect("enqueued");
+        assert_eq!(enqueued.len(), 2);
+        assert_eq!(enqueued[1].recent_messages, vec!["hello", "reply"]);
     }
 
     #[tokio::test]
@@ -3368,6 +3651,7 @@ mod tests {
             Arc::from(hooker_registry),
             Arc::new(BackendManager::new()),
             128,
+            None,
         ))
     }
 
