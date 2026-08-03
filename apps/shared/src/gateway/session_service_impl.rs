@@ -728,6 +728,7 @@ impl CoreBackedSessionService {
                     self.session_store.clone(),
                     request.metadata.clone(),
                     &CheckoutEvictionContext::runtime_checkout(),
+                    request.options.clone(),
                     None,
                 )
                 .await?,
@@ -3391,6 +3392,7 @@ mod tests {
                 conversation_id: Some("child-conversation".to_string()),
                 sender_id: Some("child-user".to_string()),
                 metadata: json!({"branch": "a"}),
+                options: None,
             })
             .await
             .expect("checkout runtime");
@@ -3502,6 +3504,7 @@ mod tests {
                 conversation_id: None,
                 sender_id: None,
                 metadata: Value::Null,
+                options: None,
             })
             .await;
 
@@ -3555,6 +3558,7 @@ mod tests {
                 conversation_id: Some("child-conversation".to_string()),
                 sender_id: Some("child-user".to_string()),
                 metadata: json!({"branch": "a"}),
+                options: None,
             })
             .await
             .expect("checkout runtime");
@@ -3604,6 +3608,7 @@ mod tests {
                 conversation_id: None,
                 sender_id: None,
                 metadata: Value::Null,
+                options: None,
             })
             .await;
         assert!(

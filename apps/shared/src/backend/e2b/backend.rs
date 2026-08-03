@@ -52,6 +52,8 @@ pub(crate) struct E2bBackendState {
     pub(crate) temp_root: BackendPath,
     pub(crate) default_shell: Option<String>,
     pub(crate) username: Option<String>,
+    /// When true, POST /files uses multipart (legacy envd); default is octet-stream.
+    pub(crate) envd_file_upload_multipart: bool,
     pub(crate) http: reqwest::Client,
     pub(crate) lifecycle: Mutex<E2bLifecycle>,
 }

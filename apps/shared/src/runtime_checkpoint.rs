@@ -64,6 +64,8 @@ pub struct RuntimeCheckoutRequest {
     pub sender_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(default)]
+    pub options: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -34,18 +34,27 @@ impl E2bFileSystem {
         }
     }
     async fn upload_raw(&self, path: &BackendPath, content: Vec<u8>) -> Result<(), OperationError> {
-        let response = self
+        let mut request = self
             .state
             .envd_request(Method::POST, "/files")
             .query(&[("path", path.0.as_str())])
-            .header(CONTENT_TYPE, "application/octet-stream")
-            .header(ACCEPT, "application/json")
-            .body(content)
-            .send()
-            .await
-            .map_err(|error| OperationError::Transport {
-                message: format!("failed to upload e2b file {}: {error}", path.0),
-            })?;
+            .header(ACCEPT, "application/json");
+        let response = if self.state.envd_file_upload_multipart {
+            use reqwest::multipart::{Form, Part};
+            let name = path.0.rsplit('/').next().unwrap_or("file").to_string();
+            request
+                .multipart(Form::new().part("file", Part::bytes(content).file_name(name)))
+                .send()
+        } else {
+            request
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(content)
+                .send()
+        }
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to upload e2b file {}: {error}", path.0),
+        })?;
 
         if response.status().is_success() {
             return Ok(());
