@@ -32,6 +32,7 @@ pub(super) async fn lease_session_backend(
                 session_store,
                 Value::Null,
                 &CheckoutEvictionContext::resume(),
+                None,
                 initial_running,
             )
             .await;
@@ -129,6 +130,7 @@ pub(super) async fn checkout_backend_with_eviction(
     session_store: Arc<dyn crate::gateway::SessionStore>,
     metadata: Value,
     context: &CheckoutEvictionContext,
+    options: Option<Value>,
     initial_session_status: Option<(String, usize)>,
 ) -> Result<BackendLease, SessionServiceError> {
     let sandbox_key = BackendManager::sandbox_key_from_config(&GatewayBackendConfig::new(
@@ -154,7 +156,7 @@ pub(super) async fn checkout_backend_with_eviction(
                 timeout: None,
                 metadata: metadata.clone(),
                 resource_limits: BackendResourceLimits::default(),
-                options: None,
+                options: options.clone(),
                 initial_session_status: initial_session_status.clone(),
             })
             .await

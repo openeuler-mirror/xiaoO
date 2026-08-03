@@ -69,6 +69,8 @@ pub struct LlmConfig {
     pub api_key_env: Option<String>,
     pub model: String,
     #[serde(default)]
+    pub context_window: Option<usize>,
+    #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]
     pub kvcache_enabled: Option<bool>,

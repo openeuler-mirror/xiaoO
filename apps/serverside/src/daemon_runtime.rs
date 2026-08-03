@@ -180,6 +180,7 @@ impl ConfiguredRuntimeResolver {
         let effective_context_window = resolve_effective_context_window(
             &resolved_provider,
             &agent.model,
+            config.app.llm.context_window,
             llm_provider.capabilities().max_context_window,
         )
         .await;
@@ -312,6 +313,7 @@ impl ConfiguredRuntimeResolver {
         let context_window = resolve_effective_context_window(
             &resolved_provider,
             &effective.model,
+            self.llm.context_window,
             created.capabilities().max_context_window,
         )
         .await;
@@ -625,8 +627,13 @@ fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, SessionRuntimeReso
 async fn resolve_effective_context_window(
     resolved_provider: &llm_client::ResolvedConfig,
     model: &str,
+    configured: Option<usize>,
     static_fallback: usize,
 ) -> usize {
+    if let Some(context_window) = configured.filter(|value| *value > 0) {
+        return context_window;
+    }
+
     match resolve_model_context_length(resolved_provider, model).await {
         Ok(Some(context_window)) => match usize::try_from(context_window) {
             Ok(value) if value > 0 => return value,
