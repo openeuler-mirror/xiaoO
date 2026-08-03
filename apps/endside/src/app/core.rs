@@ -7,7 +7,7 @@ use ratatui::Terminal;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 
 use crate::app_state::AppState;
 use crate::config::Config;
@@ -17,6 +17,10 @@ pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
     pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+    /// Wall-clock origin for the loading spinner (see `loading_animation`).
+    /// The spinner frame is `elapsed_ms / 16 % FRAMES`, decoupling the
+    /// animation cadence from the event-loop cycle time.
+    pub(crate) animation_origin: Instant,
 }
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -33,6 +37,7 @@ impl App {
             state,
             gateway,
             pending_local_model_fetch: None,
+            animation_origin: Instant::now(),
         })
     }
 
@@ -40,6 +45,8 @@ impl App {
         &mut self,
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> Result<()> {
+        #[cfg(debug_assertions)]
+        eprintln!("PERF_PROBES_ACTIVE");
         let mut event_stream = EventStream::new();
         let mut pending_event: Option<Event> = None;
         let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
@@ -47,6 +54,16 @@ impl App {
         let mut cursor_visible = true;
         let mut last_cursor_blink_toggle = Instant::now();
         let mut needs_redraw = true;
+        // Absolute deadline of the next animation frame while streaming.
+        // `Delay`-style: each tick advances by a fixed 16ms from the previous
+        // deadline (in the select! sleep branch — never per-iteration), so the
+        // draw time is compensated and the cycle stays at ~16ms (60fps) as
+        // long as draw < 16ms, while fast event-driven iterations cannot push
+        // the deadline into the future. Started at `now`: the first active
+        // iteration's `next_wake` equals it, so the deadline falls in the past
+        // once the initial draw has run and is reset to `now + period`.
+        let animation_period = Duration::from_millis(16);
+        let mut next_animation_frame = tokio::time::Instant::now();
         // Heartbeat interval for renewing the daemon's attach lease.
         let mut heartbeat_interval =
             tokio::time::interval(crate::gateway_api::http_timeouts::HEARTBEAT_INTERVAL);
@@ -81,9 +98,28 @@ impl App {
         }
 
         loop {
+            #[cfg(debug_assertions)]
+            let _tick_start = std::time::Instant::now();
             if needs_redraw {
+                #[cfg(debug_assertions)]
+                let _draw_start = std::time::Instant::now();
                 terminal.draw(|frame| self.ui(frame))?;
                 needs_redraw = false;
+                #[cfg(debug_assertions)]
+                {
+                    let draw_elapsed = _draw_start.elapsed();
+                    if draw_elapsed > std::time::Duration::from_micros(500) {
+                        eprintln!("PERF terminal_draw: {}µs", draw_elapsed.as_micros());
+                    }
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let tick_elapsed = _tick_start.elapsed();
+                if tick_elapsed > std::time::Duration::from_millis(15) && self.state.chat_state.is_loading {
+                    eprintln!("PERF event_loop_tick: {}µs active_refresh=true", tick_elapsed.as_micros());
+                }
             }
             if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
@@ -97,10 +133,27 @@ impl App {
 
             let active_refresh =
                 self.state.chat_state.is_loading || self.gateway.needs_active_refresh();
-            let tick_duration = if active_refresh {
-                Duration::from_millis(16)
+            // While streaming, wake at the absolute animation deadline (Delay-
+            // style: compensated for draw time → ~16ms cycle = 60fps). While
+            // idle, a 250ms relative sleep is enough — the spinner doesn't
+            // run and `force_redraw_interval` (1s) handles idle refresh.
+            //
+            // The deadline is ADVANCED only when the sleep actually fires
+            // (see the select! sleep branch), never here: advancing per loop
+            // iteration would let a burst of fast event-driven iterations
+            // (scroll wheel, key auto-repeat) push the deadline 16ms into the
+            // future each time, stalling the loop until it caught up.
+            let next_wake = if active_refresh {
+                let now = tokio::time::Instant::now();
+                // Fallen behind (idle→active switch, or draw > period):
+                // restart the deadline from now instead of firing a catch-up
+                // burst.
+                if next_animation_frame < now {
+                    next_animation_frame = now + animation_period;
+                }
+                next_animation_frame
             } else {
-                Duration::from_millis(250)
+                tokio::time::Instant::now() + Duration::from_millis(250)
             };
 
             let mut handled_event = None;
@@ -112,10 +165,19 @@ impl App {
                 #[cfg(unix)]
                 {
                     tokio::select! {
-                        _ = sleep(tick_duration) => {
-                            if self.state.chat_state.is_loading {
-                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
-                                needs_redraw = true;
+                        _ = sleep_until(next_wake) => {
+                            // Advance the animation deadline only when this
+                            // sleep fires (Delay semantics) — see the
+                            // `next_wake` comment above. Spinner frames are
+                            // wall-clock derived; only `is_loading` needs the
+                            // forced redraw (the reveal drain and stream
+                            // updates drive their own redraws via
+                            // `poll_stream_updates`).
+                            if active_refresh {
+                                next_animation_frame += animation_period;
+                                if self.state.chat_state.is_loading {
+                                    needs_redraw = true;
+                                }
                             }
                         }
                         maybe_event = event_stream.next().fuse() => {
@@ -163,10 +225,19 @@ impl App {
                 #[cfg(not(unix))]
                 {
                     tokio::select! {
-                        _ = sleep(tick_duration) => {
-                            if self.state.chat_state.is_loading {
-                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
-                                needs_redraw = true;
+                        _ = sleep_until(next_wake) => {
+                            // Advance the animation deadline only when this
+                            // sleep fires (Delay semantics) — see the
+                            // `next_wake` comment above. Spinner frames are
+                            // wall-clock derived; only `is_loading` needs the
+                            // forced redraw (the reveal drain and stream
+                            // updates drive their own redraws via
+                            // `poll_stream_updates`).
+                            if active_refresh {
+                                next_animation_frame += animation_period;
+                                if self.state.chat_state.is_loading {
+                                    needs_redraw = true;
+                                }
                             }
                         }
                         maybe_event = event_stream.next().fuse() => {
@@ -253,6 +324,14 @@ impl App {
                         self.state.chat_state.stick_to_bottom = true;
                         needs_redraw = true;
                     }
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let tick_elapsed = _tick_start.elapsed();
+                if tick_elapsed > std::time::Duration::from_millis(15) && self.state.chat_state.is_loading {
+                    eprintln!("PERF event_loop_tick: {}µs active_refresh=true", tick_elapsed.as_micros());
                 }
             }
         }
