@@ -12,9 +12,9 @@ use crate::error::{
     map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
 use crate::url_fallback::{
-    build_base_url_candidates, build_final_candidates, is_configuration_error,
-    is_http_unauthorized_error, is_retryable_network_error, should_try_next_candidate,
-    write_url_fallback_error_log, UrlAttemptRecord,
+    build_base_url_candidates, build_final_candidates, build_url_fallback_error_message,
+    is_configuration_error, is_http_unauthorized_error, is_retryable_network_error,
+    should_try_next_candidate, UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -50,10 +50,18 @@ impl OpenAiFamilyProvider {
         default_headers: Vec<(String, String)>,
         api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
+        // Mirror Node's convention: NODE_TLS_REJECT_UNAUTHORIZED=0 disables
+        // peer certificate verification. Useful for corporate gateways whose
+        // root CA is not in the system trust store. Any other value (or
+        // unset) keeps verification enabled.
+        let skip_tls_verify = std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
+            .map(|v| v.trim() == "0")
+            .unwrap_or(false);
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
                 .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(skip_tls_verify)
                 .http1_only()
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -498,25 +506,14 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
-                    let error_msg = write_url_fallback_error_log(
-                        &self.api_base,
-                        &base_candidates,
-                        &attempts,
-                        &error,
-                    );
+                    let error_msg = build_url_fallback_error_message(&attempts);
                     return Err(LlmError::ApiError(error_msg));
                 }
             }
         }
 
         // Reachable only when `final_urls` is empty (no candidates generated).
-        let final_error = LlmError::ApiError(format!(
-            "All {} endpoint URL candidates failed",
-            final_urls.len()
-        ));
-
-        let error_msg =
-            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         Err(LlmError::ApiError(error_msg))
     }
@@ -702,25 +699,14 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
-                    let error_msg = write_url_fallback_error_log(
-                        &self.api_base,
-                        &base_candidates,
-                        &attempts,
-                        &error,
-                    );
+                    let error_msg = build_url_fallback_error_message(&attempts);
                     return Err(LlmError::ApiError(error_msg));
                 }
             }
         }
 
         // Reachable only when `final_urls` is empty (no candidates generated).
-        let final_error = LlmError::ApiError(format!(
-            "All {} endpoint URL candidates failed for streaming",
-            final_urls.len()
-        ));
-
-        let error_msg =
-            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         Err(LlmError::ApiError(error_msg))
     }
