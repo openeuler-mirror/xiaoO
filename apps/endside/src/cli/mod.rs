@@ -6,11 +6,8 @@ use std::sync::{Arc, Mutex};
 use agent_contracts::CompressionPipeline;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
 use agent_types::hook::HookerRegistryConfig;
-use agent_types::{CompletionConfig, ReasoningEffort};
-use compact::{
-    ContextManager, ContextManagerConfig, ContextThresholds, MicroCompactionPolicy,
-    RoughTokenEstimator, RoughTokenEstimatorConfig, SummaryCompressionBudget,
-};
+use agent_types::ReasoningEffort;
+use compact::{build_context_manager, CompactOverrides};
 use llm_client::{
     create_llm_provider, resolve_config, resolve_model_context_length, LlmProviderConfig,
     LlmProviderWrapper, ResolveInput,
@@ -161,50 +158,25 @@ pub fn build_compression_pipeline(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> Result<Arc<dyn CompressionPipeline>, Box<dyn std::error::Error>> {
-    let estimator = Arc::new(
-        RoughTokenEstimator::try_new(RoughTokenEstimatorConfig {
-            chars_per_token: 4,
-            message_overhead_tokens: 4,
-            tool_use_overhead_tokens: 8,
-            tool_result_overhead_tokens: 8,
-            image_block_overhead_tokens: 256,
-            document_block_overhead_tokens: 256,
-        })
-        .map_err(|e| format!("token estimator: {e}"))?,
-    );
+    // Route through the shared `compact::build_context_manager` so the local
+    // CLI and the daemon use the *same* defaults and estimator tuning. A
+    // missing `[compact]` section yields all-`None` overrides, which the
+    // helper layers onto its built-in defaults — identical to the daemon.
     let cc = &config.compact;
-    let context_manager_config = ContextManagerConfig {
-        thresholds: ContextThresholds {
-            warning_ratio: cc.warning_ratio.unwrap_or(0.6),
-            auto_compact_ratio: cc.auto_compact_ratio.unwrap_or(0.75),
-            blocking_ratio: cc.blocking_ratio.unwrap_or(0.9),
-        },
-        micro_policy: MicroCompactionPolicy {
-            stale_tool_pair_after_ms: 120_000,
-            preserve_recent_messages: 6,
-        },
-        summary_budget: SummaryCompressionBudget {
-            max_summary_tokens: cc.summary_max_tokens.unwrap_or(1024),
-            preserve_tail_messages: cc.summary_preserve_tail.unwrap_or(4),
-        },
-        snip_preserve_tail_messages: cc.snip_preserve_tail.unwrap_or(6),
-        collapse_preserve_tail_messages: cc.collapse_preserve_tail.unwrap_or(4),
-        session_memory_compaction: None,
-        snip_stale_after_ms: cc.snip_stale_after_ms.unwrap_or(3_600_000),
+    let overrides = CompactOverrides {
+        warning_ratio: cc.warning_ratio,
+        auto_compact_ratio: cc.auto_compact_ratio,
+        blocking_ratio: cc.blocking_ratio,
+        snip_stale_after_ms: cc.snip_stale_after_ms,
+        snip_preserve_tail: cc.snip_preserve_tail,
+        collapse_preserve_tail: cc.collapse_preserve_tail,
+        summary_max_tokens: cc.summary_max_tokens,
+        summary_preserve_tail: cc.summary_preserve_tail,
+        summary_llm_max_tokens: cc.summary_llm_max_tokens,
     };
-    let compression_pipeline: Arc<dyn CompressionPipeline> = Arc::new(
-        ContextManager::new(
-            estimator,
-            context_manager_config,
-            Arc::clone(llm_provider),
-            CompletionConfig {
-                max_tokens: cc.summary_llm_max_tokens.unwrap_or(4096),
-                temperature: 0.2,
-            },
-        )
-        .map_err(|e| format!("context manager: {e}"))?,
-    );
-    Ok(compression_pipeline)
+    let pipeline = build_context_manager(Some(&overrides), Arc::clone(llm_provider))
+        .map_err(|e| format!("context manager: {e}"))?;
+    Ok(pipeline)
 }
 
 pub async fn resolve_effective_context_window(

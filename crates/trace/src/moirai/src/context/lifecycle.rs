@@ -73,6 +73,21 @@ impl<S: SpanStorage + 'static> AgentContext<S> {
         Ok(span_id)
     }
 
+    /// Best-effort synchronous mark that the context has ended.
+    ///
+    /// Unlike [`end`]/[`end_with_parent`], this does NOT write an end span
+    /// to storage. It only flips the internal `ended` flag so that the
+    /// [`Drop`] implementation does not emit the
+    /// "dropped without calling end()" warning.
+    ///
+    /// Use this when the trace is being abandoned and async finalization
+    /// cannot run — for example when the owning future is cancelled
+    /// mid-turn during runtime shutdown and there is no tokio context
+    /// available to drive an async `end()` call from a `Drop` impl.
+    pub fn mark_ended(&self) {
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub async fn flush(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         let spans_to_flush: Vec<Span> = inner.buffer.drain(..).collect();
