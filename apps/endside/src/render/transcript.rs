@@ -104,7 +104,7 @@ impl App {
                 // have shifted, so a per-index `render_revision` check could
                 // match a different message's block. Fall back to a full
                 // rebuild (rare path — deletions are uncommon).
-                render_state.message_render_revisions.clear();
+                render_state.message_render_revisions = vec![None; message_count];
                 render_state.last_render_width = None;
                 render_state.last_render_theme = None;
                 render_state.transcript_cache = None;
