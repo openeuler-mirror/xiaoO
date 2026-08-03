@@ -29,14 +29,12 @@ impl App {
         #[cfg(debug_assertions)]
         let _ui_start = std::time::Instant::now();
         let size = frame.area();
+        #[cfg(debug_assertions)]
         let is_loading = self.state.chat_state.is_loading;
 
-        let (chunks, body_chunks, show_sidebar) = if self.state.render_state.cached_area == Some(size)
-        {
+        let fresh_layout = if self.state.render_state.cached_area == Some(size) {
             // Fast path: reuse cached layout (terminal has not resized).
-            let chunks: &[Rect; 4] = self.state.render_state.cached_chunks.as_slice().try_into().unwrap();
-            let body_chunks: &[Rect; 2] = self.state.render_state.cached_body_chunks.as_slice().try_into().unwrap();
-            (chunks, body_chunks, self.state.render_state.cached_show_sidebar)
+            None
         } else {
             // Slow path: recompute layout and cache it.
             self.state.status_panel.set_workspace(&self.state.workspace);
@@ -68,12 +66,11 @@ impl App {
             self.state.render_state.cached_chunks = chunks.to_vec();
             self.state.render_state.cached_body_chunks = body_chunks.to_vec();
             self.state.render_state.cached_show_sidebar = show_sidebar;
-            (&self.state.render_state.cached_chunks.as_slice().try_into().unwrap(),
-             &self.state.render_state.cached_body_chunks.as_slice().try_into().unwrap(),
-             show_sidebar)
+            Some(show_sidebar)
         };
-        let chunks = *chunks;
-        let body_chunks = *body_chunks;
+        let show_sidebar = fresh_layout.unwrap_or(self.state.render_state.cached_show_sidebar);
+        let chunks: Vec<Rect> = self.state.render_state.cached_chunks.clone();
+        let body_chunks: Vec<Rect> = self.state.render_state.cached_body_chunks.clone();
 
         let background = Block::default().style(Style::default().bg(self.state.theme.background));
         frame.render_widget(background, size);
