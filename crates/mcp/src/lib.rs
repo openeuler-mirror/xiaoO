@@ -32,13 +32,41 @@ pub struct McpServerWithTools {
 
 /// Connect to, initialise, and list tools from every enabled MCP server in
 /// `config`. Unreachable servers are logged and skipped.
+///
+/// Servers are initialised in parallel; the returned `Vec` preserves the
+/// input order so tool registration stays deterministic.
 pub async fn init_mcp_tools(servers: &[McpServerConfig]) -> Vec<McpServerWithTools> {
-    let mut out = Vec::new();
-    for server in servers {
-        if !server.is_enabled() {
-            continue;
+    // Collect enabled indices up front so the returned Vec preserves input
+    // order (JoinSet yields in completion order, not insertion order).
+    let enabled_indices: Vec<usize> = servers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.is_enabled())
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut join_set = tokio::task::JoinSet::new();
+    for &i in &enabled_indices {
+        // Clone the config so the spawned task owns it. Configs are small;
+        // the clone cost is negligible vs. the network/process round-trips.
+        let server = servers[i].clone();
+        join_set.spawn(async move { (i, init_one_server(&server).await) });
+    }
+
+    let mut results: Vec<Option<McpServerWithTools>> = (0..servers.len()).map(|_| None).collect();
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok((i, Some(srv))) => results[i] = Some(srv),
+            Ok((_, None)) => {}
+            Err(join_error) => {
+                tracing::warn!(error = %join_error, "mcp init task panicked");
+            }
         }
-        if let Some(srv) = init_one_server(server).await {
+    }
+
+    let mut out = Vec::new();
+    for i in enabled_indices {
+        if let Some(srv) = results[i].take() {
             out.push(srv);
         }
     }
