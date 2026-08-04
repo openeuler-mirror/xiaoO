@@ -34,7 +34,7 @@ impl E2bFileSystem {
         }
     }
     async fn upload_raw(&self, path: &BackendPath, content: Vec<u8>) -> Result<(), OperationError> {
-        let mut request = self
+        let request = self
             .state
             .envd_request(Method::POST, "/files")
             .query(&[("path", path.0.as_str())])

@@ -117,8 +117,13 @@ impl App {
             #[cfg(debug_assertions)]
             {
                 let tick_elapsed = _tick_start.elapsed();
-                if tick_elapsed > std::time::Duration::from_millis(15) && self.state.chat_state.is_loading {
-                    eprintln!("PERF event_loop_tick: {}µs active_refresh=true", tick_elapsed.as_micros());
+                if tick_elapsed > std::time::Duration::from_millis(15)
+                    && self.state.chat_state.is_loading
+                {
+                    eprintln!(
+                        "PERF event_loop_tick: {}µs active_refresh=true",
+                        tick_elapsed.as_micros()
+                    );
                 }
             }
             if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
@@ -330,8 +335,13 @@ impl App {
             #[cfg(debug_assertions)]
             {
                 let tick_elapsed = _tick_start.elapsed();
-                if tick_elapsed > std::time::Duration::from_millis(15) && self.state.chat_state.is_loading {
-                    eprintln!("PERF event_loop_tick: {}µs active_refresh=true", tick_elapsed.as_micros());
+                if tick_elapsed > std::time::Duration::from_millis(15)
+                    && self.state.chat_state.is_loading
+                {
+                    eprintln!(
+                        "PERF event_loop_tick: {}µs active_refresh=true",
+                        tick_elapsed.as_micros()
+                    );
                 }
             }
         }
