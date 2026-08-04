@@ -11,13 +11,13 @@ use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::render::markdown::MarkdownIncrementalState;
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::services::input_history::load_input_history;
 use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed_prefix};
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
-use crate::render::markdown::MarkdownIncrementalState;
 
 #[derive(PartialEq)]
 pub enum InputMode {

@@ -16,7 +16,9 @@ use crate::app_state::{
     ToolToggleRegion, TranscriptRenderCache,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
-use crate::markdown::{contains_markdown_table, render_markdown, render_markdown_incremental, MarkdownIncrementalState};
+use crate::markdown::{
+    contains_markdown_table, render_markdown, render_markdown_incremental, MarkdownIncrementalState,
+};
 use crate::theme::Theme;
 
 use super::utils::{
@@ -115,7 +117,9 @@ impl App {
                 // new tail is dirty. Prior blocks stay valid (append preserves
                 // indices), so `transcript_cache` is NOT cleared — the new
                 // messages are added incrementally on top.
-                render_state.message_render_revisions.resize(message_count, None);
+                render_state
+                    .message_render_revisions
+                    .resize(message_count, None);
             }
 
             let width_changed = render_state.last_render_width != Some(inner_area.width);
@@ -133,9 +137,8 @@ impl App {
             // A None `transcript_cache` (first tick, post-switch, post-shrink)
             // forces every message dirty; width/theme changes likewise.
             let mut renders: Vec<Option<CachedMessageRender>> = Vec::with_capacity(message_count);
-            let mut any_dirty = render_state.transcript_cache.is_none()
-                || width_changed
-                || theme_changed;
+            let mut any_dirty =
+                render_state.transcript_cache.is_none() || width_changed || theme_changed;
 
             for message_index in 0..message_count {
                 let message = &messages[message_index];
@@ -143,7 +146,8 @@ impl App {
                 let should_bypass_cache = is_active_stream_message && chat_is_loading;
                 let revision_changed = render_state.message_render_revisions[message_index]
                     != Some(message.render_revision);
-                let is_dirty = should_bypass_cache || revision_changed || width_changed || theme_changed;
+                let is_dirty =
+                    should_bypass_cache || revision_changed || width_changed || theme_changed;
 
                 if is_dirty {
                     // Only the active streaming message uses the incremental
@@ -189,13 +193,17 @@ impl App {
             render_state.last_render_theme = Some(theme);
 
             #[cfg(debug_assertions)]
-            { _t_dirty = Some(std::time::Instant::now()); }
+            {
+                _t_dirty = Some(std::time::Instant::now());
+            }
             if any_dirty {
                 let prev = render_state.transcript_cache.take();
                 render_state.transcript_cache = Some(build_transcript_cache(prev, renders));
             }
             #[cfg(debug_assertions)]
-            { _t_build = Some(std::time::Instant::now()); }
+            {
+                _t_build = Some(std::time::Instant::now());
+            }
             // `any_dirty == false` && prev cache present: nothing changed this
             // tick — reuse the cache untouched (pure scroll / cursor blink).
         }
@@ -245,8 +253,7 @@ impl App {
                 .logical_line_visual_starts
                 .partition_point(|start| *start <= scroll_offset)
                 .saturating_sub(1);
-            let safe_start_line_index =
-                start_line_index.min(logical_line_count.saturating_sub(1));
+            let safe_start_line_index = start_line_index.min(logical_line_count.saturating_sub(1));
             let slice_start_visual = transcript_cache
                 .logical_line_visual_starts
                 .get(safe_start_line_index)
@@ -324,9 +331,11 @@ impl App {
         } else {
             let visual_end = scroll_end.min(transcript_cache.total_lines);
             #[cfg(debug_assertions)]
-            { _t_collect = Some(std::time::Instant::now()); }
-            let visible_visual_lines = transcript_cache
-                .collect_visible_visual_lines(scroll_offset, visual_end);
+            {
+                _t_collect = Some(std::time::Instant::now());
+            }
+            let visible_visual_lines =
+                transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
             let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         }
@@ -570,9 +579,7 @@ pub(crate) fn build_transcript_cache(
                 // the freshly rendered suffix. Zero `Line` clone for the
                 // frozen prefix — this is what makes per-tick work O(suffix)
                 // instead of O(total).
-                let prev_b = prev_blocks
-                    .get_mut(message_index)
-                    .and_then(Option::take);
+                let prev_b = prev_blocks.get_mut(message_index).and_then(Option::take);
                 match prev_b {
                     Some(MessageVisualBlock {
                         mut lines,
@@ -598,14 +605,12 @@ pub(crate) fn build_transcript_cache(
 
                         // Append the freshly rendered suffix.
                         let suffix_lines = render.lines;
-                        let suffix_wrapped = render
-                            .wrapped_lines
-                            .unwrap_or_else(|| {
-                                suffix_lines
-                                    .iter()
-                                    .map(|l| wrap_line_to_visual_lines(l, render.width))
-                                    .collect::<Vec<_>>()
-                            });
+                        let suffix_wrapped = render.wrapped_lines.unwrap_or_else(|| {
+                            suffix_lines
+                                .iter()
+                                .map(|l| wrap_line_to_visual_lines(l, render.width))
+                                .collect::<Vec<_>>()
+                        });
                         let mut acc = visual_freeze_n;
                         for wl in &suffix_wrapped {
                             logical_to_visual_offset.push(acc);
@@ -641,14 +646,12 @@ pub(crate) fn build_transcript_cache(
                              but no prev block"
                         );
                         let suffix_lines = render.lines;
-                        let suffix_wrapped = render
-                            .wrapped_lines
-                            .unwrap_or_else(|| {
-                                suffix_lines
-                                    .iter()
-                                    .map(|l| wrap_line_to_visual_lines(l, render.width))
-                                    .collect::<Vec<_>>()
-                            });
+                        let suffix_wrapped = render.wrapped_lines.unwrap_or_else(|| {
+                            suffix_lines
+                                .iter()
+                                .map(|l| wrap_line_to_visual_lines(l, render.width))
+                                .collect::<Vec<_>>()
+                        });
                         let mut l2v = Vec::with_capacity(suffix_wrapped.len());
                         let mut acc = 0usize;
                         for wl in &suffix_wrapped {
@@ -699,18 +702,23 @@ pub(crate) fn build_transcript_cache(
                     visual_lines.extend(wl);
                 }
 
-                let tool_toggle_row_offset = render
-                    .tool_toggle_row_offset
-                    .map(|logical_offset| logical_to_visual_offset.get(logical_offset).copied().unwrap_or(acc));
-                let subagent_open_target = render.subagent_open_target.as_ref().map(|target| {
-                    SubagentOpenTarget {
-                        agent_id: target.agent_id.clone(),
-                        row_offset: logical_to_visual_offset
-                            .get(target.row_offset)
-                            .copied()
-                            .unwrap_or(acc),
-                    }
+                let tool_toggle_row_offset = render.tool_toggle_row_offset.map(|logical_offset| {
+                    logical_to_visual_offset
+                        .get(logical_offset)
+                        .copied()
+                        .unwrap_or(acc)
                 });
+                let subagent_open_target =
+                    render
+                        .subagent_open_target
+                        .as_ref()
+                        .map(|target| SubagentOpenTarget {
+                            agent_id: target.agent_id.clone(),
+                            row_offset: logical_to_visual_offset
+                                .get(target.row_offset)
+                                .copied()
+                                .unwrap_or(acc),
+                        });
 
                 MessageVisualBlock {
                     message_index,
@@ -728,10 +736,7 @@ pub(crate) fn build_transcript_cache(
             // `lines` / `visual_lines` / `logical_to_visual_offset` /
             // `tool_toggle_row_offset` / `subagent_open_target` carry over
             // untouched; only the global offsets need re-basing.
-            let mut moved = match prev_blocks
-                .get_mut(message_index)
-                .and_then(Option::take)
-            {
+            let mut moved = match prev_blocks.get_mut(message_index).and_then(Option::take) {
                 Some(b) => b,
                 None => {
                     // Caller invariant: a `None` render requires a matching
@@ -2043,7 +2048,11 @@ fn render_standard_message_lines(
             let mut new_state = result.new_state;
             new_state.set_thinking_len(thinking_len);
             new_markdown_state = Some(new_state);
-            (result.lines, result.wrapped, result.frozen_markdown_move_count)
+            (
+                result.lines,
+                result.wrapped,
+                result.frozen_markdown_move_count,
+            )
         }
         _ => (Vec::new(), Vec::new(), None),
     };
@@ -2067,7 +2076,8 @@ fn render_standard_message_lines(
         );
 
         if !message.thinking_content.is_empty() {
-            let is_thinking = chat_is_loading && is_active_stream_message && message.content.is_empty();
+            let is_thinking =
+                chat_is_loading && is_active_stream_message && message.content.is_empty();
             let thinking_header = if is_thinking {
                 format!("  {} {loading_animation}", sanitize_terminal_text("⭕️"))
             } else {
@@ -2124,10 +2134,7 @@ fn render_standard_message_lines(
                 push(
                     &mut lines,
                     &mut wrapped,
-                    Line::styled(
-                        format!("  {}", sanitize_terminal_text(line)),
-                        content_style,
-                    ),
+                    Line::styled(format!("  {}", sanitize_terminal_text(line)), content_style),
                 );
             }
         }
@@ -2148,7 +2155,11 @@ fn render_standard_message_lines(
     {
         let elapsed = _start.elapsed();
         if elapsed > std::time::Duration::from_micros(200) && is_active_stream_message {
-            eprintln!("PERF render_standard_message_lines: {}µs, {} lines", elapsed.as_micros(), lines.len());
+            eprintln!(
+                "PERF render_standard_message_lines: {}µs, {} lines",
+                elapsed.as_micros(),
+                lines.len()
+            );
         }
     }
     (lines, wrapped, new_markdown_state, frozen_prefix_line_count)
@@ -2898,7 +2909,8 @@ mod tests {
             file_change: None,
         });
 
-        let (collapsed, _state) = render_message_entry(&message, &theme, 80, false, false, "", None);
+        let (collapsed, _state) =
+            render_message_entry(&message, &theme, 80, false, false, "", None);
         assert_eq!(collapsed.tool_toggle_row_offset, Some(1));
 
         message
@@ -3025,7 +3037,10 @@ mod tests {
         content_lines: &[Line<'static>],
         width: u16,
         dirty_count: usize,
-    ) -> (Vec<Option<CachedMessageRender>>, Vec<Option<CachedMessageRender>>) {
+    ) -> (
+        Vec<Option<CachedMessageRender>>,
+        Vec<Option<CachedMessageRender>>,
+    ) {
         let all_dirty: Vec<Option<CachedMessageRender>> = (0..num_messages)
             .map(|_| Some(make_bench_render(content_lines, width, true)))
             .collect();
@@ -3178,25 +3193,35 @@ mod tests {
         let moved_block_idx = 0usize;
         let dirty_block_idx = num_messages - 1;
         let prev_for_check = build_transcript_cache(None, renders_all_dirty.clone());
-        let moved_ptr = prev_for_check.message_blocks[moved_block_idx].visual_lines.as_ptr();
+        let moved_ptr = prev_for_check.message_blocks[moved_block_idx]
+            .visual_lines
+            .as_ptr();
         let new_cache = build_transcript_cache(Some(prev_for_check), renders_incremental.clone());
         assert_eq!(
-            new_cache.message_blocks[moved_block_idx].visual_lines.as_ptr(),
+            new_cache.message_blocks[moved_block_idx]
+                .visual_lines
+                .as_ptr(),
             moved_ptr,
             "incremental rebuild must move (not clone) non-dirty visual_lines — \
              pointer should be unchanged"
         );
         // The dirty (last) block, by contrast, is freshly built.
         assert_ne!(
-            new_cache.message_blocks[dirty_block_idx].visual_lines.as_ptr(),
+            new_cache.message_blocks[dirty_block_idx]
+                .visual_lines
+                .as_ptr(),
             moved_ptr,
             "dirty block should be a fresh allocation"
         );
 
         eprintln!();
         eprintln!("=== build_transcript_cache microbenchmark (incremental) ===");
-        eprintln!("  Messages: {num_messages}, ~{lines_per_message} lines each, width {bench_width}");
-        eprintln!("  A) Full rebuild (no prev):       {a_us:>6} µs avg (over {num_measure_runs} runs)");
+        eprintln!(
+            "  Messages: {num_messages}, ~{lines_per_message} lines each, width {bench_width}"
+        );
+        eprintln!(
+            "  A) Full rebuild (no prev):       {a_us:>6} µs avg (over {num_measure_runs} runs)"
+        );
         eprintln!("  B-A) Pure incremental step:      {incremental_step_us:>6} µs avg (1 dirty, prev exists)");
         eprintln!("  C) Full rebuild with prev:       {c_us:>6} µs avg (over {num_measure_runs} runs, incl prev-build)");
         eprintln!(
@@ -3257,8 +3282,17 @@ mod tests {
                 make_bench_renders(num_messages, &content, default_width, default_dirty);
             let (full, incr, _) =
                 time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
-            rows.push((format!("msgs={num_messages:>3} dirty=1"), full, incr, speedup));
+            let speedup = if incr > 0 {
+                full as f64 / incr as f64
+            } else {
+                f64::INFINITY
+            };
+            rows.push((
+                format!("msgs={num_messages:>3} dirty=1"),
+                full,
+                incr,
+                speedup,
+            ));
         }
 
         // Axis 2: dirty count (tail), 50 messages, long content, width 80.
@@ -3268,7 +3302,11 @@ mod tests {
                 make_bench_renders(default_messages, &content, default_width, dirty);
             let (full, incr, _) =
                 time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            let speedup = if incr > 0 {
+                full as f64 / incr as f64
+            } else {
+                f64::INFINITY
+            };
             let pct = (dirty * 100) / default_messages;
             rows.push((
                 format!("msgs=50 dirty={dirty:>2} ({pct}%)"),
@@ -3285,7 +3323,11 @@ mod tests {
                 make_bench_renders(default_messages, &content, width, default_dirty);
             let (full, incr, _) =
                 time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            let speedup = if incr > 0 {
+                full as f64 / incr as f64
+            } else {
+                f64::INFINITY
+            };
             rows.push((format!("msgs=50 dirty=1 w={width:>3}"), full, incr, speedup));
         }
 
@@ -3298,7 +3340,11 @@ mod tests {
                 make_bench_renders(default_messages, &content, default_width, default_dirty);
             let (full, incr, _) =
                 time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 { full as f64 / incr as f64 } else { f64::INFINITY };
+            let speedup = if incr > 0 {
+                full as f64 / incr as f64
+            } else {
+                f64::INFINITY
+            };
             rows.push((format!("msgs=50 dirty=1 {label}"), full, incr, speedup));
         }
 
@@ -3311,10 +3357,7 @@ mod tests {
             "  {:<22} {:>10} {:>10} {:>10}",
             "scenario", "full", "incr", "speedup"
         );
-        eprintln!(
-            "  {:-<22} {:-<10} {:-<10} {:-<10}",
-            "", "", "", ""
-        );
+        eprintln!("  {:-<22} {:-<10} {:-<10} {:-<10}", "", "", "", "");
         for (label, full, incr, speedup) in &rows {
             eprintln!(
                 "  {:<22} {:>8}µs {:>8}µs {:>8.1}×",
@@ -3335,7 +3378,7 @@ mod tests {
                 incr < full,
                 "scenario {label}: incremental step ({incr}µs) must be cheaper \
                  than full rebuild ({full}µs)",
-             );
+            );
         }
     }
 
@@ -3464,8 +3507,7 @@ mod tests {
             .iter()
             .map(|l| wrap_line_to_visual_lines(l, width))
             .collect();
-        let prev_visuals: Vec<Line<'static>> =
-            prev_wrapped.iter().flatten().cloned().collect();
+        let prev_visuals: Vec<Line<'static>> = prev_wrapped.iter().flatten().cloned().collect();
         let prev_l2v: Vec<usize> = {
             let mut v = Vec::new();
             let mut acc = 0;
@@ -3517,7 +3559,10 @@ mod tests {
 
         assert_eq!(block.lines.len(), 2);
         assert_eq!(rendered_line_text(&block.lines[0]), "hdr");
-        assert_eq!(rendered_line_text(&block.lines[1]), "another long wrapping suffix line");
+        assert_eq!(
+            rendered_line_text(&block.lines[1]),
+            "another long wrapping suffix line"
+        );
 
         // l2v[0] = 0 (header), l2v[1] = prefix_visual_count (suffix starts
         // after the header's visual lines).
