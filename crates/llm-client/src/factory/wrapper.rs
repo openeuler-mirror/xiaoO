@@ -95,9 +95,9 @@ impl LlmProviderWrapper {
                 Err(e) => {
                     pre_hook_error = Some(e.to_string());
                     if is_stream {
-                        eprintln!("llm pre-hook phase failed (stream): {}", e);
+                        tracing::warn!("llm pre-hook phase failed (stream): {}", e);
                     } else {
-                        eprintln!("llm pre-hook phase failed: {}", e);
+                        tracing::warn!("llm pre-hook phase failed: {}", e);
                     }
                 }
             }
@@ -186,7 +186,7 @@ impl LlmProviderWrapper {
             let output = match hooker.invoke(input, runtime_view).await {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "llm pre-hook invoke failed for hooker '{}' (hook_point='{}'): {}",
                         hooker.id(),
                         hook_point.0,
@@ -207,7 +207,7 @@ impl LlmProviderWrapper {
             let pre_result = match output.primary {
                 HookInvokePrimary::LlmPre(r) => r,
                 other => {
-                    eprintln!(
+                    tracing::warn!(
                         "llm pre-hooker '{}' returned unexpected output {:?} for hook_point '{}'",
                         hooker.id(),
                         other,
@@ -630,7 +630,7 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             post_hook_error = Some(e.to_string());
-                            eprintln!("llm post-hook phase failed: {}", e);
+                            tracing::warn!("llm post-hook phase failed: {}", e);
                         }
                     }
                 }
@@ -693,7 +693,7 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             error_hook_error = Some(e.to_string());
-                            eprintln!("llm error-hook phase failed: {}", e);
+                            tracing::warn!("llm error-hook phase failed: {}", e);
                         }
                     }
                 }
@@ -808,7 +808,7 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             post_hook_error = Some(e.to_string());
-                            eprintln!("llm post-hook phase failed (stream): {}", e);
+                            tracing::warn!("llm post-hook phase failed (stream): {}", e);
                         }
                     }
                 }
@@ -892,7 +892,7 @@ impl LlmProviderWrapper {
                         }
                         Err(e) => {
                             error_hook_error = Some(e.to_string());
-                            eprintln!("llm error-hook phase failed (stream): {}", e);
+                            tracing::warn!("llm error-hook phase failed (stream): {}", e);
                         }
                     }
                 }

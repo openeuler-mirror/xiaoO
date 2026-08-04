@@ -15,6 +15,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 # tokio is needed by the plugin hooker subprocess driver (`run_plugin_subprocess`)
 # which uses `tokio::process::Command` + `tokio::time::timeout` so a hung plugin
 # script cannot block the async agent-loop task forever.

@@ -48,8 +48,8 @@ pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
 pub fn bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
     if !bytes.is_empty() && bytes.len() % 4 != 0 {
         // Log-worthy: indicates corrupted data. Return what we can parse.
-        eprintln!(
-            "warning: embedding bytes length {} not divisible by 4, truncating remainder",
+        tracing::warn!(
+            "embedding bytes length {} not divisible by 4, truncating remainder",
             bytes.len()
         );
     }

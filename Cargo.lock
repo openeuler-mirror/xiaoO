@@ -1237,6 +1237,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1946,6 +1947,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4109,6 +4111,7 @@ dependencies = [
  "moirai",
  "serde_json",
  "tokio",
+ "tracing",
  "ulid",
 ]
 
