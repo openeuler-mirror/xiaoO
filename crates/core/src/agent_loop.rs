@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -2327,7 +2328,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
 }
 
 pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
-    let (call_id, tool_name, output, is_error) = match result {
+    let (call_id, tool_name, mut output, is_error) = match result {
         ToolExecutionResult::Completed {
             final_call,
             raw_outcome,
@@ -2376,6 +2377,8 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
             true,
         ),
     };
+
+    output = truncate_tool_output(&tool_name, &call_id, &output);
 
     ChatMessage {
         role: MessageRole::Tool,
@@ -2459,6 +2462,119 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+const MAX_TOOL_OUTPUT_BYTES: usize = 50 * 1024;
+const TRUNCATED_TOOL_OUTPUT_DIR: &str = "truncated_tool_output";
+const TRUNCATED_RETENTION_DAYS: u64 = 7;
+
+static LAST_CLEANUP_DAY: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the largest byte index `<= index` that falls on a UTF-8 character
+/// boundary.  Equivalent to `str::floor_char_boundary` (stable since Rust
+/// 1.80) but written inline so it compiles on any Rust version the CI may
+/// pin.
+fn char_boundary_before(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let bytes = s.as_bytes();
+    let mut i = index;
+    while i > 0 && bytes[i] & 0xC0 == 0x80 {
+        i -= 1;
+    }
+    i
+}
+
+/// Truncates tool output to [`MAX_TOOL_OUTPUT_BYTES`] bytes.  Full content
+/// is saved to `~/.xiaoo/truncated_tool_output/` so the model can access it
+/// via `file_read` or `grep`.  This mirrors the opencode tool-output design
+/// (see opencode/specs/tool_design.md).
+fn truncate_tool_output(tool_name: &str, call_id: &str, output: &str) -> String {
+    if output.len() <= MAX_TOOL_OUTPUT_BYTES {
+        return output.to_string();
+    }
+
+    // Char-safe truncation boundary
+    let safe_boundary = char_boundary_before(output, MAX_TOOL_OUTPUT_BYTES);
+    let truncated = &output[..safe_boundary];
+    let omitted = output.len() - safe_boundary;
+
+    // Save full output to ~/.xiaoo/truncated_tool_output/
+    let saved_path = std::env::var("HOME").ok().and_then(|home| {
+        let dir = std::path::PathBuf::from(home)
+            .join(".xiaoo")
+            .join(TRUNCATED_TOOL_OUTPUT_DIR);
+        std::fs::create_dir_all(&dir).ok()?;
+        let filename = format!("{}.{}.{}.txt", tool_name, now_ms(), call_id);
+        let path = dir.join(&filename);
+        std::fs::write(&path, output).ok().map(|_| {
+            maybe_cleanup_truncated_dir();
+            path
+        })
+    });
+
+    let hint = match saved_path {
+        Some(path) => format!(
+            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+             Full output saved to: {}\n\
+             Use `file_read` with offset/limit to view specific sections, or \
+             `grep` to search the full content.",
+            omitted,
+            MAX_TOOL_OUTPUT_BYTES,
+            path.display(),
+        ),
+        None => format!(
+            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+             Use `file_read` with offset/limit or `grep` to search the full content.",
+            omitted, MAX_TOOL_OUTPUT_BYTES,
+        ),
+    };
+
+    format!("{}{}", truncated, hint)
+}
+
+/// Lazy cleanup of truncated tool output files older than
+/// [`TRUNCATED_RETENTION_DAYS`].  Runs at most once per day to avoid
+/// unnecessary filesystem scans on every truncated tool call.
+fn maybe_cleanup_truncated_dir() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86400)
+        .unwrap_or(0);
+    let last = LAST_CLEANUP_DAY.load(Ordering::Relaxed);
+    if last >= now {
+        return;
+    }
+    LAST_CLEANUP_DAY.store(now, Ordering::Relaxed);
+
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let dir = std::path::PathBuf::from(home)
+        .join(".xiaoo")
+        .join(TRUNCATED_TOOL_OUTPUT_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let retention = std::time::Duration::from_secs(TRUNCATED_RETENTION_DAYS * 86400);
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if let Ok(age) = mtime.elapsed() {
+            if age > retention {
+                std::fs::remove_file(entry.path()).ok();
+            }
+        }
+    }
 }
 
 fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
