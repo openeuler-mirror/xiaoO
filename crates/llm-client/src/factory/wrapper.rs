@@ -61,6 +61,64 @@ impl LlmProviderWrapper {
             .map(|id| HookPointId(format!("{}.Llm.complete.{}", id, stage)))
     }
 
+    /// Whether any enabled pre-hook is registered for `*.Llm.complete.pre`.
+    /// Used to skip the per-call `LlmRequest` clone when no pre-hooks exist.
+    fn has_enabled_pre_hooks(&self, runtime_view: Option<&dyn RuntimeView>) -> bool {
+        let Some(rv) = runtime_view else {
+            return false;
+        };
+        let Some(hook_point) = self.build_llm_hook_point("pre") else {
+            return false;
+        };
+        let registry = rv.hookers();
+        let hookers = registry.list_for_hook_point(&hook_point);
+        hookers.iter().any(|h| registry.is_enabled(h.id()))
+    }
+
+    /// Shared pre-hook + trace-update phase for `complete_scoped` and
+    /// `complete_stream_scoped`. Returns `(pre_hook_count, pre_hook_error)`.
+    /// No-op when `effective_request` is `None`.
+    async fn run_pre_hook_phase(
+        &self,
+        runtime_view: &dyn RuntimeView,
+        effective_request: &mut Option<LlmRequest>,
+        trace_span: Option<&TraceSpanHandle>,
+        is_stream: bool,
+    ) -> (usize, Option<String>) {
+        let mut pre_hook_count = 0;
+        let mut pre_hook_error = None;
+        if let Some(ref mut req) = effective_request {
+            match self.run_pre_hook_sequence(Some(runtime_view), req).await {
+                Ok(results) => {
+                    pre_hook_count = results.len();
+                }
+                Err(e) => {
+                    pre_hook_error = Some(e.to_string());
+                    if is_stream {
+                        eprintln!("llm pre-hook phase failed (stream): {}", e);
+                    } else {
+                        eprintln!("llm pre-hook phase failed: {}", e);
+                    }
+                }
+            }
+
+            update_trace_span(
+                Some(runtime_view),
+                trace_span,
+                merge_trace_fields(
+                    json!({
+                        "phase": "pre_hooks_done",
+                        "pre_hook_count": pre_hook_count,
+                        "pre_hook_error": pre_hook_error,
+                    }),
+                    effective_request_trace_fields(req),
+                ),
+            )
+            .await;
+        }
+        (pre_hook_count, pre_hook_error)
+    }
+
     async fn run_pre_hook_sequence(
         &self,
         runtime_view: Option<&dyn RuntimeView>,
@@ -515,11 +573,20 @@ impl LlmProviderWrapper {
         request: &LlmRequest,
     ) -> Result<LlmResponse, LlmError> {
         let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
-        let mut effective_request = request.clone();
+        // Lazy clone: only copy the request when pre-hooks are configured
+        // (they may mutate it). Otherwise pass the original by reference,
+        // avoiding an O(message-history) clone per LLM call.
+        let has_pre_hooks = self.has_enabled_pre_hooks(runtime_view);
+        let mut effective_request: Option<LlmRequest> = if has_pre_hooks {
+            Some(request.clone())
+        } else {
+            None
+        };
+        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
         let mut trace_span = begin_trace_span(
             runtime_view,
             &self.capabilities().model_name,
-            &effective_request,
+            effective_request_ref,
             false,
         )
         .await;
@@ -530,36 +597,19 @@ impl LlmProviderWrapper {
         let mut post_hook_error = None;
         let mut error_hook_error = None;
 
-        if runtime_view.is_some() {
-            match self
-                .run_pre_hook_sequence(runtime_view, &mut effective_request)
-                .await
-            {
-                Ok(results) => {
-                    pre_hook_count = results.len();
-                }
-                Err(e) => {
-                    pre_hook_error = Some(e.to_string());
-                    eprintln!("llm pre-hook phase failed: {}", e);
-                }
+        if has_pre_hooks {
+            if let Some(rv) = runtime_view {
+                let (count, error) = self
+                    .run_pre_hook_phase(rv, &mut effective_request, trace_span.as_ref(), false)
+                    .await;
+                pre_hook_count = count;
+                pre_hook_error = error;
             }
-
-            update_trace_span(
-                runtime_view,
-                trace_span.as_ref(),
-                merge_trace_fields(
-                    json!({
-                        "phase": "pre_hooks_done",
-                        "pre_hook_count": pre_hook_count,
-                        "pre_hook_error": pre_hook_error,
-                    }),
-                    effective_request_trace_fields(&effective_request),
-                ),
-            )
-            .await;
         }
 
-        match self.complete_with_retry(&effective_request).await {
+        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
+
+        match self.complete_with_retry(effective_request_ref).await {
             Ok(mut response) => {
                 update_trace_span(
                     runtime_view,
@@ -572,7 +622,7 @@ impl LlmProviderWrapper {
 
                 if runtime_view.is_some() {
                     match self
-                        .run_post_hook_sequence(runtime_view, &effective_request, &mut response)
+                        .run_post_hook_sequence(runtime_view, effective_request_ref, &mut response)
                         .await
                     {
                         Ok(results) => {
@@ -609,7 +659,7 @@ impl LlmProviderWrapper {
             Err(error) => {
                 if runtime_view.is_some() {
                     match self
-                        .run_error_hook_sequence(runtime_view, &effective_request, &error)
+                        .run_error_hook_sequence(runtime_view, effective_request_ref, &error)
                         .await
                     {
                         Ok(results) => {
@@ -683,11 +733,20 @@ impl LlmProviderWrapper {
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
         let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
-        let mut effective_request = request.clone();
+        // Lazy clone: only copy the request when pre-hooks are configured
+        // (they may mutate it). Otherwise pass the original by reference,
+        // avoiding an O(message-history) clone per LLM call.
+        let has_pre_hooks = self.has_enabled_pre_hooks(runtime_view);
+        let mut effective_request: Option<LlmRequest> = if has_pre_hooks {
+            Some(request.clone())
+        } else {
+            None
+        };
+        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
         let mut trace_span = begin_trace_span(
             runtime_view,
             &self.capabilities().model_name,
-            &effective_request,
+            effective_request_ref,
             true,
         )
         .await;
@@ -711,37 +770,22 @@ impl LlmProviderWrapper {
             on_chunk(chunk);
         };
 
-        if runtime_view.is_some() {
-            match self
-                .run_pre_hook_sequence(runtime_view, &mut effective_request)
-                .await
-            {
-                Ok(results) => {
-                    pre_hook_count = results.len();
-                }
-                Err(e) => {
-                    pre_hook_error = Some(e.to_string());
-                    eprintln!("llm pre-hook phase failed (stream): {}", e);
-                }
+        if has_pre_hooks {
+            if let Some(rv) = runtime_view {
+                let (count, error) = self
+                    .run_pre_hook_phase(rv, &mut effective_request, trace_span.as_ref(), true)
+                    .await;
+                pre_hook_count = count;
+                pre_hook_error = error;
             }
-
-            update_trace_span(
-                runtime_view,
-                trace_span.as_ref(),
-                merge_trace_fields(
-                    json!({
-                        "phase": "pre_hooks_done",
-                        "pre_hook_count": pre_hook_count,
-                        "pre_hook_error": pre_hook_error,
-                    }),
-                    effective_request_trace_fields(&effective_request),
-                ),
-            )
-            .await;
         }
 
+        // Re-borrow the (possibly pre-hook-transformed) request; falls back
+        // to the original `request` when no pre-hooks ran.
+        let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
+
         match self
-            .complete_stream_with_retry(&effective_request, &traced_on_chunk)
+            .complete_stream_with_retry(effective_request_ref, &traced_on_chunk)
             .await
         {
             Ok(mut response) => {
@@ -756,7 +800,7 @@ impl LlmProviderWrapper {
 
                 if runtime_view.is_some() {
                     match self
-                        .run_post_hook_sequence(runtime_view, &effective_request, &mut response)
+                        .run_post_hook_sequence(runtime_view, effective_request_ref, &mut response)
                         .await
                     {
                         Ok(results) => {
@@ -804,7 +848,7 @@ impl LlmProviderWrapper {
             Err(error) => {
                 if runtime_view.is_some() {
                     match self
-                        .run_error_hook_sequence(runtime_view, &effective_request, &error)
+                        .run_error_hook_sequence(runtime_view, effective_request_ref, &error)
                         .await
                     {
                         Ok(results) => {

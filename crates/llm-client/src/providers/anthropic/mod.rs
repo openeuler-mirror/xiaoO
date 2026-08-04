@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,7 +24,6 @@ pub(crate) struct AnthropicProvider {
     api_key: Option<String>,
     base_url: String,
     capabilities: ProviderCapabilities,
-    current_event: Mutex<Option<String>>,
     api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
@@ -50,7 +48,6 @@ impl AnthropicProvider {
                 max_context_window: 200000,
                 model_name: model,
             },
-            current_event: Mutex::new(None),
             api_key_provider,
         }
     }
@@ -301,6 +298,9 @@ impl LlmProvider for AnthropicProvider {
 
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        // Per-stream event_type state. Scoped locally so concurrent streams
+        // on the same shared provider don't race on a shared Mutex.
+        let mut current_event: Option<String> = None;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
@@ -318,15 +318,19 @@ impl LlmProvider for AnthropicProvider {
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
+            // Cursor-based SSE scanning: find each '\n' without rebuilding
+            // the buffer per line; drain the consumed prefix in place.
+            let mut start = 0;
+            while let Some(relative) = buffer[start..].find('\n') {
+                let pos = start + relative;
+                let line = &buffer[start..pos];
+                start = pos + 1;
 
                 if line.is_empty() {
                     continue;
                 }
 
-                if let Some(parsed) = self.parse_anthropic_stream_line(&line)? {
+                if let Some(parsed) = Self::parse_anthropic_stream_line(&mut current_event, line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
                     }
@@ -352,6 +356,10 @@ impl LlmProvider for AnthropicProvider {
                     let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
                     on_chunk(stream_chunk);
                 }
+            }
+            // Drop the consumed prefix in place; no per-line allocation.
+            if start > 0 {
+                buffer.drain(..start);
             }
         }
 
@@ -390,9 +398,16 @@ impl LlmProvider for AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    fn parse_anthropic_stream_line(&self, line: &str) -> Result<Option<ParsedChunk>, LlmError> {
+    /// Parses one SSE line, using `current_event` to remember the last
+    /// `event:` line so subsequent `data:` lines can dispatch on the event
+    /// type. State is caller-supplied (a local in `complete_stream`) so
+    /// concurrent streams on the same shared provider don't race.
+    fn parse_anthropic_stream_line(
+        current_event: &mut Option<String>,
+        line: &str,
+    ) -> Result<Option<ParsedChunk>, LlmError> {
         if let Some(event_type) = line.strip_prefix("event: ") {
-            *self.current_event.lock().unwrap() = Some(event_type.to_string());
+            *current_event = Some(event_type.to_string());
             return Ok(Some(ParsedChunk::default()));
         }
 
@@ -406,7 +421,9 @@ impl AnthropicProvider {
             Err(_) => return Ok(Some(ParsedChunk::default())),
         };
 
-        let event_type = self.current_event.lock().unwrap().clone();
+        // Clone the event_type out to release the borrow on `current_event`
+        // before the match below.
+        let event_type = current_event.clone();
 
         match event_type.as_deref() {
             Some("message_start") => {
@@ -532,26 +549,31 @@ mod tests {
 
     #[test]
     fn test_parse_content_block_delta() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().content, Some("Hello".to_string()));
     }
 
     #[test]
     fn test_parse_message_delta() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_delta")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_delta")
             .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let chunk = result.unwrap();
         assert_eq!(chunk.finish_reason, Some("end_turn".to_string()));
         assert!(chunk.usage.is_some());
@@ -560,15 +582,14 @@ mod tests {
 
     #[test]
     fn test_parse_message_start_usage() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_start")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_start")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(
-                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
-            )
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
+        )
+        .unwrap();
         let chunk = result.unwrap();
         assert!(chunk.usage.is_some());
         assert_eq!(chunk.usage.unwrap().prompt_tokens, 21);
@@ -598,25 +619,30 @@ mod tests {
 
     #[test]
     fn test_parse_message_stop() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_stop")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_stop")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"message_stop"}"#)
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"message_stop"}"#,
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_input_json_delta_as_tool_call() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"Tok"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let chunk = result.unwrap();
         let tool_calls = chunk.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -629,13 +655,17 @@ mod tests {
 
     #[test]
     fn test_parse_content_block_stop() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_stop")
-            .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"content_block_stop","index":0}"#)
-            .unwrap();
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_stop",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -768,13 +798,14 @@ mod tests {
 
     #[test]
     fn test_parse_unknown_event() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: unknown_event")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: unknown_event")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"unknown_event"}"#)
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"unknown_event"}"#,
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -782,13 +813,17 @@ mod tests {
 
     #[test]
     fn test_parse_malformed_data() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line("data: invalid json")
-            .unwrap();
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "data: invalid json",
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -796,8 +831,9 @@ mod tests {
 
     #[test]
     fn test_parse_empty_line() {
-        let provider = make_provider();
-        let result = provider.parse_anthropic_stream_line("").unwrap();
+        let mut current_event = None;
+        let result =
+            AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "").unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -805,22 +841,30 @@ mod tests {
 
     #[test]
     fn test_multiple_content_deltas() {
-        let provider = make_provider();
+        let mut current_event = None;
 
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.unwrap().content, Some("Hello".to_string()));
 
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" World"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.unwrap().content, Some(" World".to_string()));
     }
 }
