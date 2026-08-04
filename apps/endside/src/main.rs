@@ -32,6 +32,7 @@ pub(crate) use render::markdown;
 pub(crate) use render::provider_dialog;
 pub(crate) use render::status_panel;
 pub(crate) use render::theme;
+pub(crate) use services::mcp as mcp_service;
 pub(crate) use services::provider as provider_service;
 pub(crate) use services::remote_sessions as remote_sessions_service;
 pub(crate) use services::session_snapshot as session_snapshot_service;

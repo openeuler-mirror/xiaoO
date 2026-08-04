@@ -547,10 +547,7 @@ mod tests {
     /// Clicking past the last visual line clamps to the last logical line's end.
     #[test]
     fn mouse_to_line_col_past_end_clamps_to_last_line() {
-        let render = cached(
-            vec![Line::from("hello"), Line::raw("")],
-            80,
-        );
+        let render = cached(vec![Line::from("hello"), Line::raw("")], 80);
 
         let cache = build_transcript_cache(None, vec![Some(render)]);
 
@@ -663,10 +660,7 @@ mod tests {
         // exactly), textwrap emits 4 visual rows of "hello" (inter-word
         // spaces stripped). Logical char positions of each "hello":
         //   v0 @ 0, v1 @ 6, v2 @ 12, v3 @ 18.
-        let render = cached(
-            vec![Line::from("hello hello hello hello")],
-            5,
-        );
+        let render = cached(vec![Line::from("hello hello hello hello")], 5);
 
         let cache = build_transcript_cache(None, vec![Some(render)]);
 
@@ -699,10 +693,7 @@ mod tests {
     /// `transcript_selected_text` later filtering them out during copy.
     #[test]
     fn mouse_to_line_col_on_header_line_does_not_panic() {
-        let render = cached(
-            vec![Line::from("  ▎ You  12:00:00"), Line::raw("body")],
-            40,
-        );
+        let render = cached(vec![Line::from("  ▎ You  12:00:00"), Line::raw("body")], 40);
 
         let cache = build_transcript_cache(None, vec![Some(render)]);
 

@@ -418,7 +418,11 @@ fn render_markdown_full(
     content: &str,
     theme: &Theme,
     width: u16,
-) -> (Vec<Line<'static>>, Vec<Vec<Line<'static>>>, MarkdownIncrementalState) {
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<Line<'static>>>,
+    MarkdownIncrementalState,
+) {
     let logical_lines = render_markdown(content, theme, width);
     let wrapped_lines: Vec<Vec<Line<'static>>> = logical_lines
         .iter()
@@ -441,7 +445,8 @@ fn render_markdown_full(
         (0, MarkdownParseState::default())
     } else {
         let frozen_lines: Vec<&str> = frozen_content.lines().collect();
-        let outcome = parse_markdown_lines(&frozen_lines, MarkdownParseState::default(), theme, width);
+        let outcome =
+            parse_markdown_lines(&frozen_lines, MarkdownParseState::default(), theme, width);
         (outcome.lines.len(), outcome.state)
     };
 
@@ -1145,7 +1150,8 @@ mod tests {
                 let expected_text = expected.iter().map(line_text).collect::<Vec<_>>();
                 let actual_text = accumulated.iter().map(line_text).collect::<Vec<_>>();
                 assert_eq!(
-                    actual_text, expected_text,
+                    actual_text,
+                    expected_text,
                     "incremental mismatch at prefix {:?}",
                     &content[..end]
                 );
@@ -1173,7 +1179,9 @@ mod tests {
 
     #[test]
     fn incremental_matches_full_for_prose() {
-        assert_incremental_equals_full("Hello world, this is a streaming message.\nSecond line here.\nThird line.");
+        assert_incremental_equals_full(
+            "Hello world, this is a streaming message.\nSecond line here.\nThird line.",
+        );
     }
 
     #[test]
@@ -1210,7 +1218,8 @@ mod tests {
 
         // "single line" starts with the empty frozen prefix, so the
         // incremental path applies with 0 frozen lines → suffix == full.
-        let result2 = render_markdown_incremental(Some(result.new_state), "single line", &theme, 40);
+        let result2 =
+            render_markdown_incremental(Some(result.new_state), "single line", &theme, 40);
         let full = render_markdown("single line", &theme, 40);
         assert_eq!(
             result2.lines.iter().map(line_text).collect::<Vec<_>>(),

@@ -941,7 +941,9 @@ mod tests {
     #[test]
     fn apply_todo_snapshot_invalidates_layout_cache_on_presence_transition() {
         use ratatui::layout::Rect;
-        use xiaoo_shared::plan::{TodoDisplayStatus as SharedTodoStatus, TodoSnapshotItem, TodoSnapshotUpdate};
+        use xiaoo_shared::plan::{
+            TodoDisplayStatus as SharedTodoStatus, TodoSnapshotItem, TodoSnapshotUpdate,
+        };
 
         let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
         let mut state = test_state();
@@ -953,7 +955,10 @@ mod tests {
         // plan_state starts None; empty update -> no transition -> cache stays.
         runtime.apply_todo_snapshot(
             &mut state,
-            TodoSnapshotUpdate { title: String::new(), items: vec![] },
+            TodoSnapshotUpdate {
+                title: String::new(),
+                items: vec![],
+            },
         );
         assert!(state.plan_state.is_none());
         assert_eq!(
@@ -1007,7 +1012,10 @@ mod tests {
         // Some -> None transition: cache must be invalidated.
         runtime.apply_todo_snapshot(
             &mut state,
-            TodoSnapshotUpdate { title: String::new(), items: vec![] },
+            TodoSnapshotUpdate {
+                title: String::new(),
+                items: vec![],
+            },
         );
         assert!(state.plan_state.is_none());
         assert!(

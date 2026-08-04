@@ -684,7 +684,9 @@ mod tests {
                 agent_types::ChatMessage::user("first question"),
                 agent_types::ChatMessage::assistant("first answer", 0),
                 agent_types::ChatMessage::user("second question"),
-                agent_types::ChatMessage::user("<system-reminder>\n# Context\nper-turn state\n</system-reminder>"),
+                agent_types::ChatMessage::user(
+                    "<system-reminder>\n# Context\nper-turn state\n</system-reminder>",
+                ),
             ],
             tools: Vec::new(),
             tool_choice: agent_types::ToolChoice::Auto,

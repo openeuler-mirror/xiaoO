@@ -33,6 +33,10 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         summary: "打开手动/自动存档列表；带名称时仅匹配手动存档。",
     },
     SlashCommandSpec {
+        name: "/mcp",
+        summary: "列出当前已配置的 MCP 服务端信息。",
+    },
+    SlashCommandSpec {
         name: "/new",
         summary: "清空当前对话上下文并创建一个新的 session。",
     },
@@ -247,6 +251,7 @@ mod tests {
                 "/dir",
                 "/delete",
                 "/load",
+                "/mcp",
                 "/new",
                 "/save",
                 "/remote",
@@ -262,6 +267,7 @@ mod tests {
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
         assert_eq!(candidates_for_prefix("/l", NO_EXT), vec!["/load"]);
+        assert_eq!(candidates_for_prefix("/m", NO_EXT), vec!["/mcp"]);
         assert_eq!(candidates_for_prefix("/n", NO_EXT), vec!["/new"]);
         assert_eq!(candidates_for_prefix("/r", NO_EXT), vec!["/remote"]);
         assert_eq!(
