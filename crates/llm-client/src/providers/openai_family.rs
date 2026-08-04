@@ -241,15 +241,19 @@ impl OpenAiFamilyProvider {
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
+            // Cursor-based SSE scanning: find each '\n' without rebuilding
+            // the buffer per line; drain the consumed prefix in place.
+            let mut start = 0;
+            while let Some(relative) = buffer[start..].find('\n') {
+                let pos = start + relative;
+                let line = &buffer[start..pos];
+                start = pos + 1;
 
                 if line.is_empty() {
                     continue;
                 }
 
-                if let Some(parsed) = parse_openai_family_stream_line(&line)? {
+                if let Some(parsed) = parse_openai_family_stream_line(line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
                     }
@@ -270,6 +274,10 @@ impl OpenAiFamilyProvider {
                     let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
                     on_chunk(stream_chunk);
                 }
+            }
+            // Drop the consumed prefix in place; no per-line allocation.
+            if start > 0 {
+                buffer.drain(..start);
             }
         }
 
