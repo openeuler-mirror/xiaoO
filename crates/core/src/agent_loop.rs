@@ -685,7 +685,17 @@ async fn compress(
         .map_err(|e| AgentError::Compression(e.to_string()));
 
     match view {
-        Ok(view) => {
+        Ok(mut view) => {
+            // Prune stale tool output as part of the compression event and
+            // persist the result. Compression already invalidates the
+            // provider prefix cache wholesale (history is rewritten), so
+            // piggybacking the prune here is free — whereas pruning per turn
+            // would move the prune frontier every turn and permanently cap
+            // cache hits at it. Between compressions history stays strictly
+            // append-only. Note: the summarizer above saw the full outputs;
+            // only the retained messages are pruned.
+            prune_stale_tool_output(&mut view.messages);
+
             tracing::info!(
                 severity = ?analysis.severity,
                 usage_ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
@@ -860,8 +870,11 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         ctx.input.visible_tools.clone()
     };
 
-    let mut projected_messages = ctx.state.messages.read().clone();
-    prune_stale_tool_output(&mut projected_messages);
+    // History is projected as-is: append-only between compressions so every
+    // request shares a byte-identical prefix with the previous one (provider
+    // prefix caching). Stale tool output is pruned only inside `compress`,
+    // where the cache is being invalidated wholesale anyway.
+    let projected_messages = ctx.state.messages.read().clone();
 
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
