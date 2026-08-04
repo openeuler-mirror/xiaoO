@@ -38,10 +38,7 @@ const CHANNEL_CONTEXT_BOUNDARY_INSTRUCTION: &str =
 /// [`compose_turn_context_reminder`] and injected as a trailing message
 /// instead (see `builder_impl`), keeping the change point at the very end of
 /// the prompt.
-pub(crate) fn compose_system_sections(
-    base_system: &str,
-    context: &PromptContext,
-) -> Vec<String> {
+pub(crate) fn compose_system_sections(base_system: &str, context: &PromptContext) -> Vec<String> {
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let (base_system, repo_map) = split_repo_map_section(&base_system);
     let mut stable = Vec::new();

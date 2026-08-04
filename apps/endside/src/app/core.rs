@@ -46,7 +46,7 @@ impl App {
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> Result<()> {
         #[cfg(debug_assertions)]
-        eprintln!("PERF_PROBES_ACTIVE");
+        tracing::debug!("PERF_PROBES_ACTIVE");
         let mut event_stream = EventStream::new();
         let mut pending_event: Option<Event> = None;
         let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
@@ -109,7 +109,7 @@ impl App {
                 {
                     let draw_elapsed = _draw_start.elapsed();
                     if draw_elapsed > std::time::Duration::from_micros(500) {
-                        eprintln!("PERF terminal_draw: {}µs", draw_elapsed.as_micros());
+                        tracing::debug!("PERF terminal_draw: {}µs", draw_elapsed.as_micros());
                     }
                 }
             }
@@ -120,7 +120,7 @@ impl App {
                 if tick_elapsed > std::time::Duration::from_millis(15)
                     && self.state.chat_state.is_loading
                 {
-                    eprintln!(
+                    tracing::debug!(
                         "PERF event_loop_tick: {}µs active_refresh=true",
                         tick_elapsed.as_micros()
                     );
@@ -338,7 +338,7 @@ impl App {
                 if tick_elapsed > std::time::Duration::from_millis(15)
                     && self.state.chat_state.is_loading
                 {
-                    eprintln!(
+                    tracing::debug!(
                         "PERF event_loop_tick: {}µs active_refresh=true",
                         tick_elapsed.as_micros()
                     );

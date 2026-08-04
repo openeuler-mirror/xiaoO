@@ -10,6 +10,7 @@ use crate::cron_dialog::CronDialogMode;
 use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
+use crate::mcp_service::render_mcp_overview;
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
 use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
@@ -691,6 +692,18 @@ impl App {
                 .chat_state
                 .messages
                 .push(crate::chat::Message::system(render_skills_overview(
+                    &self.state.agent_config,
+                )));
+            self.state.chat_state.stick_to_bottom = true;
+            return Ok(());
+        }
+
+        if trimmed.eq_ignore_ascii_case("/mcp") {
+            self.state.chat_state.input.reset();
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(render_mcp_overview(
                     &self.state.agent_config,
                 )));
             self.state.chat_state.stick_to_bottom = true;

@@ -162,7 +162,7 @@ impl App {
             // (not `_t5.elapsed() - total`) so the phases sum to `total`.
             let t_dialogs = std::time::Instant::now().duration_since(_t5);
             if total > std::time::Duration::from_micros(100) {
-                eprintln!(
+                tracing::debug!(
                     "PERF ui: total={}µs setup={}µs header={}µs chat={}µs input={}µs sidebar={}µs status={}µs dialogs={}µs loading={}",
                     total.as_micros(),
                     t_setup.as_micros(),

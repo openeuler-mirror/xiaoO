@@ -8,6 +8,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use textwrap::{wrap, Options, WordSeparator, WordSplitter};
+use tracing;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
@@ -336,6 +337,11 @@ impl App {
             }
             let visible_visual_lines =
                 transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
+            {
+                _t_collect = Some(std::time::Instant::now());
+            }
+            let visible_visual_lines =
+                transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
             let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         }
@@ -432,7 +438,9 @@ impl App {
                     Some(c) => _start.elapsed().saturating_sub(c.duration_since(_start)),
                     None => std::time::Duration::ZERO,
                 };
-                eprintln!(
+                // tracing, NEVER eprintln!/println!: raw stdout/stderr writes
+                // land at the cursor position inside the live TUI screen.
+                tracing::debug!(
                     "PERF render_chat: {}µs dirty={}µs build={}µs collect={}µs render={}µs",
                     elapsed.as_micros(),
                     t_dirty.as_micros(),
@@ -2155,7 +2163,7 @@ fn render_standard_message_lines(
     {
         let elapsed = _start.elapsed();
         if elapsed > std::time::Duration::from_micros(200) && is_active_stream_message {
-            eprintln!(
+            tracing::debug!(
                 "PERF render_standard_message_lines: {}µs, {} lines",
                 elapsed.as_micros(),
                 lines.len()
