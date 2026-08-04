@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use agent_types::lsp::{
     LspCallHierarchyItem, LspDiagnostic, LspError, LspIncomingCall, LspLocation, LspOutgoingCall,
@@ -13,10 +14,31 @@ use crate::servers::{builtin_servers, find_root, read_file, ServerConfig};
 
 type InstanceKey = (String, PathBuf); // (server_id, workspace_root)
 
+/// TTL for cached `find_root` results. Bounds staleness: a deleted marker
+/// or a new marker at a higher ancestor is picked up after this elapses.
+const ROOT_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// A cached `find_root` result with the time it was computed.
+struct CachedRoot {
+    root: PathBuf,
+    cached_at: Instant,
+}
+
+impl CachedRoot {
+    fn is_expired(&self) -> bool {
+        Instant::now().duration_since(self.cached_at) >= ROOT_CACHE_TTL
+    }
+}
+
 pub struct LspServerManager {
     configs: Vec<ServerConfig>,
     instances: HashMap<InstanceKey, LspServerInstance>,
     env: Arc<dyn LspEnv>,
+    /// Cache of `find_root` results, keyed by `(file, server_id)`. All
+    /// results (including the fallback to the file's parent) are cached;
+    /// entries expire after `ROOT_CACHE_TTL`, so a marker added or removed
+    /// later is picked up once the entry goes stale.
+    root_cache: HashMap<PathBuf, HashMap<String, CachedRoot>>,
 }
 
 impl LspServerManager {
@@ -34,6 +56,7 @@ impl LspServerManager {
             configs,
             instances: HashMap::new(),
             env,
+            root_cache: HashMap::new(),
         }
     }
 
@@ -42,7 +65,46 @@ impl LspServerManager {
             configs,
             instances: HashMap::new(),
             env,
+            root_cache: HashMap::new(),
         }
+    }
+
+    /// Resolve the workspace root for `file` against `root_markers`, using
+    /// the in-process cache to avoid re-walking ancestors on every LSP
+    /// action. All results are cached and expire after `ROOT_CACHE_TTL`;
+    /// staleness is bounded, so markers added or removed during the TTL
+    /// window are picked up after expiry.
+    async fn cached_find_root(
+        &mut self,
+        file: &Path,
+        server_id: &str,
+        root_markers: &[&str],
+    ) -> PathBuf {
+        // Fast path: unexpired cache hit.
+        if let Some(per_server) = self.root_cache.get(file) {
+            if let Some(entry) = per_server.get(server_id) {
+                if !entry.is_expired() {
+                    return entry.root.clone();
+                }
+            }
+        }
+        let root = find_root(file, root_markers, self.env.as_ref()).await;
+        // Always cache the result. The previous "only cache if root !=
+        // file.parent()" heuristic skipped the case where the marker is in
+        // the file's direct parent (e.g. main.rs next to Cargo.toml),
+        // defeating the cache for that common layout. Rely on the TTL to
+        // surface markers added or removed after the entry was stored.
+        self.root_cache
+            .entry(file.to_path_buf())
+            .or_default()
+            .insert(
+                server_id.to_string(),
+                CachedRoot {
+                    root: root.clone(),
+                    cached_at: Instant::now(),
+                },
+            );
+        root
     }
 
     /// Ensure all matching instances exist and are started; open the file in each.
@@ -53,14 +115,19 @@ impl LspServerManager {
             .unwrap_or("")
             .to_string();
 
-        let mut keys: Vec<InstanceKey> = Vec::new();
-        for c in self
+        // Collect matching configs into an owned Vec so we don't hold a
+        // borrow of `self.configs` across the `cached_find_root` await.
+        let matching: Vec<(&str, &[&str])> = self
             .configs
             .iter()
             .filter(|c| c.extensions.contains(&ext.as_str()))
-        {
-            let root = find_root(file, c.root_markers, self.env.as_ref()).await;
-            keys.push((c.id.to_string(), root));
+            .map(|c| (c.id, c.root_markers))
+            .collect();
+
+        let mut keys: Vec<InstanceKey> = Vec::new();
+        for (id, root_markers) in matching {
+            let root = self.cached_find_root(file, id, root_markers).await;
+            keys.push((id.to_string(), root));
         }
 
         if keys.is_empty() {
@@ -122,14 +189,19 @@ impl LspServerManager {
             .unwrap_or("")
             .to_string();
 
-        let mut keys: Vec<InstanceKey> = Vec::new();
-        for c in self
+        // Collect matching configs into an owned Vec so we don't hold a
+        // borrow of `self.configs` across the `cached_find_root` await.
+        let matching: Vec<(&str, &[&str])> = self
             .configs
             .iter()
             .filter(|c| c.extensions.contains(&ext.as_str()))
-        {
-            let root = find_root(file, c.root_markers, self.env.as_ref()).await;
-            keys.push((c.id.to_string(), root));
+            .map(|c| (c.id, c.root_markers))
+            .collect();
+
+        let mut keys: Vec<InstanceKey> = Vec::new();
+        for (id, root_markers) in matching {
+            let root = self.cached_find_root(file, id, root_markers).await;
+            keys.push((id.to_string(), root));
         }
 
         for key in &keys {

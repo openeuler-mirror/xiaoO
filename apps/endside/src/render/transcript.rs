@@ -8,7 +8,6 @@ use ratatui::{
 };
 use serde_json::Value;
 use textwrap::{wrap, Options, WordSeparator, WordSplitter};
-use tracing;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
@@ -332,11 +331,6 @@ impl App {
         } else {
             let visual_end = scroll_end.min(transcript_cache.total_lines);
             #[cfg(debug_assertions)]
-            {
-                _t_collect = Some(std::time::Instant::now());
-            }
-            let visible_visual_lines =
-                transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
             {
                 _t_collect = Some(std::time::Instant::now());
             }
