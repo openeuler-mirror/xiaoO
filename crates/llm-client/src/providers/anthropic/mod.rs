@@ -65,7 +65,25 @@ impl AnthropicProvider {
 
     fn build_body(&self, request: &LlmRequest, stream: bool) -> serde_json::Value {
         let system_blocks = anthropic_system_blocks(&request.messages);
-        let other_messages = anthropic_messages(&request.messages);
+        let mut other_messages = anthropic_messages(&request.messages);
+
+        // Incremental prefix caching over the conversation history: mark the
+        // final content block of the last two non-system messages as cache
+        // breakpoints. The prompt builder appends the per-turn `<system-reminder>`
+        // context as the final message (ephemeral, never persisted), so the
+        // breakpoint on the second-to-last message is the one that lands on
+        // stable history and yields the cache hit next turn; the one on the
+        // tail costs only a small re-write of the reminder itself. Budget:
+        // 2 breakpoints here + system breakpoints stays within Anthropic's
+        // limit of 4.
+        for msg in other_messages.iter_mut().rev().take(2) {
+            if let Some(last_block) = msg["content"]
+                .as_array_mut()
+                .and_then(|blocks| blocks.last_mut())
+            {
+                last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            }
+        }
 
         let max_tokens = request.max_tokens.unwrap_or(16384);
         let (max_tokens, thinking_budget) =
@@ -655,6 +673,45 @@ mod tests {
         assert_eq!(system[1]["text"], "# Context\n\nvolatile tail");
         assert!(system[1].get("cache_control").is_none());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_body_marks_last_two_messages_as_cache_breakpoints() {
+        let provider = make_provider();
+        let request = LlmRequest {
+            messages: vec![
+                agent_types::ChatMessage::system("base system"),
+                agent_types::ChatMessage::user("first question"),
+                agent_types::ChatMessage::assistant("first answer", 0),
+                agent_types::ChatMessage::user("second question"),
+                agent_types::ChatMessage::user("<system-reminder>\n# Context\nper-turn state\n</system-reminder>"),
+            ],
+            tools: Vec::new(),
+            tool_choice: agent_types::ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            response_format: agent_types::ResponseFormat::Text,
+            reasoning_effort: agent_types::ReasoningEffort::Off,
+        };
+
+        let body = provider.build_body(&request, false);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+
+        // Older history carries no breakpoint.
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert!(messages[1]["content"][0].get("cache_control").is_none());
+        // The last two messages do: the second-to-last lands on stable
+        // history (cache hit next turn); the last covers the ephemeral
+        // per-turn reminder tail.
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[3]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
