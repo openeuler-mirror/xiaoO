@@ -8,6 +8,13 @@ pub trait ToolRegistry: Send + Sync {
     fn get_spec(&self, id: &ToolId) -> Option<&dyn ToolSpecView>;
     fn list_specs(&self) -> Vec<&dyn ToolSpecView>;
     fn filter_for(&self, agent_id: &AgentId) -> Box<dyn ToolFilter>;
+
+    /// Number of registered tool specs. Cheaper than `list_specs().len()`
+    /// (which allocates + sorts) — useful on hot paths like token-budget
+    /// pre-checks.
+    fn spec_count(&self) -> usize {
+        self.list_specs().len()
+    }
 }
 
 pub trait ToolFilter: Send + Sync {
