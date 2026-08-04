@@ -762,9 +762,12 @@ fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
     }
 }
 
-/// Per-turn dynamic context re-injected into the system prompt: the remaining
-/// horizon and the live `todo_write` plan. Rendered into the volatile tail of
-/// the system message (see `prompt::compose`), after the cache-stable prefix.
+/// Per-turn dynamic context: the remaining horizon and the live `todo_write`
+/// plan. Rendered by the prompt builder into an ephemeral `<system-reminder>`
+/// message appended at the END of each request (see
+/// `prompt::compose::compose_turn_context_reminder`) — never into the system
+/// prompt, whose per-turn churn would break provider prefix caching for the
+/// entire conversation history behind it.
 fn live_context_snippets(
     ctx: &LoopContext<'_>,
 ) -> Vec<agent_types::context::prompt::MemorySnippet> {
