@@ -504,12 +504,28 @@ pub struct ModelInfo {
     pub name: String,
 }
 
-/// Default provider list shown in TUI (openai, anthropic, openrouter, ollama).
+/// Default provider and model list shown in the TUI.
 pub fn default_provider_list() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {
             name: "openai".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "gpt-5.6".to_string(),
+                    name: "GPT-5.6 (Latest)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-sol".to_string(),
+                    name: "GPT-5.6 Sol (Flagship)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-terra".to_string(),
+                    name: "GPT-5.6 Terra (Balanced)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-luna".to_string(),
+                    name: "GPT-5.6 Luna (Efficient)".to_string(),
+                },
                 ModelInfo {
                     id: "gpt-4o".to_string(),
                     name: "GPT-4o".to_string(),
@@ -527,6 +543,14 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "anthropic".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "claude-fable-5".to_string(),
+                    name: "Claude Fable 5".to_string(),
+                },
+                ModelInfo {
+                    id: "claude-sonnet-5".to_string(),
+                    name: "Claude Sonnet 5".to_string(),
+                },
                 ModelInfo {
                     id: "claude-sonnet-4-20250514".to_string(),
                     name: "Claude Sonnet 4".to_string(),
@@ -563,6 +587,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "zhipu".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "glm-5.2".to_string(),
+                    name: "GLM-5.2 (Flagship)".to_string(),
+                },
                 ModelInfo {
                     id: "glm-5".to_string(),
                     name: "GLM-5 (Flagship)".to_string(),
@@ -612,6 +640,34 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "openrouter".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "openai/gpt-5.6-sol".to_string(),
+                    name: "GPT-5.6 Sol".to_string(),
+                },
+                ModelInfo {
+                    id: "openai/gpt-5.6-terra".to_string(),
+                    name: "GPT-5.6 Terra".to_string(),
+                },
+                ModelInfo {
+                    id: "openai/gpt-5.6-luna".to_string(),
+                    name: "GPT-5.6 Luna".to_string(),
+                },
+                ModelInfo {
+                    id: "anthropic/claude-fable-5".to_string(),
+                    name: "Claude Fable 5".to_string(),
+                },
+                ModelInfo {
+                    id: "anthropic/claude-sonnet-5".to_string(),
+                    name: "Claude Sonnet 5".to_string(),
+                },
+                ModelInfo {
+                    id: "moonshotai/kimi-k3".to_string(),
+                    name: "Kimi K3".to_string(),
+                },
+                ModelInfo {
+                    id: "z-ai/glm-5.2".to_string(),
+                    name: "GLM-5.2 (z-ai)".to_string(),
+                },
                 ModelInfo {
                     id: "z-ai/glm-5".to_string(),
                     name: "GLM-5 (z-ai)".to_string(),
@@ -663,12 +719,20 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
             name: "kimi".to_string(),
             models: vec![
                 ModelInfo {
-                    id: "kimi-k2-0905-preview".to_string(),
-                    name: "Kimi K2 0905 Preview".to_string(),
+                    id: "kimi-k3".to_string(),
+                    name: "Kimi K3 (Flagship)".to_string(),
                 },
                 ModelInfo {
-                    id: "kimi-latest".to_string(),
-                    name: "Kimi Latest".to_string(),
+                    id: "kimi-k2.7-code".to_string(),
+                    name: "Kimi K2.7 Code".to_string(),
+                },
+                ModelInfo {
+                    id: "kimi-k2.7-code-highspeed".to_string(),
+                    name: "Kimi K2.7 Code Highspeed".to_string(),
+                },
+                ModelInfo {
+                    id: "kimi-k2.6".to_string(),
+                    name: "Kimi K2.6".to_string(),
                 },
             ],
         },
@@ -726,6 +790,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "zai-coding-plan".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "glm-5.2".to_string(),
+                    name: "GLM-5.2 (Coding Plan)".to_string(),
+                },
                 ModelInfo {
                     id: "glm-5.1".to_string(),
                     name: "GLM-5.1 (Coding Plan)".to_string(),
@@ -1058,12 +1126,44 @@ impl ChatState {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatState, Input, Message};
+    use super::{default_provider_list, ChatState, Input, Message};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
     };
+
+    #[test]
+    fn default_provider_list_contains_latest_models_and_excludes_retired_kimi_models() {
+        let providers = default_provider_list();
+        let model_ids = |provider: &str| {
+            providers
+                .iter()
+                .find(|entry| entry.name == provider)
+                .unwrap_or_else(|| panic!("missing provider {provider}"))
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        let openai = model_ids("openai");
+        assert!(openai.contains(&"gpt-5.6"));
+        assert!(openai.contains(&"gpt-5.6-sol"));
+        assert!(openai.contains(&"gpt-5.6-terra"));
+        assert!(openai.contains(&"gpt-5.6-luna"));
+
+        let anthropic = model_ids("anthropic");
+        assert!(anthropic.contains(&"claude-fable-5"));
+        assert!(anthropic.contains(&"claude-sonnet-5"));
+
+        let kimi = model_ids("kimi");
+        assert!(kimi.contains(&"kimi-k3"));
+        assert!(!kimi.contains(&"kimi-k2-0905-preview"));
+        assert!(!kimi.contains(&"kimi-latest"));
+
+        assert!(model_ids("zhipu").contains(&"glm-5.2"));
+    }
 
     #[test]
     fn message_render_revision_updates_with_content_and_streaming_changes() {

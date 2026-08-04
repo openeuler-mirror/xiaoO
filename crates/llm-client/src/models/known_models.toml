@@ -6,6 +6,25 @@
 # Unknown models should be excluded and rely on runtime detection.
 
 [models]
+# === OpenAI ===
+# Official docs: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+# Context: 1.05M tokens, Max output: 128K tokens
+"gpt-5.6-sol" = 1_050_000
+"gpt-5.6-terra" = 1_050_000
+"gpt-5.6-luna" = 1_050_000
+"gpt-5.6" = 1_050_000 # alias for gpt-5.6-sol
+
+# === Anthropic ===
+# Official docs: https://platform.claude.com/docs/en/about-claude/models/overview
+# Context: 1M tokens, Max output: 128K tokens
+"claude-fable-5" = 1_000_000
+"claude-sonnet-5" = 1_000_000
+
+# === Kimi / Moonshot ===
+# Official docs: https://platform.moonshot.cn/docs/models
+# Context: 1M tokens
+"kimi-k3" = 1_000_000
+
 # === DeepSeek ===
 # Official docs: https://api-docs.deepseek.com/zh-cn/quick_start/pricing
 # Context: 1M tokens, Max output: 384K tokens
