@@ -31,6 +31,45 @@ impl ToolCallBuilderImpl {
     ) -> Option<Arc<dyn ToolExecutor>> {
         tool_filter.get_executor_for_name(tool_name)
     }
+
+    /// Build a tool call from a `RawToolCall` and a *borrowed* filter,
+    /// without taking ownership of a `Box<dyn ToolFilter>`. Use this when
+    /// building a batch of calls sharing the same `visible_tools`: build
+    /// the filter once via `tool_filter_from_specs`, then call this for
+    /// each call. Avoids the per-call HashMap + Vec allocation.
+    pub fn build_with_filter_ref(
+        raw_tool_call: RawToolCall,
+        tool_filter: &dyn ToolFilter,
+    ) -> Result<Box<dyn ToolCall>, BuildError> {
+        let visible_spec =
+            Self::resolve_visible_spec_by_name(tool_filter, &raw_tool_call.tool_name).ok_or_else(
+                || BuildError::InvalidConfig {
+                    message: format!(
+                        "tool '{}' is not visible in the current ToolFilter",
+                        raw_tool_call.tool_name
+                    ),
+                },
+            )?;
+
+        let executor =
+            Self::resolve_visible_executor_by_name(tool_filter, &raw_tool_call.tool_name)
+                .ok_or_else(|| BuildError::InvalidConfig {
+                    message: format!(
+                        "tool '{}' is missing an executor in the current ToolFilter",
+                        raw_tool_call.tool_name
+                    ),
+                })?;
+
+        let _ = visible_spec.id();
+
+        let final_call = FinalToolCall {
+            call_id: raw_tool_call.call_id,
+            tool_name: raw_tool_call.tool_name,
+            input: raw_tool_call.input,
+        };
+
+        Ok(Box::new(ToolCallImpl::new(final_call, visible_spec, executor)) as Box<dyn ToolCall>)
+    }
 }
 
 impl ToolCallBuilder for ToolCallBuilderImpl {

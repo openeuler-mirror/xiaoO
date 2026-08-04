@@ -24,6 +24,10 @@ impl ToolRegistry for EmptyToolRegistry {
         Vec::new()
     }
 
+    fn spec_count(&self) -> usize {
+        0
+    }
+
     fn filter_for(&self, _agent_id: &AgentId) -> Box<dyn ToolFilter> {
         Box::new(EmptyToolFilter)
     }
