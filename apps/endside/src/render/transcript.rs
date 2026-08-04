@@ -337,6 +337,11 @@ impl App {
             }
             let visible_visual_lines =
                 transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
+            {
+                _t_collect = Some(std::time::Instant::now());
+            }
+            let visible_visual_lines =
+                transcript_cache.collect_visible_visual_lines(scroll_offset, visual_end);
             let paragraph = Paragraph::new(Text::from(visible_visual_lines));
             frame.render_widget(paragraph, inner_area);
         }
