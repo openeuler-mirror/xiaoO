@@ -2,7 +2,8 @@ use crate::gateway::{
     AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionControlPlane,
     SessionDetachRequest, SessionHeartbeatRequest, SessionInput, SessionLifecycleStatus,
     SessionOpenRequest, SessionRecord, SessionRuntimeBuildInput, SessionRuntimeResolveError,
-    SessionRuntimeResolver, SessionService, SessionServiceError, SessionStore, SessionStoreError,
+    SessionRuntimeResolver, SessionService, SessionServiceError, SessionStateOutcome, SessionStore,
+    SessionStoreError,
 };
 use crate::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
@@ -503,6 +504,72 @@ impl CoreBackedSessionService {
         // bypass the cap. A normal user-typed turn carries `chain_depth = 0`,
         // which resets the chain.
         stamp_and_cap_send_prompt_actions(collected, emitting_turn_chain_depth, max_depth)
+    }
+
+    /// Fire-and-forget `*.Session.lifecycle.state` for states with no
+    /// `AppTurnResult` to attach actions to (today: `"failed"` after a
+    /// turn terminates with `Err`; `outcome = "error"`). Plugin actions
+    /// are discarded; plugin errors are logged. Bounded by
+    /// [`SESSION_STATE_HOOK_OVERALL_DEADLINE`], mirroring
+    /// [`fire_session_state_hook_and_collect_actions`].
+    fn fire_session_state_hook_background(
+        &self,
+        session_id: String,
+        sender_id: String,
+        agent_id: String,
+        state: String,
+        outcome: String,
+    ) {
+        let hook_point = session_lifecycle_hook_point(&agent_id, "state");
+        let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
+        if hooker_ids.is_empty() {
+            return;
+        }
+        let registry = Arc::clone(&self.hooker_registry);
+        tokio::spawn(async move {
+            let noop_runtime = NoopRuntimeView::new();
+            let input = HookInvokeInput::SessionState {
+                input: SessionStateHookInput {
+                    session_id,
+                    sender_id,
+                    agent_id,
+                    state,
+                    outcome,
+                },
+                metadata: HookInvokeMetadata::default(),
+            };
+            // Overall deadline caps accumulated background runtime and
+            // (via `kill_on_drop`) reaps any spawned plugin subprocess on drop.
+            let loop_body = async {
+                for hooker_id in hooker_ids {
+                    let Some(hooker) = registry.get(&hooker_id) else {
+                        continue;
+                    };
+                    match hooker.invoke(input.clone(), &noop_runtime).await {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                hooker_id = %hooker_id,
+                                hook_point = "session.lifecycle.state",
+                                error = %error,
+                                "session state hook invocation failed"
+                            );
+                        }
+                    }
+                }
+            };
+            if tokio::time::timeout(SESSION_STATE_HOOK_OVERALL_DEADLINE, loop_body)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    hook_point = "session.lifecycle.state",
+                    deadline_secs = SESSION_STATE_HOOK_OVERALL_DEADLINE.as_secs(),
+                    "session state hook background dispatch exceeded overall deadline; \
+                     aborting pending hookers"
+                );
+            }
+        });
     }
 
     /// Collect the (id)s of enabled hookers registered for `hook_point`,
@@ -1210,10 +1277,10 @@ impl CoreBackedSessionService {
             .await;
         }
 
-        let idle_session_id = request.session_id.clone();
-        let idle_sender_id = request.sender_id.clone();
-        let idle_agent_id = resolved.descriptor.agent_id.0.clone();
-        let idle_chain_depth = request.chain_depth;
+        let lifecycle_session_id = request.session_id.clone();
+        let lifecycle_sender_id = request.sender_id.clone();
+        let lifecycle_agent_id = resolved.descriptor.agent_id.0.clone();
+        let lifecycle_chain_depth = request.chain_depth;
 
         let prior_memory_context = seed_session
             .loop_state
@@ -1221,6 +1288,7 @@ impl CoreBackedSessionService {
             .map(|loop_state| loop_state.messages.clone())
             .unwrap_or_default();
         let handle = self.get_or_create_session_handle(seed_session).await;
+
         let mut turn_result = handle
             .run_turn(
                 request,
@@ -1231,44 +1299,39 @@ impl CoreBackedSessionService {
             )
             .await;
 
-        // Fire the session.lifecycle.state event hook after any non-error
-        // turn termination. `run_turn` returns `Ok(AppTurnResult)` for ALL
-        // four `AgentOutcome` variants (Complete / MaxTurnsReached /
-        // BudgetExhausted / Cancelled) — they all leave the session back in
-        // `idle` (ready for the next turn), so `state="idle"` is correct for
-        // each. Only `Err(_)` (a true failure) is excluded; that branch
-        // currently emits no event. The per-variant terminal kind is carried
-        // in the payload's `outcome` field so plugins can distinguish a
-        // normal completion from a soft termination without switching on
-        // `state`.
-        //
-        // Actions requested by the hookers are collected into
-        // `AppTurnResult.hook_actions`. Before they are returned, `SendPrompt`
-        // entries are stamped with `chain_depth = idle_chain_depth + 1` and
-        // dropped if that value **reaches** `max_prompt_chain_depth`
-        // (`next_depth >= max`, an exclusive upper bound — the chain may run
-        // `max_prompt_chain_depth` turns total: depth `0` (user-initiated)
-        // plus `max - 1` `send_prompt`-triggered turns). Daemon-side execution
-        // (e.g. `open_session` for `CreateSession`/`SwitchSession`/`SendPrompt`)
-        // is performed by the HTTP router via its own `DaemonHookActionSink`
-        // after `run_turn` returns, before forwarding to the TUI via the SSE
-        // `Done` event. The trade-off vs a fire-and-forget design is that the
-        // user sees the turn result after the hookers finish; acceptable
-        // because session lifecycle hooks only fire after turn termination
-        // anyway, and most setups register zero or fast hookers.
+        // Dispatch `*.Session.lifecycle.state`: `Ok` → `state="idle"`
+        // (awaited; actions collected); `Err` → `state="failed"`
+        // (fire-and-forget; actions discarded, error logged).
         if hooks_enabled {
-            if let Ok(turn) = turn_result.as_mut() {
-                let actions = self
-                    .fire_session_state_hook_and_collect_actions(
-                        idle_session_id,
-                        idle_sender_id,
-                        idle_agent_id,
-                        "idle".to_string(),
-                        turn.outcome.as_tag().to_string(),
-                        idle_chain_depth,
-                    )
-                    .await;
-                turn.hook_actions = actions;
+            match turn_result.as_mut() {
+                Ok(turn) => {
+                    let actions = self
+                        .fire_session_state_hook_and_collect_actions(
+                            lifecycle_session_id,
+                            lifecycle_sender_id,
+                            lifecycle_agent_id,
+                            SessionLifecycleStatus::Idle.as_tag().to_string(),
+                            turn.outcome.as_tag().to_string(),
+                            lifecycle_chain_depth,
+                        )
+                        .await;
+                    turn.hook_actions = actions;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        session_id = %lifecycle_session_id,
+                        agent_id = %lifecycle_agent_id,
+                        "turn failed; dispatching state=\"failed\" session lifecycle hook"
+                    );
+                    self.fire_session_state_hook_background(
+                        lifecycle_session_id,
+                        lifecycle_sender_id,
+                        lifecycle_agent_id,
+                        SessionLifecycleStatus::Failed.as_tag().to_string(),
+                        SessionStateOutcome::Error.as_tag().to_string(),
+                    );
+                }
             }
         }
 
@@ -2252,6 +2315,13 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
     use xiaoo_core::LoopStateSnapshot;
+
+    use agent_contracts::{Hooker, RuntimeView};
+    use agent_types::hook::{HookInvokeError, HookInvokeOutput};
+    use agent_types::session::{SessionHookError, SessionHookResult};
+    use hook::framework::HookerRegistryImpl;
+    use std::any::Any;
+    use std::collections::HashSet;
 
     #[test]
     fn runtime_exec_shell_prefers_explicit_shell() {
@@ -4199,5 +4269,172 @@ mod tests {
         if let Err(SessionServiceError::SessionAttachedByAnotherClient { .. }) = result {
             panic!("daemon:cron turn must NOT be rejected by the pop-time holder check");
         }
+    }
+
+    // ===== session lifecycle state hook (idle / failed) =====
+    //
+    // The `failed` integration path through `run_turn` is not exercised:
+    // reliably forcing `run_turn_inner` to return `Err` requires a
+    // specific LLM/backend failure mode outside this crate's contract.
+
+    /// Records every `*.Session.lifecycle.state` invocation as a
+    /// `(state, outcome)` pair onto a shared `Vec`, optionally returning
+    /// per-state `actions`. Uses the `*` hook point so the test doesn't
+    /// need to know the resolver's agent_id.
+    struct RecordingStateHooker {
+        id: HookerId,
+        hook_point: HookPointId,
+        invocations: Arc<StdMutex<Vec<(String, String)>>>,
+        actions_by_state: HashMap<String, Vec<HookAction>>,
+    }
+
+    impl RecordingStateHooker {
+        fn new(
+            id: &str,
+            invocations: Arc<StdMutex<Vec<(String, String)>>>,
+            actions_by_state: HashMap<String, Vec<HookAction>>,
+        ) -> Self {
+            Self {
+                id: HookerId(id.to_string()),
+                hook_point: HookPointId("*.Session.lifecycle.state".to_string()),
+                invocations,
+                actions_by_state,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Hooker for RecordingStateHooker {
+        fn id(&self) -> &HookerId {
+            &self.id
+        }
+
+        fn hook_point(&self) -> &HookPointId {
+            &self.hook_point
+        }
+
+        async fn invoke(
+            &self,
+            input: HookInvokeInput,
+            _runtime: &dyn RuntimeView,
+        ) -> Result<HookInvokeOutput, HookInvokeError> {
+            match input {
+                HookInvokeInput::SessionState {
+                    input: state_input, ..
+                } => {
+                    self.invocations
+                        .lock()
+                        .expect("recording hooker invocations")
+                        .push((state_input.state.clone(), state_input.outcome.clone()));
+                    let actions = self
+                        .actions_by_state
+                        .get(&state_input.state)
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok(
+                        HookInvokeOutput::SessionState(SessionHookResult::Acknowledged)
+                            .with_actions(actions),
+                    )
+                }
+                other => Err(HookInvokeError::Session(SessionHookError::Plugin {
+                    message: format!(
+                        "recording hooker '{}' expected SessionState input but got {:?}",
+                        self.id.0, other
+                    ),
+                })),
+            }
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// Build a `HookerRegistry` with a single enabled `RecordingStateHooker`
+    /// for `*.Session.lifecycle.state`.
+    fn recording_state_hooker_registry(
+        invocations: Arc<StdMutex<Vec<(String, String)>>>,
+        actions_by_state: HashMap<String, Vec<HookAction>>,
+    ) -> Arc<dyn HookerRegistry> {
+        let hooker = Box::new(RecordingStateHooker::new(
+            "recording-state-hooker",
+            invocations,
+            actions_by_state,
+        ));
+        let hooker_id = hooker.id().clone();
+        let mut hookers: HashMap<HookerId, Box<dyn Hooker>> = HashMap::new();
+        hookers.insert(hooker_id.clone(), hooker);
+        let mut enabled: HashSet<HookerId> = HashSet::new();
+        enabled.insert(hooker_id);
+        Arc::new(HookerRegistryImpl::new(hookers, enabled, HashMap::new()))
+    }
+
+    /// Construct a `CoreBackedSessionService` with an explicit hooker
+    /// registry, mirroring `make_reaper_service` but exposing the registry
+    /// argument so tests can inject a recording hooker.
+    fn build_service_with_hooker_registry(
+        store: Arc<InMemorySessionStore>,
+        resolver: Arc<StubRuntimeResolver>,
+        hooker_registry: Arc<dyn HookerRegistry>,
+    ) -> Arc<CoreBackedSessionService> {
+        Arc::new(CoreBackedSessionService::new(
+            store,
+            resolver,
+            hooker_registry,
+            Arc::new(BackendManager::new()),
+            128,
+            None,
+        ))
+    }
+
+    /// Poll `invocations` until it holds `expected` entries, or panic
+    /// after `timeout_ms` (the caller cannot await the fire-and-forget
+    /// background task).
+    async fn wait_for_invocations(
+        invocations: &Arc<StdMutex<Vec<(String, String)>>>,
+        expected: usize,
+        timeout_ms: u64,
+    ) -> Vec<(String, String)> {
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            loop {
+                let snapshot = invocations.lock().expect("invocations").clone();
+                if snapshot.len() >= expected {
+                    return snapshot;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for hooker invocations")
+    }
+
+    #[tokio::test]
+    async fn fire_session_state_hook_background_dispatches_failed_state() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+        });
+        let invocations = Arc::new(StdMutex::new(Vec::new()));
+        let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());
+        let service = build_service_with_hooker_registry(store, resolver, registry);
+
+        service.fire_session_state_hook_background(
+            "session-failed".to_string(),
+            "user-1".to_string(),
+            "test-agent".to_string(),
+            SessionLifecycleStatus::Failed.as_tag().to_string(),
+            SessionStateOutcome::Error.as_tag().to_string(),
+        );
+
+        let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
+        assert_eq!(
+            recorded,
+            vec![("failed".to_string(), "error".to_string())],
+            "fire_session_state_hook_background(state=\"failed\") must dispatch \
+             to the hooker with outcome=\"error\""
+        );
     }
 }

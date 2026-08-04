@@ -52,8 +52,8 @@ pub use session_base::{
 };
 pub use session_record::{
     RuntimeBootstrapBinding, RuntimeBootstrapSkill, SessionAgentRecord, SessionLifecycleStatus,
-    SessionRecord, SessionRuntimeSnapshot, E2B_BOOTSTRAP_MANIFEST_VERSION, E2B_REMOTE_SKILLS_ROOT,
-    E2B_REMOTE_WORKSPACE_ROOT,
+    SessionRecord, SessionRuntimeSnapshot, SessionStateOutcome, E2B_BOOTSTRAP_MANIFEST_VERSION,
+    E2B_REMOTE_SKILLS_ROOT, E2B_REMOTE_WORKSPACE_ROOT,
 };
 pub use session_runtime::{
     AppRuntimeAssembly, AppRuntimeFactory, AppRuntimeFactoryError, ResolvedSessionRuntime,
