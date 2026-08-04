@@ -34,6 +34,9 @@ impl AnthropicProvider {
         model: String,
         api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
+        let max_context_window = crate::models::get_known_model_context_length(&model)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(200000);
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
@@ -45,7 +48,7 @@ impl AnthropicProvider {
                 supports_streaming: true,
                 supports_tool_calls: true,
                 supports_json_mode: true,
-                max_context_window: 200000,
+                max_context_window,
                 model_name: model,
             },
             api_key_provider,
@@ -82,9 +85,12 @@ impl AnthropicProvider {
             }
         }
 
-        let max_tokens = request.max_tokens.unwrap_or(16384);
-        let (max_tokens, thinking_budget) =
-            anthropic_reasoning_budget(request.reasoning_effort, max_tokens);
+        let requested_max_tokens = request.max_tokens.unwrap_or(16384);
+        let (max_tokens, thinking, output_effort) = anthropic_reasoning_config(
+            &self.capabilities.model_name,
+            request.reasoning_effort,
+            requested_max_tokens,
+        );
 
         let mut body = serde_json::json!({
             "model": self.capabilities.model_name,
@@ -123,22 +129,82 @@ impl AnthropicProvider {
         let wire_tool_choice = crate::convert::tool_choice_to_wire(&request.tool_choice);
         body["tool_choice"] = to_anthropic_tool_choice(&wire_tool_choice);
 
+        let mut output_config = serde_json::Map::new();
         let wire_format = crate::convert::response_format_to_wire(&request.response_format);
         if let Some(ref wf) = wire_format {
             if let Some(output_format) = to_anthropic_output_format(wf) {
-                body["output_config"] = serde_json::json!({ "format": output_format });
+                output_config.insert("format".to_string(), output_format);
             }
         }
 
-        if let Some(budget_tokens) = thinking_budget {
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            });
+        if let Some(effort) = output_effort {
+            output_config.insert("effort".to_string(), serde_json::json!(effort));
+        }
+        if !output_config.is_empty() {
+            body["output_config"] = serde_json::Value::Object(output_config);
+        }
+
+        if let Some(thinking) = thinking {
+            body["thinking"] = thinking;
         }
 
         body
     }
+}
+
+fn anthropic_reasoning_config(
+    model: &str,
+    effort: ReasoningEffort,
+    requested_max_tokens: usize,
+) -> (usize, Option<serde_json::Value>, Option<&'static str>) {
+    if is_claude_fable_5_model(model) || is_claude_sonnet_5_model(model) {
+        return match effort {
+            ReasoningEffort::Off if is_claude_sonnet_5_model(model) => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "disabled" })),
+                None,
+            ),
+            // Fable 5 always uses adaptive thinking, so its "off" setting is
+            // represented by omitting an unsupported disabled request.
+            ReasoningEffort::Off => (requested_max_tokens, None, None),
+            ReasoningEffort::High => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "adaptive" })),
+                Some("high"),
+            ),
+            ReasoningEffort::Max => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "adaptive" })),
+                Some("max"),
+            ),
+        };
+    }
+
+    let (max_tokens, thinking_budget) = anthropic_reasoning_budget(effort, requested_max_tokens);
+    let thinking = thinking_budget.map(|budget_tokens| {
+        serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+        })
+    });
+    (max_tokens, thinking, None)
+}
+
+fn is_claude_fable_5_model(model: &str) -> bool {
+    normalized_model_leaf(model).starts_with("claude-fable-5")
+}
+
+fn is_claude_sonnet_5_model(model: &str) -> bool {
+    normalized_model_leaf(model).starts_with("claude-sonnet-5")
+}
+
+fn normalized_model_leaf(model: &str) -> String {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn anthropic_reasoning_budget(
@@ -163,6 +229,32 @@ fn anthropic_reasoning_budget(
             (max_tokens, Some(budget))
         }
     }
+}
+
+fn anthropic_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "refusal" => StopReason::ContentFilter,
+        _ => StopReason::EndTurn,
+    }
+}
+
+fn anthropic_response_text(response: &serde_json::Value) -> Option<String> {
+    let content = response["content"].as_array().map(|blocks| {
+        blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("")
+    });
+
+    content.filter(|text| !text.is_empty()).or_else(|| {
+        response["stop_details"]["explanation"]
+            .as_str()
+            .filter(|explanation| !explanation.is_empty())
+            .map(str::to_string)
+    })
 }
 
 #[async_trait]
@@ -199,11 +291,7 @@ impl LlmProvider for AnthropicProvider {
         let anthropic_response: serde_json::Value =
             serde_json::from_str(&resp_body).map_err(map_serde_error)?;
 
-        let content = anthropic_response["content"]
-            .as_array()
-            .and_then(|arr| arr.iter().find_map(|c| c["text"].as_str()))
-            .unwrap_or("")
-            .to_string();
+        let content = anthropic_response_text(&anthropic_response);
         let reasoning_content = anthropic_response["content"].as_array().and_then(|arr| {
             let thinking = arr
                 .iter()
@@ -227,11 +315,7 @@ impl LlmProvider for AnthropicProvider {
         let finish_reason = anthropic_response["stop_reason"]
             .as_str()
             .unwrap_or("end_turn");
-        let stop_reason = match finish_reason {
-            "tool_use" => StopReason::ToolUse,
-            "max_tokens" => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        };
+        let stop_reason = anthropic_stop_reason(finish_reason);
 
         let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
             .iter()
@@ -245,7 +329,7 @@ impl LlmProvider for AnthropicProvider {
         Ok(LlmResponse {
             message: AssistantMessage {
                 text: if tool_use_blocks.is_empty() {
-                    Some(content)
+                    content
                 } else {
                     None
                 },
@@ -342,11 +426,7 @@ impl LlmProvider for AnthropicProvider {
                             Some(merge_usage(final_usage.take(), wire_usage_to_usage(usage)));
                     }
                     if let Some(ref reason) = parsed.finish_reason {
-                        final_stop_reason = match reason.as_str() {
-                            "tool_use" => StopReason::ToolUse,
-                            "max_tokens" => StopReason::MaxTokens,
-                            _ => StopReason::EndTurn,
-                        };
+                        final_stop_reason = anthropic_stop_reason(reason);
                     }
                     super::openai_family::accumulate_tool_call_deltas_pub(
                         &mut full_tool_calls,
@@ -539,10 +619,14 @@ mod tests {
     use agent_types::LlmRequest;
 
     fn make_provider() -> AnthropicProvider {
+        make_provider_for_model("claude-sonnet-4-6")
+    }
+
+    fn make_provider_for_model(model: &str) -> AnthropicProvider {
         AnthropicProvider::new(
             Some("test-key".to_string()),
             "https://api.anthropic.com/v1".to_string(),
-            "claude-sonnet-4-6".to_string(),
+            model.to_string(),
             None,
         )
     }
@@ -794,6 +878,86 @@ mod tests {
         let body = provider.build_body(&request, false);
 
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn claude_5_capability_uses_known_context_window() {
+        let provider = make_provider_for_model("claude-sonnet-5");
+
+        assert_eq!(provider.capabilities.max_context_window, 1_000_000);
+    }
+
+    #[test]
+    fn sonnet_5_disables_thinking_when_reasoning_effort_is_off() {
+        let provider = make_provider_for_model("claude-sonnet-5");
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn fable_5_does_not_request_unsupported_disabled_thinking() {
+        let provider = make_provider_for_model("claude-fable-5");
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn claude_5_uses_adaptive_thinking_and_model_effort() {
+        let provider = make_provider_for_model("anthropic/claude-sonnet-5");
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = ReasoningEffort::Max;
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn claude_5_merges_structured_output_format_with_effort() {
+        let provider = make_provider_for_model("claude-fable-5");
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = ReasoningEffort::High;
+        request.response_format = agent_types::ResponseFormat::JsonSchema {
+            name: "answer".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string" } }
+            }),
+        };
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn refusal_maps_to_content_filter_and_uses_explanation_text() {
+        assert!(matches!(
+            anthropic_stop_reason("refusal"),
+            StopReason::ContentFilter
+        ));
+        let response = serde_json::json!({
+            "content": [],
+            "stop_reason": "refusal",
+            "stop_details": { "explanation": "I can't help with that request." }
+        });
+
+        assert_eq!(
+            anthropic_response_text(&response).as_deref(),
+            Some("I can't help with that request.")
+        );
     }
 
     #[test]
