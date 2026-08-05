@@ -206,11 +206,18 @@ impl FileReadExecutor {
         let estimated_tokens = super::tokenizer::estimate_tokens(file_path, &text_output.content);
         if estimated_tokens > max_tokens {
             if input.limit.is_none() {
-                return Ok(FileReadOutput::Text(window_text_output(
-                    text_output,
-                    max_tokens,
-                    estimated_tokens,
-                )));
+                let windowed = window_text_output(text_output, max_tokens, estimated_tokens);
+                let mut dedup_store = self.get_dedup_store().await;
+                dedup_store.set_read_state(
+                    file_path.to_string(),
+                    FileReadState {
+                        timestamp: mtime,
+                        offset: input.offset,
+                        limit: input.limit,
+                        is_partial_view: input.offset.is_some() || input.limit.is_some(),
+                    },
+                );
+                return Ok(FileReadOutput::Text(windowed));
             }
             return Err(format!(
                 "File content token count ({}) exceeds maximum ({}). Re-read a smaller slice with a lower `limit` (and `offset` to page).",
@@ -240,23 +247,34 @@ impl FileReadExecutor {
     ) -> Option<FileReadOutput> {
         let dedup_store = self.get_dedup_store().await;
 
+        // Suppressed for both paged and full reads — without it, repeated
+        // identical reads of an unchanged file re-slurp, re-tokenize, and
+        // re-serialize the content every time.
         let is_partial_view = input.offset.is_some() || input.limit.is_some();
-        if !is_partial_view {
-            return None;
-        }
 
-        let is_unchanged =
-            dedup_store.is_file_unchanged(file_path, mtime, input.offset, input.limit, true);
+        let is_unchanged = dedup_store.is_file_unchanged(
+            file_path,
+            mtime,
+            input.offset,
+            input.limit,
+            is_partial_view,
+        );
 
         if is_unchanged {
+            let note = if is_partial_view {
+                "File is unchanged since your previous identical paged read \
+                    this session; its content is already in your context above. \
+                    Pass a different `offset`/`limit` to view other lines, or \
+                    re-read after the file changes."
+            } else {
+                "File is unchanged since your previous full read this session; \
+                    its content is already in your context above. \
+                    Re-read after the file changes, or use grep to jump to a pattern."
+            };
             return Some(FileReadOutput::FileUnchanged(
                 super::output::FileUnchangedOutput {
                     file_path: input.file_path.clone(),
-                    note: "File is unchanged since your previous identical paged read \
-                           this session; its content is already in your context above. \
-                           Pass a different `offset`/`limit` to view other lines, or \
-                           re-read after the file changes."
-                        .to_string(),
+                    note: note.to_string(),
                 },
             ));
         }
@@ -382,21 +400,12 @@ impl ToolExecutor for FileReadExecutor {
             });
         }
 
-        let bytes = timed(
-            "file_read read_bytes",
-            DEFAULT_FS_TIMEOUT_MS,
-            backend.files().read_bytes(ReadBytesRequest {
-                path: resolved.clone(),
-            }),
-        )
-        .await
-        .map_err(|e| ToolExecutionError::ExecutionFailed {
-            message: format!("Failed to read file: {}", e),
-        })?;
-
         let ext = Self::get_extension(&resolved_str).unwrap_or_default();
         let mtime = system_time_to_timestamp(stat.modified_at);
 
+        // Short-circuit: return the cached "FileUnchanged" notice before
+        // paying for `read_bytes` (previously the dedup check ran after
+        // the full read).
         if Self::dedup_applies(&ext) {
             if let Some(output) = self
                 .check_dedup_unchanged(&resolved_str, &input, mtime)
@@ -414,6 +423,18 @@ impl ToolExecutor for FileReadExecutor {
                 });
             }
         }
+
+        let bytes = timed(
+            "file_read read_bytes",
+            DEFAULT_FS_TIMEOUT_MS,
+            backend.files().read_bytes(ReadBytesRequest {
+                path: resolved.clone(),
+            }),
+        )
+        .await
+        .map_err(|e| ToolExecutionError::ExecutionFailed {
+            message: format!("Failed to read file: {}", e),
+        })?;
 
         let result = if Self::is_notebook_extension(&ext) {
             self.process_notebook(
