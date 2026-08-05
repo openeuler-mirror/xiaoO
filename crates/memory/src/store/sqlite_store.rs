@@ -137,8 +137,12 @@ impl SqliteDurableMemoryStore {
             }
             Some((old_name, old_dims)) => {
                 // Model changed — invalidate all embeddings
-                eprintln!(
-                    "embedding model changed: {old_name}({old_dims}d) -> {current_name}({current_dims}d), invalidating embeddings"
+                tracing::warn!(
+                    "embedding model changed: {}({}d) -> {}({}d), invalidating embeddings",
+                    old_name,
+                    old_dims,
+                    current_name,
+                    current_dims
                 );
                 conn.execute("UPDATE memories SET embedding = NULL", [])
                     .map_err(|e| MemoryError::Embedding {
@@ -303,7 +307,7 @@ impl SqliteDurableMemoryStore {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("warning: FTS5 query prepare failed (FTS5 may be unavailable): {e}");
+                tracing::warn!("FTS5 query prepare failed (FTS5 may be unavailable): {}", e);
                 return Vec::new();
             }
         };

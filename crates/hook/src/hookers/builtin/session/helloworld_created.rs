@@ -40,9 +40,10 @@ impl Hooker for BuiltinSessionCreatedHooker {
     ) -> Result<HookInvokeOutput, HookInvokeError> {
         match input {
             HookInvokeInput::SessionCreated { input, .. } => {
-                println!(
+                tracing::info!(
                     "[BuiltinSessionCreatedHooker] session '{}' created for sender '{}'",
-                    input.session_id, input.sender_id
+                    input.session_id,
+                    input.sender_id
                 );
                 Ok(HookInvokeOutput::SessionCreated(
                     SessionHookResult::Acknowledged,

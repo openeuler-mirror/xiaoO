@@ -202,7 +202,7 @@ impl TraceBackend for MoiraiSqliteBackend {
         drop(active_spans);
 
         if !active_span_ids.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "moirai trace finalization called while spans are still active: count={} active_span_ids={:?}",
                 active_span_ids.len(),
                 active_span_ids
@@ -220,14 +220,16 @@ impl TraceBackend for MoiraiSqliteBackend {
                     .update_span_at(span_id, force_closed_fields, occurred_at_ms as i64)
                     .await
                 {
-                    eprintln!("moirai finalize update failed for active span {span_id}: {error}");
+                    tracing::warn!(
+                        "moirai finalize update failed for active span {span_id}: {error}"
+                    );
                 }
                 if let Err(error) = self
                     .context
                     .end_span_at(span_id, occurred_at_ms as i64)
                     .await
                 {
-                    eprintln!("moirai finalize end failed for active span {span_id}: {error}");
+                    tracing::warn!("moirai finalize end failed for active span {span_id}: {error}");
                 }
             }
         }
@@ -243,7 +245,7 @@ impl TraceBackend for MoiraiSqliteBackend {
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
             .await
         {
-            eprintln!("moirai trace finalization failed: {error}");
+            tracing::error!("moirai trace finalization failed: {error}");
         }
 
         *finalized = true;
