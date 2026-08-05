@@ -4,6 +4,7 @@ use agent_contracts::LoopEventSink;
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
 use axum::{
+    body::{to_bytes, Body},
     extract::{Request, State},
     http::{header, StatusCode},
     middleware::{self, Next},
@@ -664,6 +665,8 @@ pub fn create_mcp_router(
     session_control_plane: Arc<dyn SessionControlPlane>,
     session_store: Arc<dyn SessionStore>,
     rate_limit: Option<RateLimitConfig>,
+    local_base_url: String,
+    enable_access_log: bool,
 ) -> Router {
     let agent_operations = Arc::new(AgentOperationRegistry::default());
     spawn_idle_reaper(
@@ -711,17 +714,43 @@ pub fn create_mcp_router(
         allowed_origins,
     };
 
-    let router = Router::new()
-        .merge(
-            Router::new()
-                .nest_service("/mcp/chatbot", chatbot_service)
-                .layer(middleware::from_fn_with_state(chatbot_auth, authorize_mcp)),
-        )
-        .merge(
-            Router::new()
-                .nest_service("/mcp/agent", agent_service)
-                .layer(middleware::from_fn_with_state(agent_auth, authorize_mcp)),
-        );
+    let auto_init_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let chatbot_auto_init = AutoInitState {
+        client: auto_init_client.clone(),
+        local_base_url: local_base_url.clone(),
+        endpoint_path: "/mcp/chatbot",
+    };
+    let agent_auto_init = AutoInitState {
+        client: auto_init_client,
+        local_base_url,
+        endpoint_path: "/mcp/agent",
+    };
+
+    let chatbot_router = Router::new()
+        .nest_service("/mcp/chatbot", chatbot_service)
+        .layer(middleware::from_fn_with_state(
+            chatbot_auto_init,
+            auto_initialize_mcp,
+        ))
+        .layer(middleware::from_fn_with_state(chatbot_auth, authorize_mcp));
+    let agent_router = Router::new()
+        .nest_service("/mcp/agent", agent_service)
+        .layer(middleware::from_fn_with_state(
+            agent_auto_init,
+            auto_initialize_mcp,
+        ))
+        .layer(middleware::from_fn_with_state(agent_auth, authorize_mcp));
+
+    let router = if enable_access_log {
+        Router::new()
+            .merge(chatbot_router.layer(middleware::from_fn(access_log_mcp)))
+            .merge(agent_router.layer(middleware::from_fn(access_log_mcp)))
+    } else {
+        Router::new().merge(chatbot_router).merge(agent_router)
+    };
     match rate_limit.and_then(|config| config.governor_layer()) {
         Some(layer) => router.layer(layer),
         None => router,
@@ -1263,9 +1292,21 @@ async fn authorize_mcp(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if let Some(origin) = request.headers().get(header::ORIGIN) {
-        let origin = origin.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
+    let path = request.uri().path().to_string();
+    let origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let has_auth = request.headers().get(header::AUTHORIZATION).is_some();
+
+    if let Some(origin) = &origin {
         if !auth.allowed_origins.contains(origin) {
+            tracing::warn!(
+                endpoint = %path,
+                origin = %origin,
+                "mcp request rejected: origin not allowed (403)"
+            );
             return Err(StatusCode::FORBIDDEN);
         }
     }
@@ -1279,9 +1320,198 @@ async fn authorize_mcp(
         .map(|token| token == auth.bearer_token.as_ref())
         .unwrap_or(false);
     if !authorized {
+        tracing::warn!(
+            endpoint = %path,
+            has_auth_header = has_auth,
+            origin = ?origin,
+            "mcp request rejected: invalid or missing bearer token (401)"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
+}
+
+/// 兼容跳过 initialize 的客户端：无 session id 的非 initialize 请求，
+/// 先自动向同端点发一次 initialize 拿 session id，注入请求头后转发。
+#[derive(Clone)]
+struct AutoInitState {
+    client: reqwest::Client,
+    local_base_url: String,
+    endpoint_path: &'static str,
+}
+
+const AUTO_INIT_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+async fn auto_initialize_mcp(
+    State(state): State<AutoInitState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    // 已有 session id 或 initialize 请求 → 直接放行
+    if request.headers().get("mcp-session-id").is_some() {
+        return next.run(request).await;
+    }
+
+    let (mut parts, body) = request.into_parts();
+    let body_bytes = match to_bytes(body, AUTO_INIT_BODY_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(format!("failed to read body: {err}")))
+                .expect("valid response");
+        }
+    };
+
+    let is_initialize = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+        .ok()
+        .and_then(|v| v.get("method").and_then(|m| m.as_str()).map(|s| s == "initialize"))
+        .unwrap_or(false);
+    if is_initialize {
+        let request = Request::from_parts(parts, Body::from(body_bytes));
+        return next.run(request).await;
+    }
+
+    let auth_header = parts.headers.get(header::AUTHORIZATION).cloned();
+    let init_url = format!("{}{}", state.local_base_url, state.endpoint_path);
+    let init_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "auto-init",
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "auto-initialize", "version": "1.0"}
+        }
+    });
+
+    let mut init_req = state
+        .client
+        .post(&init_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&init_body);
+    if let Some(auth) = auth_header {
+        init_req = init_req.header(header::AUTHORIZATION, auth);
+    }
+
+    let init_result = init_req.send().await;
+    let session_id = match init_result {
+        Ok(resp) => resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
+        Err(err) => {
+            tracing::warn!(%err, endpoint = state.endpoint_path, "auto-initialize request failed");
+            let request = Request::from_parts(parts, Body::from(body_bytes));
+            return next.run(request).await;
+        }
+    };
+
+    match session_id {
+        Some(sid) => {
+            tracing::info!(endpoint = state.endpoint_path, %sid, "auto-initialize succeeded");
+            if let Ok(value) = sid.parse() {
+                parts.headers.insert("mcp-session-id", value);
+            }
+            let request = Request::from_parts(parts, Body::from(body_bytes));
+            next.run(request).await
+        }
+        None => {
+            tracing::warn!(endpoint = state.endpoint_path, "auto-initialize returned no session id");
+            let request = Request::from_parts(parts, Body::from(body_bytes));
+            next.run(request).await
+        }
+    }
+}
+
+const ACCESS_LOG_BODY_LIMIT: usize = 8 * 1024 * 1024;
+const ACCESS_LOG_PREVIEW_LEN: usize = 2048;
+
+// 截取 UTF-8 字符串到指定字节长度（不切断多字节字符）
+fn truncate_utf8(bytes: &[u8], max_len: usize) -> String {
+    if bytes.len() <= max_len {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut end = max_len;
+    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
+        end -= 1;
+    }
+    let mut s = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    s.push_str("...(truncated)");
+    s
+}
+
+// 换行转义为字面文本，保证每条 access log 单行
+fn escape_body(s: &str) -> String {
+    s.replace('\r', "\\r").replace('\n', "\\n")
+}
+
+// 记录每个 MCP 请求/响应的 method、path、jsonrpc method、body 预览、状态和耗时。
+// 仅在 `--log-file` 启用时挂载。body 读取会消费原始流，成功后必须重建再转发。
+async fn access_log_mcp(request: Request, next: Next) -> Response {
+    let start = std::time::Instant::now();
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+
+    let (parts, body) = request.into_parts();
+    let (jsonrpc_method, req_body_log, body) = match to_bytes(body, ACCESS_LOG_BODY_LIMIT).await {
+        Ok(bytes) => {
+            let jsonrpc_method = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| {
+                    v.get("method")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_owned)
+                });
+            let log = escape_body(&truncate_utf8(&bytes, ACCESS_LOG_PREVIEW_LEN));
+            (jsonrpc_method, log, Body::from(bytes))
+        }
+        Err(err) => {
+            tracing::warn!(%err, %path, "mcp request body too large to read for access log");
+            return Response::builder()
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                .body(Body::from(format!("request body too large: {err}")))
+                .expect("valid response");
+        }
+    };
+    let has_session = parts.headers.get("mcp-session-id").is_some();
+
+    let request = Request::from_parts(parts, body);
+    let response = next.run(request).await;
+
+    let status = response.status();
+    let (resp_parts, resp_body) = response.into_parts();
+    let (resp_body_log, resp_bytes) = match to_bytes(resp_body, ACCESS_LOG_BODY_LIMIT).await {
+        Ok(bytes) => {
+            let log = escape_body(&truncate_utf8(&bytes, ACCESS_LOG_PREVIEW_LEN));
+            (log, bytes)
+        }
+        Err(err) => {
+            tracing::warn!(%err, %path, "failed to capture mcp response body for access log");
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("failed to capture response body: {err}")))
+                .expect("valid response");
+        }
+    };
+    let response = Response::from_parts(resp_parts, Body::from(resp_bytes));
+    let elapsed = start.elapsed();
+
+    tracing::info!(
+        %method,
+        %path,
+        jsonrpc_method = ?jsonrpc_method,
+        has_session,
+        %status,
+        ?elapsed,
+        req_body = %req_body_log,
+        resp_body = %resp_body_log,
+        "mcp access log"
+    );
+
+    response
 }
 
 #[cfg(test)]
@@ -1794,6 +2024,8 @@ mod tests {
             sessions,
             Arc::new(InMemorySessionStore::default()),
             None,
+            "http://127.0.0.1:0".to_string(),
+            false,
         )
     }
 
