@@ -87,6 +87,7 @@ async fn mcp_tool_source_discovers_and_invokes() {
         call_id: "call-1".to_string(),
         tool_name: "mcp__mock__echo".to_string(),
         input: serde_json::json!({"message": "hi"}),
+        ..Default::default()
     };
     let runtime = NoopRuntime;
     let output = discovered[0]

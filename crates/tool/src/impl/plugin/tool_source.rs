@@ -358,6 +358,7 @@ stdout = "text"
                     call_id: "call-1".to_string(),
                     tool_name: "echo_payload".to_string(),
                     input: json!({"message": "hello"}),
+                    ..Default::default()
                 },
                 &runtime,
             )

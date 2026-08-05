@@ -2,7 +2,7 @@ use crate::backend::{BackendPath, OperationError};
 use async_trait::async_trait;
 
 /// Request to execute a command.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecRequest {
     pub command: String,
     pub args: Vec<String>,
@@ -11,6 +11,10 @@ pub struct ExecRequest {
     pub timeout_ms: Option<u64>,
     /// Extra environment variables to inject into the process.
     pub env: Option<Vec<(String, String)>>,
+    /// Additional data for a single invocation. This information
+    /// originates from the pre-tool-call plugin; individual backends
+    /// can parse and process the fields relevant to them.
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Result of command execution.

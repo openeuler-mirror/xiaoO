@@ -226,7 +226,7 @@ async fn handle_request(
                     shell,
                     cwd: cwd.map(BackendPath),
                     timeout_ms,
-                    env: None,
+                    ..Default::default()
                 })
                 .await?;
             Ok(exec_result_json(&result))

@@ -2,7 +2,9 @@ use crate::backend::capability::{
     OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
 };
 use crate::backend::{OperationError, OperationPermissionControl};
+use crate::InteractionHandle;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 /// Capabilities advertised by an operation backend implementation.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +29,11 @@ pub trait OperationBackend: Send + Sync {
     fn search(&self) -> &dyn OperationSearch;
     fn exec(&self) -> &dyn OperationExec;
     fn export(&self) -> &dyn OperationExport;
+    /// Hand the backend an interaction handle it may use to ask the user
+    /// questions at runtime (e.g. sandbox permission prompts). Backends that
+    /// never surface user prompts leave the default no-op; wrapper backends
+    /// forward to their inner.
+    fn attach_interaction(&self, _interaction: Arc<dyn InteractionHandle>) {}
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
         None
     }

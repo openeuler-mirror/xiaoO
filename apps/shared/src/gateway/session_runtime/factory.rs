@@ -264,6 +264,7 @@ fn operation_backend_exec_isolation(
     {
         Some("macos_seatbelt") => Some("macos_seatbelt"),
         Some("linux_bubblewrap") => Some("linux_bubblewrap"),
+        Some("linux_dynsandbox") => Some("linux_dynsandbox"),
         _ => None,
     }
 }
