@@ -17,7 +17,7 @@ use memory::MemorySnapshot;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use subagent::{
     HostAction, JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
     SubagentControlError, SubagentCoordinator, SubagentTerminalKind, SubagentTerminalSnapshot,
@@ -46,6 +46,13 @@ struct PendingInteractionWaiter {
 struct RootTurnSinks {
     loop_event_sink: Option<Arc<dyn LoopEventSink>>,
     tool_event_sink: Option<Arc<dyn ToolEventSink>>,
+    /// The parent (root) turn's real interaction handle. In remote/daemon
+    /// mode the resolver returns default (None) bindings, so a spawned
+    /// subagent's `ask_user_question` cannot find a handle via the resolver.
+    /// The per-turn handle (e.g. `RemoteSseInteractionHandle`) is only stored
+    /// here so `request_interaction` can forward subagent questions to the
+    /// user through the same channel/SSE the root turn uses.
+    interaction_handle: Option<Arc<dyn InteractionHandle>>,
 }
 
 struct LaneRunInput {
@@ -85,6 +92,13 @@ pub struct SessionSupervisor {
     /// on exit. Kept as a single `Mutex<Option<RootTurnSinks>>` so the
     /// pair is always set/cleared atomically.
     current_root_sinks: Mutex<Option<RootTurnSinks>>,
+    /// Optional cap on how long a forwarded subagent interaction
+    /// (`ask_user_question`) may wait for the user to reply. Only armed
+    /// when the handle does not enforce its own timeout (see
+    /// [`InteractionHandle::has_builtin_timeout`]); see
+    /// `request_interaction` for why self-timing handles skip it.
+    /// `None` = no outer cap.
+    interaction_timeout: Option<Duration>,
 }
 
 impl SessionSupervisor {
@@ -93,6 +107,7 @@ impl SessionSupervisor {
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         backend_manager: Arc<BackendManager>,
         session: SessionRecord,
+        interaction_timeout: Option<Duration>,
     ) -> Self {
         Self {
             session_store,
@@ -105,6 +120,7 @@ impl SessionSupervisor {
             interaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             root_turn_lock: Mutex::new(()),
             current_root_sinks: Mutex::new(None),
+            interaction_timeout,
         }
     }
 
@@ -189,19 +205,91 @@ impl SessionSupervisor {
             .insert(request_id.clone(), waiter);
 
         let session = self.session.lock().await.clone();
-        let interaction_handle = self
-            .load_interaction_handle(&session, &parent_agent_id)
-            .await;
+        // Prefer the current root turn's real interaction handle: in
+        // remote/daemon mode the resolver returns default (None) bindings,
+        // so `load_interaction_handle` yields None and the subagent's
+        // question would hang forever. Fall back to the resolver only when
+        // no root-turn handle is stored (local CLI/TUI / channel mode where
+        // the handle lives in the resolver's static bindings).
+        let interaction_handle = {
+            let sinks = self.current_root_sinks.lock().await;
+            sinks.as_ref().and_then(|s| s.interaction_handle.clone())
+        };
+        let interaction_handle = match interaction_handle {
+            Some(handle) => Some(handle),
+            None => {
+                self.load_interaction_handle(&session, &parent_agent_id)
+                    .await
+            }
+        };
         let semaphore = self.interaction_semaphore.clone();
+        let interaction_timeout = self.interaction_timeout;
+        let has_builtin_timeout = interaction_handle
+            .as_ref()
+            .is_some_and(|h| h.has_builtin_timeout());
+        // Only arm the outer `select!` when the handle does not enforce
+        // its own timeout AND a timeout is configured: racing a
+        // self-timing handle would drop its `ask` future mid-cleanup,
+        // leaking its pending entry and skipping the user-facing timeout
+        // notice (see `ChannelInteractionHandle::has_builtin_timeout`).
+        // Other handles get the outer cap and `abort_pending` on expiry.
+        let outer_timeout = if has_builtin_timeout {
+            None
+        } else {
+            interaction_timeout
+        };
 
         if let Some(handle) = interaction_handle {
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let response = handle.ask(&request).await;
+                let response = match outer_timeout {
+                    Some(duration) => {
+                        tokio::select! {
+                            biased;
+                            r = handle.ask(&request) => r,
+                            _ = tokio::time::sleep(duration) => {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    timeout_secs = duration.as_secs(),
+                                    "subagent interaction timed out before the user \
+                                     replied; delivering sentinel response"
+                                );
+                                // Drop-then-abort: `handle.ask` future is
+                                // cancelled by `select!` here. Any external
+                                // pending state it registered (e.g. an SSE
+                                // interaction store entry) is released via
+                                // `abort_pending` so a late user reply is
+                                // not silently swallowed by a stale entry.
+                                handle.abort_pending(&request).await;
+                                super::subagent_interaction::interaction_timeout_response(
+                                    &request,
+                                )
+                            }
+                        }
+                    }
+                    None => handle.ask(&request).await,
+                };
                 supervisor
                     .deliver_interaction_response_from_user(request_id, response)
                     .await;
             });
+        } else {
+            // No handle to route through (no root-turn sink AND the resolver
+            // returned None): the spawned `ask` task would never run, so
+            // the waiter we inserted into `pending_interactions` would
+            // leak forever and the subagent lane would block on
+            // `response_rx` indefinitely. Deliver a sentinel now so the
+            // lane winds down and the waiter is reaped.
+            tracing::warn!(
+                request_id = %request_id,
+                parent_agent_id = %parent_agent_id,
+                "no interaction handle available for subagent request; \
+                 delivering sentinel response"
+            );
+            let response = super::subagent_interaction::interaction_timeout_response(&request);
+            supervisor
+                .deliver_interaction_response_from_user(request_id, response)
+                .await;
         }
     }
 
@@ -350,6 +438,12 @@ impl SessionSupervisor {
                 loop_event_sink_override.clone(),
             ),
             tool_event_sink: resolved_runtime.bindings.tool_event_sink.clone(),
+            // Store the parent turn's real interaction handle so spawned
+            // subagent lanes can route their `ask_user_question` through it
+            // via `request_interaction`. The root lane itself still uses the
+            // override directly (injected into its worker), so this does not
+            // affect root-lane interaction.
+            interaction_handle: interaction_handle_override.clone(),
         };
         *self.current_root_sinks.lock().await = Some(stored_root_sinks);
 
@@ -1336,7 +1430,7 @@ mod tests {
             created_at_ms: 0,
             updated_at_ms: 0,
         };
-        let supervisor = SessionSupervisor::new(store, resolver, backend_manager, session);
+        let supervisor = SessionSupervisor::new(store, resolver, backend_manager, session, None);
 
         assert!(
             supervisor.current_root_sinks.lock().await.is_none(),

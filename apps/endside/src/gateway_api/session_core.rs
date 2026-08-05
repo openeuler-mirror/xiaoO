@@ -222,6 +222,9 @@ impl SessionGateway {
                     hooker_config,
                     backend_manager,
                     memory_automation,
+                    // No subagent interaction timeout: channel sessions use
+                    // ChannelInteractionHandle which carries its own timeout.
+                    None,
                 ) {
                     Ok(dependencies) => dependencies,
                     Err(error) => {
