@@ -10,7 +10,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.10.5"
+AM_VERSION="0.11.1"
+
+# 本实例归属标识。安装期探测与运行期 bridge 都按此字段过滤：
+# 只认 healthy 且 instance==xiaoo 的服务，避免把同机其他 agent（如 OpenDesk
+# 的 instance=opendesk）当成自己的 agentmoss 误停/误连。
+AM_INSTANCE="xiaoo"
 
 # venv 路径（sudo 模式用 /opt/agent_moss/venv/，非 sudo 模式 fallback 到用户目录）
 # 如果 venv 已存在，优先使用已有的，避免重复创建
@@ -157,11 +162,15 @@ except Exception as e:
 " || true
 fi
 
-# 检测是否有服务已在运行（无论什么模式）
-# 注意：仅判断 healthy，不校验 instance 归属（安装期探测，bridge 运行期才过滤）
+# 检测是否有本实例的服务已在运行（无论什么模式）
+# 归属过滤：只认 healthy 且 instance==AM_INSTANCE 的服务，避免把同机其他 agent
+# 的 agentmoss（如 OpenDesk 的 instance=opendesk）当成自己的误停。与运行期
+# bridge.py 的归属过滤一致（旧版健康检查缺 instance 字段时视为不匹配，宁可探测
+# 不到也不漂移）。本例 instance 已在上面定义 AM_INSTANCE=xiaoo。
 EXISTING_PORT=""
 for port in 9090 9091 9092 9093 9094 9095; do
-    if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null | grep -q '"healthy"'; then
+    if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \
+        | grep -q "\"instance\":\"${AM_INSTANCE}\""; then
         EXISTING_PORT="$port"
         break
     fi
@@ -197,11 +206,10 @@ fi
 # 步骤 3：安装 systemd service
 echo ""
 echo "步骤 3/5：安装 systemd service..."
-# 注入归属实例标识 AGENT_MOSS_INSTANCE=xiaoo。
+# 注入归属实例标识 AGENT_MOSS_INSTANCE=xiaoo（值已在顶部定义）。
 # 多个 agentmoss 同机并存时，bridge 探测靠此字段过滤，避免漂移到别人的进程。
 # systemd 模式：service 的 EnvironmentFile=-/etc/agent_moss/agent_moss.env 读这个文件；
 # nohup 模式：下方 export 让进程继承。两种模式都覆盖。
-AM_INSTANCE="xiaoo"
 sudo mkdir -p /etc/agent_moss
 if [ -f /etc/agent_moss/agent_moss.env ]; then
     # 已有 env 文件：删旧的同名行（避免重复），再追加
@@ -272,9 +280,12 @@ FOUND_PORT=""
 echo "等待服务就绪..."
 for wait in $(seq 1 6); do
     for port in 9090 9091 9092 9093 9094 9095; do
-        if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null | grep -q '"healthy"'; then
+        # 归属过滤：只认 healthy 且 instance==AM_INSTANCE 的服务，避免把同机其他
+        # agent 的 agentmoss（如 OpenDesk 的 instance=opendesk）误打印成自己的。
+        if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \
+            | grep -q "\"instance\":\"${AM_INSTANCE}\""; then
             FOUND_PORT="$port"
-            echo "✅ AgentMoss 服务健康（端口 ${port}）"
+            echo "✅ AgentMoss 服务健康（端口 ${port}，instance=${AM_INSTANCE}）"
             echo "   Policy Console: http://127.0.0.1:${port}/console"
             break
         fi
@@ -283,7 +294,7 @@ for wait in $(seq 1 6); do
     [ $wait -lt 6 ] && echo "   等待中...（${wait}/5）" && sleep 1
 done
 if [ -z "$FOUND_PORT" ]; then
-    echo "❌ 服务健康检查未通过，无法连接 AgentMoss"
+    echo "❌ 服务健康检查未通过，无法连接 AgentMoss（instance=${AM_INSTANCE}）"
     echo "   查看日志：sudo journalctl -u agent_moss -n 20 --no-pager"
 fi
 
