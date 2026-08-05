@@ -1072,6 +1072,8 @@ async fn run_once(
         config.hooker.clone(),
         Arc::new(xiaoo_shared::backend::BackendManager::new()),
         memory_automation,
+        // No subagent interaction timeout for the local CLI/TUI entry.
+        None,
     ) {
         Ok(d) => d,
         Err(e) => {

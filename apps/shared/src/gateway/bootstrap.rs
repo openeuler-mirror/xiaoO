@@ -102,6 +102,9 @@ impl AppBootstrap {
             hooker_config,
             backend_manager,
             None,
+            // No subagent interaction timeout for the short-form bootstrap;
+            // callers that need the cap (the daemon) use the long form.
+            None,
         )
     }
 
@@ -111,6 +114,7 @@ impl AppBootstrap {
         hooker_config: HookerRegistryConfig,
         backend_manager: Arc<BackendManager>,
         memory_automation: Option<Arc<dyn crate::gateway::TurnMemoryAutomation>>,
+        interaction_timeout: Option<std::time::Duration>,
     ) -> Result<AppDependencies, AppBootstrapError> {
         // Extract the cross-turn `send_prompt` chain depth cap before
         // `hooker_config` is consumed by the registry builder. The cap is
@@ -142,6 +146,14 @@ impl AppBootstrap {
             })
             .unwrap_or(false);
         session_components.set_enforce_anonymous_lease(enforce);
+        // Forward the configured interaction timeout (the daemon forwards
+        // the same `interaction_timeout_secs` it uses for the HTTP router)
+        // so a subagent's `ask_user_question` forwarded via
+        // `request_interaction` cannot hang forever waiting for the user
+        // (for handles without a built-in timeout, e.g.
+        // `RemoteSseInteractionHandle`). `None` = no outer cap (rely on the
+        // handle's own timeout, or block until the channel closes).
+        session_components.set_interaction_timeout(interaction_timeout);
         // Log the enforcement mode so operators can tell whether anonymous
         // callers are actually single-writer-guarded.
         let anonymous_lease_enforced = session_components.anonymous_lease_enforced();

@@ -286,6 +286,18 @@ impl InteractionHandle for SharedInteractionHandle {
         }
         NoopInteractionHandle::new().ask(request).await
     }
+
+    fn has_builtin_timeout(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.has_builtin_timeout())
+    }
+
+    async fn abort_pending(&self, request: &InteractionRequest) {
+        if let Some(inner) = &self.inner {
+            inner.abort_pending(request).await;
+        }
+    }
 }
 
 struct ArcInteractionHandle {
@@ -302,6 +314,14 @@ impl ArcInteractionHandle {
 impl InteractionHandle for ArcInteractionHandle {
     async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
         self.inner.ask(request).await
+    }
+
+    fn has_builtin_timeout(&self) -> bool {
+        self.inner.has_builtin_timeout()
+    }
+
+    async fn abort_pending(&self, request: &InteractionRequest) {
+        self.inner.abort_pending(request).await;
     }
 }
 

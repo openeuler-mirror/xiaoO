@@ -93,6 +93,13 @@ pub struct CoreBackedSessionService {
     /// gradual rollout; flip via [`Self::set_enforce_anonymous_lease`]
     /// (typically driven by `XIAOO_ENFORCE_LEASE` in `AppBootstrap`).
     enforce_anonymous_lease: Arc<std::sync::atomic::AtomicBool>,
+    /// Cap on how long a forwarded subagent interaction
+    /// (`ask_user_question`) may wait for the user. Set by the daemon via
+    /// [`Self::set_interaction_timeout`] (it forwards the same
+    /// `interaction_timeout_secs` used for the HTTP router). Stored as
+    /// whole seconds in an `AtomicU64` (0 = `None`); sub-second precision
+    /// is dropped because the only caller uses `Duration::from_secs`.
+    interaction_timeout: Arc<std::sync::atomic::AtomicU64>,
     memory_automation: Option<Arc<dyn TurnMemoryAutomation>>,
 }
 
@@ -116,6 +123,7 @@ impl CoreBackedSessionService {
             max_prompt_chain_depth,
             sessions_lease: SessionLeaseTable::new(),
             enforce_anonymous_lease: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            interaction_timeout: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             memory_automation,
         }
     }
@@ -140,6 +148,17 @@ impl CoreBackedSessionService {
     pub fn anonymous_lease_enforced(&self) -> bool {
         self.enforce_anonymous_lease
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Set the cap on how long a forwarded subagent interaction may wait
+    /// for the user. Applied to subsequently created `SessionSupervisor`
+    /// handles (existing supervisors keep their creation-time value).
+    /// `None` (the default) disables the outer cap; the supervisor then
+    /// relies on the handle's own timeout or blocks until the user replies.
+    pub fn set_interaction_timeout(&self, timeout: Option<std::time::Duration>) {
+        let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
+        self.interaction_timeout
+            .store(secs, std::sync::atomic::Ordering::Release);
     }
 
     /// Spawn the background orphan-session reaper. Wakes every
@@ -598,11 +617,22 @@ impl CoreBackedSessionService {
             return existing.clone();
         }
 
+        let interaction_timeout = {
+            let secs = self
+                .interaction_timeout
+                .load(std::sync::atomic::Ordering::Acquire);
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs))
+            }
+        };
         let supervisor = Arc::new(SessionSupervisor::new(
             self.session_store.clone(),
             self.runtime_resolver.clone(),
             Arc::clone(&self.backend_manager),
             session.clone(),
+            interaction_timeout,
         ));
         let handle = SessionHandle::new(
             session.session_id.clone(),
@@ -2757,6 +2787,7 @@ mod tests {
                 HookerRegistryConfig::default(),
                 Arc::new(BackendManager::new()),
                 Some(automation.clone() as Arc<dyn TurnMemoryAutomation>),
+                None,
             )
             .expect("dependencies");
 

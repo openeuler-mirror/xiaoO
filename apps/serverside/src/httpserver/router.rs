@@ -316,6 +316,18 @@ impl RemoteInteractionStore {
             .map(|tx| tx.send(response).is_ok())
             .unwrap_or(false)
     }
+
+    /// Drop the pending `oneshot::Sender` for `session_id` without sending
+    /// a response. Called by `RemoteSseInteractionHandle::abort_pending`
+    /// when the gateway's defensive outer `interaction_timeout` fires
+    /// before the user replied: the `ask` future (which held the
+    /// `Receiver`) has already been dropped by `tokio::select!`, so this
+    /// just removes the orphaned `Sender` so a late user reply via
+    /// [`answer`](Self::answer) returns `false` (instead of finding a
+    /// stale entry whose `Sender` would silently fail to deliver).
+    async fn cancel(&self, session_id: &str) {
+        self.pending.lock().await.remove(session_id);
+    }
 }
 
 struct RemoteSseInteractionHandle {
@@ -336,6 +348,13 @@ impl InteractionHandle for RemoteSseInteractionHandle {
             Ok(response) => response,
             Err(_) => default_interaction_response(request),
         }
+    }
+
+    /// Releases the orphaned pending entry via `store.cancel` so a late
+    /// user reply (via the SSE `/interaction/respond` route) returns `false`
+    /// instead of being silently swallowed by a stale `Sender`.
+    async fn abort_pending(&self, _request: &InteractionRequest) {
+        self.store.cancel(&self.session_id).await;
     }
 }
 

@@ -105,6 +105,7 @@ async fn run_daemon(
         tokio::spawn(async move {
             handler_handle.await.ok();
         });
+        let interaction_timeout_secs = config.interaction_timeout_secs();
         let app =
         AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
             session_store.clone(),
@@ -112,8 +113,8 @@ async fn run_daemon(
             hooker_config,
             backend_manager.clone(),
             memory_automation,
+            Some(std::time::Duration::from_secs(interaction_timeout_secs)),
         )?;
-        let interaction_timeout_secs = config.interaction_timeout_secs();
         let session_service = app.session_service.clone();
         let session_control_plane = app.session_control_plane.clone();
 
