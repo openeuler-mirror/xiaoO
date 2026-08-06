@@ -10,7 +10,12 @@ pub struct PreToolHookInput {
 pub enum PreHookResult {
     Allow,
     Deny { reason: String },
-    Transform { modified_input: serde_json::Value },
+    Transform {
+        modified_input: serde_json::Value,
+        /// Plugin-produced per-invocation payload; the framework injects the
+        /// hooker id and accumulates entries into `FinalToolCall.extra`.
+        extra: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Clone, Debug)]

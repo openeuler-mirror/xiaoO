@@ -80,6 +80,11 @@ impl SandboxDialog {
                 name: "Bubblewrap",
                 description: "Linux bubblewrap + local file policy。",
             });
+            options.push(SandboxOption {
+                id: "dynsandbox",
+                name: "Dyn-Sandbox",
+                description: "Linux dynsandbox + local file policy。",
+            });
         }
         let selected = options
             .iter()
@@ -1002,6 +1007,7 @@ pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
     match isolation.get("kind").and_then(|value| value.as_str()) {
         Some("macos_seatbelt") => "seatbelt",
         Some("linux_bubblewrap") => "bubblewrap",
+        Some("linux_dynsandbox") => "dynsandbox",
         _ => "local",
     }
 }
@@ -1021,6 +1027,7 @@ pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'
     {
         Some("macos_seatbelt") => "Seatbelt",
         Some("linux_bubblewrap") => "Bubblewrap",
+        Some("linux_dynsandbox") => "Dyn-Sandbox",
         _ => "Local",
     }
 }
@@ -1055,6 +1062,15 @@ pub(crate) fn sandbox_backend_config(
                 "isolation".to_string(),
                 serde_json::json!({
                     "kind": "linux_bubblewrap"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        "dynsandbox" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "linux_dynsandbox"
                 }),
             );
             Some(GatewayBackendConfig::new("local", options))
@@ -1165,6 +1181,20 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_dyn_sandbox() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/bash"}),
+        ));
+
+        let updated = sandbox_backend_config("dynsandbox", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/bash");
+        assert_eq!(updated.options["isolation"]["kind"], "linux_dynsandbox");
+    }
+
+    #[test]
     fn sandbox_helpers_recognize_bubblewrap() {
         let mut config = Config::default();
         config.operation_backend = Some(GatewayBackendConfig::new(
@@ -1176,6 +1206,21 @@ mod tests {
         assert_eq!(
             sandbox_display_name(&config.operation_backend),
             "Bubblewrap"
+        );
+    }
+
+    #[test]
+    fn sandbox_helpers_recognize_dyn_sandbox() {
+        let mut config = Config::default();
+        config.operation_backend = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"isolation": {"kind": "linux_dynsandbox"}}),
+        ));
+
+        assert_eq!(current_sandbox_id(&config), "dynsandbox");
+        assert_eq!(
+            sandbox_display_name(&config.operation_backend),
+            "Dyn-Sandbox"
         );
     }
 

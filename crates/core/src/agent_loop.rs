@@ -1869,6 +1869,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
             call_id: raw_tool_call.call_id.clone(),
             tool_name: raw_tool_call.tool_name.clone(),
             input: raw_tool_call.input.clone(),
+            ..Default::default()
         };
 
         match ToolCallBuilderImpl::build_with_filter_ref(raw_tool_call, per_batch_filter.as_ref()) {
@@ -3438,6 +3439,7 @@ mod tests {
                 call_id: "call_1".to_string(),
                 tool_name: "todo_write".to_string(),
                 input: serde_json::json!({}),
+                ..Default::default()
             },
             raw_outcome: RawToolOutcome::Success {
                 output: "ok".to_string(),
@@ -3450,6 +3452,7 @@ mod tests {
                 call_id: "call_2".to_string(),
                 tool_name: "todo_write".to_string(),
                 input: serde_json::json!({}),
+                ..Default::default()
             },
             raw_outcome: RawToolOutcome::Error {
                 message: "bad input".to_string(),

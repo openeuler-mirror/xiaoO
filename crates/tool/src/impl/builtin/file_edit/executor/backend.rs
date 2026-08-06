@@ -321,6 +321,7 @@ mod tests {
             call_id: format!("{tool_name}-call"),
             tool_name: tool_name.to_string(),
             input,
+            ..Default::default()
         }
     }
 

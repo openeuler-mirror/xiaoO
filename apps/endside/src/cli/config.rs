@@ -304,4 +304,40 @@ allowed_agent_roles = ["main", "researcher"]
             vec!["main".to_string(), "researcher".to_string()]
         );
     }
+
+    #[test]
+    fn test_load_linux_dynsandbox_operation_backend_config() {
+        let config_content = r#"
+[llm]
+provider = "openai"
+
+[operation_backend]
+kind = "local"
+
+[operation_backend.options.isolation]
+kind = "linux_dynsandbox"
+allow_network = false
+readable_roots = ["/home/alice/project"]
+writable_roots = ["/home/alice/project/.xiaoo-tmp"]
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = FileConfig::load_from_path(temp_file.path(), false);
+
+        let backend = config.operation_backend.expect("operation_backend");
+        assert_eq!(backend.kind, "local");
+        assert_eq!(backend.options["isolation"]["kind"], "linux_dynsandbox");
+        assert_eq!(backend.options["isolation"]["allow_network"], false);
+        assert_eq!(
+            backend.options["isolation"]["readable_roots"][0],
+            "/home/alice/project"
+        );
+        assert_eq!(
+            backend.options["isolation"]["writable_roots"][0],
+            "/home/alice/project/.xiaoo-tmp"
+        );
+    }
 }

@@ -2043,6 +2043,7 @@ impl SessionControlPlane for CoreBackedSessionService {
                 cwd: request.cwd.map(BackendPath),
                 timeout_ms: request.timeout_ms,
                 env,
+                ..Default::default()
             })
             .await;
         let result = match result {

@@ -536,6 +536,7 @@ impl PluginToolHookerAdaptor {
                 modified_input: self
                     .read_required_value_field(output, "modified_input")?
                     .clone(),
+                extra: output.get("extra").cloned(),
             }),
             result => Err(ToolExecutionError::ExecutionFailed {
                 message: format!(
@@ -940,6 +941,7 @@ else:
                 call_id: "call-1".to_string(),
                 tool_name: "bash".to_string(),
                 input: json!({"command": "pwd"}),
+                ..Default::default()
             },
         };
 

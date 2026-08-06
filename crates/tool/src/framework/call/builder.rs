@@ -66,6 +66,7 @@ impl ToolCallBuilderImpl {
             call_id: raw_tool_call.call_id,
             tool_name: raw_tool_call.tool_name,
             input: raw_tool_call.input,
+            ..Default::default()
         };
 
         Ok(Box::new(ToolCallImpl::new(final_call, visible_spec, executor)) as Box<dyn ToolCall>)
@@ -119,6 +120,7 @@ impl ToolCallBuilder for ToolCallBuilderImpl {
             call_id: raw_tool_call.call_id,
             tool_name: raw_tool_call.tool_name,
             input: raw_tool_call.input,
+            ..Default::default()
         };
 
         Ok(Box::new(ToolCallImpl::new(final_call, visible_spec, executor)) as Box<dyn ToolCall>)

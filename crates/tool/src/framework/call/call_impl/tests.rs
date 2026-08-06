@@ -88,6 +88,7 @@ fn test_tool_call_impl() -> ToolCallImpl {
             call_id: "call-1".to_string(),
             tool_name: "test_tool".to_string(),
             input: serde_json::json!({"value": 1}),
+            ..Default::default()
         },
         spec,
         executor,
@@ -100,6 +101,7 @@ fn test_execution_state() -> ToolExecutionState {
             call_id: "call-1".to_string(),
             tool_name: "test_tool".to_string(),
             input: serde_json::json!({"value": 1}),
+            ..Default::default()
         },
         trace_span: None,
         lifecycle_record: None,

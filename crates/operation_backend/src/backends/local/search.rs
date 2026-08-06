@@ -235,15 +235,13 @@ mod tests {
             backend_id: "local-test".to_string(),
             workspace_root: BackendPath(workspace.display().to_string()),
             workspace_root_host: workspace.clone(),
-            home_dir: None,
-            home_dir_host: None,
             temp_root_host: temp.clone(),
-            default_shell: None,
             policy: LocalBackendPolicy::test_macos_seatbelt(
                 vec![workspace.clone(), temp.clone()],
                 vec![temp],
                 false,
             ),
+            ..Default::default()
         }))
     }
 

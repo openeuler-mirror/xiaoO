@@ -1043,7 +1043,7 @@ mod tests {
                 shell: Some("/bin/sh".to_string()),
                 cwd: Some(BackendPath(workspace.path().to_string_lossy().to_string())),
                 timeout_ms: Some(5_000),
-                env: None,
+                ..Default::default()
             })
             .await
             .expect("exec command");

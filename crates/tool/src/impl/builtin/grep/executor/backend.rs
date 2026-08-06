@@ -202,10 +202,9 @@ impl GrepExecutor {
             .exec(ExecRequest {
                 command: "rg".to_string(),
                 args,
-                shell: None,
                 cwd: Some(cwd),
                 timeout_ms: Some(timeout_ms),
-                env: None,
+                ..Default::default()
             })
             .await
             .map_err(|e| format!("Failed to execute rg via backend exec: {}", e))?;
@@ -320,10 +319,9 @@ impl GrepExecutor {
             .exec(ExecRequest {
                 command: "grep".to_string(),
                 args,
-                shell: None,
                 cwd: Some(cwd),
                 timeout_ms: Some(timeout_ms),
-                env: None,
+                ..Default::default()
             })
             .await
             .map_err(|e| format!("Failed to execute grep via backend exec: {}", e))?;

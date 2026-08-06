@@ -7,10 +7,14 @@ use agent_contracts::backend::{
     capability::{exec::ExecRequest, exec::ExecResult, OperationExec},
     OperationError,
 };
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -47,7 +51,7 @@ impl OperationExec for LocalExec {
         };
 
         let mut command =
-            command_from_spec(command_spec, &self._state.policy, command_cwd.as_deref());
+            command_from_spec(&request, command_spec, &self._state.policy, command_cwd.as_deref());
 
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {
@@ -59,7 +63,14 @@ impl OperationExec for LocalExec {
             command.current_dir(cwd);
         }
 
-        command.stdin(std::process::Stdio::null());
+        let stream_auth = self._state.policy.requires_stdin();
+        if stream_auth {
+            // dyn-sandbox's stdin doubles as the AUTH control channel: we must
+            // hold the pipe open to write `ALLOW\n`/`DENY\n` on demand.
+            command.stdin(std::process::Stdio::piped());
+        } else {
+            command.stdin(std::process::Stdio::null());
+        }
         command.stdout(std::process::Stdio::piped());
         command.stderr(std::process::Stdio::piped());
 
@@ -79,6 +90,35 @@ impl OperationExec for LocalExec {
         #[cfg(unix)]
         if pgid > 0 {
             crate::process_group::register_pgid(pgid);
+        }
+
+        #[cfg(unix)]
+        if stream_auth {
+            tracing::info!(
+                "dyn-sandbox streaming exec start: pgid={} timeout_ms={:?}",
+                pgid, request.timeout_ms
+            );
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| OperationError::ExecutionFailed {
+                    message: "failed to capture stdin".to_string(),
+                })?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| OperationError::ExecutionFailed {
+                    message: "failed to capture stdout".to_string(),
+                })?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| OperationError::ExecutionFailed {
+                    message: "failed to capture stderr".to_string(),
+                })?;
+            return self
+                .exec_linux_dynsandbox(request.timeout_ms, child, stdin, stdout, stderr, pgid)
+                .await;
         }
 
         let stdout = child
@@ -178,6 +218,243 @@ impl OperationExec for LocalExec {
     }
 }
 
+/// A dyn-sandbox `AUTH_REQ:filename:resolved` event decoded from stderr.
+struct AuthEvent {
+    filename: String,
+    path: String,
+}
+
+impl LocalExec {
+    /// Streaming execution for dyn-sandbox: the sandbox keeps the process alive
+    /// and emits `AUTH_REQ:filename:path` on stderr when it blocks an operation.
+    /// We read stderr line-by-line, prompt via the attached auth interaction,
+    /// and write `ALLOW\n`/`DENY\n` back to stdin (the AUTH control channel).
+    ///
+    /// The process-side timeout is a deadline that pauses while the user
+    /// decides: `interaction.ask` never consumes the timeout.
+    async fn exec_linux_dynsandbox(
+        &self,
+        timeout_ms: Option<u64>,
+        mut child: tokio::process::Child,
+        stdin: tokio::process::ChildStdin,
+        stdout: tokio::process::ChildStdout,
+        stderr: tokio::process::ChildStderr,
+        pgid: i32,
+    ) -> Result<ExecResult, OperationError> {
+        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mut stdout_task = spawn_pipe_drainer(stdout, stdout_buf.clone());
+
+        // True while stderr_task may still relay AUTH_REQ events. Once it ends
+        // the auth channel closes; the main loop stops polling it so a closed
+        // channel can't busy-spin past the deadline timer.
+        let auth_open = Arc::new(AtomicBool::new(true));
+        let (auth_tx, mut auth_rx) = tokio::sync::mpsc::channel::<AuthEvent>(16);
+        let mut stderr_task = {
+            let buf = stderr_buf.clone();
+            let auth_open_flag = auth_open.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut bytes: Vec<u8> = Vec::new();
+                loop {
+                    bytes.clear();
+                    match reader.read_until(b'\n', &mut bytes).await {
+                        Ok(0) => break,
+                        Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    // Reading raw bytes never fails on encoding; a line that
+                    // isn't valid UTF-8 is dropped and reading continues, so a
+                    // stray non-UTF-8 byte can't kill the AUTH_REQ relay.
+                    let Ok(line) = std::str::from_utf8(&bytes) else {
+                        tracing::warn!(
+                            "dyn-sandbox dropped non-UTF-8 stderr line ({} raw bytes)",
+                            bytes.len()
+                        );
+                        continue;
+                    };
+                    if let Some(rest) = line.strip_prefix("AUTH_REQ:") {
+                        if let Some((filename, path)) = rest.split_once(':') {
+                            let event = AuthEvent {
+                                filename: filename.to_string(),
+                                path: path.trim().to_string(),
+                            };
+                            tracing::info!(
+                                "dyn-sandbox AUTH_REQ received: filename={} path={}",
+                                filename, path
+                            );
+                            if auth_tx.send(event).await.is_err() {
+                                break;
+                            }
+                        } else {
+                            tracing::warn!(
+                                "malformed dyn-sandbox AUTH_REQ line: {:?}",
+                                line.trim()
+                            );
+                        }
+                    } else {
+                        // Regular stderr: buffer for the result.
+                        buf.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(line.as_bytes());
+                    }
+                }
+                auth_open_flag.store(false, Ordering::SeqCst);
+            })
+        };
+
+        let mut stdin = stdin;
+        let mut deadline =
+            timeout_ms.map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
+        let mut exit_code: Option<i32> = None;
+        let mut timed_out = false;
+
+        enum Event {
+            Exited(std::io::Result<std::process::ExitStatus>),
+            Auth { filename: String, path: String },
+            StderrClosed,
+        }
+
+        loop {
+            let wait_for_event = async {
+                tokio::select! {
+                    status = child.wait() => Event::Exited(status),
+                    evt = auth_rx.recv(), if auth_open.load(Ordering::SeqCst) => match evt {
+                        Some(auth) => Event::Auth { filename: auth.filename, path: auth.path },
+                        None => Event::StderrClosed,
+                    }
+                }
+            };
+            let outcome = match deadline {
+                Some(dl) => tokio::time::timeout_at(dl, wait_for_event).await,
+                None => Ok(wait_for_event.await),
+            };
+
+            match outcome {
+                Err(_elapsed) => {
+                    timed_out = true;
+                    tracing::warn!(
+                        "dyn-sandbox exec timed out (timeout_ms={:?}), killing process group {}",
+                        timeout_ms, pgid
+                    );
+                    Self::kill_process_group(&mut child, pgid).await;
+                    break;
+                }
+                Ok(Event::Exited(status)) => {
+                    exit_code = status.ok().and_then(|status| status.code());
+                    break;
+                }
+                Ok(Event::Auth { filename, path }) => {
+                    let ask_start = tokio::time::Instant::now();
+                    let decision = self.handle_auth(&filename, &path).await;
+                    let ask_elapsed = ask_start.elapsed();
+                    tracing::info!(
+                        "dyn-sandbox auth decision: filename={} path={} decision={} elapsed_ms={}",
+                        filename,
+                        path,
+                        String::from_utf8_lossy(&decision).trim(),
+                        ask_elapsed.as_millis() as u64
+                    );
+                    if let Some(deadline) = &mut deadline {
+                        // Pause the process-side timeout across the user's ask.
+                        *deadline += ask_elapsed;
+                    }
+                    if let Err(error) = stdin.write_all(&decision).await {
+                        tracing::error!(
+                            "dyn-sandbox failed to write auth decision to stdin: {}",
+                            error
+                        );
+                    }
+                    let _ = stdin.flush().await;
+                }
+                // Only reachable in a tiny race between stderr_task storing
+                // `auth_open=false` and dropping `auth_tx`; the channel closing
+                // means no more auth events, so just keep waiting on the child.
+                Ok(Event::StderrClosed) => {}
+            }
+        }
+
+        // Bounded grace drain, then abort so we never hang (mirrors the
+        // non-streamed path).
+        let _ = timeout(DRAIN_GRACE, async {
+            let _ = tokio::join!(&mut stdout_task, &mut stderr_task);
+        })
+        .await;
+        stdout_task.abort();
+        stderr_task.abort();
+
+        #[cfg(unix)]
+        if pgid > 0 {
+            crate::process_group::unregister_pgid(pgid);
+        }
+
+        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(|e| e.into_inner()));
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|e| e.into_inner()));
+
+        tracing::info!(
+            "dyn-sandbox exec finished: exit_code={:?} timed_out={} stdout_bytes={} stderr_bytes={}",
+            exit_code,
+            timed_out,
+            stdout.len(),
+            stderr.len()
+        );
+
+        Ok(ExecResult {
+            stdout,
+            stderr,
+            exit_code,
+            timed_out,
+        })
+    }
+
+    /// Prompt the user whether to allow a blocked path. Denies when no auth
+    /// interaction has been attached (e.g. the backend used standalone).
+    async fn handle_auth(&self, filename: &str, path: &str) -> Vec<u8> {
+        let interaction = self
+            ._state
+            .interaction
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let Some(interaction) = interaction else {
+            tracing::warn!(
+                "dyn-sandbox auto-deny (no auth interaction attached): filename={} path={}",
+                filename, path
+            );
+            return b"DENY\n".to_vec();
+        };
+        let response = interaction
+            .ask(&InteractionRequest::Choice {
+                prompt: format!(
+                    "Dynamic Sandbox blocked Auth\nTool needs access to:\n file:{filename}\n path:{path}"
+                ),
+                options: vec!["Allow".to_string(), "Deny".to_string()],
+                allow_custom_input: false,
+                source: None,
+            })
+            .await;
+        match response {
+            InteractionResponse::Choice {
+                value: Some(value),
+            } if value == "Allow" => b"ALLOW\n".to_vec(),
+            _ => b"DENY\n".to_vec(),
+        }
+    }
+
+    async fn kill_process_group(child: &mut tokio::process::Child, pgid: i32) {
+        #[cfg(unix)]
+        {
+            if pgid > 0 {
+                crate::process_group::send_sigterm_to_group(pgid);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                crate::process_group::send_sigkill_to_group(pgid);
+            }
+        }
+        let _ = child.wait().await;
+    }
+}
+
 /// Maximum time to wait for the stdout/stderr reader tasks to finish after the
 /// child process has exited (or been killed).
 ///
@@ -263,6 +540,7 @@ fn build_command_spec(request: &ExecRequest) -> Result<LocalCommandSpec, Operati
 }
 
 fn command_from_spec(
+    request: &ExecRequest,
     spec: LocalCommandSpec,
     policy: &crate::backends::local::policy::LocalBackendPolicy,
     cwd: Option<&std::path::Path>,
@@ -276,6 +554,23 @@ fn command_from_spec(
     }
 
     if let Some(cwd) = cwd {
+        if let Some(args) = policy.linux_dynsandbox_args(cwd, request.extra.as_ref()) {
+            let mut command = Command::new("dyn-sandbox");
+            command.args(args);
+            command.arg("--");
+            command.arg(spec.program);
+            command.args(spec.args);
+            tracing::info!(
+                "dyn-sandbox command built: {}",
+                command
+                    .as_std()
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            return command;
+        }
         if let Some(args) = policy.bubblewrap_args(cwd) {
             let mut command = Command::new("bwrap");
             command.args(args);
@@ -457,7 +752,7 @@ mod linux_bubblewrap_tests {
                 shell: Some("bash".to_string()),
                 cwd: Some(BackendPath(cwd.to_string_lossy().into_owned())),
                 timeout_ms: Some(5_000),
-                env: None,
+                ..Default::default()
             })
             .await
             .unwrap()
@@ -471,6 +766,374 @@ mod linux_bubblewrap_tests {
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_dynsandbox_tests {
+    use super::*;
+    use crate::backends::local::factory::local_backend_with_isolation;
+    use crate::backends::local::policy::LocalBackendPolicy;
+    use agent_contracts::backend::BackendPath;
+    use agent_contracts::InteractionHandle;
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    /// Interaction handle that answers every dyn-sandbox AUTH prompt with a
+    /// fixed decision, recording the prompts it was shown for assertions.
+    struct ScriptedInteraction {
+        allow: bool,
+        prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl InteractionHandle for ScriptedInteraction {
+        async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+            let prompt = match request {
+                InteractionRequest::Choice { prompt, .. } => prompt.clone(),
+                _ => String::new(),
+            };
+            self.prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(prompt);
+            let value = if self.allow {
+                Some("Allow".to_string())
+            } else {
+                Some("Deny".to_string())
+            };
+            InteractionResponse::Choice { value }
+        }
+    }
+
+    #[test]
+    fn command_from_spec_builds_linux_dynsandbox_args() {
+        let workspace = PathBuf::from("/workspace");
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_dynsandbox",
+            vec![workspace.clone(), workspace.join("tmp")],
+            vec![workspace.join("tmp")],
+            false,
+        );
+        let request = ExecRequest {
+            command: "echo hi".to_string(),
+            args: vec![],
+            shell: Some("bash".to_string()),
+            cwd: Some(BackendPath("/workspace".to_string())),
+            timeout_ms: Some(1_000),
+            ..Default::default()
+        };
+        let command = command_from_spec(
+            &request,
+            LocalCommandSpec {
+                program: "bash".to_string(),
+                args: vec!["-c".to_string(), "echo hi".to_string()],
+            },
+            &policy,
+            Some(workspace.as_path()),
+        );
+
+        assert_eq!(command.as_std().get_program(), "dyn-sandbox");
+        let args: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--mount",
+                "/workspace:ro",
+                "--mount",
+                "/workspace/tmp:rw",
+                "-c",
+                "/workspace",
+                "--",
+                "bash",
+                "-c",
+                "echo hi",
+            ]
+        );
+    }
+
+    /// Install a fake `dyn-sandbox` script on PATH (once per test process). The
+    /// real binary is not installed in this environment, and the streaming
+    /// tests need the backend's `linux_dynsandbox_available()` PATH probe to pass.
+    /// The script plays the sandbox side of the AUTH protocol: it announces a
+    /// blocked path on stderr, reads the decision from stdin (the AUTH control
+    /// channel), and echoes it back so tests can observe what was written.
+    fn install_fake_linux_dynsandbox() -> &'static PathBuf {
+        static FAKE_DYN_SANDBOX: OnceLock<PathBuf> = OnceLock::new();
+        FAKE_DYN_SANDBOX.get_or_init(|| {
+            let root = std::env::temp_dir().join(format!(
+                "xiaoo-fake-dyn-sandbox-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(root.as_path());
+            std::fs::create_dir_all(root.as_path()).unwrap();
+            let bin = root.join("dyn-sandbox");
+            std::fs::write(
+                bin.as_path(),
+                "#!/bin/sh\necho \"AUTH_REQ:shadow:/etc/shadow\" >&2\nIFS= read -r response\necho \"verdict:$response\"\nexit 0\n",
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(bin.as_path(), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            let mut paths =
+                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+            paths.insert(0, root.clone());
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            root
+        })
+    }
+
+    fn linux_dynsandbox_backend(
+        workspace: PathBuf,
+        writable: PathBuf,
+    ) -> std::sync::Arc<dyn agent_contracts::backend::OperationBackend> {
+        local_backend_with_isolation(
+            workspace.clone(),
+            None,
+            Some(writable.clone()),
+            None,
+            Some(json!({
+                "kind": "linux_dynsandbox",
+                "allow_network": false,
+                "readable_roots": [workspace.to_string_lossy().to_string()],
+                "writable_roots": [writable.to_string_lossy().to_string()]
+            })),
+        )
+        .unwrap()
+    }
+
+    async fn linux_dynsandbox_exec_bash(
+        backend: &dyn agent_contracts::backend::OperationBackend,
+        cwd: &Path,
+        command: &str,
+    ) -> ExecResult {
+        backend
+            .exec()
+            .exec(ExecRequest {
+                command: command.to_string(),
+                args: vec![],
+                shell: Some("bash".to_string()),
+                cwd: Some(BackendPath(cwd.to_string_lossy().into_owned())),
+                timeout_ms: Some(5_000),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+    }
+
+    fn linux_dynsandbox_exec_with_auth(
+        workspace: &Path,
+        command: &str,
+        allow: bool,
+    ) -> (ExecResult, Vec<String>) {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        install_fake_linux_dynsandbox();
+        let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "auth");
+        let writable = workspace.join("tmp");
+        std::fs::create_dir_all(writable.as_path()).unwrap();
+
+        let backend = linux_dynsandbox_backend(workspace.to_path_buf(), writable);
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        backend.attach_interaction(Arc::new(ScriptedInteraction {
+            allow,
+            prompts: prompts.clone(),
+        }));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(linux_dynsandbox_exec_bash(backend.as_ref(), workspace, command));
+        let prompts = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let _ = std::fs::remove_dir_all(root.as_path());
+        (result, prompts)
+    }
+
+    #[test]
+    fn linux_dynsandbox_streaming_allows_blocked_path() {
+        let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "allow");
+        let workspace = root.join("workspace");
+        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            String::from_utf8_lossy(result.stdout.as_slice()).contains("verdict:ALLOW"),
+            "stdout was: {:?}",
+            String::from_utf8_lossy(result.stdout.as_slice())
+        );
+        assert_eq!(prompts.len(), 1, "prompts: {prompts:?}");
+        assert!(
+            prompts[0].contains("/etc/shadow"),
+            "prompt was: {:?}",
+            prompts[0]
+        );
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn linux_dynsandbox_streaming_denies_on_user_choice() {
+        let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "deny");
+        let workspace = root.join("workspace");
+        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(
+            String::from_utf8_lossy(result.stdout.as_slice()).contains("verdict:DENY"),
+            "stdout was: {:?}",
+            String::from_utf8_lossy(result.stdout.as_slice())
+        );
+        assert_eq!(prompts.len(), 1);
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    /// Regression test for the auth-channel busy-wait: when stderr_task ends
+    /// before the child does (EOF on our read side), the main loop must stop
+    /// polling the closed auth channel so the deadline timer arms and the
+    /// still-running child is killed on timeout. Without the `auth_open` guard
+    /// the loop spins on the closed channel, the timeout never fires, and exec
+    /// only returns once the child exits on its own (~5s later) with no
+    /// timeout signal.
+    #[test]
+    fn exec_linux_dynsandbox_times_out_when_stderr_closes_early() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+
+        let exec = LocalExec::new(Arc::new(LocalBackendState {
+            backend_id: "test".to_string(),
+            workspace_root: BackendPath("/workspace".to_string()),
+            workspace_root_host: std::env::current_dir().expect("current dir"),
+            temp_root_host: std::env::temp_dir(),
+            ..Default::default()
+        }));
+
+        // Close stderr immediately (EOF on our read side) but keep running well
+        // past the 500ms timeout so the deadline is the only thing that can end
+        // the exec promptly.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let start = std::time::Instant::now();
+        let result = runtime
+            .block_on(async {
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg("exec 2>&-; sleep 5")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .process_group(0)
+                    .spawn()
+                    .expect("spawn child");
+                let pgid = child.id().unwrap_or(0) as i32;
+                if pgid > 0 {
+                    crate::process_group::register_pgid(pgid);
+                }
+                let stdin = child.stdin.take().expect("stdin");
+                let stdout = child.stdout.take().expect("stdout");
+                let stderr = child.stderr.take().expect("stderr");
+                exec.exec_linux_dynsandbox(Some(500), child, stdin, stdout, stderr, pgid)
+                    .await
+                    .expect("exec_linux_dynsandbox")
+            });
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.timed_out,
+            "expected timeout, got exit_code={:?}",
+            result.exit_code
+        );
+        assert_eq!(result.exit_code, None);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "exec took {elapsed:?}; without the auth_open guard it spins until `sleep 5` exits"
+        );
+    }
+
+    /// Regression test for non-UTF-8 stderr: a stray invalid-UTF-8 line must
+    /// not kill the stderr reader, or subsequent regular stderr is lost and —
+    /// worse — a later `AUTH_REQ` is never relayed (the sandbox would block
+    /// waiting for a decision and only fail via timeout). The line is dropped
+    /// and reading continues.
+    #[test]
+    fn exec_linux_dynsandbox_survives_invalid_utf8_stderr_line() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let exec = LocalExec::new(Arc::new(LocalBackendState {
+            backend_id: "test".to_string(),
+            workspace_root: BackendPath("/workspace".to_string()),
+            workspace_root_host: std::env::current_dir().expect("current dir"),
+            temp_root_host: std::env::temp_dir(),
+            interaction: std::sync::RwLock::new(Some(Arc::new(ScriptedInteraction {
+                allow: true,
+                prompts: prompts.clone(),
+            }))),
+            ..Default::default()
+        }));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let result = runtime
+            .block_on(async {
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(
+                        "printf '\\377\\376\\377\\n' >&2; printf 'ok-line\\n' >&2; \
+                         echo 'AUTH_REQ:shadow:/etc/shadow' >&2; IFS= read -r resp; \
+                         echo \"verdict:$resp\"",
+                    )
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .process_group(0)
+                    .spawn()
+                    .expect("spawn child");
+                let pgid = child.id().unwrap_or(0) as i32;
+                if pgid > 0 {
+                    crate::process_group::register_pgid(pgid);
+                }
+                let stdin = child.stdin.take().expect("stdin");
+                let stdout = child.stdout.take().expect("stdout");
+                let stderr = child.stderr.take().expect("stderr");
+                exec.exec_linux_dynsandbox(Some(5_000), child, stdin, stdout, stderr, pgid)
+                    .await
+                    .expect("exec_linux_dynsandbox")
+            });
+
+        assert_eq!(result.exit_code, Some(0), "stderr={:?}", result.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(result.stderr.as_slice()),
+            "ok-line\n"
+        );
+        assert!(
+            String::from_utf8_lossy(result.stdout.as_slice()).contains("verdict:ALLOW"),
+            "stdout was: {:?}",
+            String::from_utf8_lossy(result.stdout.as_slice())
+        );
+        let prompts = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(prompts.len(), 1, "prompts: {prompts:?}");
+        assert!(
+            prompts[0].contains("/etc/shadow"),
+            "prompt was: {:?}",
+            prompts[0]
+        );
     }
 }
 
@@ -514,7 +1177,7 @@ mod pipe_drain_tests {
                     shell: Some("bash".to_string()),
                     cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
                     timeout_ms: Some(2_000),
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .unwrap()
@@ -566,7 +1229,7 @@ mod pipe_drain_tests {
                     shell: Some("bash".to_string()),
                     cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
                     timeout_ms: Some(5_000),
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .unwrap()
