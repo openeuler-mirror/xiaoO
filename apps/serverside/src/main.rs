@@ -25,7 +25,7 @@ use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing_subscriber::EnvFilter;
 use xiaoo_shared::backend::BackendManager;
 use xiaoo_shared::gateway::{
@@ -36,8 +36,8 @@ use xiaoo_shared::gateway::{
 async fn main() -> Result<()> {
     let _cleanup_guard = ProcessGroupCleanupGuard;
 
-    init_tracing();
     let cli = Cli::parse(env::args().skip(1))?;
+    init_tracing(cli.log_file.clone());
     if cli.help {
         print_usage();
         return Ok(());
@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         cli.port,
         cli.dashboard_host,
         cli.dashboard_port,
+        cli.log_file,
     )
     .await
 }
@@ -60,6 +61,7 @@ async fn run_daemon(
     port: u16,
     dashboard_cli_host: Option<String>,
     dashboard_cli_port: Option<u16>,
+    log_file: Option<PathBuf>,
 ) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path).with_context(|| {
@@ -191,12 +193,15 @@ async fn run_daemon(
             .context("failed to create router with channel runtimes")?
         };
         if let Some(mcp_server_config) = mcp_server_config {
+            let local_base_url = format!("http://127.0.0.1:{port}");
             router = router.merge(create_mcp_router(
                 mcp_server_config,
                 session_service.clone(),
                 session_control_plane.clone(),
                 session_store.clone(),
                 rate_limit.clone(),
+                local_base_url,
+                log_file.is_some(),
             ));
         }
 
@@ -451,13 +456,31 @@ fn spawn_telegram_polling_service(
     Ok(())
 }
 
-fn init_tracing() {
+// 持有 non-blocking writer 的 guard，防止后台日志线程在进程退出前被回收。
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+
+fn init_tracing(log_file: Option<PathBuf>) {
+    use tracing_subscriber::fmt::layer;
+    use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,xiaoo_serverside=debug,xiaoo_shared=debug"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+    let stderr_layer = layer().with_target(false).with_filter(filter.clone());
+    let subscriber = tracing_subscriber::registry().with(stderr_layer);
+    if let Some(path) = log_file {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let file_appender = tracing_appender::rolling::never("", &path);
+        let (writer, guard) = tracing_appender::non_blocking(file_appender);
+        let file_layer = layer()
+            .with_target(false)
+            .with_writer(writer)
+            .with_filter(filter);
+        let _ = subscriber.with(file_layer).try_init();
+        let _ = LOG_GUARD.set(guard);
+    } else {
+        let _ = subscriber.try_init();
+    }
 }
 
 struct Cli {
@@ -467,6 +490,7 @@ struct Cli {
     port: u16,
     dashboard_host: Option<String>,
     dashboard_port: Option<u16>,
+    log_file: Option<PathBuf>,
     help: bool,
 }
 
@@ -481,6 +505,7 @@ impl Cli {
         let mut port = 18080_u16;
         let mut dashboard_host: Option<String> = None;
         let mut dashboard_port: Option<u16> = None;
+        let mut log_file: Option<PathBuf> = None;
         let remaining = args.into_iter().collect::<Vec<_>>();
         let mut index = 0;
         while index < remaining.len() {
@@ -493,6 +518,7 @@ impl Cli {
                         port,
                         dashboard_host,
                         dashboard_port,
+                        log_file,
                         help: true,
                     });
                 }
@@ -538,6 +564,13 @@ impl Cli {
                             .with_context(|| format!("invalid dashboard port `{value}`"))?,
                     );
                 }
+                "--log-file" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --log-file")?;
+                    log_file = Some(PathBuf::from(value));
+                }
                 other => bail!("unknown argument `{other}`"),
             }
             index += 1;
@@ -549,6 +582,7 @@ impl Cli {
             port,
             dashboard_host,
             dashboard_port,
+            log_file,
             help: false,
         })
     }
@@ -557,10 +591,11 @@ impl Cli {
 fn print_usage() {
     eprintln!(
         "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
-         \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\n\
+         \x20                  [--dashboard-host <host>] [--dashboard-port <port>] [--log-file <path>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
-         Dashboard port auto-increments on conflict (28081, 28082, ...)."
+         Dashboard port auto-increments on conflict (28081, 28082, ...).\n\
+         --log-file enables file logging and MCP request/response access logging."
     );
 }
 
