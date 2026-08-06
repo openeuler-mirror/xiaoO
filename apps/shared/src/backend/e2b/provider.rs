@@ -996,10 +996,9 @@ mod tests {
                         r"W\s*=".to_string(),
                         "grep-smoke.py".to_string(),
                     ],
-                    shell: None,
                     cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
                     timeout_ms: Some(30_000),
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|error| format!("execute structured grep: {error}"))?;

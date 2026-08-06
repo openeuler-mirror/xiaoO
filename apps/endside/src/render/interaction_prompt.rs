@@ -204,6 +204,9 @@ pub fn interaction_prompt_outer_height(req: &PromptRequest, inner_width: u16) ->
 }
 
 /// Wrap text into multiple lines based on character display width.
+/// Hard line breaks (`\n`) are preserved: the text is first split into
+/// segments, each wrapped to `max_width` columns, and empty segments kept as
+/// blank lines so `\n\n` renders as a blank line.
 /// Returns a Vec of strings, each fitting within max_width columns.
 fn wrap_text_to_lines(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || text.is_empty() {
@@ -211,28 +214,24 @@ fn wrap_text_to_lines(text: &str, max_width: usize) -> Vec<String> {
     }
 
     let mut lines = Vec::new();
-    let mut current_line = String::new();
-    let mut current_width = 0usize;
-
-    for ch in text.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
-
-        if current_width + cw > max_width {
-            lines.push(current_line);
-            current_line = String::new();
-            current_width = 0;
+    for segment in text.split('\n') {
+        if segment.is_empty() {
+            lines.push(String::new());
+            continue;
         }
-
-        current_line.push(ch);
-        current_width += cw;
-    }
-
-    if !current_line.is_empty() {
+        let mut current_line = String::new();
+        let mut current_width = 0usize;
+        for ch in segment.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+            if current_width + cw > max_width {
+                lines.push(current_line);
+                current_line = String::new();
+                current_width = 0;
+            }
+            current_line.push(ch);
+            current_width += cw;
+        }
         lines.push(current_line);
-    }
-
-    if lines.is_empty() {
-        lines.push(String::new());
     }
 
     lines
@@ -402,5 +401,39 @@ pub fn render_interaction_prompt(
             let cy = sup_inner.y;
             f.set_cursor_position((cx, cy));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text_to_lines;
+
+    #[test]
+    fn preserves_hard_newlines() {
+        assert_eq!(
+            wrap_text_to_lines("line one\nline two", 100),
+            vec!["line one".to_string(), "line two".to_string()]
+        );
+    }
+
+    #[test]
+    fn keeps_blank_line_for_double_newline() {
+        assert_eq!(
+            wrap_text_to_lines("a\n\nb", 100),
+            vec!["a".to_string(), String::new(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn wraps_each_segment_by_width() {
+        assert_eq!(
+            wrap_text_to_lines("abc\nabcdef", 4),
+            vec!["abc".to_string(), "abcd".to_string(), "ef".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_single_empty_line() {
+        assert_eq!(wrap_text_to_lines("", 10), vec![String::new()]);
     }
 }

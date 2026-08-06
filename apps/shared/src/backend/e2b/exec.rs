@@ -665,10 +665,8 @@ mod tests {
         ExecRequest {
             command: command.to_string(),
             args: Vec::new(),
-            shell: None,
             cwd: Some(BackendPath("/home/user/workspace".to_string())),
-            timeout_ms: None,
-            env: None,
+            ..Default::default()
         }
     }
 

@@ -133,6 +133,10 @@ impl OperationBackend for AtomicWriteCapabilityOverride {
         self.inner.export()
     }
 
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        self.inner.attach_interaction(interaction);
+    }
+
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
         self.inner.permission_control()
     }
