@@ -81,6 +81,7 @@ struct ChatInput {
     message: String,
     /// xiaoO application session ID returned by a previous call.
     #[serde(default)]
+    #[schemars(schema_with = "optional_string_schema")]
     session_id: Option<String>,
 }
 
@@ -90,9 +91,11 @@ struct AgentInput {
     message: String,
     /// xiaoO application session ID returned by a previous call.
     #[serde(default)]
+    #[schemars(schema_with = "optional_string_schema")]
     session_id: Option<String>,
     /// Absolute, existing, readable directory. Required for a new session.
     #[serde(default)]
+    #[schemars(schema_with = "optional_string_schema")]
     workspace: Option<String>,
 }
 
@@ -154,17 +157,35 @@ struct AgentRunningSnapshot {
     #[schemars(schema_with = "optional_nonnegative_integer_schema")]
     current_turn: Option<u32>,
     /// Latest visible text snapshot from the current or previous root-agent turn.
+    #[schemars(schema_with = "optional_string_schema")]
     last_text: Option<String>,
     /// Unix timestamp of the most recent snapshot update.
     #[schemars(schema_with = "nonnegative_integer_schema")]
     updated_at_ms: u64,
 }
 
+fn optional_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "x-nullable": true
+    })
+}
+
 fn optional_nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
-        "type": ["integer", "null"],
-        "minimum": 0
+        "type": "integer",
+        "minimum": 0,
+        "x-nullable": true
     })
+}
+
+fn optional_mcp_usage_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let schema = gen.subschema_for::<McpUsage>();
+    let mut value = serde_json::Value::from(schema);
+    if let serde_json::Value::Object(ref mut obj) = value {
+        obj.insert("x-nullable".to_owned(), serde_json::json!(true));
+    }
+    schemars::Schema::try_from(value).expect("subschema is an object or bool")
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -187,7 +208,9 @@ enum AgentOperationDetail {
     Done {
         reply: String,
         outcome: String,
+        #[schemars(schema_with = "optional_mcp_usage_schema")]
         usage: Option<McpUsage>,
+        #[schemars(schema_with = "optional_string_schema")]
         error: Option<String>,
     },
 }
