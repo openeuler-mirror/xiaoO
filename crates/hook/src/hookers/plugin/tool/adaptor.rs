@@ -175,9 +175,14 @@ impl PluginToolHookerAdaptor {
 
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
-        // Get the first user message as prompt_session (for intent consistency check)
+        // Get the most recent user message as prompt_session (for intent consistency check).
+        // intent 一致性检查需要"当前意图"，而非整个会话的第一条用户消息：多轮对话里
+        // 会话开头通常是寒暄（如 "hi"），取第一条会污染意图判断。用户对 ask_user_question
+        // 之类的回答会作为 tool_result（Tool 角色）写回，不会成为 User 消息，因此取
+        // 最近一条 User 消息不会被这类回答污染，语义上就是"用户最近一次主动输入"。
         let prompt_session = recent_messages
             .iter()
+            .rev()
             .find(|m| m.role == MessageRole::User)
             .and_then(|m| {
                 m.blocks.iter().find_map(|b| match b {
