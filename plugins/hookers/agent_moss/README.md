@@ -137,7 +137,7 @@ agent-moss init -o input.json
 agent-moss analyze input.json
 
 # 安装 systemd service（有 sudo 时）
-# 自动创建 /etc/systemd/system/agent_moss.service，--enable 开机自启
+# 自动创建 /etc/systemd/system/agent-moss.service，--enable 开机自启
 agent-moss install --enable
 
 # 无 sudo 时跳过 systemd，提示手动启动：
@@ -510,17 +510,17 @@ sudo vim /etc/agent_moss/agent_moss.yaml
 
 ```bash
 # HTTP TCP 模式（默认，适合跨机/调试）
-sudo systemctl enable --now agent_moss
+sudo systemctl enable --now agent-moss
 
 # Unix Socket 模式（同机部署推荐，更低延迟）
 # 编辑 /etc/agent_moss/agent_moss.yaml 中 server.mode: "socket"
-# 或修改 /etc/systemd/system/agent_moss.service 中的 ExecStart
+# 或修改 /etc/systemd/system/agent-moss.service 中的 ExecStart
 ```
 
 ### 启动与验证
 
 ```bash
-sudo systemctl enable --now agent_moss
+sudo systemctl enable --now agent-moss
 
 # HTTP 模式验证
 curl http://127.0.0.1:9090/api/v1/health
@@ -535,12 +535,12 @@ curl --unix-socket /var/run/agent_moss/agent_moss.sock \
 
 | 命令 | 说明 |
 |------|------|
-| `systemctl start agent_moss` | 启动 |
-| `systemctl stop agent_moss` | 停止 |
-| `systemctl restart agent_moss` | 重启 |
-| `systemctl status agent_moss` | 查看状态 |
+| `systemctl start agent-moss` | 启动 |
+| `systemctl stop agent-moss` | 停止 |
+| `systemctl restart agent-moss` | 重启 |
+| `systemctl status agent-moss` | 查看状态 |
 | `journalctl -u agent_moss -f` | 查看日志 |
-| `systemctl disable agent_moss` | 取消开机启动 |
+| `systemctl disable agent-moss` | 取消开机启动 |
 
 ### 防火墙（HTTP 模式需要）
 

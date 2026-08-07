@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.11.2"
+AM_VERSION="0.11.3"
 
 # 本实例归属标识。安装期探测与运行期 bridge 都按此字段过滤：
 # 只认 healthy 且 instance==xiaoo 的服务，避免把同机其他 agent（如 OpenDesk
@@ -179,7 +179,7 @@ if [ -n "$EXISTING_PORT" ]; then
     echo ""
     echo "⚠️  检测到已有 AgentMoss 服务运行在端口 ${EXISTING_PORT}"
     EXISTING_MODE="systemd"
-    if command -v systemctl &>/dev/null && systemctl is-active agent_moss &>/dev/null 2>&1; then
+    if command -v systemctl &>/dev/null && systemctl is-active agent-moss &>/dev/null 2>&1; then
         EXISTING_MODE="systemd"
     else
         EXISTING_MODE="后台进程（nohup）"
@@ -190,8 +190,8 @@ if [ -n "$EXISTING_PORT" ]; then
     if [[ "$clean_choice" =~ ^[Yy]$ ]]; then
         echo "正在停止现有服务..."
         if [ "$EXISTING_MODE" = "systemd" ]; then
-            sudo systemctl stop agent_moss 2>/dev/null || true
-            sudo systemctl disable agent_moss 2>/dev/null || true
+            sudo systemctl stop agent-moss 2>/dev/null || true
+            sudo systemctl disable agent-moss 2>/dev/null || true
         fi
         # 杀掉所有 agent_moss 进程
         pkill -f "agent_moss.cli" 2>/dev/null || true
@@ -235,15 +235,15 @@ fi
 echo ""
 echo "步骤 4/5：启动 AgentMoss 服务..."
 if [ "$USE_SYSTEMD" = true ] && command -v systemctl &>/dev/null; then
-    if sudo systemctl is-active agent_moss &>/dev/null; then
+    if sudo systemctl is-active agent-moss &>/dev/null; then
         echo "✅ AgentMoss 服务已在运行，重启以加载新版本..."
-        sudo systemctl restart agent_moss 2>&1 || {
+        sudo systemctl restart agent-moss 2>&1 || {
             echo "⚠️  重启失败，尝试重新启动..."
-            sudo systemctl start agent_moss 2>&1 || true
+            sudo systemctl start agent-moss 2>&1 || true
         }
     else
         echo "正在通过 systemctl 启动..."
-        if sudo systemctl start agent_moss 2>&1; then
+        if sudo systemctl start agent-moss 2>&1; then
             echo "✅ AgentMoss 服务已启动（systemctl）"
         else
             echo "❌ systemctl 启动失败，尝试直接后台启动..."
@@ -305,12 +305,12 @@ echo "════════════════════════�
 echo "  venv:      ${VENV_DIR}"
 echo "  CLI:       ${AM_BIN}"
 if [ "$USE_SYSTEMD" = true ]; then
-    echo "  启动：     sudo systemctl start agent_moss"
-    echo "  停止：     sudo systemctl stop agent_moss"
-    echo "  状态：     sudo systemctl status agent_moss"
+    echo "  启动：     sudo systemctl start agent-moss"
+    echo "  停止：     sudo systemctl stop agent-moss"
+    echo "  状态：     sudo systemctl status agent-moss"
     echo "  日志：     journalctl -u agent_moss -f"
     echo "  卸载：     sudo rm -rf /opt/agent_moss"
-    echo "             sudo rm /etc/systemd/system/agent_moss.service"
+    echo "             sudo rm /etc/systemd/system/agent-moss.service"
     echo "             sudo systemctl daemon-reload"
 else
     PROC_ID=$(pgrep -f "agent_moss.cli" 2>/dev/null | head -1 || true)
