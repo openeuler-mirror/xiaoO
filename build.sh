@@ -126,7 +126,18 @@ if [ "$INSTALL_AUDIT" = true ]; then
         echo ""
         echo "✅ agent_moss installed & service running."
         echo ""
-        echo "   Policy Console: http://127.0.0.1:9090/console"
+        # 动态探测实际端口（与 install.sh 步骤5 同源逻辑）：agent-moss server --port 0
+        # findFreePort 从 9090 往上找空闲，同机多实例并存时可能落在 9091+。只认
+        # healthy 且 instance==xiaoo 的服务，避免漂移到同机其他 agent 的 agentmoss。
+        AM_CONSOLE_URL="http://127.0.0.1:9090/console"  # 探测失败兜底
+        for port in 9090 9091 9092 9093 9094 9095; do
+            if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \
+                | grep -q '"instance":"xiaoo"'; then
+                AM_CONSOLE_URL="http://127.0.0.1:${port}/console"
+                break
+            fi
+        done
+        echo "   Policy Console: ${AM_CONSOLE_URL}"
         if [ "${ENABLE_LLM_ENV:-}" = "0" ]; then
             echo "   LLM 分析 (L3): 已禁用"
         else
