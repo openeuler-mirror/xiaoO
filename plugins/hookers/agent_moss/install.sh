@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # AgentMoss 版本（单一定义，多处使用）
 # 0.10.3 起 health 带 instance 字段，配合本脚本注入 AGENT_MOSS_INSTANCE=xiaoo
 # 实现多实例探测过滤（避免漂移到其他agent的agentmoss）。
-AM_VERSION="0.11.3"
+AM_VERSION="0.12.0"
 
 # 本实例归属标识。安装期探测与运行期 bridge 都按此字段过滤：
 # 只认 healthy 且 instance==xiaoo 的服务，避免把同机其他 agent（如 OpenDesk
