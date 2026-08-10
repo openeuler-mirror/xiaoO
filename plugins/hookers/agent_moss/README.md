@@ -549,6 +549,47 @@ sudo firewall-cmd --add-port=9090/tcp --permanent
 sudo firewall-cmd --reload
 ```
 
+### RPM 安装（离线交付，推荐）
+
+AgentMoss 提供 RPM 离线包（源码包建议在 AgentSecurity 仓构建 RPM）。RPM 安装与上面的源码安装等价，但依赖通过 RPM `Requires` 自动解析，无需联网。
+
+**安装后产物**：
+
+| 路径 | 内容 |
+|------|------|
+| `/usr/lib/.xiaoo/hookers/agent_moss/agent_moss/` | Python 源码 |
+| `/usr/lib/.xiaoo/hookers/agent_moss/scripts/` | systemd service 模板 |
+| `/usr/lib/.xiaoo/hookers/agent_moss/hooks/` | bridge 脚本（xiaoO 用） |
+| `/usr/bin/agent-moss` | CLI 入口（install/status/server） |
+| `/usr/lib/systemd/system/agent-moss.service` | systemd unit（daemon 子包） |
+| `/var/lib/agent_moss/` | 运行时数据（token_stats、user_rules） |
+| `/var/log/agent_moss/` | 日志目录 |
+
+> ⚠️ **注意**：`/usr/lib/.xiaoo/hookers/` 是 **AgentMoss 与 xiaoO 共用**的目录。AgentMoss 源码装在其子目录 `agent_moss/` 下。**不要手动 `rm -rf /usr/lib/.xiaoo/` 清理残留**——这样会连带删掉 AgentMoss 源码，导致 `/usr/bin/agent-moss` 报 `ModuleNotFoundError: No module named 'agent_moss'`。清理旧插件（如 audit_agent）应只删对应子目录，或通过 `dnf remove` 卸载。
+
+**完整安装顺序（AgentMoss + xiaoO）**：AgentMoss 是 xiaoO 的安全审计运行时依赖，需先装 AgentMoss 再装 xiaoO。
+
+```bash
+# 1. 装 AgentMoss 主包 + daemon 子包（提供安全分析服务）
+sudo dnf install ./AgentMoss-xxx.noarch.rpm ./AgentMoss-daemon-xxx.noarch.rpm
+
+# 2. 启动服务（http://127.0.0.1:9090）
+sudo systemctl enable --now agent-moss
+
+# 3. 装 xiaoO 主包 + hookers 子包
+sudo dnf install ./xiaoO-xxx.noarch.rpm ./xiaoO-hookers-xxx.noarch.rpm
+
+# 4. 注册 agent_moss bridge 到 xiaoO config.toml
+xiaoo-hookers-install --non-interactive agent_moss
+```
+
+> 未运行 AgentMoss 时，agent_moss bridge fail-close（拒绝工具执行）。
+
+> 💡 若 `/usr/bin/agent-moss` 报 `No module named 'agent_moss'`（源码被手工删除或未装好），重新安装 AgentMoss 主包即可恢复源码：
+> ```bash
+> sudo dnf reinstall ./AgentMoss-xxx.noarch.rpm
+> ```
+
 ## API 参考
 
 | 方法 | 路径 | 说明 |
