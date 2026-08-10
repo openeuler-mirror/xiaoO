@@ -338,6 +338,16 @@ def _handle_hook_payload(data: dict) -> int:
     request_body = {
         "session_id": session_id,
         "prompt_session": prompt_session,
+        "prompt_history": [
+            {
+                "text": t.get("text", ""),
+                "actions": [
+                    _normalize_history_item(a)
+                    for a in t.get("actions", []) if isinstance(a, dict)
+                ],
+            }
+            for t in data.get("prompt_history", []) if isinstance(t, dict)
+        ],
         "action_history": [
             _normalize_history_item(h)
             for h in action_history if isinstance(h, dict)

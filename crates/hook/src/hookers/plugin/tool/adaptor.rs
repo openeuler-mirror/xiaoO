@@ -247,10 +247,53 @@ impl PluginToolHookerAdaptor {
             })
             .collect();
 
+        // 构造交错历史 prompt（prompt_history）：按时间序遍历消息，遇到 User 消息
+        // 开一个新 turn，其后的 ToolResult 归入该 turn 的 actions，直到下一条 User。
+        // 解决多轮会话里"继续"覆盖初始读取/搜索意图导致的 L2 意图一致性漏报。
+        // 与 AgentMoss 接口契约 docs/INTEGRATION_GUIDE.md 第 4 节一致。
+        let mut prompt_history: Vec<Value> = Vec::new();
+        for m in messages.iter() {
+            if m.role == MessageRole::User {
+                let text = m.blocks.iter().find_map(|b| match b {
+                    agent_types::llm::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }).unwrap_or_default();
+                prompt_history.push(json!({
+                    "text": text,
+                    "actions": Vec::<Value>::new(),
+                }));
+            } else {
+                // 非 User 消息中的 ToolResult 归入当前（最近一个）turn 的 actions
+                for block in &m.blocks {
+                    if let agent_types::llm::ContentBlock::ToolResult {
+                        call_id, tool_name, output, is_error,
+                    } = block
+                    {
+                        if let Some(last) = prompt_history.last_mut() {
+                            if let Some(obj) = last.as_object_mut() {
+                                let mut action = tool_use_map.get(call_id).cloned().unwrap_or_else(|| {
+                                    json!({"action_type": tool_name, "action_detail": ""})
+                                });
+                                if let Some(aobj) = action.as_object_mut() {
+                                    aobj.insert("call_id".to_string(), json!(call_id));
+                                    aobj.insert("output".to_string(), json!(output));
+                                    aobj.insert("is_error".to_string(), json!(is_error));
+                                }
+                                if let Some(arr) = obj.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                                    arr.push(action);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(json!({
             "stage": "pre",
             "session_id": session_id,
             "prompt_session": prompt_session,
+            "prompt_history": prompt_history,
             "action_history": action_history,
             "hooker": self.serialize_hooker_info(runtime),
             "metadata": self.serialize_metadata(metadata),
