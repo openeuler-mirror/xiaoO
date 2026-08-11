@@ -707,11 +707,20 @@ pub fn create_mcp_router(
         agent_operations,
     };
 
+    // Session layer also emits SSE priming (`retry: 3000` + `id:`) by default
+    // (SessionConfig::default().sse_retry = 3s) on every request-wise stream
+    // (tools/list, tools/call ...). Strict SSE parsers (e.g. Java SDK) fail on
+    // the `retry:` line, so disable it here as well (the tower layer is
+    // disabled via `.with_sse_retry(None)` below).
+    let mut session_manager = LocalSessionManager::default();
+    session_manager.session_config.sse_retry = None;
+    let session_manager = Arc::new(session_manager);
+
     let chatbot_state = state.clone();
     let chatbot_service: StreamableHttpService<ChatbotMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(ChatbotMcpServer::new(chatbot_state.clone())),
-            Default::default(),
+            session_manager.clone(),
             StreamableHttpServerConfig::default()
                 .disable_allowed_hosts()
                 .with_sse_keep_alive(None)
@@ -723,7 +732,7 @@ pub fn create_mcp_router(
     let agent_service: StreamableHttpService<AgentMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(AgentMcpServer::new(agent_state.clone())),
-            Default::default(),
+            session_manager,
             StreamableHttpServerConfig::default()
                 .disable_allowed_hosts()
                 .with_sse_keep_alive(None)
