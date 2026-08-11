@@ -1286,8 +1286,6 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
-    let filtered_text_len = Mutex::new(0usize);
-    let filtered_reasoning_len = Mutex::new(0usize);
 
     // Extract secrets from message history to filter in assistant messages
     let messages = ctx.state.messages.read().clone();
@@ -1316,8 +1314,6 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                     &agent_id,
                     &streamed_text,
                     &streamed_reasoning,
-                    &filtered_text_len,
-                    &filtered_reasoning_len,
                     chunk,
                     &secrets,
                 );
@@ -1537,8 +1533,6 @@ fn stream_assistant_chunk(
     agent_id: &AgentId,
     streamed_text: &Mutex<String>,
     streamed_reasoning: &Mutex<String>,
-    filtered_text_len: &Mutex<usize>,
-    filtered_reasoning_len: &Mutex<usize>,
     chunk: StreamChunk,
     secrets: &[String],
 ) {
@@ -1558,27 +1552,13 @@ fn stream_assistant_chunk(
         full_reasoning.push_str(&delta_reasoning);
 
         if let Some(sink) = sink {
-            if sink.supports_message_delta() {
-                if secrets.is_empty() {
-                    sink.on_assistant_reasoning_delta(agent_id, &delta_reasoning);
-                } else {
-                    let filtered_full = filter_secrets_in_text(&full_reasoning, secrets);
-                    let mut prev_len = filtered_reasoning_len
-                        .lock()
-                        .expect("filtered reasoning len mutex should not be poisoned");
-                    if *prev_len < filtered_full.len() {
-                        let delta = &filtered_full[*prev_len..];
-                        if !delta.is_empty() {
-                            sink.on_assistant_reasoning_delta(agent_id, delta);
-                        }
-                    } else if *prev_len > filtered_full.len() {
-                        sink.on_assistant_reasoning(agent_id, &filtered_full);
-                    }
-                    *prev_len = filtered_full.len();
-                }
+            // See the text branch above: delta streaming is unsafe when secrets
+            // may span a chunk boundary, since the append-only delta API cannot
+            // correct an already-emitted partial-secret prefix.
+            if sink.supports_message_delta() && secrets.is_empty() {
+                sink.on_assistant_reasoning_delta(agent_id, &delta_reasoning);
             } else {
-                let snapshot = full_reasoning.clone();
-                let filtered = filter_secrets_in_text(&snapshot, secrets);
+                let filtered = filter_secrets_in_text(&full_reasoning, secrets);
                 sink.on_assistant_reasoning(agent_id, &filtered);
             }
         }
@@ -1593,27 +1573,16 @@ fn stream_assistant_chunk(
         full_text.push_str(&delta_text);
 
         if let Some(sink) = sink {
-            if sink.supports_message_delta() {
-                if secrets.is_empty() {
-                    sink.on_assistant_message_delta(agent_id, &delta_text);
-                } else {
-                    let filtered_full = filter_secrets_in_text(&full_text, secrets);
-                    let mut prev_len = filtered_text_len
-                        .lock()
-                        .expect("filtered text len mutex should not be poisoned");
-                    if *prev_len < filtered_full.len() {
-                        let delta = &filtered_full[*prev_len..];
-                        if !delta.is_empty() {
-                            sink.on_assistant_message_delta(agent_id, delta);
-                        }
-                    } else if *prev_len > filtered_full.len() {
-                        sink.on_assistant_message(agent_id, &filtered_full);
-                    }
-                    *prev_len = filtered_full.len();
-                }
+            // Delta streaming is only safe when no secrets need redaction: a
+            // secret split across a chunk boundary would otherwise leak its
+            // already-emitted prefix, since the append-only delta API cannot
+            // express the "replace prefix with <SECRET>" correction. Fall back
+            // to a full filtered snapshot per chunk — matching the pre-delta
+            // legacy path.
+            if sink.supports_message_delta() && secrets.is_empty() {
+                sink.on_assistant_message_delta(agent_id, &delta_text);
             } else {
-                let snapshot = full_text.clone();
-                let filtered = filter_secrets_in_text(&snapshot, secrets);
+                let filtered = filter_secrets_in_text(&full_text, secrets);
                 sink.on_assistant_message(agent_id, &filtered);
             }
         }
@@ -3987,23 +3956,19 @@ mod tests {
         let new_sink = NewPathSink::default();
         let old_text = Mutex::new(String::new());
         let old_reasoning = Mutex::new(String::new());
-        let ft = Mutex::new(0usize);
-        let fr = Mutex::new(0usize);
         for _ in 0..5 {
             for chunk in &chunks {
                 stream_assistant_chunk(
-                    Some(&old_sink), &agent_id, &old_text, &old_reasoning, &ft, &fr, chunk.clone(), &[],
+                    Some(&old_sink), &agent_id, &old_text, &old_reasoning, chunk.clone(), &[],
                 );
             }
         }
         let new_text = Mutex::new(String::new());
         let new_reasoning = Mutex::new(String::new());
-        let ft2 = Mutex::new(0usize);
-        let fr2 = Mutex::new(0usize);
         for _ in 0..5 {
             for chunk in &chunks {
                 stream_assistant_chunk(
-                    Some(&new_sink), &agent_id, &new_text, &new_reasoning, &ft2, &fr2, chunk.clone(), &[],
+                    Some(&new_sink), &agent_id, &new_text, &new_reasoning, chunk.clone(), &[],
                 );
             }
         }
@@ -4011,12 +3976,10 @@ mod tests {
         // ---- Measure old path (full-text clone) ----
         let old_text = Mutex::new(String::new());
         let old_reasoning = Mutex::new(String::new());
-        let ft3 = Mutex::new(0usize);
-        let fr3 = Mutex::new(0usize);
         let old_start = Instant::now();
         for chunk in &chunks {
             stream_assistant_chunk(
-                Some(&old_sink), &agent_id, &old_text, &old_reasoning, &ft3, &fr3, chunk.clone(), &[],
+                Some(&old_sink), &agent_id, &old_text, &old_reasoning, chunk.clone(), &[],
             );
         }
         let old_elapsed = old_start.elapsed();
@@ -4024,12 +3987,10 @@ mod tests {
         // ---- Measure new path (delta) ----
         let new_text = Mutex::new(String::new());
         let new_reasoning = Mutex::new(String::new());
-        let ft4 = Mutex::new(0usize);
-        let fr4 = Mutex::new(0usize);
         let new_start = Instant::now();
         for chunk in &chunks {
             stream_assistant_chunk(
-                Some(&new_sink), &agent_id, &new_text, &new_reasoning, &ft4, &fr4, chunk.clone(), &[],
+                Some(&new_sink), &agent_id, &new_text, &new_reasoning, chunk.clone(), &[],
             );
         }
         let new_elapsed = new_start.elapsed();
@@ -4052,5 +4013,122 @@ mod tests {
             new_us <= old_us + old_us / 5,
             "New path ({new_us}µs) should not be significantly slower than old path ({old_us}µs)"
         );
+    }
+
+    /// A delta-capable sink that accumulates text and reasoning independently,
+    /// so tests can assert on each stream in isolation. `on_assistant_message`
+    /// / `on_assistant_reasoning` replace the accumulated string (the full
+    /// snapshot fallback path), while the `_delta` variants append.
+    #[derive(Default)]
+    struct DeltaSink {
+        text: Mutex<String>,
+        reasoning: Mutex<String>,
+    }
+    impl LoopEventSink for DeltaSink {
+        fn on_turn_start(&self, _: &AgentId, _: u32) {}
+        fn on_assistant_message(&self, _: &AgentId, text: &str) {
+            *self.text.lock().unwrap() = text.to_string();
+        }
+        fn on_assistant_message_delta(&self, _: &AgentId, delta: &str) {
+            self.text.lock().unwrap().push_str(delta);
+        }
+        fn on_assistant_reasoning(&self, _: &AgentId, text: &str) {
+            *self.reasoning.lock().unwrap() = text.to_string();
+        }
+        fn on_assistant_reasoning_delta(&self, _: &AgentId, delta: &str) {
+            self.reasoning.lock().unwrap().push_str(delta);
+        }
+        fn supports_message_delta(&self) -> bool {
+            true
+        }
+        fn on_tool_result(&self, _: &AgentId, _: &ToolResultEvent) {}
+        fn on_loop_end(&self, _: &AgentId, _: &LoopEndSummary) {}
+    }
+
+    /// Regression: a secret split across two text chunks must not leak its
+    /// already-emitted prefix. Before the fix, the delta path emitted the
+    /// partial-secret prefix in chunk 1 and then appended a mis-aligned slice
+    /// from chunk 2 (`"Hello passRET> world"`), leaking `"pass"`. With the
+    /// full-snapshot fallback, chunk 2's `on_assistant_message` replaces the
+    /// whole string, yielding the correct redacted text.
+    #[test]
+    fn stream_secret_split_across_text_chunk_boundary_does_not_leak() {
+        let sink = DeltaSink::default();
+        let streamed_text = Mutex::new(String::new());
+        let streamed_reasoning = Mutex::new(String::new());
+        let agent_id = AgentId("test".to_string());
+        let secrets = vec!["password123".to_string()];
+
+        let chunks = [
+            StreamChunk {
+                delta_text: Some("Hello pass".to_string()),
+                delta_reasoning: None,
+                delta_tool_call: None,
+            },
+            StreamChunk {
+                delta_text: Some("word123 world".to_string()),
+                delta_reasoning: None,
+                delta_tool_call: None,
+            },
+        ];
+
+        for chunk in chunks {
+            stream_assistant_chunk(
+                Some(&sink),
+                &agent_id,
+                &streamed_text,
+                &streamed_reasoning,
+                chunk,
+                &secrets,
+            );
+            // The full secret must never be present in the accumulated text.
+            assert!(
+                !sink.text.lock().unwrap().contains("password123"),
+                "secret leaked after chunk"
+            );
+        }
+
+        assert_eq!(sink.text.lock().unwrap().as_str(), "Hello <SECRET> world");
+    }
+
+    /// Regression: symmetric to the text case — a secret split across two
+    /// reasoning chunks must not leak via the reasoning delta path.
+    #[test]
+    fn stream_secret_split_across_reasoning_chunk_boundary_does_not_leak() {
+        let sink = DeltaSink::default();
+        let streamed_text = Mutex::new(String::new());
+        let streamed_reasoning = Mutex::new(String::new());
+        let agent_id = AgentId("test".to_string());
+        let secrets = vec!["password123".to_string()];
+
+        let chunks = [
+            StreamChunk {
+                delta_text: None,
+                delta_reasoning: Some("Thinking pass".to_string()),
+                delta_tool_call: None,
+            },
+            StreamChunk {
+                delta_text: None,
+                delta_reasoning: Some("word123 done".to_string()),
+                delta_tool_call: None,
+            },
+        ];
+
+        for chunk in chunks {
+            stream_assistant_chunk(
+                Some(&sink),
+                &agent_id,
+                &streamed_text,
+                &streamed_reasoning,
+                chunk,
+                &secrets,
+            );
+            assert!(
+                !sink.reasoning.lock().unwrap().contains("password123"),
+                "secret leaked after reasoning chunk"
+            );
+        }
+
+        assert_eq!(sink.reasoning.lock().unwrap().as_str(), "Thinking <SECRET> done");
     }
 }
