@@ -1,6 +1,8 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use agent_contracts::backend::capability::exec::ExecRequest;
 use agent_contracts::backend::capability::path::{ResolveBase, ResolvePathRequest};
@@ -25,6 +27,11 @@ struct ResolvedSearchTarget {
     cwd: BackendPath,
     search_target: String,
 }
+
+/// Max concurrent `stat` calls when sorting `FilesWithMatches` by mtime.
+/// Each `stat` runs on the Tokio blocking pool; bounding parallelism avoids
+/// flooding it when the match set is large (e.g. thousands of files).
+const STAT_CONCURRENCY_LIMIT: usize = 64;
 
 pub struct GrepExecutor {
     spec: Arc<GrepToolSpec>,
@@ -195,10 +202,9 @@ impl GrepExecutor {
             .exec(ExecRequest {
                 command: "rg".to_string(),
                 args,
-                shell: None,
                 cwd: Some(cwd),
                 timeout_ms: Some(timeout_ms),
-                env: None,
+                ..Default::default()
             })
             .await
             .map_err(|e| format!("Failed to execute rg via backend exec: {}", e))?;
@@ -313,10 +319,9 @@ impl GrepExecutor {
             .exec(ExecRequest {
                 command: "grep".to_string(),
                 args,
-                shell: None,
                 cwd: Some(cwd),
                 timeout_ms: Some(timeout_ms),
-                env: None,
+                ..Default::default()
             })
             .await
             .map_err(|e| format!("Failed to execute grep via backend exec: {}", e))?;
@@ -377,7 +382,7 @@ impl GrepExecutor {
         &self,
         input: &GrepInput,
         resolved_target: &ResolvedSearchTarget,
-        backend: &dyn agent_contracts::backend::OperationBackend,
+        backend: &std::sync::Arc<dyn agent_contracts::backend::OperationBackend>,
     ) -> Result<GrepOutput, String> {
         let output_mode = input.output_mode.unwrap_or(OutputMode::FilesWithMatches);
         let head_limit = input.head_limit.unwrap_or(DEFAULT_HEAD_LIMIT);
@@ -391,8 +396,13 @@ impl GrepExecutor {
         // exhausted it (e.g. a timed-out `rg` would just time out `grep` too,
         // slower, for no benefit).
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        let lines = match Self::run_rg(backend, rg_args, resolved_target.cwd.clone(), timeout_ms)
-            .await
+        let lines = match Self::run_rg(
+            backend.as_ref(),
+            rg_args,
+            resolved_target.cwd.clone(),
+            timeout_ms,
+        )
+        .await
         {
             Ok(lines) => lines,
             Err(rg_err) => {
@@ -409,7 +419,7 @@ impl GrepExecutor {
                 };
                 let grep_args = Self::build_grep_args(input, &resolved_target.search_target);
                 Self::run_grep(
-                    backend,
+                    backend.as_ref(),
                     grep_args,
                     resolved_target.cwd.clone(),
                     output_mode,
@@ -476,40 +486,96 @@ impl GrepExecutor {
                 Ok(output)
             }
             OutputMode::FilesWithMatches => {
-                let mut files_with_mtime = Vec::new();
-
-                for line in &lines {
-                    let resolved_path =
-                        Self::resolve_result_path(backend, &resolved_target.cwd, line).await?;
-                    let stat = timed(
-                        "grep result stat",
-                        DEFAULT_FS_TIMEOUT_MS,
-                        backend.files().stat(&resolved_path),
-                    )
-                    .await
-                    .map_err(|e| format!("Failed to stat grep result file: {}", e))?;
-                    files_with_mtime.push((
-                        line.clone(),
-                        stat.modified_at
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-                    ));
+                // Stat all matched files concurrently via a `JoinSet` so the
+                // resolve + stat syscalls run in parallel (the previous
+                // sequential loop blocked for N syscalls in series on slow
+                // disks/network mounts). A semaphore bounds concurrency to
+                // avoid flooding the blocking pool on large match sets.
+                let stat_permits = Arc::new(tokio::sync::Semaphore::new(
+                    STAT_CONCURRENCY_LIMIT.min(lines.len().max(1)),
+                ));
+                let mut join_set = tokio::task::JoinSet::new();
+                for line in lines.iter().cloned() {
+                    let backend_ref = Arc::clone(backend);
+                    let cwd = resolved_target.cwd.clone();
+                    let permit_source = Arc::clone(&stat_permits);
+                    join_set.spawn(async move {
+                        let _permit = permit_source
+                            .acquire()
+                            .await
+                            .map_err(|e| format!("stat semaphore closed: {e}"))?;
+                        let resolved_path =
+                            Self::resolve_result_path(backend_ref.as_ref(), &cwd, &line).await?;
+                        let stat = timed(
+                            "grep result stat",
+                            DEFAULT_FS_TIMEOUT_MS,
+                            backend_ref.files().stat(&resolved_path),
+                        )
+                        .await
+                        .map_err(|e| format!("Failed to stat grep result file: {}", e))?;
+                        Ok::<_, String>((line, stat.modified_at.unwrap_or(SystemTime::UNIX_EPOCH)))
+                    });
                 }
 
-                files_with_mtime.sort_by(|a, b| {
-                    let time_cmp = b.1.cmp(&a.1);
-                    if time_cmp == std::cmp::Ordering::Equal {
-                        a.0.cmp(&b.0)
-                    } else {
-                        time_cmp
+                let mut files_with_mtime: Vec<(String, SystemTime)> =
+                    Vec::with_capacity(lines.len());
+                while let Some(res) = join_set.join_next().await {
+                    match res {
+                        Ok(Ok(value)) => files_with_mtime.push(value),
+                        Ok(Err(e)) => return Err(e),
+                        Err(join_error) => {
+                            return Err(format!("stat task panicked: {join_error}"));
+                        }
                     }
-                });
+                }
 
-                let sorted_files: Vec<String> =
-                    files_with_mtime.into_iter().map(|(file, _)| file).collect();
-                let (limited_files, applied_limit) =
-                    Self::apply_head_limit(sorted_files, head_limit, offset);
+                // Bounded top-K via a min-heap of size `head_limit + offset`.
+                // O(N log K) vs. O(N log N) for a full sort, and the
+                // intermediate Vec is bounded to K. `head_limit == 0` means
+                // "no limit" (heap unbounded).
+                let total_matches = files_with_mtime.len();
+                let want_k = if head_limit == 0 {
+                    total_matches
+                } else {
+                    (head_limit as usize).saturating_add(offset as usize)
+                };
+                // Cap capacity at items we'll actually keep — `want_k` may
+                // be much larger than `total_matches`.
+                let heap_cap = want_k.min(total_matches).saturating_add(1).max(1);
+                let mut heap: BinaryHeap<Reverse<(SystemTime, String)>> =
+                    BinaryHeap::with_capacity(heap_cap);
+                for (file, mtime) in files_with_mtime {
+                    heap.push(Reverse((mtime, file)));
+                    if want_k > 0 && heap.len() > want_k {
+                        heap.pop();
+                    }
+                }
+                let mut top_k: Vec<(SystemTime, String)> = Vec::with_capacity(heap.len());
+                while let Some(Reverse((mtime, file))) = heap.pop() {
+                    top_k.push((mtime, file));
+                }
+                // BinaryHeap::pop returns largest first → top_k is oldest-first;
+                // reverse for newest-first.
+                top_k.reverse();
+
+                let skipped = top_k.len().min(offset as usize);
+                let limited_files: Vec<String> = top_k
+                    .into_iter()
+                    .skip(skipped)
+                    .map(|(_, file)| file)
+                    .collect();
 
                 let num_files = limited_files.len();
+                // Truncation iff strictly more matches than kept
+                // (`total_matches > want_k`). Using `num_files == head_limit`
+                // would be wrong when `total_matches == head_limit + offset`
+                // exactly — then `num_files == head_limit` but nothing dropped.
+                let was_truncated = head_limit > 0 && total_matches > want_k;
+                let applied_limit = if was_truncated {
+                    Some(head_limit)
+                } else {
+                    None
+                };
 
                 let mut output = GrepOutput::new(OutputMode::FilesWithMatches)
                     .with_files(limited_files, num_files);
@@ -612,7 +678,7 @@ impl ToolExecutor for GrepExecutor {
             .await
             .map_err(|e| ToolExecutionError::ExecutionFailed { message: e })?;
 
-        match self.call_inner(&input, &resolved_target, &*backend).await {
+        match self.call_inner(&input, &resolved_target, &backend).await {
             Ok(output) => {
                 let json = serde_json::to_string(&output).map_err(|e| {
                     ToolExecutionError::ExecutionFailed {

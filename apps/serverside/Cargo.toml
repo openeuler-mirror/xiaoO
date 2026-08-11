@@ -53,6 +53,7 @@ shellexpand.workspace = true
 
 agent-contracts = { path = "../../crates/agent-contracts" }
 agent-types = { path = "../../crates/agent-types" }
+subagent = { path = "../../crates/subagent" }
 tool = { path = "../../crates/tool" }
 xiaoo-shared = { path = "../shared" }
 

@@ -32,6 +32,7 @@ pub(crate) use render::markdown;
 pub(crate) use render::provider_dialog;
 pub(crate) use render::status_panel;
 pub(crate) use render::theme;
+pub(crate) use services::mcp as mcp_service;
 pub(crate) use services::provider as provider_service;
 pub(crate) use services::remote_sessions as remote_sessions_service;
 pub(crate) use services::session_snapshot as session_snapshot_service;
@@ -78,8 +79,15 @@ where
             config_arg.path.display()
         )
     })?;
-    let config = config::require_tui_bootstrap_config(config, &config_arg.path)?;
-    run_tui(config, config_arg.path).await
+    let mut config = config::require_tui_bootstrap_config(config, &config_arg.path)?;
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    config.load_runtime_mcp_servers(
+        config_arg.mcp_config.as_deref(),
+        &workspace,
+        dirs::home_dir().as_deref(),
+        &config_arg.path,
+    )?;
+    run_tui(config, config_arg.path, workspace).await
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,7 +120,7 @@ fn os_str_eq(value: &OsStr, expected: &str) -> bool {
 
 fn print_end_side_usage(program: &OsStr) {
     eprintln!(
-        "Usage: {} [--config <path>]\n       {} --cli <command>\n\nDefault: launch the TUI.\nCLI: pass --cli before existing CLI commands, for example `{} --cli run -p \"hello\"`.",
+        "Usage: {} [--config <path>] [--mcp-config <path>]\n       {} --cli <command>\n\nDefault: launch the TUI.\nCLI: pass --cli before existing CLI commands, for example `{} --cli run -p \"hello\"`.",
         PathBuf::from(program).display(),
         PathBuf::from(program).display(),
         PathBuf::from(program).display()
@@ -122,6 +130,7 @@ fn print_end_side_usage(program: &OsStr) {
 struct ConfigArg {
     path: PathBuf,
     explicit: bool,
+    mcp_config: Option<PathBuf>,
 }
 
 fn parse_config_path_from<I, T>(args: I) -> Result<ConfigArg>
@@ -132,30 +141,36 @@ where
     let mut args = args.into_iter().map(Into::into);
     let program = args.next().unwrap_or_else(|| OsString::from("xiaoo"));
 
-    let cli_path = match args.next() {
-        None => None,
-        Some(first) if first == "--help" || first == "-h" => {
+    let mut cli_path = None;
+    let mut mcp_config = None;
+    while let Some(argument) = args.next() {
+        if argument == "--help" || argument == "-h" {
             print_usage(&program);
             std::process::exit(0);
-        }
-        Some(first) if first == "--config" || first == "-c" => {
+        } else if argument == "--config" || argument == "-c" {
             let Some(path) = args.next() else {
                 bail!("missing value for --config");
             };
-            if args.next().is_some() {
-                bail!("unexpected extra arguments after --config");
+            if cli_path.replace(PathBuf::from(path)).is_some() {
+                bail!("--config may only be specified once");
             }
-            Some(PathBuf::from(path))
+        } else if argument == "--mcp-config" {
+            let Some(path) = args.next() else {
+                bail!("missing value for --mcp-config");
+            };
+            if mcp_config.replace(PathBuf::from(path)).is_some() {
+                bail!("--mcp-config may only be specified once");
+            }
+        } else {
+            bail!("unsupported argument {:?}. use --help for usage", argument);
         }
-        Some(_) => {
-            bail!("unsupported arguments. use --help for usage, or pass only --config <path>")
-        }
-    };
+    }
 
     if let Some(path) = cli_path {
         return Ok(ConfigArg {
             path,
             explicit: true,
+            mcp_config,
         });
     }
 
@@ -166,12 +181,14 @@ where
         return Ok(ConfigArg {
             path,
             explicit: true,
+            mcp_config,
         });
     }
 
     Ok(ConfigArg {
         path: default_config_path()?,
         explicit: false,
+        mcp_config,
     })
 }
 
@@ -187,7 +204,7 @@ fn load_tui_config(config_arg: &ConfigArg) -> Result<Option<config::Config>> {
 
 fn print_usage(program: &std::ffi::OsStr) {
     eprintln!(
-        "Usage: {} [--config <path>]\n\nConfig lookup order: --config > XIAOO_CONFIG > platform default.\nLaunch the TUI binary directly.",
+        "Usage: {} [--config <path>] [--mcp-config <path>]\n\nConfig lookup order: --config > XIAOO_CONFIG > platform default.\nMCP lookup order: --mcp-config > XIAOO_MCP_CONFIG > workspace .mcp.json > ~/.config/xiaoo/mcp.json.\nLaunch the TUI binary directly.",
         PathBuf::from(program).display()
     );
 }
@@ -216,7 +233,7 @@ fn default_config_path() -> Result<PathBuf> {
     }
 }
 
-async fn run_tui(config: config::Config, config_path: PathBuf) -> Result<()> {
+async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBuf) -> Result<()> {
     let (validation_errors, validation_warnings) = validate_config_for_tui(&config, &config_path);
 
     for warning in &validation_warnings {
@@ -241,7 +258,6 @@ async fn run_tui(config: config::Config, config_path: PathBuf) -> Result<()> {
     let _ = execute!(io::stdout(), EnableMouseCapture);
     let _ = execute!(io::stdout(), EnableBracketedPaste);
 
-    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut app = app::App::new_with_config(&config, config_path.clone(), workspace)
         .context("failed to initialize TUI app state")?;
 
@@ -339,8 +355,26 @@ fn validate_config_for_tui(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_args, EntryInvocation};
+    use super::{classify_args, parse_config_path_from, EntryInvocation};
     use std::ffi::OsString;
+
+    #[test]
+    fn tui_accepts_mcp_config_alongside_toml_config() {
+        let parsed = parse_config_path_from([
+            "xiaoo",
+            "--config",
+            "/tmp/config.toml",
+            "--mcp-config",
+            "/tmp/mcp.json",
+        ])
+        .expect("TUI should accept both config paths");
+
+        assert_eq!(parsed.path, std::path::PathBuf::from("/tmp/config.toml"));
+        assert_eq!(
+            parsed.mcp_config,
+            Some(std::path::PathBuf::from("/tmp/mcp.json"))
+        );
+    }
 
     #[test]
     fn no_args_dispatches_to_tui() {

@@ -1,9 +1,9 @@
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use crate::gateway::{
-    compose_repo_map, compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord,
-    SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
-    SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_repo_map, compose_workspace_system_prompt, MemoryAutomationConfig,
+    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
+    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
@@ -65,6 +65,7 @@ pub struct HostedSessionRuntimeConfig {
     pub skills_config: SkillsConfig,
     pub subagent_roles: BTreeMap<String, SubagentRoleConfigEntry>,
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+    pub memory_automation: MemoryAutomationConfig,
 }
 
 pub struct HostedSessionRuntimeResolver {

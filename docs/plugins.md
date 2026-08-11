@@ -195,15 +195,15 @@ cat /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker.log
 | `*.Chat.command.before` | 用户输入命中 `~/.xiaoo/commands/<name>.md` 斜杠命令、模板展开为 body 之后、body 提交为 user turn 之前 | `Allow` / `Transform { body }` / `Deny { reason }` |
 | `*.Chat.message.received` | user 消息构造完成、写入消息历史之前 | `Accept` / `Transform { message }` |
 | `*.Chat.system.transform` | PromptBuilder 组装完 `system: Vec<String>` 分段、合并成单条 system 消息之前 | `Allow` / `Transform { system }` |
-| `*.Session.lifecycle.state` | 一次非错误 root turn 结束（`Complete`/`MaxTurnsReached`/`BudgetExhausted`/`Cancelled` 四种 `Ok` 结局）、会话回到 `idle` 时（fire-and-forget，不阻塞 turn 返回） | `Ack`（事件型，无可变输出） |
+| `*.Session.lifecycle.state` | root turn 生命周期状态切换：`idle`（一次非错误 root turn 结束，`Complete`/`MaxTurnsReached`/`BudgetExhausted`/`Cancelled` 四种 `Ok` 结局，会话回到 idle）/ `failed`（turn 以 `Err` 结束） | `Ack`（事件型，无可变输出） |
 
-> 前三个 chat hook 是「可变 hook」——插件可以改写或拒绝输入；第四个 session hook 是「事件型观察者」——只能确认收到事件，没有 `transform`/`deny` 路径。
+> 前三个 chat hook 是「可变 hook」——插件可以改写或拒绝输入；第四个 session hook 是「事件型观察者」——只能确认收到事件，没有 `transform`/`deny` 路径。`idle` 状态下 `actions`（`create_session` / `switch_session` / `send_prompt`）会被收集并执行；`failed` 状态下 `actions` 被丢弃（fire-and-forget）。
 
 ### 与 Tool hook 的差异
 
 - **执行模型相同**：都是 `sh -c <command>`，stdin 写入一次 JSON payload、stdout 读取一次 JSON 结果，非零退出视为失败。
 - **`payload.stage` 不同**：chat/session hook 的 stage 字符串是 `command_before` / `chat_message` / `system_transform` / `session_state`（不是 `pre`/`post`/`error`），脚本据此分发。
-- **调度差异**：chat hook 在 agent loop 同步执行，单个插件报错只 `tracing::warn!` 不中断整轮，只有 `command.before` 的 `Deny` 会短路；session state hook 在 gateway 后台 `tokio::spawn` 执行（fire-and-forget），错误走 `tracing::warn!`，绝不影响主流程或 `run_turn` 返回值。
+- **调度差异**：chat hook 在 agent loop 同步执行，单个插件报错只 `tracing::warn!` 不中断整轮，只有 `command.before` 的 `Deny` 会短路；session state hook 在 gateway 后台执行：`idle` 状态在 `run_turn` 返回后等待所有 hooker 完成（30s 整体上限，便于收集 `actions` 注入 `Done` 事件），`failed` 状态走 `tokio::spawn` 的 fire-and-forget 路径（不阻塞错误返回），错误一律走 `tracing::warn!`，绝不影响主流程或 `run_turn` 返回值。
 - **交互机制**：三个 chat hook 还支持 `action: "ask_user"`——插件可发起 `Confirm` / `TextInput` / `Choice` 交互，用户回答后 xiaoo 会带着 `interaction` 字段再次调用同一命令，直到插件返回 `final`。session state hook 不支持该机制。
 
 ### Minimal plugin.json
@@ -311,8 +311,12 @@ switch (payload.stage) {
   }
   case "session_state": {
     // payload.session_id = 当前会话 id（事件型、只读）
-    // payload.state      = "idle"（一轮非错误结束）
-    // payload.outcome    = complete / max_turns_reached / budget_exhausted / cancelled
+    // payload.state      = "idle" / "failed"
+    //   - idle：一轮非错误结束（actions 会被收集执行）
+    //   - failed：turn 以 Err 结束（fire-and-forget，actions 被丢弃）
+    // payload.outcome    =
+    //   - idle     -> complete / max_turns_reached / budget_exhausted / cancelled
+    //   - failed   -> "error"
     if (payload.state === "idle" && payload.outcome === "max_turns_reached") {
       const newSession = `cont-${Date.now()}`;
       result = {

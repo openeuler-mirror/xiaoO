@@ -28,28 +28,40 @@ impl OperationSearch for LocalSearch {
             Some(path) => self._state.backend_path_to_host(path)?,
             None => self._state.workspace_root_host.clone(),
         };
-        self._state.policy.check_read(base_dir.as_path(), "glob")?;
-        self._state.ensure_directory(base_dir.as_path())?;
+        let state = Arc::clone(&self._state);
         let pattern = Pattern::new(request.pattern.as_str()).map_err(|error| {
             OperationError::InvalidPath {
                 message: format!("invalid glob pattern: {error}"),
             }
         })?;
+        let limit = request.limit;
 
-        let mut host_paths = Vec::new();
-        collect_paths(
-            &self._state,
-            base_dir.as_path(),
-            base_dir.as_path(),
-            &pattern,
-            &mut host_paths,
-        )?;
+        // Move the recursive walk (read_dir + canonicalize + is_dir) onto a
+        // blocking thread; it's purely CPU/IO-bound and would stall the
+        // async worker.
+        let mut host_paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            state.policy.check_read(base_dir.as_path(), "glob")?;
+            state.ensure_directory(base_dir.as_path())?;
+            let mut out = Vec::new();
+            collect_paths(
+                state.as_ref(),
+                base_dir.as_path(),
+                base_dir.as_path(),
+                &pattern,
+                &mut out,
+            )?;
+            Ok::<_, OperationError>(out)
+        })
+        .await
+        .map_err(|join_error| OperationError::Transport {
+            message: format!("glob blocking task panicked: {join_error}"),
+        })??;
         host_paths.sort();
 
         let mut entries = Vec::new();
         for path in host_paths {
             entries.push(self._state.host_path_to_backend(path.as_path())?);
-            if request.limit.is_some_and(|limit| entries.len() >= limit) {
+            if limit.is_some_and(|limit| entries.len() >= limit) {
                 break;
             }
         }
@@ -58,10 +70,7 @@ impl OperationSearch for LocalSearch {
 
     async fn grep(&self, request: GrepRequest) -> Result<GrepResult, OperationError> {
         let target_dir = self._state.backend_path_to_host(&request.base_dir)?;
-        self._state
-            .policy
-            .check_read(target_dir.as_path(), "grep")?;
-        self._state.ensure_directory(target_dir.as_path())?;
+        let state = Arc::clone(&self._state);
         let include_pattern = match request.include.as_deref() {
             Some(pattern) => {
                 Some(
@@ -73,8 +82,22 @@ impl OperationSearch for LocalSearch {
             None => None,
         };
 
-        let mut files = Vec::new();
-        collect_files(&self._state, target_dir.as_path(), &mut files)?;
+        // Walk the tree on the blocking pool — `read_dir` + `canonicalize`
+        // per entry are syscalls we don't want on the async worker.
+        let target_dir_for_walk = target_dir.clone();
+        let mut files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            state
+                .policy
+                .check_read(target_dir_for_walk.as_path(), "grep")?;
+            state.ensure_directory(target_dir_for_walk.as_path())?;
+            let mut out = Vec::new();
+            collect_files(state.as_ref(), target_dir_for_walk.as_path(), &mut out)?;
+            Ok::<_, OperationError>(out)
+        })
+        .await
+        .map_err(|join_error| OperationError::Transport {
+            message: format!("grep walk blocking task panicked: {join_error}"),
+        })??;
         files.sort();
 
         let mut entries = Vec::new();
@@ -157,6 +180,8 @@ fn collect_paths(
     pattern: &Pattern,
     entries: &mut Vec<PathBuf>,
 ) -> Result<(), OperationError> {
+    // Caller already policy-checked the walk root; re-check only when
+    // descending into a new subdirectory.
     state.policy.check_read(current, "glob")?;
     for entry in std::fs::read_dir(current).map_err(|error| io_error_for_path(current, error))? {
         let entry = entry.map_err(|error| io_error_for_path(current, error))?;
@@ -210,15 +235,13 @@ mod tests {
             backend_id: "local-test".to_string(),
             workspace_root: BackendPath(workspace.display().to_string()),
             workspace_root_host: workspace.clone(),
-            home_dir: None,
-            home_dir_host: None,
             temp_root_host: temp.clone(),
-            default_shell: None,
             policy: LocalBackendPolicy::test_macos_seatbelt(
                 vec![workspace.clone(), temp.clone()],
                 vec![temp],
                 false,
             ),
+            ..Default::default()
         }))
     }
 

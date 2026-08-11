@@ -24,19 +24,21 @@ const CHANNEL_FILE_INSTRUCTION: &str = include_str!("prompts/channel_file_instru
 const CHANNEL_CONTEXT_BOUNDARY_INSTRUCTION: &str =
     include_str!("prompts/channel_context_boundary_instruction.md");
 
-/// Split the system prompt into cache-stable prefix parts (base prompt,
-/// workspace rules, skills catalog, and repo map when present) and the
-/// per-turn-volatile `# Context` tail (environment, horizon, plan, memory).
-/// Returns the stable parts un-joined so callers can either join them into a
-/// single string or feed the array to the `*.Chat.system.transform` hooker.
-/// The volatile tail, when present, is the final element of a merged system
-/// message so the stable prefix stays a byte-identical leading span every
-/// turn, enabling auto-prefix caching on providers that cache the longest
-/// matching prefix.
-pub(crate) fn compose_system_sections(
-    base_system: &str,
-    context: &PromptContext,
-) -> (Vec<String>, Option<String>) {
+/// Compose the system prompt as cache-stable parts only: base prompt,
+/// workspace rules, skills catalog, repo map when present, and the
+/// environment block (constant within a session — the date is the fastest
+/// mover at once per day). Returns the parts un-joined so callers can either
+/// join them into a single string or feed the array to the
+/// `*.Chat.system.transform` hooker.
+///
+/// Per-turn-volatile context (horizon, plan, memory) deliberately does NOT
+/// render here: the system message is the first span of the token stream, so
+/// any per-turn byte change in it would invalidate provider prefix caching
+/// for the entire conversation history behind it. That context is composed by
+/// [`compose_turn_context_reminder`] and injected as a trailing message
+/// instead (see `builder_impl`), keeping the change point at the very end of
+/// the prompt.
+pub(crate) fn compose_system_sections(base_system: &str, context: &PromptContext) -> Vec<String> {
     let (base_system, workspace_prompt) = split_workspace_prompt_block(base_system);
     let (base_system, repo_map) = split_repo_map_section(&base_system);
     let mut stable = Vec::new();
@@ -56,18 +58,24 @@ pub(crate) fn compose_system_sections(
     if let Some(repo_map) = repo_map {
         stable.push(repo_map);
     }
-    let volatile = compose_context_section(context);
-    (stable, volatile)
+    if let Some(environment) = compose_environment_section(context) {
+        stable.push(environment);
+    }
+    stable
 }
 
-/// The per-turn dynamic block: environment, remaining-budget horizon, the live
-/// plan from the `todo_write` store, and recalled memory. Kept whole and last so
-/// the stable prefix above stays cache-aligned.
-fn compose_context_section(context: &PromptContext) -> Option<String> {
+/// The per-turn dynamic block: remaining-budget horizon, the live plan from
+/// the `todo_write` store, pinned instructions, and recalled memory — wrapped
+/// in `<system-reminder>` tags so the model reads it as runtime-injected
+/// state, not user-authored text.
+///
+/// Rendered as the LAST message of each request (ephemeral, never persisted
+/// into session history). Because it sits at the tail of the token stream,
+/// its per-turn churn invalidates nothing before it: the system prompt and
+/// the whole conversation history remain a byte-identical prefix and keep
+/// hitting provider prefix caches.
+pub(crate) fn compose_turn_context_reminder(context: &PromptContext) -> Option<String> {
     let mut blocks = Vec::new();
-    if let Some(section) = compose_environment_section(context) {
-        blocks.push(section);
-    }
     if let Some(section) = compose_progress_section(context) {
         blocks.push(section);
     }
@@ -83,7 +91,10 @@ fn compose_context_section(context: &PromptContext) -> Option<String> {
     if blocks.is_empty() {
         None
     } else {
-        Some(format!("# Context\n\n{}", blocks.join("\n\n")))
+        Some(format!(
+            "<system-reminder>\n# Context\nAuto-injected runtime state for this turn (not authored by the user); the latest reminder supersedes any earlier ones.\n\n{}\n</system-reminder>",
+            blocks.join("\n\n")
+        ))
     }
 }
 
@@ -126,11 +137,7 @@ fn compose_plan_section(context: &PromptContext) -> Option<String> {
 }
 
 pub fn compose_system_text(base_system: &str, context: &PromptContext) -> String {
-    let (mut parts, volatile) = compose_system_sections(base_system, context);
-    if let Some(volatile) = volatile {
-        parts.push(volatile);
-    }
-    parts.join("\n\n")
+    compose_system_sections(base_system, context).join("\n\n")
 }
 
 pub fn compose_channel_system_prompt(sections: ChannelPromptSections<'_>) -> String {
@@ -377,31 +384,38 @@ mod tests {
                 "hello",
             )]),
         };
-        let (stable, volatile) = compose_system_sections(
+        let stable = compose_system_sections(
             &format!(
                 "base system\n\n{WORKSPACE_PROMPT_MARKER_BEGIN}\n## Workspace Instructions\n### /repo/AGENTS.md\nroot rules\n{WORKSPACE_PROMPT_MARKER_END}\n\n## 当前通道\n- 当前 channel: capture."
             ),
             &context,
         );
 
-        // stable: [base (before+after merged), workspace_prompt, skill_section]
-        assert_eq!(stable.len(), 3);
+        // stable: [base (before+after merged), workspace_prompt, skill_section, environment]
+        assert_eq!(stable.len(), 4);
         assert!(stable[0].starts_with("base system"));
         assert!(stable[0].contains("当前 channel: capture."));
         assert!(stable[2].contains("## Available Skills"));
         assert!(stable[2].contains("- skill: do thing"));
+        assert!(stable[3].starts_with("## Environment"));
+        assert!(stable[3].contains("- model: gpt-test"));
 
-        // volatile: # Context (environment + instructions + memory)
-        let context_section = volatile.expect("volatile context section should be present");
-        assert!(context_section.starts_with("# Context"));
-        assert!(context_section.contains("## Environment"));
-        assert!(context_section.contains("## Instructions"));
-        assert!(context_section.contains("## Memory"));
-        assert!(context_section.contains("[fact/repo] remember this"));
-        assert!(context_section.contains("- policy: be precise"));
-        assert!(!context_section.contains("score="));
-        assert!(!context_section.contains("# Conversation"));
-        assert!(!context_section.contains("# Tools"));
+        // per-turn reminder: # Context (instructions + memory), tagged as a
+        // system-reminder for message-tail injection — NOT part of the system
+        // prompt, so the stable prefix stays byte-identical across turns.
+        let reminder = compose_turn_context_reminder(&context)
+            .expect("turn context reminder should be present");
+        assert!(reminder.starts_with("<system-reminder>"));
+        assert!(reminder.ends_with("</system-reminder>"));
+        assert!(reminder.contains("# Context"));
+        assert!(!reminder.contains("## Environment"));
+        assert!(reminder.contains("## Instructions"));
+        assert!(reminder.contains("## Memory"));
+        assert!(reminder.contains("[fact/repo] remember this"));
+        assert!(reminder.contains("- policy: be precise"));
+        assert!(!reminder.contains("score="));
+        assert!(!reminder.contains("# Conversation"));
+        assert!(!reminder.contains("# Tools"));
 
         assert!(stable[1].starts_with("## Workspace Instructions"));
         assert!(stable[1].contains("/repo/AGENTS.md"));

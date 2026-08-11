@@ -56,6 +56,7 @@ pub async fn build_backend(
         temp_root_host,
         default_shell: options.default_shell,
         policy,
+        ..Default::default()
     }));
 
     Ok(Arc::new(backend))
@@ -127,6 +128,7 @@ pub fn local_backend_with_isolation(
             temp_root_host,
             default_shell,
             policy,
+            ..Default::default()
         },
     ))))
 }

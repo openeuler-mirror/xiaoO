@@ -13,6 +13,14 @@ pub(super) async fn lease_session_backend(
     resolved: &ResolvedSessionRuntime,
     session_store: Arc<dyn crate::gateway::SessionStore>,
 ) -> Result<BackendLease, SessionServiceError> {
+    // The freshly leased backend is about to run a turn. Register it as
+    // "running" with queue_depth=1 so the shared registry does not treat
+    // it as evictable while the turn is in flight. This closes the race
+    // where `ensure_session_backend` registers a new backend with the
+    // default "idle" status and another process evicts it before the
+    // turn re-reports Running.
+    let initial_running = Some(("running".to_string(), 1usize));
+
     // Resume a session whose sandbox was evicted: check out a new sandbox from
     // the eviction checkpoint before running the turn.
     if session.status == crate::gateway::SessionLifecycleStatus::Paused {
@@ -24,6 +32,8 @@ pub(super) async fn lease_session_backend(
                 session_store,
                 Value::Null,
                 &CheckoutEvictionContext::resume(),
+                None,
+                initial_running,
             )
             .await;
         }
@@ -49,6 +59,7 @@ pub(super) async fn lease_session_backend(
                 workspace_root: resolved.backend_workspace_root.clone(),
                 session_id: session.session_id.clone(),
                 e2b_bootstrap: resolved.e2b_bootstrap.clone(),
+                initial_session_status: initial_running,
             },
             session_store,
         )
@@ -119,6 +130,8 @@ pub(super) async fn checkout_backend_with_eviction(
     session_store: Arc<dyn crate::gateway::SessionStore>,
     metadata: Value,
     context: &CheckoutEvictionContext,
+    options: Option<Value>,
+    initial_session_status: Option<(String, usize)>,
 ) -> Result<BackendLease, SessionServiceError> {
     let sandbox_key = BackendManager::sandbox_key_from_config(&GatewayBackendConfig::new(
         checkpoint.provider.clone(),
@@ -143,7 +156,8 @@ pub(super) async fn checkout_backend_with_eviction(
                 timeout: None,
                 metadata: metadata.clone(),
                 resource_limits: BackendResourceLimits::default(),
-                options: None,
+                options: options.clone(),
+                initial_session_status: initial_session_status.clone(),
             })
             .await
         {

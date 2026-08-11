@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use xiaoo_shared::backend::BackendManager;
-use xiaoo_shared::gateway::{AppBootstrap, InMemorySessionStore, SessionStore};
+use xiaoo_shared::gateway::{
+    AppBootstrap, InMemorySessionStore, McpMemoryAutomation, SessionStore,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,6 +44,7 @@ async fn main() -> Result<()> {
     }
     run_daemon(
         cli.config,
+        cli.mcp_config,
         cli.host,
         cli.port,
         cli.dashboard_host,
@@ -52,6 +55,7 @@ async fn main() -> Result<()> {
 
 async fn run_daemon(
     config_path: Option<PathBuf>,
+    mcp_config_path: Option<PathBuf>,
     host: String,
     port: u16,
     dashboard_cli_host: Option<String>,
@@ -64,7 +68,13 @@ async fn run_daemon(
             config_path.display()
         )
     })?;
-    let config = DaemonConfig::load_from(&config_path)?;
+    let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = DaemonConfig::load_with_mcp_config(
+        &config_path,
+        mcp_config_path.as_deref(),
+        &workspace,
+        dirs::home_dir().as_deref(),
+    )?;
     let mcp_server_config = config.resolve_mcp_server_config()?;
     let hooker_config = config.app.hooker.clone();
     let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
@@ -72,162 +82,193 @@ async fn run_daemon(
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let backend_manager = Arc::new(BackendManager::new());
-    // Start the cross-process signal handler so backends owned by this
-    // daemon that another process has marked for eviction get evicted
-    // immediately upon receiving SIGUSR1.
-    let handler_handle = backend_manager
-        .clone()
-        .start_signal_handler(session_store.clone());
-    tokio::spawn(async move {
-        handler_handle.await.ok();
-    });
-    let app = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
-        session_store.clone(),
-        resolver,
-        hooker_config,
-        backend_manager.clone(),
-    )?;
-    let interaction_timeout_secs = config.interaction_timeout_secs();
-    let session_service = app.session_service.clone();
-    let session_control_plane = app.session_control_plane.clone();
+    let memory_automation = match McpMemoryAutomation::connect(
+        config.app.memory_automation.clone(),
+        &config.app.mcp.servers,
+    )
+    .await
+    {
+        Ok(automation) => automation,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory automation disabled after startup error");
+            None
+        }
+    };
+    let memory_automation_for_shutdown = memory_automation.clone();
+    let serve_result = async {
+        // Start the cross-process signal handler so backends owned by this
+        // daemon that another process has marked for eviction get evicted
+        // immediately upon receiving SIGUSR1.
+        let handler_handle = backend_manager
+            .clone()
+            .start_signal_handler(session_store.clone());
+        tokio::spawn(async move {
+            handler_handle.await.ok();
+        });
+        let interaction_timeout_secs = config.interaction_timeout_secs();
+        let app =
+        AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            session_store.clone(),
+            resolver,
+            hooker_config,
+            backend_manager.clone(),
+            memory_automation,
+            Some(std::time::Duration::from_secs(interaction_timeout_secs)),
+        )?;
+        let session_service = app.session_service.clone();
+        let session_control_plane = app.session_control_plane.clone();
 
-    if let Some(telegram_config) = config.telegram_polling_config()? {
-        spawn_telegram_polling_service(
-            telegram_config,
-            session_service.clone(),
-            interaction_timeout_secs,
-        )
-        .context("failed to start telegram polling service")?;
-    }
-
-    if let Some(feishu_config) = config.feishu_config()? {
-        if feishu_config.event_transport == FeishuEventTransport::Websocket {
-            spawn_feishu_websocket_service(
-                feishu_config,
+        if let Some(telegram_config) = config.telegram_polling_config()? {
+            spawn_telegram_polling_service(
+                telegram_config,
                 session_service.clone(),
                 interaction_timeout_secs,
             )
-            .context("failed to start Feishu websocket service")?;
+            .context("failed to start telegram polling service")?;
         }
-    }
 
-    // ── Cron scheduler ──────────────────────────────────────────
-    let cron_enabled = config.cron_section().is_some();
-    let cron_scheduler = match config.resolve_cron_jobs() {
-        Ok(jobs) if !jobs.is_empty() => {
-            let global = config
-                .cron_section()
-                .expect("cron section must exist when jobs loaded");
-            let total = jobs.len();
-            let enabled_count = jobs.iter().filter(|j| j.enabled).count();
-            if enabled_count > 0 {
-                Some(Arc::new(CronScheduler::new(
-                    jobs,
-                    global.max_concurrent_jobs,
+        if let Some(feishu_config) = config.feishu_config()? {
+            if feishu_config.event_transport == FeishuEventTransport::Websocket {
+                spawn_feishu_websocket_service(
+                    feishu_config,
                     session_service.clone(),
-                )))
-            } else {
-                tracing::info!(total, "no enabled cron jobs");
+                    interaction_timeout_secs,
+                )
+                .context("failed to start Feishu websocket service")?;
+            }
+        }
+
+        // ── Cron scheduler ──────────────────────────────────────────
+        let cron_enabled = config.cron_section().is_some();
+        let cron_scheduler = match config.resolve_cron_jobs() {
+            Ok(jobs) if !jobs.is_empty() => {
+                let global = config
+                    .cron_section()
+                    .expect("cron section must exist when jobs loaded");
+                let total = jobs.len();
+                let enabled_count = jobs.iter().filter(|j| j.enabled).count();
+                if enabled_count > 0 {
+                    Some(Arc::new(CronScheduler::new(
+                        jobs,
+                        global.max_concurrent_jobs,
+                        session_service.clone(),
+                    )))
+                } else {
+                    tracing::info!(total, "no enabled cron jobs");
+                    None
+                }
+            }
+            Ok(_) => {
+                if cron_enabled {
+                    tracing::info!("cron section present but no jobs configured");
+                }
                 None
             }
-        }
-        Ok(_) => {
-            if cron_enabled {
-                tracing::info!("cron section present but no jobs configured");
+            Err(error) => {
+                tracing::error!(%error, "failed to load cron jobs, cron disabled");
+                None
             }
-            None
-        }
-        Err(error) => {
-            tracing::error!(%error, "failed to load cron jobs, cron disabled");
-            None
-        }
-    };
+        };
 
-    let channel_runtimes = config.channel_runtimes()?;
-    let mut router = if channel_runtimes.is_empty() {
-        create_router_with_control_plane_and_auth(
-            session_service.clone(),
-            session_control_plane.clone(),
-            bearer_auth,
-            rate_limit.clone(),
-        )
-    } else {
-        create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
-            session_service.clone(),
-            session_control_plane.clone(),
-            channel_runtimes,
-            interaction_timeout_secs,
-            bearer_auth,
-            rate_limit.clone(),
-        )
-        .map_err(anyhow::Error::new)
-        .context("failed to create router with channel runtimes")?
-    };
-    if let Some(mcp_server_config) = mcp_server_config {
-        router = router.merge(create_mcp_router(
-            mcp_server_config,
-            session_service.clone(),
-            session_control_plane.clone(),
+        let channel_runtimes = config.channel_runtimes()?;
+        let mut router = if channel_runtimes.is_empty() {
+            create_router_with_control_plane_and_auth(
+                session_service.clone(),
+                session_control_plane.clone(),
+                bearer_auth,
+                rate_limit.clone(),
+            )
+        } else {
+            create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
+                session_service.clone(),
+                session_control_plane.clone(),
+                channel_runtimes,
+                interaction_timeout_secs,
+                bearer_auth,
+                rate_limit.clone(),
+            )
+            .map_err(anyhow::Error::new)
+            .context("failed to create router with channel runtimes")?
+        };
+        if let Some(mcp_server_config) = mcp_server_config {
+            router = router.merge(create_mcp_router(
+                mcp_server_config,
+                session_service.clone(),
+                session_control_plane.clone(),
+                session_store.clone(),
+                rate_limit.clone(),
+            ));
+        }
+
+        // Dashboard runs on its own listener so it never shares the runtime
+        // API port (and its bearer auth). When `[http.dashboard].enabled = false`
+        // is set in the config, `dashboard_port` resolves to `None` and no
+        // dashboard server is started.
+        if let Some(dash_addr) = spawn_dashboard_server(
+            &config,
+            dashboard_cli_host,
+            dashboard_cli_port,
             session_store.clone(),
-            rate_limit.clone(),
-        ));
-    }
-
-    // Dashboard runs on its own listener so it never shares the runtime
-    // API port (and its bearer auth). When `[http.dashboard].enabled = false`
-    // is set in the config, `dashboard_port` resolves to `None` and no
-    // dashboard server is started.
-    if let Some(dash_addr) = spawn_dashboard_server(
-        &config,
-        dashboard_cli_host,
-        dashboard_cli_port,
-        session_store.clone(),
-        backend_manager.clone(),
-    )
-    .await?
-    {
-        tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
-        eprintln!("dashboard ready at http://{dash_addr}");
-    } else {
-        tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
-    }
-
-    let addr: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .with_context(|| format!("invalid listen address {host}:{port}"))?;
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind {addr}"))?;
-    tracing::info!(config = %config_path.display(), %addr, "starting rebuild daemon");
-    let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("axum server exited unexpectedly");
-
-    // Gracefully shutdown cron scheduler
-    if let Some(scheduler) = cron_scheduler {
-        scheduler.stop().await;
-    }
-
-    // Best-effort sandbox cleanup with a bounded timeout so a slow/stuck
-    // provider delete call cannot keep the daemon alive indefinitely after a
-    // shutdown signal. Matches the TUI exit path which also bounds remote
-    // close to a few seconds.
-    let shutdown_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        backend_manager.shutdown_all(),
-    )
-    .await;
-    match shutdown_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(error = %error, "failed to shutdown daemon backend manager");
+            backend_manager.clone(),
+        )
+        .await?
+        {
+            tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
+            eprintln!("dashboard ready at http://{dash_addr}");
+        } else {
+            tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
         }
-        Err(_) => {
-            tracing::warn!(
-                "daemon backend manager shutdown timed out after 10s; \
+
+        let addr: SocketAddr = format!("{host}:{port}")
+            .parse()
+            .with_context(|| format!("invalid listen address {host}:{port}"))?;
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("failed to bind {addr}"))?;
+        tracing::info!(config = %config_path.display(), %addr, "starting rebuild daemon");
+        let serve_result = axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .context("axum server exited unexpectedly");
+
+        // Gracefully shutdown cron scheduler
+        if let Some(scheduler) = cron_scheduler {
+            scheduler.stop().await;
+        }
+
+        // Best-effort sandbox cleanup with a bounded timeout so a slow/stuck
+        // provider delete call cannot keep the daemon alive indefinitely after a
+        // shutdown signal. Matches the TUI exit path which also bounds remote
+        // close to a few seconds.
+        let shutdown_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            backend_manager.shutdown_all(),
+        )
+        .await;
+        match shutdown_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "failed to shutdown daemon backend manager");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "daemon backend manager shutdown timed out after 10s; \
                  some sandboxes may linger and will be reclaimed lazily"
-            );
+                );
+            }
+        }
+        serve_result
+    }
+    .await;
+    if let Some(automation) = memory_automation_for_shutdown {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "failed to close daemon MCP memory automation");
+            }
+            Err(_) => {
+                tracing::warn!("daemon MCP memory automation close timed out after 5 seconds");
+            }
         }
     }
     serve_result
@@ -421,6 +462,7 @@ fn init_tracing() {
 
 struct Cli {
     config: Option<PathBuf>,
+    mcp_config: Option<PathBuf>,
     host: String,
     port: u16,
     dashboard_host: Option<String>,
@@ -434,6 +476,7 @@ impl Cli {
         I: IntoIterator<Item = String>,
     {
         let mut config = None;
+        let mut mcp_config = None;
         let mut host = "0.0.0.0".to_string();
         let mut port = 18080_u16;
         let mut dashboard_host: Option<String> = None;
@@ -445,6 +488,7 @@ impl Cli {
                 "--help" | "-h" => {
                     return Ok(Self {
                         config,
+                        mcp_config,
                         host,
                         port,
                         dashboard_host,
@@ -456,6 +500,13 @@ impl Cli {
                     index += 1;
                     let value = remaining.get(index).context("missing value for --config")?;
                     config = Some(PathBuf::from(value));
+                }
+                "--mcp-config" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --mcp-config")?;
+                    mcp_config = Some(PathBuf::from(value));
                 }
                 "--host" => {
                     index += 1;
@@ -493,6 +544,7 @@ impl Cli {
         }
         Ok(Self {
             config,
+            mcp_config,
             host,
             port,
             dashboard_host,
@@ -504,7 +556,7 @@ impl Cli {
 
 fn print_usage() {
     eprintln!(
-        "Usage: xiaoo-daemon [--config <path>] [--host <host>] [--port <port>]\n\
+        "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
          \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -537,6 +589,18 @@ mod tests {
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, 18080);
         assert!(!cli.help);
+    }
+
+    #[test]
+    fn parses_daemon_mcp_config_argument() {
+        let cli = Cli::parse(
+            ["--mcp-config", "/tmp/mcp.json"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("daemon should accept --mcp-config");
+
+        assert_eq!(cli.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
     }
 
     #[test]

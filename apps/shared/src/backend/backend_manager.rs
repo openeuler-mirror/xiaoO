@@ -189,7 +189,7 @@ impl BackendManager {
 
     /// Whether a backend of this `kind` participates in the shared sandbox
     /// counter / registry. Local backends are never counted.
-    fn is_counted_kind(kind: &str) -> bool {
+    pub fn is_counted_kind(kind: &str) -> bool {
         kind == "e2b" || kind == "conch"
     }
 
@@ -302,6 +302,7 @@ impl BackendManager {
                 session_ids.clone(),
                 self.process_id.clone(),
                 info.instance_id.clone(),
+                None,
             );
             self.registry.register(registry_entry).await.ok();
         }
@@ -740,6 +741,10 @@ impl BackendManager {
             child_session_id.iter().cloned().collect(),
             self.process_id.clone(),
             child_info.instance_id.clone(),
+            request
+                .initial_session_status
+                .as_ref()
+                .map(|(status, queue_depth)| (status.as_str(), *queue_depth)),
         );
         self.registry.register(registry_entry).await.ok();
 
@@ -770,6 +775,7 @@ impl BackendManager {
                 metadata: request.metadata,
                 resource_limits: request.resource_limits,
                 options: request.options,
+                initial_session_status: None,
             })
             .await?;
         let snapshot_id = checkpoint
@@ -813,6 +819,28 @@ impl BackendManager {
                             .update_activity(&existing_backend_id.0)
                             .await
                             .ok();
+                        // Re-assert the initial session status on the fast
+                        // path too. The backend may have been registered with
+                        // "idle" (e.g. created by a runtime-checkout, or reset
+                        // by a concurrent process) and would otherwise be
+                        // eligible for eviction while the upcoming turn is
+                        // in flight. Only counted kinds are tracked in the
+                        // shared registry, so skip the registry write for
+                        // local backends (avoiding needless `IN_PROCESS_LOCK`
+                        // + flock contention).
+                        if needs_counting {
+                            if let Some((status, queue_depth)) = &request.initial_session_status {
+                                self.registry
+                                    .update_session_status(
+                                        &existing_backend_id.0,
+                                        &request.session_id,
+                                        status,
+                                        *queue_depth,
+                                    )
+                                    .await
+                                    .ok();
+                            }
+                        }
                         return Ok(BackendLease::new(
                             Arc::clone(&entry.backend),
                             entry.instance.clone(),
@@ -884,6 +912,25 @@ impl BackendManager {
                 .update_activity(&existing_backend_id.0)
                 .await
                 .ok();
+            // Re-assert the initial session status here too: the backend may
+            // have been registered with "idle" while this call was waiting on
+            // the state lock, and we need the registry to reflect the
+            // upcoming turn before we hand the lease back. Skip for
+            // non-counted kinds (local backends are not in the shared
+            // registry).
+            if needs_counting {
+                if let Some((status, queue_depth)) = &request.initial_session_status {
+                    self.registry
+                        .update_session_status(
+                            &existing_backend_id.0,
+                            &request.session_id,
+                            status,
+                            *queue_depth,
+                        )
+                        .await
+                        .ok();
+                }
+            }
             return Ok(BackendLease::new(
                 Arc::clone(&entry.backend),
                 entry.instance.clone(),
@@ -937,6 +984,10 @@ impl BackendManager {
                 vec![request.session_id.clone()],
                 self.process_id.clone(),
                 instance.instance_id.0.clone(),
+                request
+                    .initial_session_status
+                    .as_ref()
+                    .map(|(status, queue_depth)| (status.as_str(), *queue_depth)),
             );
             self.registry.register(registry_entry).await.ok();
         }

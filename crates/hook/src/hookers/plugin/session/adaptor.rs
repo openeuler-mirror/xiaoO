@@ -17,11 +17,13 @@ use crate::{resolve_hook_point_category, HookPointCategory};
 /// observer hook: the only accepted result is `{"result":"ack"}`, mapped to
 /// [`SessionHookResult::Acknowledged`]. There is no `transform`/`deny` path
 /// because the event carries no mutable output. The actual lifecycle state
-/// (`"idle"`, and in the future `"running"`/`"failed"`/...) is carried in the
-/// payload's `state` field, so plugins switch on `payload.state` rather than
-/// on the hook point. Dispatch is expected to be fire-and-forget (see
-/// `CoreBackedSessionService`), so this adaptor runs the plugin command once
-/// and returns.
+/// (`"idle"` / `"failed"`) is carried in the payload's `state` field, so
+/// plugins switch on `payload.state` rather than on the hook point. The
+/// caller in the gateway layer chooses the dispatch strategy per state:
+/// `idle` is awaited so plugin-requested `actions` can be collected into
+/// `AppTurnResult.hook_actions`; `failed` is fire-and-forget and its
+/// `actions` are discarded. This adaptor itself runs the plugin command
+/// once and returns.
 pub(crate) struct PluginSessionHookerAdaptor {
     core: PluginHookerCore,
 }

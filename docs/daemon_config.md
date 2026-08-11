@@ -262,7 +262,10 @@ read = true
 glob = true
 grep = true
 
-# Context compression (CLI/Daemon only; TUI ignores [compact])
+# Context compression (CLI/Daemon only; TUI ignores [compact]).
+# This section is OPTIONAL: omit it to use the built-in defaults
+# (warning=0.6 / auto_compact=0.75 / blocking=0.9). Compression is never
+# silently disabled — a missing section yields a real ContextManager.
 [compact]
 auto_compact_ratio = 0.75
 

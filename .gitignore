@@ -18,6 +18,8 @@ __pycache__/
 
 **/tests/
 !plugins/tests/
+!crates/mcp/tests/
+!crates/tool/tests/
 
 .claude/
 .vscode/

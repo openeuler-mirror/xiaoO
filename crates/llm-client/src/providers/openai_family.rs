@@ -12,9 +12,9 @@ use crate::error::{
     map_api_status_error, map_reqwest_error, map_serde_error, parse_stream_error, LlmError,
 };
 use crate::url_fallback::{
-    build_base_url_candidates, build_final_candidates, is_configuration_error,
-    is_http_unauthorized_error, is_retryable_network_error, should_try_next_candidate,
-    write_url_fallback_error_log, UrlAttemptRecord,
+    build_base_url_candidates, build_final_candidates, build_url_fallback_error_message,
+    is_configuration_error, is_http_unauthorized_error, is_retryable_network_error,
+    should_try_next_candidate, UrlAttemptRecord,
 };
 use crate::wire_types::{ChatCompletionChunk, ParsedChunk};
 use agent_contracts::{LlmProvider, ProviderCapabilities};
@@ -50,10 +50,21 @@ impl OpenAiFamilyProvider {
         default_headers: Vec<(String, String)>,
         api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
+        // Mirror Node's convention: NODE_TLS_REJECT_UNAUTHORIZED=0 disables
+        // peer certificate verification. Useful for corporate gateways whose
+        // root CA is not in the system trust store. Any other value (or
+        // unset) keeps verification enabled.
+        let skip_tls_verify = std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
+            .map(|v| v.trim() == "0")
+            .unwrap_or(false);
+        let max_context_window = crate::models::get_known_model_context_length(&model)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(128000);
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
                 .connect_timeout(Duration::from_secs(30))
+                .danger_accept_invalid_certs(skip_tls_verify)
                 .http1_only()
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -65,7 +76,7 @@ impl OpenAiFamilyProvider {
                 supports_streaming: true,
                 supports_tool_calls: true,
                 supports_json_mode: true,
-                max_context_window: 128000,
+                max_context_window,
                 model_name: model,
             },
             api_key_provider,
@@ -88,8 +99,15 @@ impl OpenAiFamilyProvider {
     ) -> Result<serde_json::Value, LlmError> {
         let wire = llm_request_to_wire(request, &self.capabilities.model_name);
         let mut body = serde_json::to_value(&wire).map_err(map_serde_error)?;
-        if let Some(reasoning_effort) = openai_reasoning_effort(request.reasoning_effort) {
+        if let Some(reasoning_effort) =
+            reasoning_effort_for_model(&self.capabilities.model_name, request.reasoning_effort)
+        {
             body["reasoning_effort"] = serde_json::json!(reasoning_effort);
+        }
+        if request.reasoning_effort == ReasoningEffort::Off
+            && is_glm_5_2_model(&self.capabilities.model_name)
+        {
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
         }
         if force_stream {
             body["stream"] = serde_json::json!(true);
@@ -233,15 +251,19 @@ impl OpenAiFamilyProvider {
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
+            // Cursor-based SSE scanning: find each '\n' without rebuilding
+            // the buffer per line; drain the consumed prefix in place.
+            let mut start = 0;
+            while let Some(relative) = buffer[start..].find('\n') {
+                let pos = start + relative;
+                let line = &buffer[start..pos];
+                start = pos + 1;
 
                 if line.is_empty() {
                     continue;
                 }
 
-                if let Some(parsed) = parse_openai_family_stream_line(&line)? {
+                if let Some(parsed) = parse_openai_family_stream_line(line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
                     }
@@ -262,6 +284,10 @@ impl OpenAiFamilyProvider {
                     let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
                     on_chunk(stream_chunk);
                 }
+            }
+            // Drop the consumed prefix in place; no per-line allocation.
+            if start > 0 {
+                buffer.drain(..start);
             }
         }
 
@@ -323,6 +349,53 @@ fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
         ReasoningEffort::High => Some("high"),
         ReasoningEffort::Max => Some("xhigh"),
     }
+}
+
+fn reasoning_effort_for_model(model: &str, effort: ReasoningEffort) -> Option<&'static str> {
+    match effort {
+        ReasoningEffort::Off if is_gpt_5_6_model(model) => Some("none"),
+        ReasoningEffort::Off if is_kimi_k3_model(model) => None,
+        ReasoningEffort::Off if is_glm_5_2_model(model) => None,
+        ReasoningEffort::High
+            if is_gpt_5_6_model(model) || is_kimi_k3_model(model) || is_glm_5_2_model(model) =>
+        {
+            Some("high")
+        }
+        ReasoningEffort::Max
+            if is_gpt_5_6_model(model) || is_kimi_k3_model(model) || is_glm_5_2_model(model) =>
+        {
+            Some("max")
+        }
+        _ => openai_reasoning_effort(effort),
+    }
+}
+
+fn is_gpt_5_6_model(model: &str) -> bool {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .starts_with("gpt-5.6")
+}
+
+fn is_kimi_k3_model(model: &str) -> bool {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("kimi-k3")
+}
+
+fn is_glm_5_2_model(model: &str) -> bool {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("glm-5.2")
 }
 
 #[async_trait]
@@ -498,25 +571,14 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
-                    let error_msg = write_url_fallback_error_log(
-                        &self.api_base,
-                        &base_candidates,
-                        &attempts,
-                        &error,
-                    );
+                    let error_msg = build_url_fallback_error_message(&attempts);
                     return Err(LlmError::ApiError(error_msg));
                 }
             }
         }
 
         // Reachable only when `final_urls` is empty (no candidates generated).
-        let final_error = LlmError::ApiError(format!(
-            "All {} endpoint URL candidates failed",
-            final_urls.len()
-        ));
-
-        let error_msg =
-            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         Err(LlmError::ApiError(error_msg))
     }
@@ -702,25 +764,14 @@ impl LlmProvider for OpenAiFamilyProvider {
                         return Err(error);
                     }
 
-                    let error_msg = write_url_fallback_error_log(
-                        &self.api_base,
-                        &base_candidates,
-                        &attempts,
-                        &error,
-                    );
+                    let error_msg = build_url_fallback_error_message(&attempts);
                     return Err(LlmError::ApiError(error_msg));
                 }
             }
         }
 
         // Reachable only when `final_urls` is empty (no candidates generated).
-        let final_error = LlmError::ApiError(format!(
-            "All {} endpoint URL candidates failed for streaming",
-            final_urls.len()
-        ));
-
-        let error_msg =
-            write_url_fallback_error_log(&self.api_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         Err(LlmError::ApiError(error_msg))
     }
@@ -827,6 +878,116 @@ mod tests {
         let body = provider.build_body(&request, false).unwrap();
 
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn new_model_capability_uses_known_context_window() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-sol".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+
+        assert_eq!(provider.capabilities.max_context_window, 1_050_000);
+    }
+
+    #[test]
+    fn gpt_5_6_with_tools_sets_none_reasoning_effort_when_off() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-sol".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+        let request =
+            LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]).with_tools(vec![
+                agent_types::Tool {
+                    name: "lookup".to_string(),
+                    description: "Look something up".to_string(),
+                    parameters: serde_json::json!({"type": "object", "properties": {}}),
+                },
+            ]);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn gpt_5_6_without_tools_sets_none_reasoning_effort_when_off() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://api.openai.com/v1".to_string(),
+            "openai/gpt-5.6-terra".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn kimi_k3_maps_supported_reasoning_effort_values() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://api.moonshot.cn/v1".to_string(),
+            "kimi-k3".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
+            .with_reasoning_effort(ReasoningEffort::Max);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn glm_5_2_disables_thinking_when_reasoning_is_off() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            "glm-5.2".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn glm_5_2_maps_max_reasoning_effort_to_max() {
+        let provider = OpenAiFamilyProvider::new(
+            Some("test-key".to_string()),
+            "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            "z-ai/glm-5.2".to_string(),
+            OpenAiFamilyAuthStyle::Bearer,
+            vec![],
+            None,
+        );
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
+            .with_reasoning_effort(ReasoningEffort::Max);
+
+        let body = provider.build_body(&request, false).unwrap();
+
+        assert_eq!(body["reasoning_effort"], "max");
+        assert!(body.get("thinking").is_none());
     }
 
     // Regression test for the URL fallback loop: when *every* candidate URL

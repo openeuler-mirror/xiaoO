@@ -74,6 +74,10 @@ enum RemoteSseEvent {
         tool_name: String,
         output_preview: String,
         is_error: bool,
+        /// Args JSON preview for tool card rendering; `#[serde(default)]`
+        /// keeps backward compat with older daemons that omitted it.
+        #[serde(default)]
+        args_preview: String,
     },
     /// Per-call file change delta precomputed by the daemon. The TUI applies
     /// it directly to its session-diff tracker via `apply_remote_delta`,
@@ -101,6 +105,30 @@ enum RemoteSseEvent {
         title: String,
         description: String,
         task_goal: String,
+    },
+    /// Tool-lifecycle event forwarded by the daemon. `agent_id` routes
+    /// the update to the root message list or a subagent lane.
+    ToolCall {
+        agent_id: String,
+        call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        args_preview: String,
+        status: ToolCallStatus,
+        #[serde(default)]
+        detail: String,
+    },
+    /// Per-agent loop-end marker so the TUI clears `is_running` on the
+    /// matching lane. Summary fields default to zero/empty for backward
+    /// compat with older daemons.
+    LoopEnd {
+        agent_id: String,
+        #[serde(default)]
+        turn_count: u32,
+        #[serde(default)]
+        total_tokens: usize,
+        #[serde(default)]
+        stop_reason: String,
     },
     InteractionRequested {
         request: InteractionRequest,
@@ -134,7 +162,28 @@ enum RemoteSseEvent {
         #[serde(rename = "runtime_id", alias = "session_id")]
         session_id: String,
     },
+    /// Catch-all for unknown event types (e.g. from a newer daemon).
+    /// `parse_sse_frame` logs and skips these; `#[serde(other)]` keeps
+    /// the catch-all in sync with new variants automatically.
+    #[serde(other)]
+    Unknown,
 }
+
+/// Wire-format mirror of the daemon-side `ToolCallStatus`. Kept
+/// independent so the TUI does not depend on the daemon binary.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ToolCallStatus {
+    Running,
+    Completed,
+    Failed,
+    Denied,
+}
+
+const REMOTE_TOOL_COMPLETED: &str = "remote tool completed";
+const REMOTE_TOOL_FAILED: &str = "remote tool failed";
+const REMOTE_TOOL_DENIED: &str = "denied by policy";
+const REMOTE_DEFAULT_AGENT_ID: &str = "cli-agent";
 
 impl GatewayRuntime {
     pub fn configure_remote(
@@ -156,6 +205,9 @@ impl GatewayRuntime {
             .status_panel
             .set_backend(format!("Remote: {base_url}"));
         state.status_panel.set_remote_workspace(&base_url);
+        // The remote SSE protocol does not yet publish RAM-A health. Do not
+        // imply that memory is disabled merely because this TUI cannot see it.
+        state.status_panel.memory_status = crate::status_panel::MemoryStatus::Unknown;
     }
 
     pub async fn connect_remote(
@@ -203,6 +255,7 @@ impl GatewayRuntime {
             .status_panel
             .set_backend(sandbox_display_name(&state.agent_config.operation_backend));
         state.status_panel.set_workspace(&state.workspace);
+        state.status_panel.memory_status = self.session_gateway.current_memory_status();
         Ok(())
     }
 
@@ -707,18 +760,19 @@ async fn handle_remote_event(
             tool_name,
             output_preview,
             is_error,
+            args_preview,
         } => {
             let _ = updates_tx.send(SessionTurnUpdate::Tool {
-                agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
+                agent_id: AgentId(agent_id.unwrap_or_else(|| REMOTE_DEFAULT_AGENT_ID.to_string())),
                 update: ToolExecutionUpdate {
                     call_id,
                     tool: tool_name,
                     summary: if is_error {
-                        "remote tool failed".to_string()
+                        REMOTE_TOOL_FAILED.to_string()
                     } else {
-                        "remote tool completed".to_string()
+                        REMOTE_TOOL_COMPLETED.to_string()
                     },
-                    args_preview: String::new(),
+                    args_preview,
                     command_preview: None,
                     command: None,
                     detail: output_preview,
@@ -769,6 +823,69 @@ async fn handle_remote_event(
                     task_goal,
                 },
             });
+        }
+        RemoteSseEvent::ToolCall {
+            agent_id,
+            call_id,
+            tool_name,
+            args_preview,
+            status,
+            detail,
+        } => {
+            // Convert the lifecycle event into a `ToolExecutionUpdate`
+            // and let the shared apply_tool_update /
+            // apply_subagent_tool_update drive the tool-card state machine.
+            let (summary, exec_status) = match status {
+                ToolCallStatus::Running => (String::new(), ToolExecutionStatus::Running),
+                ToolCallStatus::Completed => (
+                    REMOTE_TOOL_COMPLETED.to_string(),
+                    ToolExecutionStatus::Completed,
+                ),
+                ToolCallStatus::Failed => {
+                    (REMOTE_TOOL_FAILED.to_string(), ToolExecutionStatus::Failed)
+                }
+                ToolCallStatus::Denied => {
+                    (REMOTE_TOOL_DENIED.to_string(), ToolExecutionStatus::Failed)
+                }
+            };
+            let update = ToolExecutionUpdate {
+                call_id,
+                tool: tool_name,
+                summary,
+                args_preview,
+                command_preview: None,
+                command: None,
+                detail,
+                status: exec_status,
+                exit_code: None,
+                duration_ms: None,
+                file_change: None,
+            };
+            let _ = updates_tx.send(SessionTurnUpdate::Tool {
+                agent_id: AgentId(agent_id),
+                update,
+            });
+        }
+        RemoteSseEvent::LoopEnd {
+            agent_id,
+            turn_count,
+            total_tokens,
+            stop_reason,
+        } => {
+            // Forward the per-agent `LoopEndSummary` so the TUI clears
+            // `is_running` on the matching lane.
+            let _ = updates_tx.send(SessionTurnUpdate::LoopEnd {
+                agent_id: AgentId(agent_id),
+                summary: agent_types::events::LoopEndSummary {
+                    turn_count,
+                    total_tokens,
+                    stop_reason,
+                },
+            });
+        }
+        RemoteSseEvent::Unknown => {
+            // Filtered by `parse_sse_frame` before dispatch; kept for
+            // match exhaustiveness.
         }
         RemoteSseEvent::InteractionRequested { request } => {
             let prompt = build_prompt_request(&request);
@@ -1021,9 +1138,32 @@ fn parse_sse_frame(frame: &str) -> Result<Option<RemoteSseEvent>, String> {
         return Ok(None);
     }
     let data = data_lines.join("\n");
-    serde_json::from_str(&data)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    // Single typed parse in the common case. Fall back to a Value parse
+    // only to distinguish "missing type tag" (skip) from real JSON errors,
+    // and to extract the type name for the unknown-variant debug log.
+    match serde_json::from_str::<RemoteSseEvent>(&data) {
+        Ok(RemoteSseEvent::Unknown) => {
+            let type_name = serde_json::from_str::<serde_json::Value>(&data)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_owned))
+                .unwrap_or_default();
+            tracing::debug!(
+                sse_event_type = %type_name,
+                "ignoring unknown SSE event type (likely from a newer daemon); \
+                 see docs/remote_tui.md for the event catalogue"
+            );
+            Ok(None)
+        }
+        Ok(event) => Ok(Some(event)),
+        Err(error) => {
+            let value: serde_json::Value =
+                serde_json::from_str(&data).map_err(|e| e.to_string())?;
+            if value.get("type").is_none() {
+                return Ok(None);
+            }
+            Err(error.to_string())
+        }
+    }
 }
 
 fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
@@ -1142,7 +1282,46 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sse_frame, take_sse_frame, RemoteSseEvent};
+    use std::path::PathBuf;
+    use tokio::sync::watch;
+
+    use crate::app_state::AppState;
+    use crate::gateway::MemoryAutomationHealth;
+    use crate::status_panel::MemoryStatus;
+
+    use super::{parse_sse_frame, take_sse_frame, GatewayRuntime, RemoteSseEvent};
+
+    #[test]
+    fn configuring_remote_marks_memory_state_unknown() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("test app state should initialize");
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+
+        runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Unknown);
+    }
+
+    #[tokio::test]
+    async fn disconnecting_remote_restores_cached_local_memory_health() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("test app state should initialize");
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let (_health_tx, health_rx) = watch::channel(MemoryAutomationHealth::Healthy);
+        *runtime
+            .session_gateway
+            .memory_health
+            .lock()
+            .expect("memory health lock should not be poisoned") = Some(health_rx);
+        runtime.configure_remote(&mut state, "http://daemon.example".to_string(), None);
+
+        runtime
+            .disconnect_remote(&mut state)
+            .await
+            .expect("remote disconnect should succeed");
+
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Connected);
+    }
 
     #[test]
     fn parses_sse_frame_from_split_buffer() {
@@ -1186,5 +1365,132 @@ mod tests {
     fn ignores_keepalive_frame() {
         let parsed = parse_sse_frame(": keepalive").expect("parse");
         assert!(parsed.is_none());
+    }
+
+    /// Unknown event types must not kill the SSE stream; the frame is
+    /// skipped via `Ok(None)`.
+    #[test]
+    fn ignores_unknown_event_type_instead_of_killing_stream() {
+        let parsed = parse_sse_frame(
+            "event: future_event\ndata: {\"type\":\"future_event\",\"payload\":\"...\"}",
+        )
+        .expect("parsing an unknown event type must not be a hard error");
+        assert!(parsed.is_none(), "unknown event types should be skipped");
+    }
+
+    #[test]
+    fn parses_tool_call_running_event() {
+        let parsed = parse_sse_frame(
+            "event: tool_call\ndata: {\"type\":\"tool_call\",\"agent_id\":\"child-1\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"args_preview\":\"{}\",\"status\":\"running\",\"detail\":\"\"}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::ToolCall {
+                agent_id,
+                call_id,
+                tool_name,
+                args_preview,
+                status,
+                detail,
+            } => {
+                assert_eq!(agent_id, "child-1");
+                assert_eq!(call_id, "call-1");
+                assert_eq!(tool_name, "bash");
+                assert_eq!(args_preview, "{}");
+                assert_eq!(status, super::ToolCallStatus::Running);
+                assert!(detail.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_loop_end_event() {
+        // Backward-compat: older daemons omit the summary fields
+        // (each is `#[serde(default)]`).
+        let parsed = parse_sse_frame(
+            "event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\"}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::LoopEnd {
+                agent_id,
+                turn_count,
+                total_tokens,
+                stop_reason,
+            } => {
+                assert_eq!(agent_id, "child-1");
+                assert_eq!(turn_count, 0);
+                assert_eq!(total_tokens, 0);
+                assert!(stop_reason.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Forward-compat: a newer daemon includes the summary fields on
+    /// `loop_end` and the TUI should populate them.
+    #[test]
+    fn parses_loop_end_with_summary() {
+        let parsed = parse_sse_frame(
+            "event: loop_end\ndata: {\"type\":\"loop_end\",\"agent_id\":\"child-1\",\"turn_count\":2,\"total_tokens\":512,\"stop_reason\":\"end_turn\"}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::LoopEnd {
+                agent_id,
+                turn_count,
+                total_tokens,
+                stop_reason,
+            } => {
+                assert_eq!(agent_id, "child-1");
+                assert_eq!(turn_count, 2);
+                assert_eq!(total_tokens, 512);
+                assert_eq!(stop_reason, "end_turn");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Backward-compat: older daemons omit `args_preview` on
+    /// `tool_result` (the field is `#[serde(default)]`).
+    #[test]
+    fn parses_tool_result_without_args_preview() {
+        let parsed = parse_sse_frame(
+            "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::ToolResult { args_preview, .. } => {
+                assert!(args_preview.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Forward-compat: a newer daemon includes `args_preview` on
+    /// `tool_result` and the TUI should populate the field.
+    #[test]
+    fn parses_tool_result_with_args_preview() {
+        let parsed = parse_sse_frame(
+            "event: tool_result\ndata: {\"type\":\"tool_result\",\"agent_id\":\"root\",\"call_id\":\"call-1\",\"tool_name\":\"bash\",\"output_preview\":\"done\",\"is_error\":false,\"args_preview\":\"{\\\"command\\\":\\\"ls\\\"}\"}",
+        )
+        .expect("parse")
+        .expect("event");
+
+        match parsed {
+            RemoteSseEvent::ToolResult { args_preview, .. } => {
+                assert_eq!(args_preview, "{\"command\":\"ls\"}");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

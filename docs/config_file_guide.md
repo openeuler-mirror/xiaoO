@@ -25,6 +25,78 @@ Configuration items covered in this guide:
 | `[hooker]` | Hooker configuration | [View Details](#hooker---hooker-configuration) |
 | `[operation_backend]` | CLI/TUI operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
 | `[vault]` | Encrypted secrets storage (all modes; read via `xiaoo_shared::llm_secrets`) | [View Details](#vault---encrypted-secrets-storage) |
+| `[mcp]` and `.mcp.json` | MCP client servers, including RAM-A Streamable HTTP | [View Details](#mcp---model-context-protocol-client-configuration) |
+| `[memory_automation]` | Opt-in RAM-A long-term memory recall and ingest | [View Details](#memory_automation---opt-in-long-term-memory) |
+
+---
+
+## [mcp] - Model Context Protocol Client Configuration
+
+**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+
+xiaoO can connect to stdio, legacy SSE, and Streamable HTTP MCP servers.
+For RAM-A, use a standard `.mcp.json` file so the bearer token stays in an
+environment variable:
+
+```json
+{
+  "mcpServers": {
+    "ram-a": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:18081/mcp",
+      "bearer_token_env": "RAM_A_XIAOO_TOKEN",
+      "agent_id": "xiaoo",
+      "timeout_ms": 30000
+    }
+  }
+}
+```
+
+MCP JSON lookup order is:
+
+1. `--mcp-config <path>`
+2. `XIAOO_MCP_CONFIG`
+3. workspace `.mcp.json`
+4. `~/.config/xiaoo/mcp.json`
+
+The selected file must parse and validate. Unknown fields are rejected.
+`bearer_token_env` stores only the environment variable name; never write the
+token value into JSON. RAM-A's Streamable HTTP endpoint is `/mcp` and uses
+protocol version `2025-11-25`. xiaoO owns transport headers such as `Origin`,
+`Authorization`, `X-Agent-ID`, `mcp-session-id`, and `mcp-protocol-version`;
+do not put them in `.mcp.json` `headers`.
+
+## [memory_automation] - Opt-in Long-term Memory
+
+**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+
+Automatic long-term memory is off by default. Enable it only after an MCP
+server named by `server` is configured and exposes RAM-A `memory_search` and
+`memory_ingest` tools.
+
+```toml
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 5
+recall_token_budget = 512
+context_messages = 4
+queue_path = "memory-automation-queue.jsonl"
+queue_capacity = 256
+max_retries = 5
+retry_backoff_ms = 250
+allowed_agent_roles = ["main"]
+```
+
+Before a turn, xiaoO appends bounded recalled memory as
+`<untrusted_long_term_memory>` system context and does not rewrite the user's
+original message. After a successful turn, xiaoO writes ingest work to a
+durable JSONL queue and retries with backoff. RAM-A/MCP failures degrade memory
+behavior but must not fail a normal completed reply.
+
+The TUI `Mem OK` indicator means the RAM-A connection and recent operations
+are healthy. It does not mean every role is enabled: a turn whose active role
+is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 
 ---
 
@@ -214,10 +286,12 @@ For detailed skills usage instructions, please refer to [skill_usage.md](./skill
 
 **Applicable to**: CLI ✅ | TUI ❌ | Daemon ✅
 
-> **Note**: TUI does not read `[compact]` and always runs without a compression
-> pipeline (`compression_pipeline: None` in `apps/endside/src/gateway_api/runtime_request.rs`).
-> Long TUI conversations are not auto-compacted; rely on CLI or Daemon mode when
-> you need adaptive compression.
+> **Note**: TUI does not read `[compact]`; in remote (daemon) mode the daemon
+> builds the compression pipeline from its own `[compact]` section. The
+> `[compact]` section is **optional** in both CLI and Daemon configs: when it
+> is missing, a real `ContextManager` is constructed using built-in default
+> thresholds (0.6 / 0.75 / 0.9). Compression is never silently disabled —
+> omit the section to accept the defaults.
 
 Controls context management strategy for long conversations:
 

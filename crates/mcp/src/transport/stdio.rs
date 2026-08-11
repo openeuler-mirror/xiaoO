@@ -268,6 +268,8 @@ impl McpTransport for StdioTransport {
         self.write_line(&line).await?;
         Ok(())
     }
+
+    async fn set_protocol_version(&self, _protocol_version: &str) {}
 }
 
 // Note: no custom `Drop` — `Command::kill_on_drop(true)` ensures the child is

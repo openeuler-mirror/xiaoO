@@ -1,4 +1,5 @@
 pub mod compaction;
+pub mod defaults;
 pub mod envelope;
 pub mod estimator;
 pub mod manager;
@@ -10,6 +11,13 @@ pub mod summary;
 pub use compaction::{
     CompactMode, CompactRequest, CompactionBoundary, CompactionDecision, CompactionResult,
     PartialDirection,
+};
+pub use defaults::{
+    build_context_manager, CompactOverrides, DEFAULT_AUTO_COMPACT_RATIO, DEFAULT_BLOCKING_RATIO,
+    DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_PRESERVE_RECENT_MESSAGES, DEFAULT_SNIP_PRESERVE_TAIL,
+    DEFAULT_SNIP_STALE_AFTER_MS, DEFAULT_STALE_TOOL_PAIR_AFTER_MS, DEFAULT_SUMMARY_LLM_MAX_TOKENS,
+    DEFAULT_SUMMARY_MAX_TOKENS, DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_SUMMARY_TEMPERATURE,
+    DEFAULT_WARNING_RATIO,
 };
 pub use envelope::{ContextBreakdown, ContextEnvelope, ContextSection};
 pub use estimator::{RoughTokenEstimator, RoughTokenEstimatorConfig};

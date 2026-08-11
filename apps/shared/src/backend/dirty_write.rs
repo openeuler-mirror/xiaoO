@@ -8,6 +8,7 @@ use agent_contracts::backend::{
     BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
     OperationPermissionControl, PathStat,
 };
+use agent_contracts::InteractionHandle;
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -116,6 +117,10 @@ impl OperationBackend for DirtyTrackedOperationBackend {
 
     fn export(&self) -> &dyn agent_contracts::backend::capability::export::OperationExport {
         self.inner.export()
+    }
+
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        self.inner.attach_interaction(interaction);
     }
 
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {

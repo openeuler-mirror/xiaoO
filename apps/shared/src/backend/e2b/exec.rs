@@ -655,6 +655,7 @@ mod tests {
             temp_root: BackendPath("/tmp".to_string()),
             default_shell: default_shell.map(str::to_string),
             username: None,
+            envd_file_upload_multipart: false,
             http: reqwest::Client::new(),
             lifecycle: Mutex::new(E2bLifecycle::Active),
         }))
@@ -664,10 +665,8 @@ mod tests {
         ExecRequest {
             command: command.to_string(),
             args: Vec::new(),
-            shell: None,
             cwd: Some(BackendPath("/home/user/workspace".to_string())),
-            timeout_ms: None,
-            env: None,
+            ..Default::default()
         }
     }
 

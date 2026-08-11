@@ -10,11 +10,13 @@ use agent_contracts::backend::{
     OperationPermissionControl, PathKind, PathStat, SandboxPermissionGrantId,
     SandboxPermissionGrantRequest,
 };
+use agent_contracts::InteractionHandle;
 use async_trait::async_trait;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
+#[derive(Default)]
 pub(crate) struct LocalBackendState {
     pub(crate) backend_id: String,
     pub(crate) workspace_root: BackendPath,
@@ -24,6 +26,10 @@ pub(crate) struct LocalBackendState {
     pub(crate) temp_root_host: PathBuf,
     pub(crate) default_shell: Option<String>,
     pub(crate) policy: LocalBackendPolicy,
+    /// An interaction handle used to prompt the user at runtime. It is
+    /// attached via the `attach_interaction` trait method after construction;
+    /// the handle does not exist prior to this.
+    pub(crate) interaction: RwLock<Option<Arc<dyn InteractionHandle>>>,
 }
 
 pub struct LocalOperationBackend {
@@ -70,8 +76,7 @@ impl LocalOperationBackend {
             home_dir,
             home_dir_host,
             temp_root_host: std::env::temp_dir(),
-            default_shell: None,
-            policy: LocalBackendPolicy::unrestricted(),
+            ..Default::default()
         }))
     }
 
@@ -288,6 +293,14 @@ impl OperationBackend for LocalOperationBackend {
         &self.export as &dyn OperationExport
     }
 
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        *self
+            .state
+            .interaction
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(interaction);
+    }
+
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
         Some(self)
     }
@@ -340,8 +353,7 @@ mod tests {
             home_dir,
             home_dir_host,
             temp_root_host: std::env::temp_dir(),
-            default_shell: None,
-            policy: LocalBackendPolicy::unrestricted(),
+            ..Default::default()
         }
     }
 

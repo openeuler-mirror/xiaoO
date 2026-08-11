@@ -541,15 +541,17 @@ The session state hook (section 15) does **not** support `ask_user` — it is ev
 
 ## 15. Session lifecycle state hook protocol
 
-`*.Session.lifecycle.state` is an **event-style observer** hook. It is dispatched by `CoreBackedSessionService::run_turn` in the gateway layer (not inside `agent_loop`) after a non-error root turn termination, when the session returns to the `idle` state.
+`*.Session.lifecycle.state` is an **event-style observer** hook. It is dispatched by `CoreBackedSessionService::run_turn_inner` in the gateway layer (not inside `agent_loop`) on two lifecycle state transitions: after a non-error turn termination (`"idle"`) and after a turn terminates with an error (`"failed"`).
 
 ### 15.1 Contract
 
 - The only legal result is `{"result":"ack"}` (the alias `acknowledged` is also accepted for ergonomics). Any other tag — including `transform` and the chat-hook tags `allow` / `accept` — is rejected and the hooker is treated as failed, so a plugin that mistakenly reuses a chat-hook result tag gets a loud error rather than silent acceptance.
 - There is no `transform` / `deny` path. The event carries no mutable output — plugins are observers.
-- The lifecycle state tag is carried in `payload.state`, **not** in the hook point. Today only `"idle"` is emitted (after any non-error turn termination). The `String` type is intentional so future call sites can emit `"running"` / `"failed"` / ... without changing this contract or breaking existing plugins.
-- The turn's terminal kind is carried in `payload.outcome` (`"complete"` / `"max_turns_reached"` / `"budget_exhausted"` / `"cancelled"`). It is populated for every fired event so plugins can distinguish a normal completion from a soft termination while still seeing the same `state="idle"`.
-- Dispatch is **fire-and-forget**: `run_turn` clones `session_id` / `sender_id` / `agent_id`, calls `handle.run_turn(...)`, and only if that returns `Ok` does it `tokio::spawn` a background task that invokes all registered state hookers. `run_turn` returns its original `turn_result` to the caller immediately — the spawn handle is not awaited.
+- The lifecycle state tag is carried in `payload.state`, **not** in the hook point. Two `state` values are emitted today: `"idle"` (after any non-error turn termination) and `"failed"` (after a turn that returned `Err`). The `String` type is intentional so future call sites can emit additional tags without changing this contract or breaking existing plugins.
+- The turn's terminal kind is carried in `payload.outcome`. For `state="idle"` it is one of `"complete"` / `"max_turns_reached"` / `"budget_exhausted"` / `"cancelled"` (the four `Ok` variants of `AgentOutcome`), letting plugins distinguish a normal completion from a soft termination. For `state="failed"` it is `"error"` (true failure — the failure path has no `AgentOutcome` variant).
+- Dispatch:
+  - `state="idle"`: `run_turn_inner` calls `fire_session_state_hook_and_collect_actions`, which **awaits** every registered hooker (sorted by id) under a 30s overall deadline and collects their `actions` into `AppTurnResult.hook_actions`. Awaiting is required so action execution can be bundled into the turn's `Done` SSE event before the TUI tears down the stream.
+  - `state="failed"`: `run_turn_inner` calls `fire_session_state_hook_background`, which **fire-and-forgets** the hookers via `tokio::spawn` without awaiting. There is no `AppTurnResult` to attach actions to (the turn has failed), so any `actions` requested by the plugin are intentionally discarded — chain-initiated turns only make sense after a turn terminates with `Ok`, so plugins should hook `idle` to chain.
 - Plugin errors (spawn failure, non-zero exit, invalid JSON, unsupported result) are logged via `tracing::warn!` and the loop continues to the next hooker. They never affect the turn result or downstream flows.
 - The hook is **not** wrapped in a trace span (unlike chat hooks). If you need observability, write to your own log file from inside the script.
 
@@ -582,13 +584,16 @@ The hook point sent to the plugin is constructed as `<agent_id>.Session.lifecycl
 
 That is the entire protocol. The adaptor maps it to `SessionHookResult::Acknowledged` and discards anything else.
 
-### 15.4 When `idle` is (and is not) fired
+### 15.4 When each `state` fires
 
-- Fired: after `handle.run_turn(...)` returns `Ok` — i.e. any non-error turn termination. This covers all four `AgentOutcome` variants: `Complete`, `MaxTurnsReached`, `BudgetExhausted`, and `Cancelled`. All four leave the session back in `idle` (ready for the next turn), so `state="idle"` is correct for each; the variant is distinguishable via `payload.outcome`.
-- Not fired: if `run_turn` returns an `Err`. The failure path currently emits no state event.
-- Not fired: for non-root turns or any code path that does not go through `CoreBackedSessionService::run_turn`.
+| `state` | When fired | `outcome` value | Actions collected? |
+|---|---|---|---|
+| `"idle"` | After `handle.run_turn(...)` returns `Ok` — i.e. any non-error turn termination. Covers all four `AgentOutcome` variants: `Complete`, `MaxTurnsReached`, `BudgetExhausted`, `Cancelled`. All four leave the session back in `idle` (ready for the next turn); the variant is distinguishable via `payload.outcome`. | `"complete"` / `"max_turns_reached"` / `"budget_exhausted"` / `"cancelled"` | Yes — awaited; collected into `AppTurnResult.hook_actions`. |
+| `"failed"` | After `handle.run_turn(...)` returns an `Err`. The session did not return to `idle` cleanly; the failure carries no `AgentOutcome` variant. | `"error"` | No — fire-and-forget; any `actions` requested by the plugin are discarded. |
 
-If your plugin needs to react to failures, hook a different signal today; this contract may grow new `state` values (e.g. `"failed"`) in the future, but only `idle` is currently emitted.
+Not fired for any path that does not go through `CoreBackedSessionService::run_turn_inner` (e.g. non-root turns, subagent inner steps). The hook fires only at the root-turn boundary in the gateway layer.
+
+> **Action semantics**: only the `idle` state collects and executes plugin-requested actions. Plugins that need to chain a follow-up turn (`send_prompt`) or open a new session (`create_session` / `switch_session`) must do so from the `idle` branch. The `failed` branch is a pure observer — actions it returns are silently dropped because there is no `AppTurnResult` to attach them to.
 
 ### 15.5 Minimal example
 
@@ -597,16 +602,19 @@ If your plugin needs to react to failures, hook a different signal today; this c
 const fs = require("fs");
 const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
 
-if (payload.stage === "session_state" && payload.state === "idle") {
-  // payload.outcome is one of: complete / max_turns_reached / budget_exhausted / cancelled
+if (payload.stage === "session_state") {
+  // payload.state is one of: idle / failed
+  // payload.outcome:
+  //   - idle     -> "complete" / "max_turns_reached" / "budget_exhausted" / "cancelled"
+  //   - failed   -> "error"
   fs.appendFileSync("/tmp/xiaoo-session.log",
-    `[${new Date().toISOString()}] idle: session=${payload.session_id} agent=${payload.agent_id} outcome=${payload.outcome}\n`);
+    `[${new Date().toISOString()}] ${payload.state}: session=${payload.session_id} agent=${payload.agent_id} outcome=${payload.outcome}\n`);
 }
 
 process.stdout.write(JSON.stringify({ result: "ack" }));
 ```
 
-The `state` branch is intentional — the same hooker script will keep working unchanged when future xiaoo versions emit `running` / `failed` / etc.; you simply add another `case`. Reading `payload.outcome` lets audit-style plugins tell a normal completion apart from a soft termination without switching on `state`.
+Switching on `payload.state` is intentional — the same hooker script keeps working unchanged when future xiaoo versions emit additional state tags; you simply add another branch. Reading `payload.outcome` lets audit-style plugins tell a normal completion apart from a soft termination, and distinguishes the failed state by its outcome tag.
 
 ## 16. Plugin-requested session actions
 
