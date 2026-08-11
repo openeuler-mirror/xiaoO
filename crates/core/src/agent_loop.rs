@@ -3908,24 +3908,28 @@ mod tests {
         }
 
         // --- New path sink: supports_message_delta() = true ---
+        // text/reasoning are accumulated independently so the bench can assert
+        // the delta path matches the full-snapshot path for each stream.
         #[derive(Default)]
         struct NewPathSink {
-            accumulated: Mutex<String>,
+            text: Mutex<String>,
+            reasoning: Mutex<String>,
         }
         impl LoopEventSink for NewPathSink {
             fn on_turn_start(&self, _: &AgentId, _: u32) {}
             fn on_assistant_message(&self, _: &AgentId, text: &str) {
-                // Old path fallback: used when delta support unchecked
-                *self.accumulated.lock().unwrap() = text.to_string();
+                // Full-snapshot fallback: used when delta support is unchecked
+                // or when secrets force a snapshot. Replace, not append.
+                *self.text.lock().unwrap() = text.to_string();
             }
             fn on_assistant_message_delta(&self, _: &AgentId, delta: &str) {
-                self.accumulated.lock().unwrap().push_str(delta);
+                self.text.lock().unwrap().push_str(delta);
             }
             fn on_assistant_reasoning(&self, _: &AgentId, text: &str) {
-                *self.accumulated.lock().unwrap() = text.to_string();
+                *self.reasoning.lock().unwrap() = text.to_string();
             }
             fn on_assistant_reasoning_delta(&self, _: &AgentId, delta: &str) {
-                self.accumulated.lock().unwrap().push_str(delta);
+                self.reasoning.lock().unwrap().push_str(delta);
             }
             fn supports_message_delta(&self) -> bool {
                 true
@@ -3941,9 +3945,14 @@ mod tests {
             .map(|i| {
                 let offset = (i * 7) % (chunk_base.len() - 40);
                 let text = &chunk_base[offset..offset + 40];
+                // Independent reasoning stream: different slice of the same base
+                // so the two streams carry distinct content and can be verified
+                // separately.
+                let reasoning_offset = (i * 11) % (chunk_base.len() - 40);
+                let reasoning = &chunk_base[reasoning_offset..reasoning_offset + 40];
                 StreamChunk {
                     delta_text: Some(text.to_string()),
-                    delta_reasoning: None,
+                    delta_reasoning: Some(reasoning.to_string()),
                     delta_tool_call: None,
                 }
             })
@@ -3974,6 +3983,10 @@ mod tests {
         }
 
         // ---- Measure old path (full-text clone) ----
+        // Use fresh sinks so old/new paths end in a comparable state (1× full
+        // text each); the warmup sinks accumulated 5 rounds of delta appends
+        // and are not directly comparable.
+        let old_sink = OldPathSink::default();
         let old_text = Mutex::new(String::new());
         let old_reasoning = Mutex::new(String::new());
         let old_start = Instant::now();
@@ -3985,6 +3998,7 @@ mod tests {
         let old_elapsed = old_start.elapsed();
 
         // ---- Measure new path (delta) ----
+        let new_sink = NewPathSink::default();
         let new_text = Mutex::new(String::new());
         let new_reasoning = Mutex::new(String::new());
         let new_start = Instant::now();
@@ -3994,6 +4008,21 @@ mod tests {
             );
         }
         let new_elapsed = new_start.elapsed();
+
+        // Correctness: the delta path must accumulate the same final output as
+        // the full-snapshot path for both text and reasoning. This guards
+        // against future regressions in stream_assistant_chunk's streaming
+        // semantics (empty deltas, length mismatch, text/reasoning cross-talk).
+        assert_eq!(
+            old_sink.last_text.lock().unwrap().as_str(),
+            new_sink.text.lock().unwrap().as_str(),
+            "delta path text diverges from full-snapshot path"
+        );
+        assert_eq!(
+            old_sink.last_reasoning.lock().unwrap().as_str(),
+            new_sink.reasoning.lock().unwrap().as_str(),
+            "delta path reasoning diverges from full-snapshot path"
+        );
 
         let old_us = old_elapsed.as_micros();
         let new_us = new_elapsed.as_micros();
