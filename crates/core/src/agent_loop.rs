@@ -1287,9 +1287,19 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
 
-    // Extract secrets from message history to filter in assistant messages
+    // Extract secrets from message history to filter in assistant messages.
+    // Redaction is display-only (history/snapshots hold raw secrets anyway);
+    // when the flag is off (local TUI default), pass an empty slice so the
+    // delta fast path streams unfiltered and the post-stream correction is a
+    // no-op. The daemon inherits `redact_secrets_display = true` from
+    // FeatureFlags::default(), keeping its SSE path always-redacted.
     let messages = ctx.state.messages.read().clone();
-    let secrets = extract_secrets_from_messages(&messages);
+    let all_secrets = extract_secrets_from_messages(&messages);
+    let secrets: &[String] = if ctx.snapshot.feature_flags.redact_secrets_display {
+        &all_secrets
+    } else {
+        &[]
+    };
 
     let runtime_view = ctx.input.runtime_view.as_deref();
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
@@ -4159,5 +4169,19 @@ mod tests {
         }
 
         assert_eq!(sink.reasoning.lock().unwrap().as_str(), "Thinking <SECRET> done");
+    }
+
+    /// The daemon/SSE path inherits `FeatureFlags::default()` (it never
+    /// overrides `redact_secrets_display`), so the default must stay `true`
+    /// to keep the remote stream always-redacted. The local TUI overrides
+    /// this from its own config (default `false`); see the endside crate's
+    /// `TuiConfig` test. Guarding this default here prevents a future change
+    /// from silently disabling remote redaction.
+    #[test]
+    fn feature_flags_default_redacts_secrets_for_daemon() {
+        assert!(
+            FeatureFlags::default().redact_secrets_display,
+            "FeatureFlags::default() must redact secrets (daemon inherits this)"
+        );
     }
 }

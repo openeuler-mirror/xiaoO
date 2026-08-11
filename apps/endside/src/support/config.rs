@@ -76,6 +76,12 @@ pub struct TuiConfig {
     pub remote: Option<RemoteConfig>,
     #[serde(default)]
     pub agent_order: Vec<String>,
+    /// Redact secrets echoed by the assistant in the TUI display. Default
+    /// `false` (local TUI shows the transcript as-is); set `true` for
+    /// shoulder-surf protection. Only affects the display sink — raw secrets
+    /// remain in history/snapshots regardless.
+    #[serde(default = "default_false")]
+    pub redact_secrets_display: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -524,7 +530,7 @@ pub fn resolve_context_window(config: &Config) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{require_tui_bootstrap_config, resolve_context_window, Config};
+    use super::{require_tui_bootstrap_config, resolve_context_window, Config, TuiConfig};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -697,5 +703,16 @@ kind = "local"
         let error = require_tui_bootstrap_config(Some(config), Path::new("/tmp/config.toml"))
             .expect_err("builtin plan override should fail");
         assert!(format!("{error:?}").contains("builtin"));
+    }
+
+    /// The local TUI defaults `redact_secrets_display` to `false` (show the
+    /// transcript as-is); users opt into shoulder-surf protection via
+    /// `[tui] redact_secrets_display = true`. This asymmetric default (vs
+    /// `FeatureFlags::default() = true`, which the daemon inherits) is what
+    /// makes the local TUI default-off while the remote path stays always-on.
+    #[test]
+    fn tui_config_default_does_not_redact_secrets() {
+        assert_eq!(TuiConfig::default().redact_secrets_display, false);
+        assert_eq!(Config::default().tui.redact_secrets_display, false);
     }
 }
