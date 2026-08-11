@@ -714,7 +714,10 @@ pub fn create_mcp_router(
             Default::default(),
             StreamableHttpServerConfig::default()
                 .disable_allowed_hosts()
-                .with_sse_keep_alive(None),
+                .with_sse_keep_alive(None)
+                // 禁用 priming 事件（sse_retry 会输出 `retry: 3000` 帧），
+                // 某些 MCP 客户端（如 Java SDK）的 SSE 解析器无法识别该字段。
+                .with_sse_retry(None),
         );
     let agent_state = state;
     let agent_service: StreamableHttpService<AgentMcpServer, LocalSessionManager> =
@@ -723,7 +726,9 @@ pub fn create_mcp_router(
             Default::default(),
             StreamableHttpServerConfig::default()
                 .disable_allowed_hosts()
-                .with_sse_keep_alive(None),
+                .with_sse_keep_alive(None)
+                // 同上：禁用 priming 事件，保证与严格 SSE 解析器的兼容性。
+                .with_sse_retry(None),
         );
 
     let allowed_origins: Arc<HashSet<String>> =
