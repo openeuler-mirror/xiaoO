@@ -76,7 +76,7 @@ impl Hooker for BuiltinHelloWorldPreHooker {
 #[async_trait]
 impl PreToolHook for BuiltinHelloWorldPreHooker {
     async fn hook(&self, _input: &PreToolHookInput, _runtime: &dyn RuntimeView) -> PreHookResult {
-        println!("Hook trigered at {}", &self.hook_point.0);
+        tracing::info!("Hook triggered at {}", &self.hook_point.0);
         PreHookResult::Allow
     }
 }

@@ -12,4 +12,4 @@ mod utils;
 pub(crate) use utils::{find_substring_from, paste_into_input, scroll_offset_from_drag};
 
 #[cfg(test)]
-pub(crate) use transcript::build_transcript_cache;
+pub(crate) use transcript::{build_transcript_cache, wrap_line_to_visual_lines};

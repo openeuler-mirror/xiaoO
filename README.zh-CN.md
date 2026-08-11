@@ -91,6 +91,22 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 
 该构建脚本可以安装 `audit_agent` hooker，用于审计工具执行中的高风险操作。插件安装与使用请参考 [docs/plugins.md](./docs/plugins.md)。
 
+### Docker
+
+基于代码仓构建一个同时包含 `xiaoo` 和 `xiaoo-daemon` 的镜像。镜像**不内置**
+`config.toml`，运行时通过 `XIAOO_CONFIG` 指向你挂载的配置文件：
+
+```bash
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 -p 28081:28081 \
+  -v $PWD/my.toml:/cfg.toml:ro \
+  -e XIAOO_CONFIG=/cfg.toml \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  xiaoo:latest
+```
+
+容器默认启动 `xiaoo-daemon`。传入 `xiaoo` 进入 TUI（`docker run -it xiaoo:latest xiaoo`），或 `xiaoo --cli run -p "..."` 进行一次性 CLI 调用。完整说明见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
+
 ## 快速开始
 
 创建 `~/.config/xiaoo/config.toml`：
@@ -244,6 +260,7 @@ HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选
 - [Remote TUI](./docs/remote_tui.md)
 - [Feishu Deployment](./docs/feishu_deploy.md)
 - [Telegram Deployment](./docs/telegram_deploy.md)
+- [Docker 容器化部署](./docs/docker_deploy.md)
 
 ## 许可证
 

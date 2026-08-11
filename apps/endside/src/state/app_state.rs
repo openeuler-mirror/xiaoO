@@ -11,6 +11,7 @@ use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::render::markdown::MarkdownIncrementalState;
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::services::input_history::load_input_history;
@@ -79,6 +80,11 @@ impl SandboxDialog {
                 name: "Bubblewrap",
                 description: "Linux bubblewrap + local file policy。",
             });
+            options.push(SandboxOption {
+                id: "dynsandbox",
+                name: "Dyn-Sandbox",
+                description: "Linux dynsandbox + local file policy。",
+            });
         }
         let selected = options
             .iter()
@@ -120,32 +126,118 @@ pub struct SubagentOpenTarget {
 
 #[derive(Clone)]
 pub struct CachedMessageRender {
-    pub revision: u64,
     pub width: u16,
-    pub theme: Theme,
     pub lines: Vec<Line<'static>>,
+    pub wrapped_lines: Option<Vec<Vec<Line<'static>>>>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
+    /// `Some(n)` for the active streaming assistant message rendered via the
+    /// incremental markdown path: `lines` / `wrapped_lines` contain the
+    /// SUFFIX only (the frozen prefix of `n` logical lines is moved from the
+    /// previous tick's block by `build_transcript_cache`). `None` for every
+    /// other message — `lines` is the complete output.
+    pub frozen_prefix_line_count: Option<usize>,
 }
 
+/// Per-message visual render block stored inside [`TranscriptRenderCache`].
+///
+/// Non-dirty messages move their `lines` / `visual_lines` from the previous
+/// tick's cache into the new one (zero `Line` clone); only dirty messages
+/// re-wrap. `logical_to_visual_offset[i]` is the local visual row where
+/// logical line `i` begins within this block — kept so the flat
+/// `logical_line_visual_starts` index can be rebuilt without re-walking the
+/// (moved) `visual_lines`.
 #[derive(Clone)]
-pub struct CachedMessageLayout {
+pub struct MessageVisualBlock {
     pub message_index: usize,
     pub start_visual_row: usize,
+    pub logical_line_start: usize,
+    pub lines: Vec<Line<'static>>,
+    pub visual_lines: Vec<Line<'static>>,
+    pub logical_to_visual_offset: Vec<usize>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
 #[derive(Clone)]
 pub struct TranscriptRenderCache {
-    pub all_lines: Vec<Line<'static>>,
-    pub visual_lines: Vec<Line<'static>>,
-    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
-    pub line_texts: Vec<String>,
-    pub line_is_header: Vec<bool>,
+    pub message_blocks: Vec<MessageVisualBlock>,
+    /// Flat index: visual row where each logical line begins (global).
+    /// Rebuilt each tick from `message_blocks` (O(n_logical), no `Line` clone).
     pub logical_line_visual_starts: Vec<usize>,
-    pub message_layouts: Vec<CachedMessageLayout>,
+    /// Flat per-logical-line plain text (mouse / selection copy source).
+    pub line_texts: Vec<String>,
+    /// Flat per-logical-line "is role/tool header" flag.
+    pub line_is_header: Vec<bool>,
+    /// Flat per-visual-line background colour (`paint_visible_line_backgrounds`).
+    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
     pub total_lines: usize,
+}
+
+impl TranscriptRenderCache {
+    /// Number of logical lines across all blocks.
+    pub fn logical_line_count(&self) -> usize {
+        self.line_texts.len()
+    }
+
+    /// Borrow a single visual line by global visual row index.
+    pub fn visual_line(&self, visual_row: usize) -> Option<&Line<'static>> {
+        if visual_row >= self.total_lines {
+            return None;
+        }
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.start_visual_row <= visual_row)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = visual_row - block.start_visual_row;
+        block.visual_lines.get(local)
+    }
+
+    /// Borrow a single logical line by global logical line index.
+    pub fn logical_line(&self, logical_idx: usize) -> Option<&Line<'static>> {
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.logical_line_start <= logical_idx)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = logical_idx - block.logical_line_start;
+        block.lines.get(local)
+    }
+
+    /// Collect the visible visual-line window `[scroll_offset, visual_end)`
+    /// by cloning only the relevant slices from `message_blocks`. This is the
+    /// sole remaining `Line` clone site per frame, bounded by `inner_height`
+    /// instead of the full transcript.
+    pub fn collect_visible_visual_lines(
+        &self,
+        scroll_offset: usize,
+        visual_end: usize,
+    ) -> Vec<Line<'static>> {
+        if scroll_offset >= visual_end || scroll_offset >= self.total_lines {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(visual_end.saturating_sub(scroll_offset));
+        let mut row = scroll_offset;
+        while row < visual_end && row < self.total_lines {
+            let block_idx = self
+                .message_blocks
+                .partition_point(|b| b.start_visual_row <= row)
+                .saturating_sub(1);
+            let Some(block) = self.message_blocks.get(block_idx) else {
+                break;
+            };
+            let local = row - block.start_visual_row;
+            let block_remaining = block.visual_lines.len().saturating_sub(local);
+            let take = block_remaining.min(visual_end - row);
+            if take == 0 {
+                break;
+            }
+            out.extend(block.visual_lines[local..local + take].iter().cloned());
+            row += take;
+        }
+        out
+    }
 }
 
 #[derive(Default)]
@@ -153,7 +245,27 @@ pub struct RenderState {
     pub messages_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
     pub api_key_toggle_area: Option<Rect>,
-    pub message_renders: Vec<Option<CachedMessageRender>>,
+    /// Per-message last-applied `render_revision`. `None` means "not yet
+    /// rendered" (dirty). Replaces the former `message_renders:
+    /// Vec<Option<CachedMessageRender>>` — we now keep only the revision
+    /// fingerprint instead of the full render tree, and the render itself
+    /// lives inside `TranscriptRenderCache::message_blocks`.
+    pub message_render_revisions: Vec<Option<u64>>,
+    /// Incremental markdown render state for the single active streaming
+    /// message. Only one message streams at a time; invalidated on width /
+    /// theme / transcript changes (see `render_chat`). `None` for every
+    /// non-streaming message.
+    pub incremental_markdown: Option<MarkdownIncrementalState>,
+    /// Message index that `incremental_markdown` was produced for. When the
+    /// active streaming index moves (stream settles / switches), the state
+    /// is cleared so a stale cache is never reused.
+    pub incremental_markdown_index: Option<usize>,
+    /// Width used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-wrap).
+    pub last_render_width: Option<u16>,
+    /// Theme used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-style).
+    pub last_render_theme: Option<Theme>,
     pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub subagent_open_regions: Vec<SubagentOpenRegion>,
@@ -166,6 +278,19 @@ pub struct RenderState {
     /// Inner (content) area of the input box, used for mouse drag-select.
     pub input_area: Option<Rect>,
     pub active_transcript_key: Option<String>,
+    /// Cached terminal area for layout reuse across ticks.
+    /// When `frame.area()` matches `cached_area`, layout splits are skipped.
+    pub cached_area: Option<Rect>,
+    /// Cached vertical layout chunks (header, body, input, status).
+    pub cached_chunks: Vec<Rect>,
+    /// Cached body chunks (chat, sidebar).
+    pub cached_body_chunks: Vec<Rect>,
+    /// Cached sidebar visibility computed from last layout.
+    ///
+    /// Depends on `AppState::plan_state.is_some()` (at terminal widths
+    /// 60..=71); a Some<->None transition must invalidate `cached_area` so the
+    /// body split is recomputed. See `apply_todo_snapshot`.
+    pub cached_show_sidebar: bool,
 }
 
 #[derive(Default)]
@@ -192,7 +317,6 @@ pub struct AppState {
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub cron_dialog: Option<crate::cron_dialog::CronDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
-    pub loading_tick: usize,
     pub agent_config: Config,
     pub active_agent_role: Option<String>,
     pub reasoning_effort: ReasoningEffort,
@@ -239,7 +363,6 @@ impl AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            loading_tick: 0,
             agent_config: Config::default(),
             active_agent_role: None,
             reasoning_effort: Config::default().llm.reasoning_effort,
@@ -288,7 +411,6 @@ impl AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            loading_tick: 0,
             agent_config: config.clone(),
             active_agent_role: None,
             reasoning_effort: config.llm.reasoning_effort,
@@ -326,7 +448,6 @@ impl AppState {
         self.session_snapshot_dialog = None;
         self.delete_dialog = None;
         self.api_key_dialog = None;
-        self.loading_tick = 0;
         self.session_messages.clear();
         self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
@@ -462,7 +583,9 @@ impl AppState {
     }
 
     pub fn invalidate_transcript_render_cache(&mut self) {
-        self.render_state.message_renders.clear();
+        self.render_state.message_render_revisions.clear();
+        self.render_state.last_render_width = None;
+        self.render_state.last_render_theme = None;
         self.render_state.transcript_cache = None;
         self.render_state.tool_toggle_regions.clear();
         self.render_state.subagent_open_regions.clear();
@@ -904,6 +1027,7 @@ pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
     match isolation.get("kind").and_then(|value| value.as_str()) {
         Some("macos_seatbelt") => "seatbelt",
         Some("linux_bubblewrap") => "bubblewrap",
+        Some("linux_dynsandbox") => "dynsandbox",
         _ => "local",
     }
 }
@@ -923,6 +1047,7 @@ pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'
     {
         Some("macos_seatbelt") => "Seatbelt",
         Some("linux_bubblewrap") => "Bubblewrap",
+        Some("linux_dynsandbox") => "Dyn-Sandbox",
         _ => "Local",
     }
 }
@@ -957,6 +1082,15 @@ pub(crate) fn sandbox_backend_config(
                 "isolation".to_string(),
                 serde_json::json!({
                     "kind": "linux_bubblewrap"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        "dynsandbox" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "linux_dynsandbox"
                 }),
             );
             Some(GatewayBackendConfig::new("local", options))
@@ -1067,6 +1201,20 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_dyn_sandbox() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/bash"}),
+        ));
+
+        let updated = sandbox_backend_config("dynsandbox", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/bash");
+        assert_eq!(updated.options["isolation"]["kind"], "linux_dynsandbox");
+    }
+
+    #[test]
     fn sandbox_helpers_recognize_bubblewrap() {
         let mut config = Config::default();
         config.operation_backend = Some(GatewayBackendConfig::new(
@@ -1078,6 +1226,21 @@ mod tests {
         assert_eq!(
             sandbox_display_name(&config.operation_backend),
             "Bubblewrap"
+        );
+    }
+
+    #[test]
+    fn sandbox_helpers_recognize_dyn_sandbox() {
+        let mut config = Config::default();
+        config.operation_backend = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"isolation": {"kind": "linux_dynsandbox"}}),
+        ));
+
+        assert_eq!(current_sandbox_id(&config), "dynsandbox");
+        assert_eq!(
+            sandbox_display_name(&config.operation_backend),
+            "Dyn-Sandbox"
         );
     }
 

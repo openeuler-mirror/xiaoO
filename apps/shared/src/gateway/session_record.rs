@@ -21,6 +21,38 @@ pub enum SessionLifecycleStatus {
     Closed,
 }
 
+impl SessionLifecycleStatus {
+    /// Snake-case wire tag for `*.Session.lifecycle.state` payloads
+    /// (matches the serde renaming). Use this instead of hardcoded
+    /// literals so the wire contract stays in sync with the enum.
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Failed => "failed",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+/// Terminal-kind tag for the `outcome` field of `*.Session.lifecycle.state`
+/// payloads when the state has no [`TurnOutcome`][super::turns::TurnOutcome]
+/// tag (today: only `state="failed"` → `Error`). `idle` uses
+/// `TurnOutcome::as_tag()` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStateOutcome {
+    Error,
+}
+
+impl SessionStateOutcome {
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentRoleRecord {
     pub role_id: String,

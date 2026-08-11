@@ -4,6 +4,9 @@ pub mod channel_interaction;
 pub mod decrypted_api_keys;
 mod e2b_runtime;
 pub mod hosted_runtime_resolver;
+pub mod memory_automation;
+#[cfg(test)]
+mod memory_automation_test;
 pub mod pending_interaction;
 pub mod permission_backend;
 pub mod progress_updates;
@@ -36,6 +39,9 @@ pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
 pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
+pub use memory_automation::{
+    McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationHealth, TurnMemoryAutomation,
+};
 pub use progress_updates::ChannelProgressRelayHandle;
 pub use session_base::{
     channel_session_id, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest,
@@ -46,8 +52,8 @@ pub use session_base::{
 };
 pub use session_record::{
     RuntimeBootstrapBinding, RuntimeBootstrapSkill, SessionAgentRecord, SessionLifecycleStatus,
-    SessionRecord, SessionRuntimeSnapshot, E2B_BOOTSTRAP_MANIFEST_VERSION, E2B_REMOTE_SKILLS_ROOT,
-    E2B_REMOTE_WORKSPACE_ROOT,
+    SessionRecord, SessionRuntimeSnapshot, SessionStateOutcome, E2B_BOOTSTRAP_MANIFEST_VERSION,
+    E2B_REMOTE_SKILLS_ROOT, E2B_REMOTE_WORKSPACE_ROOT,
 };
 pub use session_runtime::{
     AppRuntimeAssembly, AppRuntimeFactory, AppRuntimeFactoryError, ResolvedSessionRuntime,

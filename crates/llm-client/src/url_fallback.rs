@@ -1,11 +1,11 @@
 use agent_types::LlmError;
 use std::collections::HashSet;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
 
 pub fn build_base_url_candidates(original_base: &str) -> Vec<String> {
     let base = original_base.trim_end_matches('/');
+    if is_chat_completions_endpoint(base) {
+        return vec![base.to_string()];
+    }
     let mut candidates = Vec::new();
 
     // B1: 用户原始配置（最高优先级）
@@ -50,6 +50,9 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     for base in base_candidates {
+        if is_chat_completions_endpoint(base) {
+            continue;
+        }
         let paths = build_endpoint_paths(base);
         for path in paths {
             let url = format!("{}{}", base.trim_end_matches('/'), path);
@@ -63,6 +66,14 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     final_urls
+}
+
+fn is_chat_completions_endpoint(base: &str) -> bool {
+    base.split(['?', '#'])
+        .next()
+        .unwrap_or(base)
+        .trim_end_matches('/')
+        .ends_with("/chat/completions")
 }
 
 fn has_version_path(base: &str) -> bool {
@@ -253,86 +264,24 @@ pub fn should_try_next_candidate(error: &LlmError) -> bool {
     is_endpoint_path_error(error)
 }
 
-pub fn write_url_fallback_error_log(
-    original_base: &str,
-    base_candidates: &[String],
-    attempts: &[UrlAttemptRecord],
-    final_error: &LlmError,
-) -> String {
-    let log_path = get_error_log_path();
-
-    if let Some(parent) = log_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("Failed to create error log directory: {}", e);
-        }
-    }
-
+/// Build a one-string error message summarizing why every URL candidate
+/// failed. The returned string is wrapped into `LlmError::ApiError` and
+/// ultimately written to `~/.xiaoo/log/error.log` by the TUI layer's
+/// `remote_input` handler (`apps/endside/src/support/error_log.rs`), so this
+/// function deliberately does NOT touch the log file itself to avoid
+/// producing a duplicate `source=url_fallback` entry next to the
+/// `source=remote_input` one.
+pub fn build_url_fallback_error_message(attempts: &[UrlAttemptRecord]) -> String {
     let mut error_message = format!("All {} endpoint URL candidates failed:\n", attempts.len());
-
-    match OpenOptions::new().create(true).append(true).open(&log_path) {
-        Ok(mut file) => {
-            let timestamp = chrono::Local::now().to_rfc3339();
-
-            writeln!(file, "===== {} source=url_fallback =====", timestamp).ok();
-            writeln!(file, "Original API Base: {}", original_base).ok();
-            writeln!(file).ok();
-
-            writeln!(file, "Base URL Candidates Tried:").ok();
-            for (idx, base) in base_candidates.iter().enumerate() {
-                writeln!(file, "  B{}: {}", idx + 1, base).ok();
-            }
-            writeln!(file).ok();
-
-            writeln!(file, "All Attempts Failed:").ok();
-            for attempt in attempts {
-                writeln!(
-                    file,
-                    "  #{} ({}): {}",
-                    attempt.index + 1,
-                    attempt.url,
-                    attempt.error
-                )
-                .ok();
-                error_message.push_str(&format!(
-                    "  #{}: {} → {}\n",
-                    attempt.index + 1,
-                    attempt.url,
-                    attempt.error
-                ));
-            }
-            writeln!(file).ok();
-
-            writeln!(file, "Final Error: {}", final_error).ok();
-            writeln!(file).ok();
-
-            writeln!(file, "Suggestions:").ok();
-            writeln!(file, "  • Check if API base URL is correct and accessible").ok();
-            let test_url = {
-                let base = base_candidates.get(1).unwrap_or(&base_candidates[0]);
-                if base.ends_with("/v1") || base.contains("/v1/") {
-                    format!("{}{}", base.trim_end_matches('/'), "/models")
-                } else {
-                    format!("{}{}", base.trim_end_matches('/'), "/v1/models")
-                }
-            };
-            writeln!(file, "  • Test endpoint manually: curl -v {}", test_url).ok();
-            writeln!(file, "  • Verify API key environment variable is set").ok();
-            writeln!(file, "  • Check ~/.xiaoo/log/error.log for detailed error").ok();
-            writeln!(file).ok();
-        }
-        Err(e) => {
-            tracing::error!("Failed to write error log: {}", e);
-        }
+    for attempt in attempts {
+        error_message.push_str(&format!(
+            "  #{}: {} → {}\n",
+            attempt.index + 1,
+            attempt.url,
+            attempt.error
+        ));
     }
-
-    error_message.push_str("Details logged to ~/.xiaoo/log/error.log");
     error_message
-}
-
-fn get_error_log_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".xiaoo").join("log").join("error.log"))
-        .unwrap_or_else(|| PathBuf::from(".xiaoo_error.log"))
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +398,22 @@ mod tests {
         assert_eq!(final_urls.len(), 2);
         assert_eq!(final_urls[0], "http://example.com/v1");
         assert_eq!(final_urls[1], "http://example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn full_chat_completions_endpoint_is_not_extended_again() {
+        for endpoint in [
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions/",
+            "https://api.example.com/v1/chat/completions?api-version=2026-01-01",
+        ] {
+            let expected = endpoint.trim_end_matches('/');
+            let bases = build_base_url_candidates(endpoint);
+            assert_eq!(bases, vec![expected]);
+
+            let final_urls = build_final_candidates(&bases);
+            assert_eq!(final_urls, vec![expected]);
+        }
     }
 
     #[test]
@@ -603,11 +568,6 @@ mod tests {
 
     #[test]
     fn test_error_message_generation() {
-        let original_base = "http://wrong.endpoint.com";
-        let base_candidates = vec![
-            "http://wrong.endpoint.com".to_string(),
-            "http://wrong.endpoint.com/v1".to_string(),
-        ];
         let attempts = vec![
             UrlAttemptRecord {
                 index: 0,
@@ -620,15 +580,16 @@ mod tests {
                 error: "Connection timeout".to_string(),
             },
         ];
-        let final_error = LlmError::ApiError("All candidates failed".to_string());
 
-        let error_msg =
-            write_url_fallback_error_log(original_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         assert!(error_msg.contains("All 2 endpoint URL candidates failed"));
-        assert!(error_msg.contains("http://wrong.endpoint.com"));
-        assert!(error_msg.contains("~/.xiaoo/log/error.log"));
         assert!(error_msg.contains("http://wrong.endpoint.com/chat/completions"));
+        assert!(error_msg.contains("HTTP 404"));
+        assert!(error_msg.contains("Connection timeout"));
+        // The log-file-writing tail was removed; the TUI layer's
+        // `remote_input` handler owns the single persisted copy now.
+        assert!(!error_msg.contains("~/.xiaoo/log/error.log"));
     }
 
     #[test]

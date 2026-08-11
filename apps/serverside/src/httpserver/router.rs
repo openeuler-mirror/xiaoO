@@ -2,7 +2,9 @@ use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRunti
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
-use crate::httpserver::sse_sink::{sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent};
+use crate::httpserver::sse_sink::{
+    sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent, SseToolEventSink,
+};
 use crate::httpserver::GatewayServiceError;
 use agent_contracts::InteractionHandle;
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -314,6 +316,18 @@ impl RemoteInteractionStore {
             .map(|tx| tx.send(response).is_ok())
             .unwrap_or(false)
     }
+
+    /// Drop the pending `oneshot::Sender` for `session_id` without sending
+    /// a response. Called by `RemoteSseInteractionHandle::abort_pending`
+    /// when the gateway's defensive outer `interaction_timeout` fires
+    /// before the user replied: the `ask` future (which held the
+    /// `Receiver`) has already been dropped by `tokio::select!`, so this
+    /// just removes the orphaned `Sender` so a late user reply via
+    /// [`answer`](Self::answer) returns `false` (instead of finding a
+    /// stale entry whose `Sender` would silently fail to deliver).
+    async fn cancel(&self, session_id: &str) {
+        self.pending.lock().await.remove(session_id);
+    }
 }
 
 struct RemoteSseInteractionHandle {
@@ -334,6 +348,13 @@ impl InteractionHandle for RemoteSseInteractionHandle {
             Ok(response) => response,
             Err(_) => default_interaction_response(request),
         }
+    }
+
+    /// Releases the orphaned pending entry via `store.cancel` so a late
+    /// user reply (via the SSE `/interaction/respond` route) returns `false`
+    /// instead of being silently swallowed by a stale `Sender`.
+    async fn abort_pending(&self, _request: &InteractionRequest) {
+        self.store.cancel(&self.session_id).await;
     }
 }
 
@@ -449,6 +470,10 @@ fn create_router_from_state(
             .route(
                 "/api/v1/runtimes/write-file",
                 post(handle_runtime_write_file),
+            )
+            .route(
+                "/api/v1/runtimes/export/:session_id",
+                get(handle_session_export),
             ),
         bearer_auth.clone(),
     );
@@ -752,7 +777,11 @@ async fn stream_session_input(
             subagent_forwarder as Arc<dyn SubagentMetaForwarder>,
         ));
     let diff_tool_sink: Arc<dyn agent_contracts::ToolEventSink> =
-        Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)));
+        Arc::new(SseToolEventSink::with_inner(
+            tx.clone(),
+            Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)))
+                as Arc<dyn agent_contracts::ToolEventSink>,
+        ));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
         session_id: session_id.clone(),
         tx: tx.clone(),
@@ -1029,6 +1058,32 @@ async fn handle_runtime_checkout(
     // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
         Ok(result) => Json(result).into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_session_export(
+    State(state): State<Arc<GatewayAppState>>,
+    Path(session_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // Export returns the full SessionRecord (history, memory, agent state,
+    // resolved LLM config). Restrict it to the current lease holder,
+    // consistent with read_file/pause.
+    let client_id = query.get("client_id").map(String::as_str);
+    if let Err(response) = require_lease_holder(&state, &session_id, client_id).await {
+        return response;
+    }
+    match state.session_service.export_session(&session_id).await {
+        Ok(mut session_data) => {
+            // Drop the resolved LLM auth field from the export: the daemon
+            // resolves it from the runtime store per request, so it is not
+            // needed in the payload and should not be surfaced to callers.
+            if let Some(llm) = session_data.runtime.llm.as_mut() {
+                llm.api_key = None;
+            }
+            Json(session_data).into_response()
+        }
         Err(error) => map_session_error(error),
     }
 }

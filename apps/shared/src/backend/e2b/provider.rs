@@ -95,6 +95,9 @@ struct E2bProviderOptions {
     temp_root: Option<String>,
     #[serde(alias = "defaultShell")]
     default_shell: Option<String>,
+    /// `multipart` for legacy envd; omitted or any other value keeps octet-stream.
+    #[serde(alias = "envdFileUpload")]
+    envd_file_upload: Option<String>,
     username: Option<String>,
     metadata: Option<BTreeMap<String, String>>,
     #[serde(alias = "envVars")]
@@ -240,6 +243,10 @@ pub(crate) async fn create_backend(
                 .unwrap_or_else(|| DEFAULT_SHELL.to_string()),
         ),
         username: options.username.filter(|value| !value.trim().is_empty()),
+        envd_file_upload_multipart: options
+            .envd_file_upload
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("multipart")),
         http,
         lifecycle: Mutex::new(E2bLifecycle::Active),
     });
@@ -989,10 +996,9 @@ mod tests {
                         r"W\s*=".to_string(),
                         "grep-smoke.py".to_string(),
                     ],
-                    shell: None,
                     cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
                     timeout_ms: Some(30_000),
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|error| format!("execute structured grep: {error}"))?;

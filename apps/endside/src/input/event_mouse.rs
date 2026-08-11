@@ -420,7 +420,7 @@ fn mouse_to_line_col(
     let Some(cache) = cache else {
         return (0, 0);
     };
-    if cache.line_texts.is_empty() || cache.visual_lines.is_empty() {
+    if cache.line_texts.is_empty() || cache.total_lines == 0 {
         return (0, 0);
     }
 
@@ -432,7 +432,7 @@ fn mouse_to_line_col(
     let col_in_content = column.saturating_sub(area.x.saturating_add(1)) as usize;
 
     // Past all visual lines – clamp to the last character of the last logical line.
-    if visual_row >= cache.visual_lines.len() {
+    if visual_row >= cache.total_lines {
         let last_idx = cache.line_texts.len() - 1;
         let last_col = cache.line_texts[last_idx].chars().count();
         return (last_idx, last_col);
@@ -467,7 +467,10 @@ fn mouse_to_line_col(
     // clicked row itself, only align to its start position.
     let mut char_offset = 0usize;
     for v in line_start_visual..=visual_row {
-        let visual_text: String = cache.visual_lines[v]
+        let Some(visual_line) = cache.visual_line(v) else {
+            continue;
+        };
+        let visual_text: String = visual_line
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -484,8 +487,11 @@ fn mouse_to_line_col(
 
     // Walk the clicked visual row's spans to find the char at `col_in_content`
     // display columns.
+    let clicked_visual_line = cache
+        .visual_line(visual_row)
+        .expect("visual_row is in range (checked above)");
     let char_idx_within_visual =
-        visual_line_char_at_display_col(&cache.visual_lines[visual_row], col_in_content);
+        visual_line_char_at_display_col(clicked_visual_line, col_in_content);
 
     (logical_idx, char_offset + char_idx_within_visual)
 }
@@ -557,11 +563,25 @@ mod tests {
     use super::input_char_index_at;
     use super::mouse_to_line_col;
     use crate::app_state::CachedMessageRender;
-    use crate::render::build_transcript_cache;
+    use crate::render::{build_transcript_cache, wrap_line_to_visual_lines};
     use crate::selection::TranscriptSelection;
-    use crate::theme::Theme;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
+
+    fn cached(lines: Vec<Line<'static>>, width: u16) -> CachedMessageRender {
+        let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+            .iter()
+            .map(|line| wrap_line_to_visual_lines(line, width))
+            .collect();
+        CachedMessageRender {
+            width,
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            wrapped_lines: Some(wrapped_lines),
+            lines,
+            frozen_prefix_line_count: None,
+        }
+    }
 
     /// Regression test for the "click lands on the wrong line/char" bug.
     ///
@@ -589,25 +609,22 @@ mod tests {
         // filesystem layout. The path (in parens) is 45 chars > width 40, so
         // textwrap splits it at the width boundary.
         let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 40,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![
+        let render = cached(
+            vec![
                 Line::from("  ▎ System  12:00:00"),
                 Line::from(format!("  {content}")),
                 Line::raw(""),
             ],
-        };
-        let cache = build_transcript_cache(&[render]);
+            40,
+        );
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         // The content logical line is index 1, starting at visual row 1
         // (header is row 0). It wraps to 3 visual rows (rows 1, 2, 3),
         // and the empty spacer is row 4.
         assert_eq!(cache.logical_line_visual_starts[1], 1);
-        assert_eq!(cache.visual_lines.len(), 5);
+        assert_eq!(cache.total_lines, 5);
 
         let logical_text: String = cache.line_texts[1].chars().collect();
         let area = Rect::new(0, 0, 42, 10);
@@ -616,7 +633,9 @@ mod tests {
         // row at visual_row = 3 (the 3rd visual row of the content line — the
         // path suffix that textwrap split off).  This keeps the test robust
         // against path-length changes.
-        let tail_text: String = cache.visual_lines[3]
+        let tail_text: String = cache
+            .visual_line(3)
+            .expect("visual row 3 must exist")
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -666,15 +685,9 @@ mod tests {
     /// Clicking past the last visual line clamps to the last logical line's end.
     #[test]
     fn mouse_to_line_col_past_end_clamps_to_last_line() {
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 80,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![Line::from("hello"), Line::raw("")],
-        };
-        let cache = build_transcript_cache(&[render]);
+        let render = cached(vec![Line::from("hello"), Line::raw("")], 80);
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         let area = Rect::new(0, 0, 80, 10);
         // Row 100 is way past the last visual line.
@@ -700,30 +713,20 @@ mod tests {
     /// mapping is correct for the CJK tail row.
     #[test]
     fn mouse_to_line_col_maps_click_on_cjk_wrapped_line() {
-        // Header is kept short so it fits on one row at width 10 — isolates
-        // the test to the CJK content line's wrapping behavior.
-        // Content: 2 leading ASCII spaces + 12 CJK chars (display width 2 each)
-        // = total display width 2 + 24 = 26. At render width 10:
-        //   v0 = "  你好世界" (2 + 4*2 = 10)  → 6 chars at pos 0
-        //   v1 = "你好世界你" (5*2 = 10)       → 5 chars at pos 6
-        //   v2 = "好世界"    (3*2 = 6)         → 3 chars at pos 11
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 10,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![
+        let render = cached(
+            vec![
                 Line::from("Hdr"),
                 Line::from("  你好世界你好世界你好世界"),
                 Line::raw(""),
             ],
-        };
-        let cache = build_transcript_cache(&[render]);
+            10,
+        );
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         // Layout: header(1) + content(3 visual rows) + spacer(1) = 5.
         assert_eq!(cache.logical_line_visual_starts[1], 1);
-        assert_eq!(cache.visual_lines.len(), 5);
+        assert_eq!(cache.total_lines, 5);
 
         let logical_text: String = cache.line_texts[1].chars().collect();
         let area = Rect::new(0, 0, 12, 10);
@@ -752,19 +755,16 @@ mod tests {
         // Reuse the long-path content from the tail-click test, but click on
         // visual row 1 (v0 of content) instead of row 3 (v2).
         let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 40,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![
+        let render = cached(
+            vec![
                 Line::from("  ▎ System  12:00:00"),
                 Line::from(format!("  {content}")),
                 Line::raw(""),
             ],
-        };
-        let cache = build_transcript_cache(&[render]);
+            40,
+        );
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         let logical_text: String = cache.line_texts[1].chars().collect();
         let area = Rect::new(0, 0, 42, 10);
@@ -798,18 +798,12 @@ mod tests {
         // exactly), textwrap emits 4 visual rows of "hello" (inter-word
         // spaces stripped). Logical char positions of each "hello":
         //   v0 @ 0, v1 @ 6, v2 @ 12, v3 @ 18.
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 5,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![Line::from("hello hello hello hello")],
-        };
-        let cache = build_transcript_cache(&[render]);
+        let render = cached(vec![Line::from("hello hello hello hello")], 5);
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         // 4 visual rows, all on logical line 0.
-        assert_eq!(cache.visual_lines.len(), 4);
+        assert_eq!(cache.total_lines, 4);
         assert_eq!(cache.logical_line_visual_starts, vec![0]);
 
         let logical_text: String = cache.line_texts[0].chars().collect();
@@ -837,15 +831,9 @@ mod tests {
     /// `transcript_selected_text` later filtering them out during copy.
     #[test]
     fn mouse_to_line_col_on_header_line_does_not_panic() {
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 40,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![Line::from("  ▎ You  12:00:00"), Line::raw("body")],
-        };
-        let cache = build_transcript_cache(&[render]);
+        let render = cached(vec![Line::from("  ▎ You  12:00:00"), Line::raw("body")], 40);
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         // Sanity: header is the first logical line.
         assert_eq!(cache.line_is_header, vec![true, false]);
@@ -868,19 +856,16 @@ mod tests {
     #[test]
     fn mouse_to_line_col_drag_across_wrapped_visual_rows() {
         let content = "Session snapshot saved: name (/tmp/xiaoo-test/sessions/snapshot-name.json)";
-        let render = CachedMessageRender {
-            revision: 0,
-            width: 40,
-            theme: Theme::for_test(),
-            tool_toggle_row_offset: None,
-            subagent_open_target: None,
-            lines: vec![
+        let render = cached(
+            vec![
                 Line::from("  ▎ System  12:00:00"),
                 Line::from(format!("  {content}")),
                 Line::raw(""),
             ],
-        };
-        let cache = build_transcript_cache(&[render]);
+            40,
+        );
+
+        let cache = build_transcript_cache(None, vec![Some(render)]);
 
         let area = Rect::new(0, 0, 42, 10);
 

@@ -143,6 +143,15 @@ pub trait SessionService: Send + Sync {
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.run_turn_with_events(request, event_sink).await
     }
+
+    async fn export_session(
+        &self,
+        _session_id: &str,
+    ) -> Result<SessionRecord, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "export_session".to_string(),
+        })
+    }
 }
 
 #[async_trait]

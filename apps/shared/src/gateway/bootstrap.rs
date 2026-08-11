@@ -96,6 +96,26 @@ impl AppBootstrap {
         hooker_config: HookerRegistryConfig,
         backend_manager: Arc<BackendManager>,
     ) -> Result<AppDependencies, AppBootstrapError> {
+        Self::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+            session_store,
+            runtime_resolver,
+            hooker_config,
+            backend_manager,
+            None,
+            // No subagent interaction timeout for the short-form bootstrap;
+            // callers that need the cap (the daemon) use the long form.
+            None,
+        )
+    }
+
+    pub fn from_session_components_with_hooks_and_backend_manager_and_memory_automation(
+        session_store: Arc<dyn SessionStore>,
+        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
+        hooker_config: HookerRegistryConfig,
+        backend_manager: Arc<BackendManager>,
+        memory_automation: Option<Arc<dyn crate::gateway::TurnMemoryAutomation>>,
+        interaction_timeout: Option<std::time::Duration>,
+    ) -> Result<AppDependencies, AppBootstrapError> {
         // Extract the cross-turn `send_prompt` chain depth cap before
         // `hooker_config` is consumed by the registry builder. The cap is
         // enforced by `CoreBackedSessionService::fire_session_state_hook_and_collect_actions`,
@@ -110,6 +130,7 @@ impl AppBootstrap {
             Arc::from(hooker_registry),
             Arc::clone(&backend_manager),
             max_prompt_chain_depth,
+            memory_automation,
         ));
         // Opt-in strict lease enforcement for anonymous callers via
         // `XIAOO_ENFORCE_LEASE` (truthy: `1` / `true` / `yes` / `on`).
@@ -125,6 +146,14 @@ impl AppBootstrap {
             })
             .unwrap_or(false);
         session_components.set_enforce_anonymous_lease(enforce);
+        // Forward the configured interaction timeout (the daemon forwards
+        // the same `interaction_timeout_secs` it uses for the HTTP router)
+        // so a subagent's `ask_user_question` forwarded via
+        // `request_interaction` cannot hang forever waiting for the user
+        // (for handles without a built-in timeout, e.g.
+        // `RemoteSseInteractionHandle`). `None` = no outer cap (rely on the
+        // handle's own timeout, or block until the channel closes).
+        session_components.set_interaction_timeout(interaction_timeout);
         // Log the enforcement mode so operators can tell whether anonymous
         // callers are actually single-writer-guarded.
         let anonymous_lease_enforced = session_components.anonymous_lease_enforced();

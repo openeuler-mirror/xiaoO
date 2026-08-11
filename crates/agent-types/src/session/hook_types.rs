@@ -11,16 +11,20 @@ pub struct SessionClosedHookInput {
 }
 
 /// Input for `*.Session.lifecycle.state`. Fires on session lifecycle state
-/// transitions. `state` carries the new session-lifecycle state tag (e.g.
-/// `"idle"` = session back to idle, ready for the next turn); `outcome`
-/// carries the turn's terminal kind (`"complete"` / `"max_turns_reached"` /
-/// `"budget_exhausted"` / `"cancelled"`) so plugins can distinguish a normal
-/// completion from a soft termination while still seeing the same
-/// `state="idle"`. Currently dispatched only after a non-error root turn
-/// termination (any `Ok` variant of `AgentOutcome`); the `String` types let
-/// future call sites emit other tags (`"running"`, `"failed"`, ...) without
-/// changing this contract. Dispatched fire-and-forget so plugin scripts
-/// cannot block the turn result.
+/// transitions. `state` carries the new session-lifecycle state tag:
+/// - `"idle"` — session back to idle after a non-error root turn
+///   termination, ready for the next turn (awaited; actions collected);
+/// - `"failed"` — turn terminated with an `Err` (fire-and-forget; outcome
+///   is `"error"`).
+///
+/// `outcome` carries the turn's terminal kind so plugins can distinguish
+/// sub-variants while still seeing the same `state`. For `state="idle"` it
+/// is one of `"complete"` / `"max_turns_reached"` / `"budget_exhausted"` /
+/// `"cancelled"` (the four `Ok` variants of `AgentOutcome`); for
+/// `state="failed"` it is `"error"`. Currently dispatched only at the
+/// root-turn boundary in the gateway layer
+/// (`CoreBackedSessionService::run_turn_inner`). The `String` types let
+/// future call sites emit other tags without changing this contract.
 #[derive(Clone, Debug)]
 pub struct SessionStateHookInput {
     pub session_id: String,

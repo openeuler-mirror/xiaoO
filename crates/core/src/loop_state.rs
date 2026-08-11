@@ -90,6 +90,19 @@ impl LoopState {
     pub fn messages_arc(&self) -> Arc<RwLock<Vec<ChatMessage>>> {
         Arc::clone(&self.messages)
     }
+
+    /// Run a closure with a borrowed read view of the messages, without
+    /// cloning the entire `Vec<ChatMessage>`. The closure must not mutate
+    /// `self.messages` and should be short-lived (no holding the read
+    /// guard across `.await`).
+    ///
+    /// Prefer this over `self.messages.read().clone()` when the consumer
+    /// only needs `&[ChatMessage]` (e.g. token estimation, secret
+    /// extraction, compression analysis).
+    pub fn with_messages<R>(&self, f: impl FnOnce(&[ChatMessage]) -> R) -> R {
+        let guard = self.messages.read();
+        f(&guard)
+    }
 }
 
 #[cfg(test)]

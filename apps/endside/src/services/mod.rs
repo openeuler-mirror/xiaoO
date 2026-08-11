@@ -1,6 +1,7 @@
 pub(crate) mod command_loader;
 pub(crate) mod cron_service;
 pub(crate) mod input_history;
+pub(crate) mod mcp;
 pub(crate) mod provider;
 pub(crate) mod remote_sessions;
 pub(crate) mod session_snapshot;

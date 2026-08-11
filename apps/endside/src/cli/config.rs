@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use xiaoo_shared::gateway::MemoryAutomationConfig;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
@@ -24,6 +25,8 @@ pub struct FileConfig {
     pub subagent: BTreeMap<String, SubagentRoleConfig>,
     #[serde(default)]
     pub mcp: McpSection,
+    #[serde(default)]
+    pub memory_automation: MemoryAutomationConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -115,6 +118,13 @@ impl FileConfig {
                         subagent: parse_optional_section(&root, "subagent", &path, debug)
                             .unwrap_or_default(),
                         mcp: parse_optional_section(&root, "mcp", &path, debug).unwrap_or_default(),
+                        memory_automation: parse_optional_section(
+                            &root,
+                            "memory_automation",
+                            &path,
+                            debug,
+                        )
+                        .unwrap_or_default(),
                     }
                 }
                 Err(e) => {
@@ -124,6 +134,22 @@ impl FileConfig {
             },
             Err(_) => Self::default(),
         }
+    }
+
+    pub fn resolve_mcp_servers(
+        &self,
+        explicit_path: Option<&Path>,
+        workspace: &Path,
+        home: Option<&Path>,
+        toml_source: &Path,
+    ) -> Result<Vec<mcp::McpServerConfig>, mcp::McpConfigError> {
+        crate::support::config::load_merged_mcp_servers(
+            &self.mcp.servers,
+            explicit_path,
+            workspace,
+            home,
+            toml_source,
+        )
     }
 }
 
@@ -241,5 +267,77 @@ provider = "anthropic"
 
         let config = FileConfig::load_from_path(temp_file.path(), false);
         assert_eq!(config.subagent.len(), 0);
+    }
+
+    #[test]
+    fn test_loads_memory_automation_config() {
+        let config_content = r#"
+[memory_automation]
+enabled = true
+server = "ram-a"
+recall_top_k = 3
+recall_token_budget = 128
+context_messages = 2
+queue_path = "/tmp/xiaoo-memory-queue.jsonl"
+queue_capacity = 32
+max_retries = 4
+retry_backoff_ms = 50
+allowed_agent_roles = ["main", "researcher"]
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = FileConfig::load_from_path(temp_file.path(), false);
+
+        assert!(config.memory_automation.enabled);
+        assert_eq!(config.memory_automation.server, "ram-a");
+        assert_eq!(config.memory_automation.recall_top_k, 3);
+        assert_eq!(config.memory_automation.recall_token_budget, 128);
+        assert_eq!(config.memory_automation.context_messages, 2);
+        assert_eq!(config.memory_automation.queue_capacity, 32);
+        assert_eq!(config.memory_automation.max_retries, 4);
+        assert_eq!(config.memory_automation.retry_backoff_ms, 50);
+        assert_eq!(
+            config.memory_automation.allowed_agent_roles,
+            vec!["main".to_string(), "researcher".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_load_linux_dynsandbox_operation_backend_config() {
+        let config_content = r#"
+[llm]
+provider = "openai"
+
+[operation_backend]
+kind = "local"
+
+[operation_backend.options.isolation]
+kind = "linux_dynsandbox"
+allow_network = false
+readable_roots = ["/home/alice/project"]
+writable_roots = ["/home/alice/project/.xiaoo-tmp"]
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(config_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let config = FileConfig::load_from_path(temp_file.path(), false);
+
+        let backend = config.operation_backend.expect("operation_backend");
+        assert_eq!(backend.kind, "local");
+        assert_eq!(backend.options["isolation"]["kind"], "linux_dynsandbox");
+        assert_eq!(backend.options["isolation"]["allow_network"], false);
+        assert_eq!(
+            backend.options["isolation"]["readable_roots"][0],
+            "/home/alice/project"
+        );
+        assert_eq!(
+            backend.options["isolation"]["writable_roots"][0],
+            "/home/alice/project/.xiaoo-tmp"
+        );
     }
 }

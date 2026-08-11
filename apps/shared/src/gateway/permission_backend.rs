@@ -42,6 +42,9 @@ impl PermissionAwareOperationBackend {
         interaction: Arc<dyn InteractionHandle>,
         exec_isolation: Option<&'static str>,
     ) -> Self {
+        // Some backends may require an interaction handle;
+        // for backends that do not, this operation has no effect.
+        inner.attach_interaction(Arc::clone(&interaction));
         let bash_rules = Arc::new(BashSandboxApprovalRules::default());
         Self {
             files: PermissionAwareFileSystem::new(Arc::clone(&inner), Arc::clone(&interaction)),
@@ -86,6 +89,10 @@ impl OperationBackend for PermissionAwareOperationBackend {
 
     fn export(&self) -> &dyn OperationExport {
         &self.export
+    }
+
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        self.inner.attach_interaction(interaction);
     }
 
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {
@@ -672,6 +679,7 @@ fn isolation_display_name(isolation: &str) -> &'static str {
     match isolation {
         "macos_seatbelt" => "macOS Seatbelt",
         "linux_bubblewrap" => "Linux Bubblewrap",
+        "linux_dynsandbox" => "Dynamic Sandbox",
         _ => "Local sandbox",
     }
 }
@@ -688,6 +696,11 @@ fn runtime_exec_denial(
                 .then(|| silent_runtime_denial(backend.backend_id()))
         }),
         Some("linux_bubblewrap") => runtime_bubblewrap_denial(
+            backend.permission_control(),
+            request.command.as_str(),
+            result,
+        ),
+        Some("linux_dynsandbox") => runtime_linux_dynsandbox_denial(
             backend.permission_control(),
             request.command.as_str(),
             result,
@@ -716,6 +729,16 @@ fn silent_runtime_denial(backend_id: &str) -> SandboxPolicyDenial {
         capability: SandboxPermissionCapability::ExecRuntime,
         path: "<runtime path not reported by macOS Seatbelt>".to_string(),
     }
+}
+
+fn runtime_linux_dynsandbox_denial(
+    control: Option<&dyn OperationPermissionControl>,
+    command: &str,
+    result: &ExecResult,
+) -> Option<SandboxPolicyDenial> {
+    // dyn-sandbox mount-class denials reuse bwrap-style post-hoc parsing;
+    // landlock denials are handled in-process via AUTH_REQ streaming.
+    runtime_bubblewrap_denial(control, command, result)
 }
 
 fn runtime_bubblewrap_denial(
@@ -1150,7 +1173,7 @@ mod tests {
                 shell: Some("/bin/bash".to_string()),
                 cwd: Some(BackendPath(workspace.display().to_string())),
                 timeout_ms: Some(5000),
-                env: None,
+                ..Default::default()
             })
             .await
             .unwrap();

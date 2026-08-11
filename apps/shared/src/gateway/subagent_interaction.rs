@@ -7,6 +7,36 @@ use tokio::sync::oneshot;
 
 use super::session_supervisor::SessionSupervisor;
 
+/// Sentinel text delivered to a subagent when its forwarded interaction
+/// (`ask_user_question`) times out (either the gateway's outer
+/// `interaction_timeout` fired, or the receiver was dropped before the
+/// user replied). The text tells the model the user never replied so it
+/// can stop waiting and wind the lane down instead of hanging forever.
+pub(crate) const INTERACTION_TIMEOUT_SENTINEL: &str =
+    "[INTERACTION_TIMEOUT] The user did not reply in time.";
+
+/// Build the sentinel [`InteractionResponse`] for a timed-out forwarded
+/// interaction. Shared between:
+/// - [`SubagentInteractionHandle::ask`]'s `response_rx` failure fallback
+///   (the `oneshot::Receiver` returned `None`, i.e. the `Sender` was
+///   dropped without sending — happens when the gateway's outer timeout
+///   aborts the spawned `request_interaction` task).
+/// - [`SessionSupervisor::request_interaction`]'s outer `select!` branch
+///   when the configured `interaction_timeout` fires before the user
+///   replies.
+pub(crate) fn interaction_timeout_response(request: &InteractionRequest) -> InteractionResponse {
+    match request {
+        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+            value: Some(INTERACTION_TIMEOUT_SENTINEL.to_string()),
+            display_value: None,
+        },
+        InteractionRequest::Choice { .. } => InteractionResponse::Choice {
+            value: Some(INTERACTION_TIMEOUT_SENTINEL.to_string()),
+        },
+    }
+}
+
 pub struct SubagentInteractionHandle {
     supervisor: Arc<SessionSupervisor>,
     agent_id: AgentId,
@@ -46,20 +76,6 @@ impl InteractionHandle for SubagentInteractionHandle {
         response_rx
             .await
             .ok()
-            .unwrap_or_else(|| default_timeout_response(request))
-    }
-}
-
-fn default_timeout_response(request: &InteractionRequest) -> InteractionResponse {
-    let sentinel = "[INTERACTION_TIMEOUT] The user did not reply in time.";
-    match request {
-        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-            value: Some(sentinel.to_string()),
-            display_value: None,
-        },
-        InteractionRequest::Choice { .. } => InteractionResponse::Choice {
-            value: Some(sentinel.to_string()),
-        },
+            .unwrap_or_else(|| interaction_timeout_response(request))
     }
 }

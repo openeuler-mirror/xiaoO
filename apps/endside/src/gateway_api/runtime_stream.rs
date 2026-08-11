@@ -10,6 +10,19 @@ use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_
 impl GatewayRuntime {
     pub fn poll_stream_updates(&mut self, state: &mut AppState) -> bool {
         let mut changed = false;
+        if self.remote.is_none() {
+            if let Some(health) = self.session_gateway.take_memory_health_update() {
+                state.status_panel.memory_status = match health {
+                    crate::gateway::MemoryAutomationHealth::Healthy => {
+                        crate::status_panel::MemoryStatus::Connected
+                    }
+                    crate::gateway::MemoryAutomationHealth::Degraded => {
+                        crate::status_panel::MemoryStatus::Degraded
+                    }
+                };
+                changed = true;
+            }
+        }
         while let Some(receiver) = &mut self.stream_rx {
             let update = match receiver.try_recv() {
                 Ok(update) => update,
@@ -36,6 +49,24 @@ impl GatewayRuntime {
                         );
                         lane.is_running = true;
                         lane.last_turn = Some(turn);
+                    } else {
+                        // Root agent entering a new turn: finalize the
+                        // previous turn's stream message (if it has
+                        // content) so the next `TextDelta` creates a new
+                        // message instead of replacing the previous
+                        // turn's content. The `has_content` guard
+                        // preserves the empty placeholder message (loading
+                        // indicator) created before the first `TextDelta`.
+                        let has_content = self
+                            .stream_message_index
+                            .and_then(|index| state.chat_state.messages.get(index))
+                            .map_or(false, |message| {
+                                !message.content.trim().is_empty()
+                                    || !message.thinking_content.trim().is_empty()
+                            });
+                        if has_content {
+                            self.finalize_stream_message_before_aux(state);
+                        }
                     }
                 }
                 SessionTurnUpdate::SetAssistantContent {
@@ -121,6 +152,9 @@ impl GatewayRuntime {
                         self.insert_aux_message(state, Message::user(prompt));
                     }
                     state.chat_state.stick_to_bottom = true;
+                }
+                SessionTurnUpdate::MemoryStatus(memory_status) => {
+                    state.status_panel.memory_status = memory_status;
                 }
                 SessionTurnUpdate::Done {
                     prompt_tokens,
@@ -645,6 +679,11 @@ impl GatewayRuntime {
     }
 
     fn apply_todo_snapshot(&mut self, state: &mut AppState, update: TodoSnapshotUpdate) {
+        // `show_sidebar` in the root layout cache depends on
+        // `plan_state.is_some()` (see `App::ui`), so a Some<->None transition
+        // must invalidate the cached layout split. Content-only updates
+        // (still `Some`) don't change sidebar visibility, so the cache stays.
+        let plan_presence_changed = state.plan_state.is_some() != !update.items.is_empty();
         state.plan_state = if update.items.is_empty() {
             None
         } else {
@@ -657,6 +696,9 @@ impl GatewayRuntime {
                     .collect(),
             })
         };
+        if plan_presence_changed {
+            state.render_state.cached_area = None;
+        }
     }
 
     fn reveal_stream_chars(&mut self, state: &mut AppState) {
@@ -817,13 +859,15 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use agent_types::common::ids::AgentId;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
 
     use crate::app_state::AppState;
     use crate::chat::{
         Message, MessageRole, TodoDisplayStatus, ToolExecutionStatus, ToolExecutionUpdate,
     };
+    use crate::gateway::MemoryAutomationHealth;
     use crate::session_gateway::SessionTurnUpdate;
+    use crate::status_panel::MemoryStatus;
 
     use super::{GatewayRuntime, PendingStreamDone};
 
@@ -887,6 +931,97 @@ mod tests {
         assert_eq!(todo.items.len(), 2);
         assert_eq!(todo.items[0].0, TodoDisplayStatus::Completed);
         assert_eq!(todo.items[1].0, TodoDisplayStatus::InProgress);
+    }
+
+    /// Regression: `apply_todo_snapshot` must invalidate the root layout cache
+    /// (`cached_area`) on a Some<->None `plan_state` transition, because
+    /// sidebar visibility depends on `plan_state.is_some()` (see `App::ui`).
+    /// Content-only updates (still `Some`) must NOT invalidate, so the layout
+    /// isn't recomputed on every plan-item tick.
+    #[test]
+    fn apply_todo_snapshot_invalidates_layout_cache_on_presence_transition() {
+        use ratatui::layout::Rect;
+        use xiaoo_shared::plan::{
+            TodoDisplayStatus as SharedTodoStatus, TodoSnapshotItem, TodoSnapshotUpdate,
+        };
+
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        // Simulate a prior layout pass that cached the terminal area.
+        let cached_rect = Rect::new(0, 0, 64, 24);
+        state.render_state.cached_area = Some(cached_rect);
+
+        // plan_state starts None; empty update -> no transition -> cache stays.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: String::new(),
+                items: vec![],
+            },
+        );
+        assert!(state.plan_state.is_none());
+        assert_eq!(
+            state.render_state.cached_area,
+            Some(cached_rect),
+            "None->None transition must not invalidate layout cache"
+        );
+
+        // None -> Some transition: cache must be invalidated.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: "Plan".to_string(),
+                items: vec![TodoSnapshotItem {
+                    status: SharedTodoStatus::InProgress,
+                    content: "step 1".to_string(),
+                }],
+            },
+        );
+        assert!(state.plan_state.is_some());
+        assert!(
+            state.render_state.cached_area.is_none(),
+            "None->Some transition must invalidate layout cache (sidebar visibility changed)"
+        );
+
+        // Re-cache, then Some -> Some (content only): cache must stay.
+        state.render_state.cached_area = Some(cached_rect);
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: "Plan".to_string(),
+                items: vec![
+                    TodoSnapshotItem {
+                        status: SharedTodoStatus::Completed,
+                        content: "step 1".to_string(),
+                    },
+                    TodoSnapshotItem {
+                        status: SharedTodoStatus::InProgress,
+                        content: "step 2".to_string(),
+                    },
+                ],
+            },
+        );
+        assert!(state.plan_state.is_some());
+        assert_eq!(
+            state.render_state.cached_area,
+            Some(cached_rect),
+            "Some->Some (content-only) transition must NOT invalidate layout cache"
+        );
+
+        // Some -> None transition: cache must be invalidated.
+        runtime.apply_todo_snapshot(
+            &mut state,
+            TodoSnapshotUpdate {
+                title: String::new(),
+                items: vec![],
+            },
+        );
+        assert!(state.plan_state.is_none());
+        assert!(
+            state.render_state.cached_area.is_none(),
+            "Some->None transition must invalidate layout cache (sidebar visibility changed)"
+        );
     }
 
     #[test]
@@ -979,6 +1114,49 @@ mod tests {
 
         assert!(state.chat_state.stick_to_bottom);
         assert_eq!(state.chat_state.messages[0].content, "answer");
+    }
+
+    #[test]
+    fn stream_updates_surface_memory_state_transitions() {
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        runtime.stream_rx = Some(rx);
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Disabled))
+            .expect("memory status update should send");
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Disabled);
+
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Degraded))
+            .expect("memory status update should send");
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Degraded);
+
+        tx.send(SessionTurnUpdate::MemoryStatus(MemoryStatus::Connected))
+            .expect("memory status update should send");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Connected);
+    }
+
+    #[test]
+    fn background_memory_health_change_updates_status_without_a_turn() {
+        let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+        let mut state = test_state();
+        let (health_tx, health_rx) = watch::channel(MemoryAutomationHealth::Healthy);
+        *runtime
+            .session_gateway
+            .memory_health
+            .lock()
+            .expect("memory health lock should not be poisoned") = Some(health_rx);
+
+        health_tx
+            .send(MemoryAutomationHealth::Degraded)
+            .expect("memory health receiver should be present");
+
+        assert!(runtime.poll_stream_updates(&mut state));
+        assert_eq!(state.status_panel.memory_status, MemoryStatus::Degraded);
     }
 
     #[test]
