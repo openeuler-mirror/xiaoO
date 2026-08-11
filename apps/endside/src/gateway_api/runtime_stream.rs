@@ -74,8 +74,8 @@ impl GatewayRuntime {
                     delta,
                 } => {
                     if is_root_stream_agent(&agent_id, state) {
-                        self.record_first_token_latency_if_needed(state);
                         self.append_stream_message_content(state, &delta);
+                        self.record_first_token_latency_if_needed(state);
                     } else {
                         self.append_subagent_stream_message_content(
                             state,
@@ -89,8 +89,8 @@ impl GatewayRuntime {
                     delta,
                 } => {
                     if is_root_stream_agent(&agent_id, state) {
-                        self.record_first_token_latency_if_needed(state);
                         self.append_stream_message_thinking_content(state, &delta);
+                        self.record_first_token_latency_if_needed(state);
                     } else {
                         self.append_subagent_stream_message_thinking_content(
                             state,
