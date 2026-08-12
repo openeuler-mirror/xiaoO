@@ -123,8 +123,8 @@ xiaoo-hookers-uninstall
 也支持非交互模式：
 
 ```bash
-# 启用 audit_agent（不交互，直接写入配置）
-xiaoo-hookers-install --non-interactive audit_agent
+# 启用 agent_moss（不交互，直接写入配置）
+xiaoo-hookers-install --non-interactive agent_moss
 ```
 
 ### 方式二：直接编辑 config.toml
@@ -137,7 +137,7 @@ xiaoo-hookers-install --non-interactive audit_agent
 [hooker]
 default = "All"
 plugins = [
-  "/usr/lib/.xiaoo/hookers/audit_agent/plugin.json",
+  "/usr/lib/.xiaoo/hookers/agent_moss/plugin.json",
 ]
 ```
 
@@ -149,7 +149,7 @@ plugins = [
 [hooker]
 default = "All"
 plugins = [
-  "/usr/lib/.xiaoo/hookers/audit_agent/plugin.json",
+  "/usr/lib/.xiaoo/hookers/agent_moss/plugin.json",
   "/usr/lib/.xiaoo/hookers/tool_post_secret_guard/plugin.json",
 ]
 disabled = [
@@ -161,10 +161,12 @@ disabled = [
 
 ### RPM 场景下插件 install.sh 的变化
 
-RPM 打包时，部分插件自身的 `install.sh` 行为会有所调整。以 audit_agent 为例：
+RPM 打包时，部分插件自身的 `install.sh` 行为会有所调整。以 agent_moss 为例：
 
-- **开发者场景**（git clone + cargo build）：执行 `install.sh` 时会创建 Python 虚拟环境（venv），并通过 pip 安装依赖
-- **RPM 场景**（通过 RPM 安装）：audit_agent 的 Python 依赖已通过 RPM 包提供（`python3-openai`、`python3-httpx`、`python3-pydantic`、`python3-tenacity` 等），因此 `install.sh` **不再创建 venv 和 pip install**，只负责生成 `audit_settings.json` 配置文件
+- **开发者场景**（git clone + cargo build）：`install.sh` 创建 Python 虚拟环境（`/opt/agent_moss/venv`），从 PyPI 安装 `agent-moss` 包，注册并启动 systemd 服务
+- **RPM 场景**（通过 RPM 安装）：`agent-moss` 包及其依赖由 RPM 提供（装在系统 Python / `/usr/lib/agent_moss/`），`install.sh` 跳过 venv 与 pip install，只负责注册 systemd 服务并启动（systemd unit 由 RPM 自带）
+
+agent_moss 是瘦 bridge 插件（`bridge.py` 仅依赖 stdlib，转发到常驻 AgentMoss HTTP 服务），判定逻辑在常驻服务进程里，不随每次 hook spawn 子进程。`AGENT_MOSS_URL`/`AGENT_MOSS_PORT` 可指向远端服务，`AGENT_MOSS_LOG_PATH` 指定桥接日志路径。
 
 这意味着在 RPM 场景下执行 `xiaoo-hookers-install` 不会因为缺少 pip 或 venv 而出错。
 
@@ -174,8 +176,8 @@ RPM 打包时，部分插件自身的 `install.sh` 行为会有所调整。以 a
 # 查看 xiaoo 运行日志，确认插件已加载
 xiaoo run -p "echo hello"
 
-# 查看审计日志（audit_agent）
-cat /usr/lib/.xiaoo/hookers/audit_agent/audit_policy_checker.log
+# 查看 agent_moss 桥接日志（路径由 AGENT_MOSS_LOG_PATH 指定）
+cat "$AGENT_MOSS_LOG_PATH"
 ```
 
 ### 注意事项
