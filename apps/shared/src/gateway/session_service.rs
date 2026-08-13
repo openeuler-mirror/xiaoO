@@ -1,15 +1,4 @@
-use crate::gateway::{
-    AppTurnRequest, AppTurnResult, SessionDetachRequest, SessionHeartbeatRequest,
-    SessionOpenRequest, SessionRecord, SessionSubmitReceipt,
-};
-use crate::{
-    RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
-    RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimeExecRequest, RuntimeExecResult,
-    RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest, RuntimeReadFileResult,
-    RuntimeResumeRequest, RuntimeResumeResult, RuntimeWriteFileRequest, RuntimeWriteFileResult,
-};
-use agent_contracts::backend::ExecutionState;
+use crate::gateway::{AppTurnRequest, AppTurnResult, SessionOpenRequest, SessionRecord};
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use async_trait::async_trait;
 use memory::MemorySnapshot;
@@ -37,13 +26,6 @@ pub enum SessionServiceError {
     RuntimeShutdown { message: String },
     #[error("core runtime execution failed: {message}")]
     CoreRun { message: String },
-    #[error("core runtime execution interrupted ({execution_state}): {message}")]
-    RuntimeExecInterrupted {
-        message: String,
-        stdout_base64: String,
-        stderr_base64: String,
-        execution_state: ExecutionState,
-    },
     #[error("core runtime execution failed with partial state: {message}")]
     CoreRunWithState {
         message: String,
@@ -156,16 +138,6 @@ pub trait SessionService: Send + Sync {
 
 #[async_trait]
 pub trait SessionControlPlane: Send + Sync {
-    async fn hibernate_idle_session(
-        &self,
-        _session_id: &str,
-        _idle_before_ms: u64,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "hibernate_idle_session".to_string(),
-        })
-    }
-
     async fn open_session(
         &self,
         _request: SessionOpenRequest,
@@ -175,145 +147,12 @@ pub trait SessionControlPlane: Send + Sync {
         })
     }
 
-    async fn resume_session(
-        &self,
-        _session_id: &str,
-    ) -> Result<Option<SessionRecord>, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "resume_session".to_string(),
-        })
-    }
-
     async fn force_close_session(
         &self,
         _session_id: &str,
     ) -> Result<SessionRecord, SessionServiceError> {
         Err(SessionServiceError::UnsupportedCapability {
             capability: "force_close_session".to_string(),
-        })
-    }
-
-    /// Like [`force_close_session`](Self::force_close_session) but checks the
-    /// attach lease first: returns `SessionAttachedByAnotherClient` when
-    /// `client_id` is not the current holder. Default impl delegates to
-    /// `force_close_session` (no lease check) so existing mocks keep working.
-    async fn force_close_session_with_lease(
-        &self,
-        session_id: &str,
-        _client_id: Option<&str>,
-    ) -> Result<SessionRecord, SessionServiceError> {
-        self.force_close_session(session_id).await
-    }
-
-    /// Renew this client's lease on `session_id`. Returns
-    /// `SessionAttachedByAnotherClient` if the lease was taken over by a
-    /// different `client_id`. Default impl: no-op.
-    async fn heartbeat_session(
-        &self,
-        _request: SessionHeartbeatRequest,
-    ) -> Result<(), SessionServiceError> {
-        Ok(())
-    }
-
-    /// Release this client's lease without destroying the session or its
-    /// backend. Idempotent. Default impl: no-op.
-    async fn detach_session(
-        &self,
-        _request: SessionDetachRequest,
-    ) -> Result<(), SessionServiceError> {
-        Ok(())
-    }
-
-    /// Returns `Ok(())` iff `client_id` is the current lease holder of
-    /// `session_id` (or no lease is in place). Uniform guard at the top of
-    /// every turn-driving RPC. Default impl: always `Ok`.
-    async fn assert_lease_holder(
-        &self,
-        _session_id: &str,
-        _client_id: Option<&str>,
-    ) -> Result<(), SessionServiceError> {
-        Ok(())
-    }
-
-    async fn checkpoint_runtime(
-        &self,
-        _request: RuntimeCheckpointRequest,
-    ) -> Result<RuntimeCheckpointResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "checkpoint_runtime".to_string(),
-        })
-    }
-
-    async fn checkout_runtime(
-        &self,
-        _request: RuntimeCheckoutRequest,
-    ) -> Result<RuntimeCheckoutResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "checkout_runtime".to_string(),
-        })
-    }
-
-    async fn pause_runtime(
-        &self,
-        _request: RuntimePauseRequest,
-    ) -> Result<RuntimePauseResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "pause_runtime".to_string(),
-        })
-    }
-
-    async fn resume_runtime(
-        &self,
-        _request: RuntimeResumeRequest,
-    ) -> Result<RuntimeResumeResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "resume_runtime".to_string(),
-        })
-    }
-
-    async fn delete_checkpoint_snapshot(
-        &self,
-        _request: RuntimeCheckpointSnapshotDeleteRequest,
-    ) -> Result<RuntimeCheckpointSnapshotDeleteResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "delete_checkpoint_snapshot".to_string(),
-        })
-    }
-
-    async fn exec_runtime(
-        &self,
-        _request: RuntimeExecRequest,
-    ) -> Result<RuntimeExecResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "exec_runtime".to_string(),
-        })
-    }
-
-    async fn read_runtime_file(
-        &self,
-        _request: RuntimeReadFileRequest,
-    ) -> Result<RuntimeReadFileResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "read_runtime_file".to_string(),
-        })
-    }
-
-    async fn write_runtime_file(
-        &self,
-        _request: RuntimeWriteFileRequest,
-    ) -> Result<RuntimeWriteFileResult, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "write_runtime_file".to_string(),
-        })
-    }
-
-    async fn submit_input(
-        &self,
-        _session_id: &str,
-        _input: crate::gateway::SessionInput,
-    ) -> Result<SessionSubmitReceipt, SessionServiceError> {
-        Err(SessionServiceError::UnsupportedCapability {
-            capability: "submit_input".to_string(),
         })
     }
 }

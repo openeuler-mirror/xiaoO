@@ -104,14 +104,6 @@ impl CheckoutEvictionContext {
         }
     }
 
-    pub(super) fn runtime_checkout() -> Self {
-        Self {
-            checkout: "checkout runtime backend",
-            eviction: "checkout runtime backend eviction",
-            lease: "failed to lease checked out backend",
-            exhausted: "checkout runtime backend failed: sandbox limit reached and no idle sandbox to evict",
-        }
-    }
 }
 
 /// Check out a backend from `checkpoint` for `session_id`, retrying with

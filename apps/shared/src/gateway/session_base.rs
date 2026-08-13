@@ -1,5 +1,4 @@
-use crate::backend::BackendForkResult;
-use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig, SessionRecord};
+use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -112,24 +111,6 @@ pub struct SessionDetachRequest {
     pub client_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionForkRequest {
-    pub parent_session_id: String,
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
-    pub sender_id: Option<String>,
-    #[serde(default)]
-    pub snapshot_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionForkResult {
-    pub parent: SessionRecord,
-    pub child: SessionRecord,
-    pub backend_fork: BackendForkResult,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInteractionRequest {
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -145,39 +126,6 @@ pub type RuntimeCancelRequest = SessionCancelRequest;
 pub type RuntimeInteractionRequest = SessionInteractionRequest;
 pub type RuntimeHeartbeatRequest = SessionHeartbeatRequest;
 pub type RuntimeDetachRequest = SessionDetachRequest;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum SessionInput {
-    Turn {
-        request: AppTurnRequest,
-    },
-    Interaction {
-        response: InteractionResponse,
-    },
-    InputChunk {
-        stream_id: String,
-        seq: u32,
-        content: String,
-        is_final: bool,
-    },
-    CancelActiveTurn,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionInputKind {
-    Turn,
-    Interaction,
-    InputChunk,
-    CancelActiveTurn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionSubmitReceipt {
-    pub session_id: String,
-    pub accepted_kind: SessionInputKind,
-}
 
 #[cfg(test)]
 mod tests {

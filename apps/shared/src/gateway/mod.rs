@@ -1,15 +1,12 @@
 mod backend_workspace_context;
 pub mod bootstrap;
-pub mod channel_interaction;
 pub mod decrypted_api_keys;
 mod e2b_runtime;
 pub mod hosted_runtime_resolver;
 pub mod memory_automation;
 #[cfg(test)]
 mod memory_automation_test;
-pub mod pending_interaction;
 pub mod permission_backend;
-pub mod progress_updates;
 pub mod prompt_utils;
 mod session_backend;
 pub mod session_base;
@@ -42,13 +39,11 @@ pub use hosted_runtime_resolver::{
 pub use memory_automation::{
     McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationHealth, TurnMemoryAutomation,
 };
-pub use progress_updates::ChannelProgressRelayHandle;
 pub use session_base::{
     channel_session_id, RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest,
     RuntimeHeartbeatRequest, RuntimeInteractionRequest, RuntimeOpenRequest, SessionCancelRequest,
-    SessionCloseRequest, SessionDetachRequest, SessionForkRequest, SessionForkResult,
-    SessionHeartbeatRequest, SessionInput, SessionInputKind, SessionInteractionRequest,
-    SessionOpenRequest, SessionSubmitReceipt,
+    SessionCloseRequest, SessionDetachRequest, SessionHeartbeatRequest,
+    SessionInteractionRequest, SessionOpenRequest,
 };
 pub use session_record::{
     RuntimeBootstrapBinding, RuntimeBootstrapSkill, SessionAgentRecord, SessionLifecycleStatus,

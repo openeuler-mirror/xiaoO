@@ -1,7 +1,7 @@
 # xiaoO container image — openEuler 24.03 LTS SP3 (builder + runtime).
-# Builds the three binaries (xiaoo, xiaoo-daemon, moirai) plus the
-# skills / hookers / docs trees and packages them with every runtime
-# dependency preinstalled. Ships NO config.toml — mount your own at run.
+# Builds the two binaries (xiaoo, moirai) plus the skills / hookers / docs
+# trees and packages them with every runtime dependency preinstalled. Ships
+# NO config.toml — mount your own at run. Default CMD launches `xiaoo`.
 # Build & run instructions: docs/docker_deploy.md.
 ###############################################################################
 
@@ -44,7 +44,6 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY apps/shared/Cargo.toml           apps/shared/
 COPY apps/endside/Cargo.toml          apps/endside/
-COPY apps/serverside/Cargo.toml       apps/serverside/
 COPY apps/vault/Cargo.toml            apps/vault/
 COPY crates/agent-contracts/Cargo.toml    crates/agent-contracts/
 COPY crates/agent-llm/Cargo.toml          crates/agent-llm/
@@ -91,18 +90,17 @@ RUN cargo fetch
 # Full source tree (.dockerignore keeps target/, .git/, config.toml out).
 COPY . .
 
-# Build all three binaries. Without buildx cache mounts, target/ is rebuilt
+# Build the two binaries. Without buildx cache mounts, target/ is rebuilt
 # from scratch each docker build — but fetch above ensures deps are already
 # downloaded, so only compilation work remains.
-RUN cargo build --release -p xiaoo-endside -p xiaoo-serverside -p moirai
+RUN cargo build --release -p xiaoo-endside -p moirai
 
 # ── Stage packaged files at /staging/ ────────────────────────────────────────
 
 # Binaries → /usr/bin/
 RUN mkdir -p /staging/usr/bin && \
-    cp /build/target/release/xiaoo         /staging/usr/bin/xiaoo && \
-    cp /build/target/release/xiaoo-daemon  /staging/usr/bin/xiaoo-daemon && \
-    cp /build/target/release/moirai        /staging/usr/bin/moirai
+    cp /build/target/release/xiaoo  /staging/usr/bin/xiaoo && \
+    cp /build/target/release/moirai /staging/usr/bin/moirai
 
 # Skills → /usr/lib/.xiaoo/skills/
 RUN mkdir -p /staging/usr/lib/.xiaoo/skills && \
@@ -178,15 +176,13 @@ ENV RUST_LOG=info \
 # Declared VOLUME so a read-only config mount on /root/.config/xiaoo stays clean.
 VOLUME ["/root/.xiaoo"]
 
-EXPOSE 18080 28081
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:18080/api/v1/health || exit 1
+# No daemon ports / healthcheck: xiaoo is a TUI/CLI, not an HTTP server. The
+# previous EXPOSE 18080 28081 and HEALTHCHECK targeted the now-removed
+# xiaoo-daemon HTTP API.
 
 WORKDIR /root
 
-# No ENTRYPOINT: the daemon runs directly as PID 1 (exec-form CMD, no shell
-# wrapper), so its own SIGINT/SIGTERM handlers (apps/serverside/src/main.rs)
-# drive graceful shutdown on `docker stop`. For the TUI / CLI / bash dispatch
-# forms see docs/docker_deploy.md.
-CMD ["xiaoo-daemon"]
+# No ENTRYPOINT: `xiaoo` runs directly as PID 1 (exec-form CMD, no shell
+# wrapper). The TUI needs a TTY — run with `docker run -it`. For the CLI /
+# bash dispatch forms see docs/docker_deploy.md.
+CMD ["xiaoo"]
