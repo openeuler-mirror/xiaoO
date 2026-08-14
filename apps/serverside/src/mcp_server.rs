@@ -578,7 +578,7 @@ impl ChatbotMcpServer {
 impl ChatbotMcpServer {
     #[tool(
         name = "chat",
-        description = "Ask a web-only xiaoO chatbot. It can use web_search and webfetch, but has no file, shell, skill, plugin, planning, or subagent access. Omit session_id to start; reuse the returned session_id to continue."
+        description = "Ask a xiaoO chatbot for direct answers. It has no file, shell, skill, plugin, planning, subagent, or web access. Omit session_id to start; reuse the returned session_id to continue."
     )]
     async fn chat(
         &self,
@@ -1089,7 +1089,7 @@ fn normalize_session_id(session_id: Option<String>) -> Result<Option<String>, St
         Some(value) => {
             let value = value.trim();
             if value.is_empty() {
-                Err("session_id must not be empty when provided".to_string())
+                Ok(None)
             } else {
                 Ok(Some(value.to_string()))
             }
@@ -2220,7 +2220,6 @@ mod tests {
             .expect("response body");
         let body = String::from_utf8(body.to_vec()).expect("UTF-8 body");
         assert!(body.contains("\"name\":\"chat\""), "{body}");
-        assert!(body.contains("web_search and webfetch"), "{body}");
         assert!(body.contains("no file, shell"), "{body}");
         assert!(!body.contains("read files"), "{body}");
         assert!(!body.contains("\"name\":\"agent\""), "{body}");
