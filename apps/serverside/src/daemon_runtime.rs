@@ -46,8 +46,8 @@ const MCP_CHATBOT_INSTANCE_ID: &str = "chatbot";
 const MCP_AGENT_INSTANCE_ID: &str = "agent";
 const MCP_CHATBOT_SYSTEM_PROMPT: &str = r#"You are xiaoO Chatbot, a direct-answer assistant.
 
-Answer the user's question directly. Do not create plans, delegate work, switch roles, access or modify files, or claim capabilities that are not available. You may search and fetch content from the public web when useful."#;
-const MCP_CHATBOT_TOOLS: [&str; 2] = ["web_search", "webfetch"];
+Answer the user's question directly. Do not create plans, delegate work, switch roles, access or modify files, or claim capabilities that are not available."#;
+const MCP_CHATBOT_TOOLS: [&str; 0] = [];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeCapabilityProfile {
@@ -1027,7 +1027,7 @@ fn resolve_profile_allowed_tool_names(
         RuntimeCapabilityProfile::McpAgent => {
             resolve_allowed_tool_names(all_tool_names, agent_role)
                 .into_iter()
-                .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file"))
+                .filter(|name| !matches!(name.0.as_str(), "ask_user_question" | "send_file" | "web_search" | "webfetch"))
                 .collect()
         }
         RuntimeCapabilityProfile::Default => resolve_allowed_tool_names(all_tool_names, agent_role),
@@ -1320,7 +1320,7 @@ mod tests {
         let chatbot =
             resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpChatbot, None);
         let chatbot = chatbot.into_iter().map(|name| name.0).collect::<Vec<_>>();
-        assert_eq!(chatbot, MCP_CHATBOT_TOOLS.map(str::to_string));
+        assert!(chatbot.is_empty());
 
         let agent =
             resolve_profile_allowed_tool_names(&all, RuntimeCapabilityProfile::McpAgent, None);
@@ -1330,6 +1330,8 @@ mod tests {
         assert!(agent.contains(&"plugin_custom".to_string()));
         assert!(!agent.contains(&"ask_user_question".to_string()));
         assert!(!agent.contains(&"send_file".to_string()));
+        assert!(!agent.contains(&"web_search".to_string()));
+        assert!(!agent.contains(&"webfetch".to_string()));
 
         let restricted_role = AgentRoleConfig {
             description: String::new(),
