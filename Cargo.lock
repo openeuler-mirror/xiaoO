@@ -5072,6 +5072,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "xiaoo-api"
+version = "0.1.0"
+dependencies = [
+ "agent-contracts",
+ "agent-types",
+ "anyhow",
+ "async-trait",
+ "compact",
+ "llm-client",
+ "lsp",
+ "mcp",
+ "operation_backend",
+ "serde",
+ "serde_json",
+ "skill",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tool",
+ "tracing",
+ "xiaoo-core",
+ "xiaoo-shared",
+]
+
+[[package]]
 name = "xiaoo-core"
 version = "0.1.0"
 dependencies = [
