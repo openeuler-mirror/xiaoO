@@ -651,7 +651,7 @@ mod derive_field_by_field {
 
 mod host_lifecycle {
     use super::*;
-    use crate::host::{LocalSessionHost, LocalSessionHostBuilder, Session};
+    use crate::host::{LocalSessionHost, Session};
     use std::time::Duration;
 
     /// 默认配置构造 host 成功。
@@ -911,5 +911,387 @@ mod host_lifecycle {
         // 不强制断言成功——init_secret_provider 是全局 NO-OP，文件不存在也不报错
         // （get_decrypted_api_key 会回退到 env var）
         let _ = host;
+    }
+}
+
+// ===========================================================================
+// TurnHandle / TurnEvent / run_turn / run_turn_with（对照 §3.3.5）
+// ===========================================================================
+
+mod turn_handle_lifecycle {
+    use super::*;
+    use crate::host::{LocalSessionHost, TurnEvent, TurnOptions};
+    use std::time::Duration;
+
+    /// `run_turn` 返回 `TurnHandle`，且后续 `result()` 在 LLM 不可达时返回 Err。
+    ///
+    /// 验证 run_turn → 后台 task → run_turn_with_interaction → result() 的错误路径。
+    #[tokio::test]
+    #[ignore = "slow: requires LLM unreachable retry path (~60s)"]
+    async fn run_turn_returns_handle_and_result_fails_when_llm_unreachable() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://127.0.0.1:1")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session should succeed");
+
+        let turn = session
+            .run_turn("hello")
+            .await
+            .expect("run_turn should return a TurnHandle");
+
+        // 取消以加速失败（否则 LLM 重试链会持续 ~60s）
+        turn.cancel();
+
+        let result = turn.result().await;
+        assert!(
+            result.is_err(),
+            "result should fail when LLM is unreachable or turn is cancelled"
+        );
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `run_turn` 不持锁过久：drop TurnHandle 后立即可再开 turn。
+    ///
+    /// 验证 §3.3.7 "drop TurnHandle 不取消 turn，但释放 active_turn 锁"。
+    #[tokio::test]
+    async fn drop_turn_handle_releases_active_turn_lock() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://127.0.0.1:1")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session should succeed");
+
+        // 开 turn 1，立即 drop（不 await result）
+        let turn1 = session
+            .run_turn("hello")
+            .await
+            .expect("run_turn should return TurnHandle");
+        drop(turn1);
+
+        // 立即可开 turn 2（active_turn 锁已释放）
+        let turn2 = session
+            .run_turn("hello again")
+            .await
+            .expect("second run_turn should succeed after first turn dropped");
+        turn2.cancel();
+        let _ = turn2.result().await;
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `TurnOptions` builder 字段全部能被设置（编译期检查 + 字段透传）。
+    #[tokio::test]
+    async fn turn_options_builder_compiles_and_overrides_apply() {
+        use agent_types::chat::CommandContext;
+        use xiaoo_shared::gateway::{GatewayEntryContext, LlmRuntimeConfig};
+
+        let opts = TurnOptions::new()
+            .reasoning_effort(agent_types::ReasoningEffort::High)
+            .llm(LlmRuntimeConfig {
+                provider: Some("openai".to_string()),
+                model: Some("gpt-4.1".to_string()),
+                api_base: None,
+                api_key_env: None,
+                api_key: None,
+            })
+            .command_context(CommandContext {
+                command: "test-command".to_string(),
+                arguments: "arg1".to_string(),
+            })
+            .entry(GatewayEntryContext::cli());
+
+        // 字段都设置成功（编译期 + 运行期）
+        assert!(opts.reasoning_effort.is_some());
+        assert!(opts.llm.is_some());
+        assert!(opts.command_context.is_some());
+        assert!(opts.entry.is_some());
+    }
+
+    /// `TurnEvent::End` 不含 `agent_id` 字段（§3.3.5 文档要求）。
+    /// 编译期检查：End variant 的字段结构。
+    #[test]
+    fn turn_event_end_variant_has_no_agent_id() {
+        let summary = agent_types::events::LoopEndSummary {
+            turn_count: 1,
+            total_tokens: 100,
+            stop_reason: "complete".to_string(),
+        };
+        let event = TurnEvent::End { summary };
+        // 模式匹配验证字段结构
+        match event {
+            TurnEvent::End { summary } => {
+                assert_eq!(summary.turn_count, 1);
+                assert_eq!(summary.stop_reason, "complete");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// `InteractionResponder::respond` 消费 self，且只能应答一次。
+    #[tokio::test]
+    async fn interaction_responder_respond_consumes_self() {
+        use agent_types::interaction::InteractionResponse;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let responder = crate::host::InteractionResponder { sender: tx };
+        responder.respond(InteractionResponse::Confirmed { allowed: true });
+        let response = rx.await.expect("should receive response");
+        match response {
+            InteractionResponse::Confirmed { allowed } => assert!(allowed),
+            _ => panic!("expected Confirmed"),
+        }
+        // responder 已被消费——不能再次 respond（编译期保证）
+    }
+
+    /// `InteractionHandle` 缺省应答（responder 未应答）：`Confirm` 默认拒绝。
+    #[tokio::test]
+    async fn interaction_default_response_is_deny() {
+        use crate::host::sink_adapters::InternalInteractionHandle;
+        use agent_contracts::InteractionHandle;
+        use agent_types::interaction::{InteractionRequest, InteractionResponse};
+
+        let (event_tx, mut _event_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let handle = InternalInteractionHandle::new(event_tx);
+
+        // 模拟"消费方未应答"——直接 drain event_rx，丢弃 responder
+        let request = InteractionRequest::Confirm {
+            prompt: "Allow?".to_string(),
+            source: None,
+        };
+        // 在另一 task 中 ask；消费方丢弃 responder（drop 而不 respond）
+        let ask_handle = tokio::spawn(async move {
+            handle.ask(&request).await
+        });
+
+        // 从 event_rx 取出 Interaction 事件，丢弃 responder（模拟未应答）
+        let event = _event_rx.recv().await.expect("should emit Interaction event");
+        match event {
+            TurnEvent::Interaction { responder, .. } => {
+                // 关键：不调用 responder.respond()，直接 drop
+                drop(responder);
+            }
+            _ => panic!("expected Interaction event"),
+        }
+
+        let response = ask_handle.await.expect("ask task should complete");
+        // 缺省应答：Confirm → allowed=false
+        match response {
+            InteractionResponse::Confirmed { allowed } => assert!(!allowed),
+            _ => panic!("expected Confirmed"),
+        }
+    }
+
+    /// `TurnHandle::queue_input` 写入的 prompt 可被 `PendingUserMessageSource` drain。
+    #[tokio::test]
+    async fn queue_input_is_drainable() {
+        use crate::host::sink_adapters::InternalPendingUserMessages;
+        use std::sync::Arc;
+        use xiaoo_core::PendingUserMessageSource;
+
+        let pending: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+        // 构造一个最小 TurnHandle-like 结构来测试 queue_input → drain
+        // （直接构造 InternalPendingUserMessages 与 TurnHandle 共享同一个 Arc）
+        let source = InternalPendingUserMessages::new(pending.clone());
+
+        // 模拟 TurnHandle::queue_input 的写入路径
+        pending.lock().unwrap().push_back("queued-1".to_string());
+        pending.lock().unwrap().push_back("queued-2".to_string());
+
+        // drain 应返回两条
+        let drained = source.drain_pending_user_messages().await;
+        assert_eq!(drained, vec!["queued-1".to_string(), "queued-2".to_string()]);
+
+        // 二次 drain 应为空
+        let drained_again = source.drain_pending_user_messages().await;
+        assert!(drained_again.is_empty());
+    }
+
+    /// `InternalLoopEventSink` 文本快照 → 增量 diff 行为快照
+    /// （对照 `cli/mod.rs:50-107` `CliEventSink`）。
+    #[tokio::test]
+    async fn loop_sink_emits_text_delta_and_assistant_snapshot() {
+        use crate::host::sink_adapters::InternalLoopEventSink;
+        use agent_contracts::LoopEventSink;
+        use agent_types::common::ids::AgentId;
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let sink = InternalLoopEventSink::new(event_tx);
+
+        let agent_id = AgentId("root".to_string());
+
+        // 第一个快照："Hello"
+        sink.on_assistant_message(&agent_id, "Hello");
+        // 第二个快照："Hello, world"（追加 ", world"）
+        sink.on_assistant_message(&agent_id, "Hello, world");
+
+        // 应产生 4 个事件：Text("Hello") + AssistantSnapshot("Hello") +
+        // Text(", world") + AssistantSnapshot("Hello, world")
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        // 至少 4 个事件
+        assert!(events.len() >= 4, "expected at least 4 events, got {}", events.len());
+
+        // 验证 Text delta
+        let text_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                TurnEvent::Text { delta, .. } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_events.len(), 2);
+        assert_eq!(text_events[0], "Hello");
+        assert_eq!(text_events[1], ", world");
+
+        // 验证 AssistantSnapshot
+        let snapshot_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                TurnEvent::AssistantSnapshot { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(snapshot_events.len(), 2);
+        // 第一个快照文本是 "Hello"
+        let first_text = snapshot_events[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                agent_types::ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(first_text, "Hello");
+    }
+
+    /// `on_tool_result` 与 `on_loop_end` 透传事件。
+    #[tokio::test]
+    async fn loop_sink_forwards_tool_result_and_loop_end() {
+        use crate::host::sink_adapters::InternalLoopEventSink;
+        use agent_contracts::LoopEventSink;
+        use agent_types::common::ids::AgentId;
+        use agent_types::events::{LoopEndSummary, ToolResultEvent};
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let sink = InternalLoopEventSink::new(event_tx);
+
+        let agent_id = AgentId("root".to_string());
+        sink.on_tool_result(
+            &agent_id,
+            &ToolResultEvent {
+                call_id: "call-1".to_string(),
+                tool_name: "bash".to_string(),
+                output_preview: "ok".to_string(),
+                is_error: false,
+                args_preview: "{}".to_string(),
+            },
+        );
+        sink.on_loop_end(
+            &agent_id,
+            &LoopEndSummary {
+                turn_count: 1,
+                total_tokens: 100,
+                stop_reason: "complete".to_string(),
+            },
+        );
+
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+
+        // 应有 ToolResult + End 两个事件
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], TurnEvent::ToolResult { .. }));
+        // End 不含 agent_id（§3.3.5）
+        match &events[1] {
+            TurnEvent::End { summary } => assert_eq!(summary.turn_count, 1),
+            _ => panic!("expected End event"),
+        }
+    }
+
+    /// `InternalToolEventSink` 透传 `ToolLifecycleEvent`。
+    #[tokio::test]
+    async fn tool_sink_forwards_lifecycle_event() {
+        use crate::host::sink_adapters::InternalToolEventSink;
+        use agent_contracts::ToolEventSink;
+        use agent_types::events::ToolLifecycleEvent;
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let sink = InternalToolEventSink::new(event_tx);
+
+        sink.emit(ToolLifecycleEvent::Running {
+            call_id: "call-2".to_string(),
+            tool_name: "bash".to_string(),
+            args_preview: "{}".to_string(),
+        });
+
+        let event = event_rx.recv().await.expect("should emit Tool event");
+        match event {
+            TurnEvent::Tool { agent_id, event } => {
+                assert!(agent_id.is_none(), "non-scoped event should have None agent_id");
+                match event {
+                    ToolLifecycleEvent::Running { call_id, .. } => {
+                        assert_eq!(call_id, "call-2");
+                    }
+                    _ => panic!("expected Running"),
+                }
+            }
+            _ => panic!("expected Tool event"),
+        }
+    }
+
+    /// Scoped `ToolLifecycleEvent` 透传 agent_id。
+    #[tokio::test]
+    async fn tool_sink_unwraps_scoped_agent_id() {
+        use crate::host::sink_adapters::InternalToolEventSink;
+        use agent_contracts::ToolEventSink;
+        use agent_types::common::ids::AgentId;
+        use agent_types::events::ToolLifecycleEvent;
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<TurnEvent>();
+        let sink = InternalToolEventSink::new(event_tx);
+
+        let event = ToolLifecycleEvent::Running {
+            call_id: "call-child".to_string(),
+            tool_name: "bash".to_string(),
+            args_preview: "{}".to_string(),
+        }
+        .scoped(AgentId("child-agent".to_string()));
+
+        sink.emit(event);
+
+        let received = event_rx.recv().await.expect("should emit Tool event");
+        match received {
+            TurnEvent::Tool { agent_id, .. } => {
+                assert_eq!(agent_id.as_ref().unwrap().0, "child-agent");
+            }
+            _ => panic!("expected Tool event"),
+        }
     }
 }

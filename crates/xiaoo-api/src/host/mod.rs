@@ -31,19 +31,30 @@
 //!   进程级资源容器与 builder。`build()` 内部初始化 secrets、连接 memory automation、
 //!   构造 lifecycle control plane。`open_session` / `shutdown` 主入口落地。
 //! - [`session::Session`]：会话句柄。`id` / `send` / `update_options` / `export` /
-//!   `close` / `run_turn_raw` 方法落地；`run_turn` / `run_turn_with` 在阶段 2.3
-//!   （`TurnHandle`）落地。
+//!   `close` / `run_turn_raw` 方法落地。
+//!
+//! ## 阶段 2.3 已落地
+//!
+//! - [`turn_handle::TurnHandle`] / [`turn_handle::TurnEvent`] /
+//!   [`turn_handle::InteractionResponder`] / [`turn_handle::TurnOptions`]：
+//!   一轮对话的流式句柄与事件流。事件词汇与远程 SSE 模型（§3.4.3）对齐。
+//! - [`session::Session::run_turn`] / [`session::Session::run_turn_with`]：流式入口。
+//!   内部 sink 适配器（[`sink_adapters`]）把 6 个 sink trait 适配成 `TurnEvent` 通道，
+//!   提炼自 endside `session_sink.rs` / `session_interaction.rs` / `cli/mod.rs:50-107`。
 
 pub mod derive;
 pub mod local_session_host;
 pub mod options;
 pub mod session;
+pub mod sink_adapters;
+pub mod turn_handle;
 
 pub use local_session_host::{
     HostBuildError, LocalSessionHost, LocalSessionHostBuilder, SecretsInit,
 };
 pub use options::{LlmOptions, SessionOptions, SessionOptionsError, SkillsSection};
 pub use session::Session;
+pub use turn_handle::{InteractionResponder, TurnEvent, TurnHandle, TurnOptions};
 
 #[cfg(test)]
 mod tests;
