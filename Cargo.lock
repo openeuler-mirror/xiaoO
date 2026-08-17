@@ -5080,6 +5080,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "compact",
+ "dirs 5.0.1",
  "llm-client",
  "lsp",
  "mcp",
@@ -5092,6 +5093,7 @@ dependencies = [
  "tokio-util",
  "tool",
  "tracing",
+ "uuid",
  "xiaoo-core",
  "xiaoo-shared",
 ]

@@ -13,6 +13,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tokio-util.workspace = true
 tracing.workspace = true
+dirs.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 xiaoo-shared = { path = "../../apps/shared" }
 xiaoo-core = { path = "../core" }

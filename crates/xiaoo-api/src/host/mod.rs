@@ -1,8 +1,6 @@
 //! 门面层：本地会话宿主、会话句柄、一轮对话与事件流。
 //!
-//! 【L0 门面层；本阶段为占位】
-//!
-//! 阶段 2 将在此模块实现以下对象，构成 xiaoo-api 对外的"API 故事"主线：
+//! 【L0 门面层】
 //!
 //! ```text
 //! LocalSessionHostBuilder ──build()──▶ LocalSessionHost（进程级资源）
@@ -18,5 +16,23 @@
 //! `builder().build() → open_session() → run_turn() → close() → shutdown()`
 //! 的顺序走完全生命周期，每一步只有一个明显的入口。
 //!
-//! 设计纪律：门面不新增运行时行为——每个方法的内部实现都是对现有代码路径
-//! 的调用或提炼（`refactor.md` §3.3.8 的逐方法映射表是实现对照基准）。
+//! ## 阶段 2.1 已落地
+//!
+//! - [`options::SessionOptions`] / [`options::LlmOptions`]：调用方仅声明"差异"，其余
+//!   由 [`options::SessionOptions::derive`] 派生为 `(SessionOpenRequest,
+//!   HostedSessionRuntimeConfig)`（§3.3.3）。派生内部调用 4 组 helper（§3.3.9）。
+//! - 行为快照测试覆盖 skills / context-window 两份重复实现的合并；派生结果与
+//!   `apps/endside/src/cli/entry.rs:956-1038` 的现有组装逐字段对照。
+//!
+//! ## 阶段 2.2 待落地
+//!
+//! - `LocalSessionHost` / `LocalSessionHostBuilder` / `HostBuildError`
+//! - `Session` / `TurnHandle` / `TurnEvent` / `TurnOptions` / `InteractionResponder`
+
+pub mod derive;
+pub mod options;
+
+pub use options::{LlmOptions, SessionOptions, SessionOptionsError, SkillsSection};
+
+#[cfg(test)]
+mod tests;
