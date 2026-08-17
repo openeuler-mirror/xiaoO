@@ -644,3 +644,272 @@ mod derive_field_by_field {
         assert_eq!(open.entry.kind, Some(GatewayEntryKind::Tui));
     }
 }
+
+// ===========================================================================
+// LocalSessionHost + Session 生命周期（对照 §3.3.2 / §3.3.4 / §3.3.8）
+// ===========================================================================
+
+mod host_lifecycle {
+    use super::*;
+    use crate::host::{LocalSessionHost, LocalSessionHostBuilder, Session};
+    use std::time::Duration;
+
+    /// 默认配置构造 host 成功。
+    #[tokio::test]
+    async fn default_builder_succeeds() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("default build should succeed");
+        // 访问器返回共享实例（仅验证非空，不强断言类型）
+        let _store = host.session_store();
+        let _bm = host.backend_manager();
+        let _cp = host.control_plane();
+        // 默认未配置 memory automation
+        assert!(host.memory_health().is_none());
+    }
+
+    /// 无活跃会话时 shutdown 是 no-op。
+    #[tokio::test]
+    async fn shutdown_with_no_active_sessions_is_noop() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("build should succeed");
+        host.shutdown(Duration::from_secs(1)).await;
+        // 二次 shutdown 幂等
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `open_session` 在派生失败时返回 `SessionServiceError`。
+    /// 验证派生 → `build_llm_provider` → `RuntimeBuild` 错误映射。
+    #[tokio::test]
+    async fn open_session_fails_on_unknown_provider() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("totally-unknown-provider", "any-model")
+                .context_window(8192),
+        );
+        let result = host.open_session(options).await;
+        let err = match result {
+            Ok(_) => panic!("open_session with unknown provider should fail"),
+            Err(e) => e,
+        };
+        // 派生失败折叠进 SessionServiceError::RuntimeBuild（§3.3.6）
+        let msg = err.to_string();
+        assert!(
+            msg.contains("provider") || msg.contains("Provider"),
+            "error should mention provider: {msg}"
+        );
+    }
+
+    /// `open_session` + `session.id()` + `session.export()` + `session.close()`
+    /// 走通（使用 ollama provider，无网络依赖——派生 + open_session 不触发 LLM 调用）。
+    #[tokio::test]
+    async fn open_export_close_lifecycle() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://localhost:11434")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session with ollama should succeed (no network needed at open time)");
+
+        // id() 返回派生生成的 session_id（非空）
+        let id = session.id().to_string();
+        assert!(!id.is_empty());
+
+        // export() 返回 SessionRecord
+        let record = session
+            .export()
+            .await
+            .expect("export should succeed after open_session");
+        assert_eq!(record.session_id, id);
+
+        // close() 返回 SessionRecord 并从 store 移除
+        let closed = Session::close(session).await.expect("close should succeed");
+        assert_eq!(closed.session_id, id);
+
+        // close 后 export 应返回 SessionNotFound
+        // （通过重新构造 Session 句柄——但 Session 已被 close 消费，这里
+        // 直接走 host.session_store().load() 验证）
+        let store = host.session_store();
+        let loaded = store.load(&id).await;
+        assert!(loaded.is_none(), "session should be removed from store after close");
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `host.shutdown()` 关闭所有活跃会话。
+    #[tokio::test]
+    async fn shutdown_closes_active_sessions() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://localhost:11434")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session should succeed");
+        let id = session.id().to_string();
+        // 不显式 close，让 shutdown 处理
+        drop(session);
+
+        host.shutdown(Duration::from_secs(1)).await;
+
+        // shutdown 后 session 应已从 store 移除
+        let store = host.session_store();
+        let loaded = store.load(&id).await;
+        assert!(loaded.is_none(), "session should be force_closed by shutdown");
+    }
+
+    /// `open_session_with` 跳过派生，直接用手工构造的 request + config。
+    /// 验证 advanced 装配路径。
+    #[tokio::test]
+    async fn open_session_with_bypasses_derive() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        // 手工构造（不走 SessionOptions::derive）
+        let (open_request, runtime_config) = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://localhost:11434")
+                .context_window(8192),
+        )
+        .derive()
+        .await
+        .expect("should derive");
+
+        let session = host
+            .open_session_with(open_request, runtime_config)
+            .await
+            .expect("open_session_with should succeed");
+        assert!(!session.id().is_empty());
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `session.send()` 在 LLM 不可达时返回 `SessionServiceError`。
+    /// 验证 send → run_turn_inner → service.run_turn 错误路径（不验证成功路径，
+    /// 成功路径需要真实 LLM）。
+    ///
+    /// 标记 `#[ignore]` 因为 LLM 重试链导致失败耗时较长（~60s）。
+    /// 阶段 2.3 落地 `run_turn_raw` + DummyProvider 后改用替身跑完整路径。
+    #[tokio::test]
+    #[ignore = "slow: requires LLM unreachable retry path"]
+    async fn send_returns_error_when_llm_unreachable() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        // 用一个一定会失败的 api_base（端口 1 是保留端口，连接被拒）
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://127.0.0.1:1")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session should succeed (no LLM call yet)");
+
+        let result = session.send("hello").await;
+        assert!(
+            result.is_err(),
+            "send should fail when LLM is unreachable"
+        );
+        let err = match result {
+            Ok(_) => panic!("should be err"),
+            Err(e) => e,
+        };
+        // 错误折叠进 SessionServiceError（具体变体不硬断言）
+        let _ = err;
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `LocalSessionHostBuilder::memory_automation` 直接注入（测试替身）。
+    #[tokio::test]
+    async fn memory_automation_injection() {
+        use std::sync::Arc;
+        use xiaoo_shared::gateway::memory_automation::TurnMemoryAutomation;
+        use xiaoo_shared::gateway::MemoryAutomationHealth;
+
+        // 构造一个最小可用的 TurnMemoryAutomation 替身
+        struct NoopAutomation;
+        #[async_trait::async_trait]
+        impl TurnMemoryAutomation for NoopAutomation {
+            async fn recall(
+                &self,
+                _ctx: &xiaoo_shared::gateway::memory_automation::TurnMemoryContext,
+            ) -> Result<
+                Vec<xiaoo_shared::gateway::memory_automation::RecallMemory>,
+                xiaoo_shared::gateway::memory_automation::MemoryAutomationError,
+            > {
+                Ok(Vec::new())
+            }
+            async fn enqueue_ingest(
+                &self,
+                _turn: xiaoo_shared::gateway::memory_automation::CompletedTurnIngest,
+            ) -> Result<(), xiaoo_shared::gateway::memory_automation::MemoryAutomationError> {
+                Ok(())
+            }
+            fn recall_token_budget(&self) -> usize {
+                0
+            }
+            fn subscribe_health(
+                &self,
+            ) -> Option<tokio::sync::watch::Receiver<MemoryAutomationHealth>> {
+                None
+            }
+        }
+
+        let host = LocalSessionHost::builder()
+            .memory_automation(Arc::new(NoopAutomation) as Arc<dyn TurnMemoryAutomation>)
+            .build()
+            .await
+            .expect("build with injected automation should succeed");
+
+        // 注入后 host 持有 automation（但 subscribe_health 返回 None，故 memory_health 是 None）
+        assert!(host.memory_health().is_none());
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `SecretsInit::WithProvider` 路径不 panic。
+    #[tokio::test]
+    async fn secrets_with_provider_path_does_not_panic() {
+        use std::path::PathBuf;
+        let tmp = std::env::temp_dir().join("xiaoo-api-test-secrets-nonexistent");
+        let host = LocalSessionHost::builder()
+            .secrets(crate::host::SecretsInit::WithProvider {
+                path: PathBuf::from(&tmp),
+                use_sdf: false,
+            })
+            .build()
+            .await;
+        // 不强制断言成功——init_secret_provider 是全局 NO-OP，文件不存在也不报错
+        // （get_decrypted_api_key 会回退到 env var）
+        let _ = host;
+    }
+}
