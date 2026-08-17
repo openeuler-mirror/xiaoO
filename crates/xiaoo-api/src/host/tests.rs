@@ -1295,3 +1295,222 @@ mod turn_handle_lifecycle {
         }
     }
 }
+
+// ===========================================================================
+// DummyProvider 全生命周期测试（对照 §阶段 2.5：build → open → run_turn →
+// 事件消费 → close → shutdown）
+// ===========================================================================
+
+mod dummy_lifecycle {
+    use super::*;
+    use crate::host::{LocalSessionHost, Session, TurnEvent};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use agent_contracts::llm::{LlmProvider, ProviderCapabilities};
+    use agent_types::llm::{
+        AssistantMessage, LlmError, LlmRequest, LlmResponse, StopReason, StreamChunk, Usage,
+    };
+    use async_trait::async_trait;
+    use llm_client::LlmProviderWrapper;
+    use xiaoo_shared::gateway::HostedSessionRuntimeConfig;
+
+    /// 最小 DummyProvider：返回固定的 "Hello from dummy!" 文本响应。
+    /// 对照 endside `cli/mod.rs:240-261` 的 DummyProvider 模式（但本版返回
+    /// 实际响应而非 unimplemented!）。
+    struct DummyProvider {
+        capabilities: ProviderCapabilities,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DummyProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            Ok(dummy_response())
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: &LlmRequest,
+            on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            on_chunk(StreamChunk {
+                delta_text: Some("Hello from dummy!".to_string()),
+                delta_reasoning: None,
+                delta_tool_call: None,
+            });
+            Ok(dummy_response())
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.capabilities
+        }
+    }
+
+    fn dummy_response() -> LlmResponse {
+        LlmResponse {
+            message: AssistantMessage {
+                text: Some("Hello from dummy!".to_string()),
+                reasoning_content: None,
+                tool_calls: vec![],
+                usage: Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                },
+                stop_reason: StopReason::EndTurn,
+            },
+            kv_cache_chunk_hashes: vec![],
+        }
+    }
+
+    fn dummy_provider() -> Arc<LlmProviderWrapper> {
+        Arc::new(LlmProviderWrapper::new(
+            Arc::new(DummyProvider {
+                capabilities: ProviderCapabilities {
+                    supports_streaming: true,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 8192,
+                    model_name: "dummy".to_string(),
+                },
+            }),
+            None,
+            None,
+        ))
+    }
+
+    /// 用 ollama 派生（无网络依赖），再把 llm_provider 替换为 DummyProvider。
+    async fn build_config_with_dummy() -> (
+        xiaoo_shared::gateway::SessionOpenRequest,
+        HostedSessionRuntimeConfig,
+    ) {
+        let (open_request, mut config) = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://localhost:11434")
+                .context_window(8192),
+        )
+        .derive()
+        .await
+        .expect("should derive with ollama");
+
+        // 替换 llm_provider 为 DummyProvider
+        let provider = dummy_provider();
+        config.llm_provider = Some(provider);
+        // compression_pipeline 仍引用 ollama provider（派生时构建），
+        // 但简单测试不触发压缩——上下文窗口 8192 远未满。
+
+        (open_request, config)
+    }
+
+    /// 完整生命周期：build → open_session_with → run_turn → 事件消费 →
+    /// result → close → shutdown。
+    #[tokio::test]
+    async fn full_lifecycle_with_dummy_provider() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let (open_request, config) = build_config_with_dummy().await;
+        let session = host
+            .open_session_with(open_request, config)
+            .await
+            .expect("open_session_with should succeed");
+
+        // run_turn 启动
+        let mut turn = session
+            .run_turn("hello")
+            .await
+            .expect("run_turn should return TurnHandle");
+
+        // 消费事件流——期望至少一个 Text delta + End
+        let mut got_text = false;
+        let mut got_end = false;
+        // 加超时以防 DummyProvider 路径意外卡住
+        let timeout = tokio::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + timeout;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, turn.next_event()).await {
+            match event {
+                TurnEvent::Text { delta, .. } => {
+                    assert!(!delta.is_empty());
+                    got_text = true;
+                }
+                TurnEvent::AssistantSnapshot { .. } => { /* 也应产生 */ }
+                TurnEvent::End { summary } => {
+                    assert!(summary.turn_count >= 1);
+                    got_end = true;
+                }
+                _ => { /* 其它事件（Tool/ToolResult 等）可能不产生 */ }
+            }
+        }
+
+        assert!(got_text, "should have received at least one Text event");
+        assert!(got_end, "should have received End event");
+
+        // result() 取终值
+        let result = turn.result().await.expect("result should succeed");
+        assert!(result.total_tokens > 0, "total_tokens should be > 0");
+
+        // close + shutdown
+        Session::close(session).await.expect("close should succeed");
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `queue_input` 在 turn 进行中追加排队输入。
+    /// DummyProvider 的 stop_reason=EndTurn 让 loop 立即结束，但 queue_input
+    /// 的机制本身仍可验证（写入 → drain 链路在步骤 3 已测，这里验证
+    /// TurnHandle::queue_input 不 panic）。
+    #[tokio::test]
+    async fn queue_input_does_not_panic_during_turn() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let (open_request, config) = build_config_with_dummy().await;
+        let session = host
+            .open_session_with(open_request, config)
+            .await
+            .expect("open_session_with should succeed");
+
+        let turn = session
+            .run_turn("hello")
+            .await
+            .expect("run_turn should succeed");
+
+        // queue_input 不 panic 即可（turn 可能立即结束）
+        turn.queue_input("follow-up question");
+
+        // 等待 turn 结束
+        let _ = turn.result().await;
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+
+    /// `cancel` 触发 CancellationToken，turn 应终止。
+    #[tokio::test]
+    async fn cancel_terminates_turn() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let (open_request, config) = build_config_with_dummy().await;
+        let session = host
+            .open_session_with(open_request, config)
+            .await
+            .expect("open_session_with should succeed");
+
+        let turn = session
+            .run_turn("hello")
+            .await
+            .expect("run_turn should succeed");
+
+        // 立即取消
+        turn.cancel();
+
+        // result 应返回（Ok 或 Err 都行——取决于 cancel 时机）
+        let _ = turn.result().await;
+        host.shutdown(Duration::from_secs(1)).await;
+    }
+}
