@@ -36,6 +36,10 @@ pub struct RuntimeCheckpointRequest {
     pub metadata: Value,
     #[serde(default)]
     pub name: Option<String>,
+    /// Process identifier used by the daemon's lease guard. `None` for
+    /// legacy / anonymous callers (lease bypass).
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +64,8 @@ pub struct RuntimeCheckoutRequest {
     pub sender_id: Option<String>,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(default)]
+    pub options: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +82,8 @@ pub struct RuntimePauseRequest {
     pub metadata: Value,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +102,8 @@ pub struct RuntimeResumeRequest {
     pub runtime_id: String,
     #[serde(default)]
     pub metadata: Value,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +142,8 @@ pub struct RuntimeExecRequest {
     pub shell: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +158,8 @@ pub struct RuntimeExecResult {
 pub struct RuntimeReadFileRequest {
     pub runtime_id: String,
     pub path: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +172,8 @@ pub struct RuntimeWriteFileRequest {
     pub runtime_id: String,
     pub path: String,
     pub content_base64: String,
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

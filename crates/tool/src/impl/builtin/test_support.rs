@@ -60,7 +60,6 @@ struct AtomicWriteCapabilityOverride {
 
 struct TestFileSystem {
     inner: Arc<dyn OperationBackend>,
-    write_error: Option<String>,
 }
 
 pub(crate) fn override_atomic_write_capability(
@@ -70,22 +69,6 @@ pub(crate) fn override_atomic_write_capability(
     Arc::new(AtomicWriteCapabilityOverride {
         files: TestFileSystem {
             inner: Arc::clone(&inner),
-            write_error: None,
-        },
-        inner,
-        supports_atomic_write,
-    })
-}
-
-pub(crate) fn fail_backend_writes(
-    inner: Arc<dyn OperationBackend>,
-    supports_atomic_write: bool,
-    message: impl Into<String>,
-) -> Arc<dyn OperationBackend> {
-    Arc::new(AtomicWriteCapabilityOverride {
-        files: TestFileSystem {
-            inner: Arc::clone(&inner),
-            write_error: Some(message.into()),
         },
         inner,
         supports_atomic_write,
@@ -106,11 +89,6 @@ impl OperationFileSystem for TestFileSystem {
         &self,
         request: WriteBytesRequest,
     ) -> Result<WriteBytesOutcome, OperationError> {
-        if let Some(message) = &self.write_error {
-            return Err(OperationError::ExecutionFailed {
-                message: message.clone(),
-            });
-        }
         self.inner.files().write_bytes(request).await
     }
 
@@ -153,6 +131,10 @@ impl OperationBackend for AtomicWriteCapabilityOverride {
 
     fn export(&self) -> &dyn OperationExport {
         self.inner.export()
+    }
+
+    fn attach_interaction(&self, interaction: Arc<dyn InteractionHandle>) {
+        self.inner.attach_interaction(interaction);
     }
 
     fn permission_control(&self) -> Option<&dyn OperationPermissionControl> {

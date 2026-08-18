@@ -167,15 +167,57 @@ temp_root = "/tmp"
 default_shell = "/bin/sh"
 ```
 
-Limit live E2B sandbox usage with `[server.resource_limits]`. If this section is
-omitted, the daemon defaults to E2B's Hobby concurrency limit of 20 active
-sandboxes. Paused runtimes and checkpoint templates do not count toward this
-limit.
+For a self-hosted E2B deployment, configure both the control-plane API URL and
+the sandbox domain. `domain` is a hostname and must not include a URL scheme or
+path.
 
 ```toml
-[server.resource_limits]
-max_active_e2b_sandboxes = 20
+[server.operation_backend]
+kind = "e2b"
+
+[server.operation_backend.options]
+api_key_env = "E2B_API_KEY"
+api_base = "https://api.e2b.example.com"
+domain = "e2b.example.com"
+template_id = "base"
+timeout_secs = 3600
+secure = true
 ```
+
+The connection settings use the following precedence:
+
+- Control-plane API: `api_base` (also accepts `api_url`) → `E2B_API_URL` →
+  `https://api.<domain>`.
+- Sandbox domain: `domain` → `E2B_DOMAIN` → `e2b.app`.
+
+For example, the equivalent environment-based configuration is:
+
+```bash
+export E2B_API_KEY="<self-hosted-api-key>"
+export E2B_API_URL="https://api.e2b.example.com"
+export E2B_DOMAIN="e2b.example.com"
+```
+
+The daemon process must inherit these environment variables. A shell export
+does not change the environment of an already-running daemon.
+
+Live E2B sandbox limits are shared by all xiaoO processes running as the same
+Unix user. Configure the per-provider-key limit in the separate global sandbox
+configuration file. If the file or field is absent, xiaoO defaults to 20 live
+sandboxes per key. Paused runtimes and provider checkpoint templates do not
+count toward this limit.
+
+```toml
+# ~/.config/xiaoo/sandbox.toml
+max_sandbox_cnt = 20
+```
+
+The current daemon does not read `[server.resource_limits]`; that older section
+must not be used for sandbox limits. Runtime processes coordinate confirmed and
+in-progress sandbox counts through `~/.xiaoo/sandbox_counts.json` and record
+backend ownership/activity in `~/.xiaoo/backend_registry.json`. Provider API
+keys are stored only as derived identifiers in these shared files, not as
+plaintext.
 
 Use the local backend in daemon mode by setting `kind = "local"` under the same
 `[server.operation_backend]` namespace.
@@ -220,7 +262,10 @@ read = true
 glob = true
 grep = true
 
-# Context compression (CLI/Daemon only; TUI ignores [compact])
+# Context compression (CLI/Daemon only; TUI ignores [compact]).
+# This section is OPTIONAL: omit it to use the built-in defaults
+# (warning=0.6 / auto_compact=0.75 / blocking=0.9). Compression is never
+# silently disabled — a missing section yields a real ContextManager.
 [compact]
 auto_compact_ratio = 0.75
 
@@ -289,9 +334,13 @@ kind = "e2b"
 api_key_env = "E2B_API_KEY"
 template_id = "base"
 timeout_secs = 3600
+```
 
-[server.resource_limits]
-max_active_e2b_sandboxes = 20
+Set the shared E2B sandbox limit separately in
+`~/.config/xiaoo/sandbox.toml`:
+
+```toml
+max_sandbox_cnt = 20
 ```
 
 ### API Endpoints

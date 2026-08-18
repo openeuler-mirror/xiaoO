@@ -3,6 +3,7 @@ use agent_types::context::prompt::SkillSummary;
 
 use crate::loading::load_skills;
 use crate::types::config::SkillsConfig;
+use crate::types::Skill;
 
 use super::skill_entry::SkillEntry;
 
@@ -14,6 +15,10 @@ pub struct FileSkillRegistry {
 impl FileSkillRegistry {
     pub fn new(config: &SkillsConfig) -> Self {
         let skills = load_skills(config);
+        Self::from_skills(skills)
+    }
+
+    pub fn from_skills(skills: Vec<Skill>) -> Self {
         let entries = skills.into_iter().map(SkillEntry::new).collect();
         Self { entries }
     }

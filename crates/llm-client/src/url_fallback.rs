@@ -1,11 +1,11 @@
 use agent_types::LlmError;
 use std::collections::HashSet;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
 
 pub fn build_base_url_candidates(original_base: &str) -> Vec<String> {
     let base = original_base.trim_end_matches('/');
+    if is_chat_completions_endpoint(base) {
+        return vec![base.to_string()];
+    }
     let mut candidates = Vec::new();
 
     // B1: 用户原始配置（最高优先级）
@@ -50,6 +50,9 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     for base in base_candidates {
+        if is_chat_completions_endpoint(base) {
+            continue;
+        }
         let paths = build_endpoint_paths(base);
         for path in paths {
             let url = format!("{}{}", base.trim_end_matches('/'), path);
@@ -63,6 +66,14 @@ pub fn build_final_candidates(base_candidates: &[String]) -> Vec<String> {
     }
 
     final_urls
+}
+
+fn is_chat_completions_endpoint(base: &str) -> bool {
+    base.split(['?', '#'])
+        .next()
+        .unwrap_or(base)
+        .trim_end_matches('/')
+        .ends_with("/chat/completions")
 }
 
 fn has_version_path(base: &str) -> bool {
@@ -94,8 +105,25 @@ const URL_PATH_ERROR_KEYWORDS: &[&str] = &[
     "url error",
 ];
 
+/// Extracts the HTTP status code from an `ApiError` message produced by
+/// [`crate::error::map_api_status_error`], which formats responses as
+/// `"HTTP {status}: {body}"` (e.g. `"HTTP 401 Unauthorized: ..."`).
+///
+/// Returns `None` for messages that don't follow this shape — e.g.
+/// manually-constructed errors such as `"unexpected content type: ..."` or
+/// `"stream error: ..."`. Those are still matched by their keyword checks.
+///
+/// Parsing the structured prefix (instead of `contains("HTTP 401")`) avoids
+/// false positives when a response *body* happens to contain an HTTP status
+/// string, and survives minor wording changes in the reason phrase.
+fn http_status_code(msg: &str) -> Option<u16> {
+    let rest = msg.strip_prefix("HTTP ")?;
+    let code = rest.split_whitespace().next()?;
+    code.parse::<u16>().ok()
+}
+
 fn is_url_path_error_response(message: &str) -> bool {
-    if !message.contains("HTTP 400") {
+    if http_status_code(message) != Some(400) {
         return false;
     }
 
@@ -123,6 +151,20 @@ fn is_url_path_error_response(message: &str) -> bool {
         .any(|keyword| normalized_message.contains(keyword))
 }
 
+/// True for an HTTP 401 (`Unauthorized`) response.
+///
+/// 401 is classified as an endpoint-path error (see [`is_endpoint_path_error`])
+/// so the URL fallback keeps trying remaining candidates. When *every*
+/// candidate returns 401, the provider uses this predicate to surface the
+/// real "Unauthorized" error to the caller instead of the wrapped
+/// "All N candidates failed" summary.
+pub fn is_http_unauthorized_error(error: &LlmError) -> bool {
+    match error {
+        LlmError::ApiError(msg) => http_status_code(msg) == Some(401),
+        _ => false,
+    }
+}
+
 pub fn is_endpoint_path_error(error: &LlmError) -> bool {
     match error {
         LlmError::HttpError(msg) => {
@@ -132,9 +174,21 @@ pub fn is_endpoint_path_error(error: &LlmError) -> bool {
                 || msg.contains("connect")
         }
         LlmError::ApiError(msg) => {
-            // Some APIs report an incomplete endpoint as HTTP 400 instead of 404/405.
-            msg.contains("HTTP 404")
-                || msg.contains("HTTP 405")
+            // Endpoint path errors → the URL fallback tries the next candidate.
+            // Some servers expose multiple chat-completion routes (e.g.
+            // `/chat/completions` and `/v1/chat/completions`) and only the
+            // versioned one accepts Bearer auth. An HTTP 401 from the
+            // unversioned route therefore means "this route cannot authenticate
+            // the request", not "the API key is wrong", so the fallback keeps
+            // going. HTTP 400 with a recognized URL-error message (see
+            // `is_url_path_error_response`) is treated the same way.
+            //
+            // When *every* candidate returns 401, the provider surfaces the
+            // real "Unauthorized" error instead of the wrapped "All N
+            // candidates failed" summary — see `is_http_unauthorized_error` and
+            // `OpenAiFamilyProvider::complete`.
+            is_http_unauthorized_error(error)
+                || matches!(http_status_code(msg), Some(404) | Some(405))
                 || msg.contains("Not Found")
                 || msg.contains("endpoint not found")
                 || msg.contains("route not found")
@@ -171,8 +225,7 @@ pub fn is_configuration_error(error: &LlmError) -> bool {
                 return false;
             }
 
-            msg.contains("HTTP 400")
-                || msg.contains("HTTP 403")
+            matches!(http_status_code(msg), Some(400) | Some(403))
                 || msg.contains("Bad Request")
                 || msg.contains("Invalid")
                 || msg.contains("invalid_request_error")
@@ -194,9 +247,7 @@ pub fn is_retryable_network_error(error: &LlmError) -> bool {
         LlmError::ApiError(msg) => {
             // Only retry for transient network/server errors
             // RateLimited (429/529) is quota/policy issue - should fail immediately
-            msg.contains("HTTP 502")
-                || msg.contains("HTTP 503")
-                || msg.contains("HTTP 504")
+            matches!(http_status_code(msg), Some(502) | Some(503) | Some(504))
                 || msg.contains("Bad Gateway")
                 || msg.contains("Service Unavailable")
                 || msg.contains("Gateway Timeout")
@@ -213,86 +264,24 @@ pub fn should_try_next_candidate(error: &LlmError) -> bool {
     is_endpoint_path_error(error)
 }
 
-pub fn write_url_fallback_error_log(
-    original_base: &str,
-    base_candidates: &[String],
-    attempts: &[UrlAttemptRecord],
-    final_error: &LlmError,
-) -> String {
-    let log_path = get_error_log_path();
-
-    if let Some(parent) = log_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::error!("Failed to create error log directory: {}", e);
-        }
-    }
-
+/// Build a one-string error message summarizing why every URL candidate
+/// failed. The returned string is wrapped into `LlmError::ApiError` and
+/// ultimately written to `~/.xiaoo/log/error.log` by the TUI layer's
+/// `remote_input` handler (`apps/endside/src/support/error_log.rs`), so this
+/// function deliberately does NOT touch the log file itself to avoid
+/// producing a duplicate `source=url_fallback` entry next to the
+/// `source=remote_input` one.
+pub fn build_url_fallback_error_message(attempts: &[UrlAttemptRecord]) -> String {
     let mut error_message = format!("All {} endpoint URL candidates failed:\n", attempts.len());
-
-    match OpenOptions::new().create(true).append(true).open(&log_path) {
-        Ok(mut file) => {
-            let timestamp = chrono::Local::now().to_rfc3339();
-
-            writeln!(file, "===== {} source=url_fallback =====", timestamp).ok();
-            writeln!(file, "Original API Base: {}", original_base).ok();
-            writeln!(file).ok();
-
-            writeln!(file, "Base URL Candidates Tried:").ok();
-            for (idx, base) in base_candidates.iter().enumerate() {
-                writeln!(file, "  B{}: {}", idx + 1, base).ok();
-            }
-            writeln!(file).ok();
-
-            writeln!(file, "All Attempts Failed:").ok();
-            for attempt in attempts {
-                writeln!(
-                    file,
-                    "  #{} ({}): {}",
-                    attempt.index + 1,
-                    attempt.url,
-                    attempt.error
-                )
-                .ok();
-                error_message.push_str(&format!(
-                    "  #{}: {} → {}\n",
-                    attempt.index + 1,
-                    attempt.url,
-                    attempt.error
-                ));
-            }
-            writeln!(file).ok();
-
-            writeln!(file, "Final Error: {}", final_error).ok();
-            writeln!(file).ok();
-
-            writeln!(file, "Suggestions:").ok();
-            writeln!(file, "  • Check if API base URL is correct and accessible").ok();
-            let test_url = {
-                let base = base_candidates.get(1).unwrap_or(&base_candidates[0]);
-                if base.ends_with("/v1") || base.contains("/v1/") {
-                    format!("{}{}", base.trim_end_matches('/'), "/models")
-                } else {
-                    format!("{}{}", base.trim_end_matches('/'), "/v1/models")
-                }
-            };
-            writeln!(file, "  • Test endpoint manually: curl -v {}", test_url).ok();
-            writeln!(file, "  • Verify API key environment variable is set").ok();
-            writeln!(file, "  • Check ~/.xiaoo/log/error.log for detailed error").ok();
-            writeln!(file).ok();
-        }
-        Err(e) => {
-            tracing::error!("Failed to write error log: {}", e);
-        }
+    for attempt in attempts {
+        error_message.push_str(&format!(
+            "  #{}: {} → {}\n",
+            attempt.index + 1,
+            attempt.url,
+            attempt.error
+        ));
     }
-
-    error_message.push_str("Details logged to ~/.xiaoo/log/error.log");
     error_message
-}
-
-fn get_error_log_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".xiaoo").join("log").join("error.log"))
-        .unwrap_or_else(|| PathBuf::from(".xiaoo_error.log"))
 }
 
 #[derive(Debug, Clone)]
@@ -412,6 +401,22 @@ mod tests {
     }
 
     #[test]
+    fn full_chat_completions_endpoint_is_not_extended_again() {
+        for endpoint in [
+            "https://api.example.com/v1/chat/completions",
+            "https://api.example.com/v1/chat/completions/",
+            "https://api.example.com/v1/chat/completions?api-version=2026-01-01",
+        ] {
+            let expected = endpoint.trim_end_matches('/');
+            let bases = build_base_url_candidates(endpoint);
+            assert_eq!(bases, vec![expected]);
+
+            let final_urls = build_final_candidates(&bases);
+            assert_eq!(final_urls, vec![expected]);
+        }
+    }
+
+    #[test]
     fn test_endpoint_path_error_detection() {
         let http_error = LlmError::HttpError("Connection failed".to_string());
         assert!(is_endpoint_path_error(&http_error));
@@ -443,6 +448,60 @@ mod tests {
         let cancelled = LlmError::Cancelled;
         assert!(!is_endpoint_path_error(&cancelled));
         assert!(!should_try_next_candidate(&cancelled));
+    }
+
+    #[test]
+    fn test_http_401_is_endpoint_error_to_continue_fallback() {
+        // Rationale: see `is_endpoint_path_error`. The error is built through
+        // the real `map_api_status_error` pipeline so this test stays in sync
+        // with the wire-level message format.
+        let response_body = serde_json::json!({
+            "error": {
+                "message": "Authentication failed: Missing API key",
+                "type": "authentication_error",
+                "code": 401
+            }
+        })
+        .to_string();
+        let error = crate::error::map_api_status_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &response_body,
+            "",
+            None,
+        );
+
+        // Classified as endpoint path error → keep trying remaining candidates.
+        assert!(is_http_unauthorized_error(&error));
+        assert!(is_endpoint_path_error(&error));
+        assert!(should_try_next_candidate(&error));
+
+        // NOT a configuration error → does not stop the fallback early.
+        assert!(!is_configuration_error(&error));
+    }
+
+    #[test]
+    fn test_http_status_code_parses_structured_prefix() {
+        // Production ApiError messages are produced by `map_api_status_error`
+        // as `"HTTP {status}: {body}"`. The prefix parser must extract the
+        // numeric code from there and ignore HTTP-status substrings that only
+        // appear in the response body (false-positive guard).
+        assert_eq!(
+            http_status_code("HTTP 401 Unauthorized: {\"error\":{}}"),
+            Some(401)
+        );
+        assert_eq!(http_status_code("HTTP 404 Not Found: no body"), Some(404));
+        assert_eq!(http_status_code("HTTP 400 Bad Request: bar"), Some(400));
+
+        // A body that happens to mention another status must not leak in.
+        assert_eq!(
+            http_status_code("HTTP 400 Bad Request: see HTTP 401 docs"),
+            Some(400)
+        );
+        // Non status-shaped, manually constructed ApiErrors → None (keyword
+        // checks handle these instead).
+        assert_eq!(http_status_code("unexpected content type: text/html"), None);
+        assert_eq!(http_status_code("stream error: {\"code\":401}"), None);
+        assert_eq!(http_status_code(""), None);
     }
 
     #[test]
@@ -509,11 +568,6 @@ mod tests {
 
     #[test]
     fn test_error_message_generation() {
-        let original_base = "http://wrong.endpoint.com";
-        let base_candidates = vec![
-            "http://wrong.endpoint.com".to_string(),
-            "http://wrong.endpoint.com/v1".to_string(),
-        ];
         let attempts = vec![
             UrlAttemptRecord {
                 index: 0,
@@ -526,15 +580,16 @@ mod tests {
                 error: "Connection timeout".to_string(),
             },
         ];
-        let final_error = LlmError::ApiError("All candidates failed".to_string());
 
-        let error_msg =
-            write_url_fallback_error_log(original_base, &base_candidates, &attempts, &final_error);
+        let error_msg = build_url_fallback_error_message(&attempts);
 
         assert!(error_msg.contains("All 2 endpoint URL candidates failed"));
-        assert!(error_msg.contains("http://wrong.endpoint.com"));
-        assert!(error_msg.contains("~/.xiaoo/log/error.log"));
         assert!(error_msg.contains("http://wrong.endpoint.com/chat/completions"));
+        assert!(error_msg.contains("HTTP 404"));
+        assert!(error_msg.contains("Connection timeout"));
+        // The log-file-writing tail was removed; the TUI layer's
+        // `remote_input` handler owns the single persisted copy now.
+        assert!(!error_msg.contains("~/.xiaoo/log/error.log"));
     }
 
     #[test]

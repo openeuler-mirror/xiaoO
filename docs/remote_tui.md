@@ -151,13 +151,33 @@ SSE event types:
 
 | Event | Description |
 |-------|-------------|
-| `turn_start` | Agent loop turn started |
-| `text_delta` | Assistant text update; includes both incremental `delta` and cumulative `snapshot` |
-| `tool_result` | Tool execution result summary |
+| `turn_start` | Agent loop turn started; carries `agent_id` (root or subagent) |
+| `text_delta` | Assistant text update; includes both incremental `delta` and cumulative `snapshot`; `agent_id` disambiguates root vs. subagent lanes |
+| `thinking_delta` | Assistant reasoning text update (mirrors `text_delta` semantics) |
+| `tool_result` | Tool execution result summary; carries `agent_id`, `call_id`, `tool_name`, `output_preview`, `is_error`, and `args_preview` |
+| `tool_call` | Tool lifecycle transition (`running` / `completed` / `failed` / `denied`). Forwarded by the daemon so the remote TUI can drive the same tool-card state machine as local mode (running spinner, terminal state). `agent_id` routes the update to the root message list or a subagent lane |
+| `tool_file_change` | Per-call file change delta precomputed by the daemon so the TUI's session diff panel mirrors the local computation |
+| `plan_update` | Plan snapshot parsed by the daemon from the `todo_write` tool's args |
+| `subagent_spawn` | Subagent lane metadata parsed by the daemon from the `spawn_subagent` tool's args + output; lets the TUI create the subagent lane without re-parsing the daemon-only `args_preview` |
+| `loop_end` | Per-agent loop-end marker. The daemon emits one per `agent_id` (root or subagent) so the TUI can clear `is_running` on the matching subagent lane as its loop terminates, matching local-mode `ChannelLoopEventSink::on_loop_end` semantics. Carries the per-agent `LoopEndSummary` fields (`turn_count`, `total_tokens`, `stop_reason`) so the TUI can render per-agent token usage / stop reason with parity to local mode; older daemons that omit them default to zero / empty via `#[serde(default)]` |
 | `interaction_requested` | Daemon asks the TUI to show an interaction prompt |
 | `done` | Turn completed; includes token usage and runtime messages |
 | `error` | Turn failed |
 | `cancelled` | Cancellation acknowledgement |
+
+**Backward / forward compatibility.** The TUI's SSE parser deserializes
+each frame into the `RemoteSseEvent` enum, which carries an
+`#[serde(other)] Unknown` catch-all variant. Unknown event types (emitted
+by a future daemon) are mapped to `Unknown`, logged at `debug` level, and
+skipped (not surfaced as a stream error), so a TUI built against this
+catalogue keeps working when a future daemon emits additional events — no
+hand-maintained string whitelist is needed, and adding a new variant to
+`RemoteSseEvent` automatically makes it a known type. New fields on
+existing events are added with `#[serde(default)]` so older daemons that
+omit them still parse on a newer TUI, and older TUIs that don't know about
+a new field silently drop it (serde's default is to allow unknown fields). Daemon authors adding new
+SSE events or fields should mirror the snake_case naming of the existing
+catalogue and document the additions in this section.
 
 ---
 
@@ -168,6 +188,14 @@ SSE event types:
 - Use bearer auth for any daemon bound to a non-loopback interface.
 - For untrusted networks, prefer an SSH tunnel or TLS-terminating reverse proxy in front of the daemon.
 - Remote runtime state is kept in the daemon's in-memory control-plane store. Restarting Machine A's daemon loses active remote runtimes in the current implementation.
+- **Subagent support.** The daemon binds the same `SubagentControl`
+  implementation (`CoreBackedSessionService`) as the local TUI, so
+  `spawn_subagent` / `join_subagent` tools work in remote mode out of
+  the box. Subagent lane lifecycle (`turn_start` → `tool_call` →
+  `loop_end`) and tool-card running state are forwarded via SSE so the
+  TUI renders subagent lanes with parity to local mode. Configure
+  `[subagent.<id>]` role presets on Machine A; role `prompt` / `tools` /
+  `max_turns` are applied at spawn time.
 
 ---
 

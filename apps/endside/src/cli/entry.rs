@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::cli::config::FileConfig;
@@ -8,6 +9,7 @@ use crate::cli::{
 };
 use agent_contracts::{LoopEventSink, SkillRegistry};
 use clap::Parser;
+use futures_util::StreamExt;
 use operation_backend::process_group::ProcessGroupCleanupGuard;
 use serde_json::Value;
 use skill::audit::{audit_skill_directory, SkillAuditOptions};
@@ -16,8 +18,8 @@ use skill::types::config::SkillsConfig;
 use xiaoo_shared::gateway::{
     session_record::SubagentRoleRecord, AppBootstrap, AppTurnRequest, GatewayEntryContext,
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, InMemorySessionStore,
-    LlmRuntimeConfig, SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver,
-    SessionStore,
+    LlmRuntimeConfig, McpMemoryAutomation, SessionDetachRequest, SessionOpenRequest,
+    SessionRuntimeBindings, SessionRuntimeDescriptor, SessionRuntimeResolver, SessionStore,
 };
 
 use agent_types::common::ids::AgentId;
@@ -34,12 +36,20 @@ struct Args {
     #[arg(long, global = true)]
     config: Option<String>,
 
+    /// Path to standard MCP JSON config (default discovery uses .mcp.json)
+    #[arg(long, global = true)]
+    mcp_config: Option<PathBuf>,
+
     /// Show intermediate results (turns, tool calls, tokens)
     #[arg(long, global = true)]
     debug: bool,
 
+    /// Show version number
+    #[arg(short = 'v', long = "version", global = true, action = clap::ArgAction::SetTrue)]
+    version: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(clap::Subcommand)]
@@ -47,8 +57,8 @@ enum Command {
     /// Run a single prompt through the AgentLoop
     Run {
         /// The prompt to send to the agent
-        #[arg(short, long)]
-        prompt: String,
+        #[arg(short, long, num_args = 1..)]
+        prompt: Vec<String>,
 
         /// LLM provider (overrides config file)
         #[arg(long)]
@@ -88,12 +98,72 @@ enum Command {
         /// Reasoning effort: off, high, or max
         #[arg(long, value_parser = clap::value_parser!(ReasoningEffort))]
         reasoning_effort: Option<ReasoningEffort>,
+
+        /// Output format for results
+        #[arg(long, value_parser = clap::value_parser!(OutputFormat), default_value = "default")]
+        format: OutputFormat,
+
+        /// Human-readable session title
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Resume an existing session by ID
+        #[arg(short, long)]
+        session: Option<String>,
+
+        /// Agent ID to use for this run
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Attach to a running daemon at the given URL instead of running locally
+        #[arg(long)]
+        attach: Option<String>,
+    },
+    /// Start a local daemon server
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 4096)]
+        port: u16,
+
+        /// Hostname to bind
+        #[arg(long, default_value_t = String::from("127.0.0.1"))]
+        hostname: String,
+    },
+    /// Export a session transcript from a running daemon
+    Export {
+        /// ID of the session to export
+        session_id: String,
+        /// Port of the running daemon
+        #[arg(long, default_value = "4096")]
+        port: u16,
+        /// Optional client id for lease verification (when the daemon enforces session leases)
+        #[arg(long)]
+        client_id: Option<String>,
+    },
+    /// Inspect resolved configuration and internal state
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommands,
     },
     /// Manage skills
     Skill {
         #[command(subcommand)]
         command: SkillCommands,
     },
+}
+
+#[derive(clap::Subcommand)]
+enum DebugCommands {
+    /// Show resolved configuration
+    Config,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+enum OutputFormat {
+    /// Human-readable text output
+    Default,
+    /// Machine-readable JSON output (one event object per line)
+    Json,
 }
 
 #[derive(clap::Subcommand)]
@@ -125,9 +195,20 @@ where
     let args = Args::parse_from(args);
     let debug = args.debug;
     let config_path = FileConfig::resolve_path(args.config.as_deref());
+    let mcp_config_path = args.mcp_config;
+
+    if args.version {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
 
     match args.command {
-        Command::Run {
+        None => {
+            eprintln!("error: 'xiaoo' requires a subcommand but one was not provided");
+            eprintln!("  [subcommands: run, serve, export, debug, skill, help]");
+            std::process::exit(1);
+        }
+        Some(Command::Run {
             prompt,
             provider,
             model,
@@ -138,7 +219,13 @@ where
             no_tools,
             tools,
             reasoning_effort,
-        } => {
+            format,
+            title,
+            session,
+            agent,
+            attach,
+        }) => {
+            let prompt = prompt.join(" ");
             if let Some(path) = config_path.as_ref() {
                 if let Err(error) = xiaoo_shared::llm_secrets::init_on_demand_secret_provider(path)
                 {
@@ -173,6 +260,20 @@ where
             let reasoning_effort = reasoning_effort.unwrap_or_default();
 
             let skills_config = resolve_skills_config_from_file(&file_cfg);
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let default_toml_source = Path::new("config.toml");
+            let mcp_servers = match file_cfg.resolve_mcp_servers(
+                mcp_config_path.as_deref(),
+                &workspace,
+                dirs::home_dir().as_deref(),
+                config_path.as_deref().unwrap_or(default_toml_source),
+            ) {
+                Ok(servers) => servers,
+                Err(error) => {
+                    eprintln!("Failed to load MCP config: {error}");
+                    std::process::exit(1);
+                }
+            };
 
             let config = CliConfig {
                 provider,
@@ -199,12 +300,38 @@ where
                 operation_backend: file_cfg.operation_backend.clone(),
                 skills_config,
                 subagent: file_cfg.subagent.clone(),
-                mcp_servers: file_cfg.mcp.servers.clone(),
+                mcp_servers,
+                memory_automation: file_cfg.memory_automation.clone(),
             };
 
-            run_once(config, prompt, debug).await;
+            let session_title = title.or_else(|| generate_title_from_prompt(&prompt));
+
+            run_once(
+                config,
+                prompt,
+                debug,
+                format,
+                session_title,
+                session,
+                agent,
+                attach,
+            )
+            .await;
         }
-        Command::Skill { command } => {
+        Some(Command::Serve { port, hostname }) => {
+            handle_serve_command(port, hostname).await;
+        }
+        Some(Command::Export {
+            session_id,
+            port,
+            client_id,
+        }) => {
+            handle_export_command(session_id, port, client_id).await;
+        }
+        Some(Command::Debug { command }) => {
+            handle_debug_command(command, config_path.as_ref(), debug);
+        }
+        Some(Command::Skill { command }) => {
             handle_skill_command(command);
         }
     }
@@ -766,16 +893,45 @@ fn reject_nested_copy(src: &std::path::Path, dest: &std::path::Path) -> std::io:
     Ok(())
 }
 
-async fn run_once(config: CliConfig, prompt: String, debug: bool) {
+async fn run_once(
+    config: CliConfig,
+    prompt: String,
+    debug: bool,
+    format: OutputFormat,
+    title: Option<String>,
+    session: Option<String>,
+    agent: Option<String>,
+    attach: Option<String>,
+) {
     if debug {
         eprintln!(
-            "[config] provider={}, model={}, max_turns={}",
-            config.provider, config.model, config.max_turns
+            "[config] provider={}, model={}, max_turns={}, format={:?}",
+            config.provider, config.model, config.max_turns, format
         );
+        if let Some(title) = &title {
+            eprintln!("[config] title={}", title);
+        }
+        if let Some(session) = &session {
+            eprintln!("[config] session={}", session);
+        }
+        if let Some(agent) = &agent {
+            eprintln!("[config] agent={}", agent);
+        }
+        if let Some(attach) = &attach {
+            eprintln!("[config] attach={}", attach);
+        }
+    }
+
+    if let Some(attach_url) = &attach {
+        run_with_attach(attach_url, prompt, format, title, session, agent, debug).await;
+        return;
     }
 
     // 1. LLM provider (shared with compression pipeline)
-    let llm_provider = match build_llm_provider(&config, Some("defaultagent".into())) {
+    let llm_provider = match build_llm_provider(
+        &config,
+        Some(agent.clone().unwrap_or_else(|| "defaultagent".into())),
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Failed to create LLM provider: {}", e);
@@ -799,7 +955,12 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
-            agent_id: AgentId("defaultagent".into()),
+            agent_id: AgentId(
+                agent
+                    .as_ref()
+                    .map(|a| a.clone())
+                    .unwrap_or_else(|| "defaultagent".into()),
+            ),
             model: config.model.clone(),
             llm: Some(LlmRuntimeConfig {
                 provider: Some(config.provider.clone()),
@@ -873,6 +1034,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
             })
             .collect(),
         mcp_servers: config.mcp_servers.clone(),
+        memory_automation: config.memory_automation.clone(),
     };
 
     // 4. Bindings (CliEventSink for debug output)
@@ -889,22 +1051,53 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
 
     // 5. Bootstrap gateway
     let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let memory_automation = match McpMemoryAutomation::connect(
+        config.memory_automation.clone(),
+        &config.mcp_servers,
+    )
+    .await
+    {
+        Ok(automation) => automation,
+        Err(error) => {
+            tracing::warn!(error = %error, "memory automation disabled after CLI startup error");
+            None
+        }
+    };
+    let memory_automation_for_shutdown = memory_automation.clone();
     let resolver: Arc<dyn SessionRuntimeResolver> =
         Arc::new(HostedSessionRuntimeResolver::new(runtime_config, bindings));
-    let deps = match AppBootstrap::from_session_components_with_hooks(
+    let deps = match AppBootstrap::from_session_components_with_hooks_and_backend_manager_and_memory_automation(
         store,
         resolver,
         config.hooker.clone(),
+        Arc::new(xiaoo_shared::backend::BackendManager::new()),
+        memory_automation,
+        // No subagent interaction timeout for the local CLI/TUI entry.
+        None,
     ) {
         Ok(d) => d,
         Err(e) => {
+            if let Some(automation) = memory_automation_for_shutdown {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    automation.close(),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        eprintln!("[warn] failed to close MCP memory automation: {error}")
+                    }
+                    Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
+                }
+            }
             eprintln!("Failed to bootstrap session: {}", e);
             std::process::exit(1);
         }
     };
 
-    // 6. Turn request
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // 6. Turn request - use provided session ID or create new one
+    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext::cli(),
@@ -912,7 +1105,7 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         message_id: None,
         conversation_id: session_id.clone(),
         sender_id: "cli-user".into(),
-        text: prompt,
+        text: prompt.clone(),
         channel_instance_id: None,
         channel_identity_prompt: None,
         reply_to_message_id: None,
@@ -920,9 +1113,40 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         mentions: Vec::new(),
         reasoning_effort: config.reasoning_effort,
         llm: None,
+        workspace: None,
+        skills: None,
         command_context: None,
         chain_depth: 0,
+        // One-shot CLI never opens a session, so it skips the attach-lease
+        // protocol and carries no `client_id`. With `XIAOO_ENFORCE_LEASE=on`,
+        // use the TUI instead.
+        client_id: None,
     };
+
+    // Print session info
+    if debug || format == OutputFormat::Json {
+        let session_info = serde_json::json!({
+            "session_id": session_id,
+            "title": title,
+            "agent": agent,
+        });
+        if format == OutputFormat::Json {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "session_start",
+                    "data": session_info
+                }))
+                .unwrap()
+            );
+            let _ = std::io::stdout().flush();
+        } else if debug {
+            eprintln!(
+                "[session] {}",
+                serde_json::to_string_pretty(&session_info).unwrap()
+            );
+        }
+    }
 
     // 7. Run turn via gateway session service, then explicitly close the
     // session so SessionClosed lifecycle hookers fire in CLI mode as well.
@@ -932,17 +1156,421 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
         .force_close_session(&session_id)
         .await
     {
-        eprintln!("[warn] failed to close session: {}", err);
+        if format == OutputFormat::Json {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "type": "error",
+                    "data": {
+                        "message": format!("failed to close session: {}", err)
+                    }
+                }))
+                .unwrap()
+            );
+            let _ = std::io::stdout().flush();
+        } else {
+            eprintln!("[warn] failed to close session: {}", err);
+        }
+    }
+    if let Some(automation) = memory_automation_for_shutdown {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), automation.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => eprintln!("[warn] failed to close MCP memory automation: {error}"),
+            Err(_) => eprintln!("[warn] MCP memory automation close timed out after 5 seconds"),
+        }
     }
 
     match turn_result {
         Ok(result) => {
-            if !result.raw_reply.is_empty() {
-                println!("{}", result.raw_reply);
+            if format == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "response",
+                        "data": {
+                            "raw_reply": result.raw_reply,
+                            "session_id": session_id,
+                        }
+                    }))
+                    .unwrap()
+                );
+                let _ = std::io::stdout().flush();
+            } else {
+                if !result.raw_reply.is_empty() {
+                    println!("{}", result.raw_reply);
+                }
             }
         }
         Err(e) => {
-            eprintln!("[error] {}", e);
+            if format == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "type": "error",
+                        "data": {
+                            "message": e.to_string()
+                        }
+                    }))
+                    .unwrap()
+                );
+                let _ = std::io::stdout().flush();
+            } else {
+                eprintln!("[error] {}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn generate_title_from_prompt(prompt: &str) -> Option<String> {
+    let words = prompt.split_whitespace().take(10).collect::<Vec<_>>();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+async fn handle_serve_command(port: u16, hostname: String) {
+    eprintln!("Starting xiaoo daemon server on {}:{}", hostname, port);
+    eprintln!("Use 'xiaoo-daemon' binary directly for full daemon functionality");
+    let status = std::process::Command::new("xiaoo-daemon")
+        .args(["--port", &port.to_string(), "--host", &hostname])
+        .status();
+
+    match status {
+        Ok(s) if s.success() => std::process::exit(0),
+        Ok(s) => {
+            eprintln!("xiaoo-daemon exited with status: {}", s);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Failed to start xiaoo-daemon: {}", e);
+            eprintln!("Make sure 'xiaoo-daemon' binary is installed");
+            std::process::exit(1);
+        }
+    }
+}
+
+async fn run_with_attach(
+    url: &str,
+    prompt: String,
+    format: OutputFormat,
+    title: Option<String>,
+    session: Option<String>,
+    agent: Option<String>,
+    debug: bool,
+) {
+    let base_url = url.trim_end_matches('/').to_string();
+    if debug {
+        eprintln!("Attaching to daemon at: {base_url}");
+    }
+
+    // Optional bearer token so attach also works against daemons that enable
+    // HTTP bearer auth (mirrors the TUI's resolve_bearer_token).
+    let bearer_token = std::env::var("XIAOO_DAEMON_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // This process's identity for the daemon's attach-lease table.
+    let client_id = format!("cli-{}", std::process::id());
+    let session_id = session.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let is_json = format == OutputFormat::Json;
+
+    if is_json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "type": "session_start",
+                "data": {
+                    "session_id": &session_id,
+                    "title": &title,
+                    "agent": &agent,
+                }
+            }))
+            .unwrap()
+        );
+        let _ = std::io::stdout().flush();
+    }
+
+    // 1. Open (or re-open) the session so this process holds the lease --
+    //    required before submitting a turn when the daemon enforces lease
+    //    ownership (`XIAOO_ENFORCE_LEASE=on`).
+    let open_request = SessionOpenRequest {
+        session_id: session_id.clone(),
+        conversation_id: session_id.clone(),
+        sender_id: "cli-user".to_string(),
+        entry: GatewayEntryContext::cli(),
+        channel: None,
+        channel_instance_id: None,
+        llm: None,
+        workspace: None,
+        skills: None,
+        client_id: Some(client_id.clone()),
+        client_pid: Some(std::process::id()),
+        client_hostname: None,
+    };
+    let open_url = format!("{base_url}/api/v1/runtimes/open");
+    let mut open_req = client.post(&open_url).json(&open_request);
+    if let Some(token) = bearer_token.as_ref() {
+        open_req = open_req.bearer_auth(token);
+    }
+    match open_req.send().await {
+        Ok(resp) if !resp.status().is_success() => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            attach_fail(
+                format!("session open failed: HTTP {status} {body}"),
+                is_json,
+            );
+        }
+        Ok(_) => {}
+        Err(error) => attach_fail(format!("failed to connect to daemon: {error}"), is_json),
+    }
+
+    // 2. Submit the turn; the daemon replies with an SSE event stream.
+    let turn_request = AppTurnRequest {
+        session_id: session_id.clone(),
+        entry: GatewayEntryContext::cli(),
+        channel: None,
+        message_id: None,
+        conversation_id: session_id.clone(),
+        sender_id: "cli-user".to_string(),
+        text: prompt,
+        channel_instance_id: None,
+        channel_identity_prompt: None,
+        reply_to_message_id: None,
+        root_message_id: None,
+        mentions: Vec::new(),
+        reasoning_effort: ReasoningEffort::default(),
+        llm: None,
+        workspace: None,
+        skills: None,
+        command_context: None,
+        chain_depth: 0,
+        client_id: Some(client_id.clone()),
+    };
+    let input_url = format!("{base_url}/api/v1/runtimes/input");
+    let mut input_req = client.post(&input_url).json(&turn_request);
+    if let Some(token) = bearer_token.as_ref() {
+        input_req = input_req.bearer_auth(token);
+    }
+    let response = match input_req.send().await {
+        Ok(response) => response,
+        Err(error) => attach_fail(format!("failed to submit turn: {error}"), is_json),
+    };
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        attach_fail(
+            format!("turn submission failed: HTTP {status} {body}"),
+            is_json,
+        );
+    }
+
+    // 3. Consume the SSE event stream emitted by /api/v1/runtimes/input.
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut printed_any_text = false;
+    let mut saw_done = false;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => attach_fail(format!("stream read error: {error}"), is_json),
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(frame) = take_sse_frame(&mut buffer) {
+            let Some(event) = parse_sse_event(&frame) else {
+                continue;
+            };
+            let typ = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match typ {
+                "text_delta" => {
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    } else if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                        print!("{delta}");
+                        let _ = std::io::stdout().flush();
+                        printed_any_text = true;
+                    }
+                }
+                "done" => {
+                    saw_done = true;
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    } else if !printed_any_text {
+                        // Daemon sent no incremental deltas; emit the final reply.
+                        if let Some(reply) = event.get("reply").and_then(|v| v.as_str()) {
+                            println!("{reply}");
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                }
+                "error" => {
+                    let message = event
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown daemon error");
+                    attach_fail(message.to_string(), is_json);
+                }
+                _ => {
+                    if is_json {
+                        println!("{}", serde_json::to_string(&event).unwrap_or_default());
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+        }
+    }
+
+    if !saw_done {
+        attach_fail(
+            "daemon stream ended without a completion event".to_string(),
+            is_json,
+        );
+    }
+
+    // 4. Best-effort detach so the daemon releases this process's lease
+    //    promptly instead of waiting for the staleness timeout. Errors are
+    //    ignored -- the turn already completed successfully.
+    let detach_request = SessionDetachRequest {
+        session_id: session_id.clone(),
+        client_id: Some(client_id),
+    };
+    let detach_url = format!("{base_url}/api/v1/runtimes/detach");
+    let mut detach_req = client.post(&detach_url).json(&detach_request);
+    if let Some(token) = bearer_token.as_ref() {
+        detach_req = detach_req.bearer_auth(token);
+    }
+    let _ = detach_req.send().await;
+}
+
+/// Report an attach-mode failure to stderr (text) or stdout (JSON), then exit.
+fn attach_fail(message: String, is_json: bool) -> ! {
+    if is_json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "data": { "message": message }
+            }))
+            .unwrap()
+        );
+        let _ = std::io::stdout().flush();
+    } else {
+        eprintln!("{message}");
+    }
+    std::process::exit(1);
+}
+
+/// Extract a single SSE frame (text up to a blank line) from the buffer.
+fn take_sse_frame(buffer: &mut String) -> Option<String> {
+    let index = buffer.find("\n\n")?;
+    let frame = buffer[..index].to_string();
+    buffer.drain(..index + 2);
+    Some(frame)
+}
+
+/// Parse an SSE frame's `data:` lines into a single JSON value. Returns
+/// `None` for keep-alive/comment frames or malformed JSON.
+fn parse_sse_event(frame: &str) -> Option<Value> {
+    let mut data_lines = Vec::new();
+    for line in frame.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with(':') || line.is_empty() {
+            continue;
+        }
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start());
+        }
+    }
+    if data_lines.is_empty() {
+        return None;
+    }
+    let data = data_lines.join("\n");
+    serde_json::from_str(&data).ok()
+}
+
+fn handle_debug_command(command: DebugCommands, config_path: Option<&PathBuf>, debug: bool) {
+    match command {
+        DebugCommands::Config => {
+            let file_cfg = config_path
+                .map(|path| FileConfig::load_from_path(path, debug))
+                .unwrap_or_default();
+
+            let mut config_json = serde_json::Map::new();
+            config_json.insert(
+                "$schema".to_string(),
+                Value::String("https://xiaoo.ai/config.json".to_string()),
+            );
+
+            if let Some(llm) = &file_cfg.llm {
+                let provider = llm.provider.as_deref().unwrap_or("openai");
+                let model = llm.model.as_deref().unwrap_or("");
+                config_json.insert(
+                    "model".to_string(),
+                    Value::String(format!("{}/{}", provider, model)),
+                );
+            }
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&Value::Object(config_json)).unwrap()
+            );
+        }
+    }
+}
+async fn handle_export_command(session_id: String, port: u16, client_id: Option<String>) {
+    let url = format!(
+        "http://127.0.0.1:{}/api/v1/runtimes/export/{}",
+        port, session_id
+    );
+
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if let Some(cid) = &client_id {
+        req = req.query(&[("client_id", cid)]);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await;
+            if status.is_success() {
+                match text {
+                    Ok(body) if !body.is_empty() => println!("{}", body),
+                    Ok(_) => {
+                        eprintln!("Error: Empty response exporting session '{}'", session_id);
+                        eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Failed to read export response body: {}", e);
+                        eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("Error: Failed to export session '{}'", session_id);
+                eprintln!("Details: HTTP {}", status.as_u16());
+                if let Ok(body) = &text {
+                    if !body.is_empty() {
+                        eprintln!("Response: {}", body);
+                    }
+                }
+                eprintln!("Make sure xiaoo-daemon is running on port {}", port);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: Failed to call export API: {}", e);
+            eprintln!("Make sure xiaoo-daemon is running on port {}", port);
             std::process::exit(1);
         }
     }
@@ -950,9 +1578,27 @@ async fn run_once(config: CliConfig, prompt: String, debug: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::copy_dir_recursive;
+    use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn parses_explicit_mcp_config_path() {
+        let args = Args::try_parse_from([
+            "xiaoo",
+            "--mcp-config",
+            "/tmp/mcp.json",
+            "run",
+            "--prompt",
+            "hello",
+        ])
+        .expect("CLI should accept --mcp-config");
+
+        assert_eq!(
+            args.mcp_config.as_deref(),
+            Some(std::path::Path::new("/tmp/mcp.json"))
+        );
+    }
 
     #[test]
     fn copy_dir_rejects_destination_inside_source() {
@@ -964,5 +1610,82 @@ mod tests {
         let err = copy_dir_recursive(&src, &src.join("nested")).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_generate_title_from_prompt() {
+        let prompt = "Fix the bug in authentication module related to JWT token validation";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(
+            title,
+            Some("Fix the bug in authentication module related to JWT token".to_string())
+        );
+    }
+
+    #[test]
+    fn test_generate_title_from_short_prompt() {
+        let prompt = "Hello world";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_generate_title_from_empty_prompt() {
+        let prompt = "";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn test_generate_title_from_whitespace_prompt() {
+        let prompt = "   ";
+        let title = generate_title_from_prompt(prompt);
+        assert_eq!(title, None);
+    }
+}
+
+#[cfg(test)]
+mod attach_sse_tests {
+    use super::{parse_sse_event, take_sse_frame};
+
+    #[test]
+    fn take_sse_frame_extracts_frame_and_drains() {
+        let mut buf = String::from("data: {\"type\":\"x\"}\n\nleftover");
+        let frame = take_sse_frame(&mut buf).unwrap();
+        assert_eq!(frame, "data: {\"type\":\"x\"}");
+        assert_eq!(buf, "leftover");
+    }
+
+    #[test]
+    fn take_sse_frame_returns_none_without_blank_line() {
+        let mut buf = String::from("data: partial");
+        assert!(take_sse_frame(&mut buf).is_none());
+        assert_eq!(buf, "data: partial");
+    }
+
+    #[test]
+    fn parse_sse_event_parses_data_json() {
+        let frame = "data: {\"type\":\"text_delta\",\"delta\":\"hi\"}";
+        let event = parse_sse_event(frame).unwrap();
+        assert_eq!(event["type"], "text_delta");
+        assert_eq!(event["delta"], "hi");
+    }
+
+    #[test]
+    fn parse_sse_event_joins_multi_line_data() {
+        let frame = "data: {\"type\":\"done\",\ndata: \"reply\":\"ok\"}";
+        let event = parse_sse_event(frame).unwrap();
+        assert_eq!(event["type"], "done");
+        assert_eq!(event["reply"], "ok");
+    }
+
+    #[test]
+    fn parse_sse_event_ignores_comments_and_blank_lines() {
+        assert!(parse_sse_event(": keepalive\n\n").is_none());
+    }
+
+    #[test]
+    fn parse_sse_event_returns_none_for_malformed_json() {
+        assert!(parse_sse_event("data: {not json").is_none());
     }
 }

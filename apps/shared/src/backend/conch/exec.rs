@@ -205,6 +205,7 @@ mod tests {
             cwd: Some(BackendPath("/workspace".to_string())),
             timeout_ms: Some(1000),
             env: Some(vec![("XIAOO_ENV".to_string(), "kept".to_string())]),
+            ..Default::default()
         }
     }
 

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum McpError {
     #[error("failed to spawn mcp server '{command}': {error}")]
     SpawnFailed { command: String, error: String },
@@ -25,6 +25,9 @@ pub enum McpError {
 
     #[error("mcp http error: {0}")]
     Http(String),
+
+    #[error("mcp bearer token environment variable `{env_var}` is unavailable")]
+    BearerTokenUnavailable { env_var: String },
 
     #[error("mcp server disconnected during request")]
     Disconnected,

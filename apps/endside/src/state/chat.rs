@@ -1,6 +1,7 @@
 use crate::input::Input;
 use ratatui::widgets::ScrollbarState;
 use std::collections::{BTreeMap, VecDeque};
+use xiaoo_shared::session_diff::FileChangeDelta as SharedFileChangeDelta;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolExecutionStatus {
@@ -14,6 +15,26 @@ pub struct FileChangeDelta {
     pub file_path: String,
     pub additions: u32,
     pub deletions: u32,
+}
+
+impl From<SharedFileChangeDelta> for FileChangeDelta {
+    fn from(delta: SharedFileChangeDelta) -> Self {
+        Self {
+            file_path: delta.file_path,
+            additions: delta.additions,
+            deletions: delta.deletions,
+        }
+    }
+}
+
+impl From<FileChangeDelta> for SharedFileChangeDelta {
+    fn from(delta: FileChangeDelta) -> Self {
+        Self {
+            file_path: delta.file_path,
+            additions: delta.additions,
+            deletions: delta.deletions,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -31,35 +52,7 @@ pub struct ToolExecutionUpdate {
     pub file_change: Option<FileChangeDelta>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TodoDisplayStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct TodoSnapshotItem {
-    pub status: TodoDisplayStatus,
-    pub content: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct TodoSnapshotUpdate {
-    pub title: String,
-    pub items: Vec<TodoSnapshotItem>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CompletionCheckUpdate {
-    pub reason: String,
-    pub missing_information: String,
-    pub next_step_hint: String,
-}
+pub use xiaoo_shared::plan::{TodoDisplayStatus, TodoSnapshotUpdate};
 
 #[derive(Debug, Clone)]
 pub struct ToolMessageState {
@@ -200,24 +193,6 @@ impl Message {
                 duration_ms: update.duration_ms,
             }),
             completion_check_state: None,
-            render_revision: 0,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn completion_check(update: CompletionCheckUpdate) -> Self {
-        Self {
-            role: MessageRole::System,
-            content: String::new(),
-            thinking_content: String::new(),
-            timestamp: chrono::Local::now(),
-            is_streaming: false,
-            tool_state: None,
-            completion_check_state: Some(CompletionCheckMessageState {
-                reason: update.reason,
-                missing_information: update.missing_information,
-                next_step_hint: update.next_step_hint,
-            }),
             render_revision: 0,
         }
     }
@@ -529,12 +504,28 @@ pub struct ModelInfo {
     pub name: String,
 }
 
-/// Default provider list shown in TUI (openai, anthropic, openrouter, ollama).
+/// Default provider and model list shown in the TUI.
 pub fn default_provider_list() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo {
             name: "openai".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "gpt-5.6".to_string(),
+                    name: "GPT-5.6 (Latest)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-sol".to_string(),
+                    name: "GPT-5.6 Sol (Flagship)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-terra".to_string(),
+                    name: "GPT-5.6 Terra (Balanced)".to_string(),
+                },
+                ModelInfo {
+                    id: "gpt-5.6-luna".to_string(),
+                    name: "GPT-5.6 Luna (Efficient)".to_string(),
+                },
                 ModelInfo {
                     id: "gpt-4o".to_string(),
                     name: "GPT-4o".to_string(),
@@ -552,6 +543,14 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "anthropic".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "claude-fable-5".to_string(),
+                    name: "Claude Fable 5".to_string(),
+                },
+                ModelInfo {
+                    id: "claude-sonnet-5".to_string(),
+                    name: "Claude Sonnet 5".to_string(),
+                },
                 ModelInfo {
                     id: "claude-sonnet-4-20250514".to_string(),
                     name: "Claude Sonnet 4".to_string(),
@@ -588,6 +587,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "zhipu".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "glm-5.2".to_string(),
+                    name: "GLM-5.2 (Flagship)".to_string(),
+                },
                 ModelInfo {
                     id: "glm-5".to_string(),
                     name: "GLM-5 (Flagship)".to_string(),
@@ -637,6 +640,34 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "openrouter".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "openai/gpt-5.6-sol".to_string(),
+                    name: "GPT-5.6 Sol".to_string(),
+                },
+                ModelInfo {
+                    id: "openai/gpt-5.6-terra".to_string(),
+                    name: "GPT-5.6 Terra".to_string(),
+                },
+                ModelInfo {
+                    id: "openai/gpt-5.6-luna".to_string(),
+                    name: "GPT-5.6 Luna".to_string(),
+                },
+                ModelInfo {
+                    id: "anthropic/claude-fable-5".to_string(),
+                    name: "Claude Fable 5".to_string(),
+                },
+                ModelInfo {
+                    id: "anthropic/claude-sonnet-5".to_string(),
+                    name: "Claude Sonnet 5".to_string(),
+                },
+                ModelInfo {
+                    id: "moonshotai/kimi-k3".to_string(),
+                    name: "Kimi K3".to_string(),
+                },
+                ModelInfo {
+                    id: "z-ai/glm-5.2".to_string(),
+                    name: "GLM-5.2 (z-ai)".to_string(),
+                },
                 ModelInfo {
                     id: "z-ai/glm-5".to_string(),
                     name: "GLM-5 (z-ai)".to_string(),
@@ -688,12 +719,20 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
             name: "kimi".to_string(),
             models: vec![
                 ModelInfo {
-                    id: "kimi-k2-0905-preview".to_string(),
-                    name: "Kimi K2 0905 Preview".to_string(),
+                    id: "kimi-k3".to_string(),
+                    name: "Kimi K3 (Flagship)".to_string(),
                 },
                 ModelInfo {
-                    id: "kimi-latest".to_string(),
-                    name: "Kimi Latest".to_string(),
+                    id: "kimi-k2.7-code".to_string(),
+                    name: "Kimi K2.7 Code".to_string(),
+                },
+                ModelInfo {
+                    id: "kimi-k2.7-code-highspeed".to_string(),
+                    name: "Kimi K2.7 Code Highspeed".to_string(),
+                },
+                ModelInfo {
+                    id: "kimi-k2.6".to_string(),
+                    name: "Kimi K2.6".to_string(),
                 },
             ],
         },
@@ -751,6 +790,10 @@ pub fn default_provider_list() -> Vec<ProviderInfo> {
         ProviderInfo {
             name: "zai-coding-plan".to_string(),
             models: vec![
+                ModelInfo {
+                    id: "glm-5.2".to_string(),
+                    name: "GLM-5.2 (Coding Plan)".to_string(),
+                },
                 ModelInfo {
                     id: "glm-5.1".to_string(),
                     name: "GLM-5.1 (Coding Plan)".to_string(),
@@ -1051,16 +1094,76 @@ impl ChatState {
                 SubagentLaneState::new(agent_id, parent_agent_id, title, description, task_goal)
             })
     }
+
+    /// Like [`Self::ensure_subagent_lane`] but never invokes
+    /// [`SubagentLaneState::update_metadata`] on an existing lane: returns
+    /// a `&mut` without touching title/description/task_goal; otherwise
+    /// inserts a new lane with the supplied fallback metadata. Use this in
+    /// handlers that only need the lane present (e.g. `TurnStart` /
+    /// `SetAssistantContent` / `Tool` for a subagent whose metadata was
+    /// already populated by an earlier `SubagentSpawn` SSE event).
+    pub fn ensure_subagent_lane_preserve_metadata(
+        &mut self,
+        agent_id: String,
+        fallback_parent_agent_id: Option<String>,
+        fallback_title: String,
+        fallback_description: String,
+        fallback_task_goal: String,
+    ) -> &mut SubagentLaneState {
+        self.subagent_lanes
+            .entry(agent_id.clone())
+            .or_insert_with(|| {
+                SubagentLaneState::new(
+                    agent_id,
+                    fallback_parent_agent_id,
+                    fallback_title,
+                    fallback_description,
+                    fallback_task_goal,
+                )
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatState, Input, Message};
+    use super::{default_provider_list, ChatState, Input, Message};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
     };
+
+    #[test]
+    fn default_provider_list_contains_latest_models_and_excludes_retired_kimi_models() {
+        let providers = default_provider_list();
+        let model_ids = |provider: &str| {
+            providers
+                .iter()
+                .find(|entry| entry.name == provider)
+                .unwrap_or_else(|| panic!("missing provider {provider}"))
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>()
+        };
+
+        let openai = model_ids("openai");
+        assert!(openai.contains(&"gpt-5.6"));
+        assert!(openai.contains(&"gpt-5.6-sol"));
+        assert!(openai.contains(&"gpt-5.6-terra"));
+        assert!(openai.contains(&"gpt-5.6-luna"));
+
+        let anthropic = model_ids("anthropic");
+        assert!(anthropic.contains(&"claude-fable-5"));
+        assert!(anthropic.contains(&"claude-sonnet-5"));
+
+        let kimi = model_ids("kimi");
+        assert!(kimi.contains(&"kimi-k3"));
+        assert!(!kimi.contains(&"kimi-k2-0905-preview"));
+        assert!(!kimi.contains(&"kimi-latest"));
+
+        assert!(model_ids("zhipu").contains(&"glm-5.2"));
+    }
 
     #[test]
     fn message_render_revision_updates_with_content_and_streaming_changes() {

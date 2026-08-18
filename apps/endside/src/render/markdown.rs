@@ -19,45 +19,71 @@ struct MarkdownTable {
     rows: Vec<Vec<String>>,
 }
 
-pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return Vec::new();
-    }
+/// Mutable state carried across lines by the markdown line parser.
+///
+/// Only `in_code_block`, `code_language`, and `show_code_language_label`
+/// cross line boundaries; every other construct (headings, HR, lists,
+/// inline paragraphs) is purely per-line. This struct is the snapshot
+/// captured at a "safe" freeze point for incremental streaming.
+#[derive(Clone, Default)]
+struct MarkdownParseState {
+    in_code_block: bool,
+    code_language: String,
+    show_code_language_label: bool,
+}
 
+/// Output of [`parse_markdown_lines`]: the rendered lines plus the parser
+/// state at the end of the consumed slice.
+struct MarkdownParseOutcome {
+    lines: Vec<Line<'static>>,
+    state: MarkdownParseState,
+}
+
+/// Core line-oriented markdown state machine, parameterised by the
+/// incoming parser state. Consumes `raw_lines` from the start; returns
+/// the rendered lines and the state at the end of the slice.
+///
+/// This is the single source of truth for line parsing — both
+/// [`render_markdown`] (full, from an empty state) and
+/// [`render_markdown_incremental`] (streaming, from a frozen state) call
+/// into here. Tables are handled by the caller via a full-render fallback
+/// (see [`render_markdown_incremental`]).
+fn parse_markdown_lines(
+    raw_lines: &[&str],
+    mut state: MarkdownParseState,
+    theme: &Theme,
+    width: u16,
+) -> MarkdownParseOutcome {
     let mut lines = Vec::new();
-    let mut in_code_block = false;
-    let mut code_language = String::new();
-    let mut show_code_language_label = false;
-    let raw_lines: Vec<&str> = text.lines().collect();
-
     let mut line_index = 0;
+
     while line_index < raw_lines.len() {
         let raw_line = raw_lines[line_index];
         let trimmed = raw_line.trim();
         let trimmed_start = raw_line.trim_start();
 
         if trimmed_start.starts_with("```") {
-            if in_code_block {
-                in_code_block = false;
-                code_language.clear();
-                show_code_language_label = false;
+            if state.in_code_block {
+                state.in_code_block = false;
+                state.code_language.clear();
+                state.show_code_language_label = false;
             } else {
-                in_code_block = true;
-                code_language = trimmed_start.trim_start_matches("```").trim().to_string();
-                show_code_language_label = !code_language.is_empty();
+                state.in_code_block = true;
+                state.code_language = trimmed_start.trim_start_matches("```").trim().to_string();
+                state.show_code_language_label = !state.code_language.is_empty();
             }
             line_index += 1;
             continue;
         }
 
-        if in_code_block {
-            if show_code_language_label {
+        if state.in_code_block {
+            if state.show_code_language_label {
                 let label_style = Style::default().fg(theme.muted).bg(theme.code_bg);
                 lines.push(Line::from(vec![Span::styled(
-                    sanitize_terminal_text(&format!("  {} ", code_language)),
+                    sanitize_terminal_text(&format!("  {} ", state.code_language)),
                     label_style,
                 )]));
-                show_code_language_label = false;
+                state.show_code_language_label = false;
             }
 
             let code_style = Style::default().fg(theme.code_fg).bg(theme.code_bg);
@@ -160,7 +186,282 @@ pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'stati
         line_index += 1;
     }
 
-    lines
+    MarkdownParseOutcome { lines, state }
+}
+
+pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let raw_lines: Vec<&str> = text.lines().collect();
+    parse_markdown_lines(&raw_lines, MarkdownParseState::default(), theme, width).lines
+}
+
+/// Frozen incremental-render state for one streaming markdown message.
+///
+/// Designed for the single active streaming message: the renderer holds
+/// one `Option<MarkdownIncrementalState>` (not per-message) because only
+/// the message at `active_stream_index` grows tick-by-tick. On every
+/// tick the streaming content is **monotonically growing** (each SSE
+/// event delivers the full accumulated text), so the previously-frozen
+/// prefix can be reused and only the newly-completed lines are parsed.
+///
+/// Freeze boundary: the frozen prefix always ends at a complete line
+/// (`\n`). The last incomplete line of `content` is never frozen — it is
+/// re-parsed every tick (cheap: one line).
+///
+/// Tables are handled by never freezing a trailing pipe-delimited line
+/// (a possible table header/row that could still grow): the freeze point
+/// rolls back past any trailing pipe lines, so a streaming table is always
+/// re-parsed from its header on each tick. This is correct (column widths
+/// depend on all rows) at the cost of re-rendering only the table region.
+///
+/// This struct deliberately stores only a **line count** (not the `Line`
+/// trees themselves): the frozen prefix lines live in the previous tick's
+/// `MessageVisualBlock` and are MOVED (zero clone) into the new block by
+/// `build_transcript_cache`. The count tells the caller how many lines to
+/// move, keeping per-tick work O(suffix) instead of O(total).
+#[derive(Clone)]
+pub struct MarkdownIncrementalState {
+    /// The frozen content prefix (everything up to and including the last
+    /// `\n` before the incomplete trailing line, minus trailing pipe
+    /// lines). `content` on the next tick must start with this exact
+    /// string for the increment to apply.
+    frozen_content: String,
+    /// Parser state snapshot at the end of `frozen_content`.
+    state: MarkdownParseState,
+    /// Number of frozen markdown lines carried over from the previous
+    /// tick's block. `build_transcript_cache` moves exactly this many
+    /// markdown lines from the prev block as the frozen prefix.
+    frozen_markdown_line_count: usize,
+    /// Width and theme fingerprint; a change invalidates the cache.
+    width: u16,
+    theme: Theme,
+    /// `message.thinking_content.len()` (byte length) when this state was
+    /// built. The thinking block sits above the markdown in the frozen
+    /// prefix; a length change means the prefix line count is misaligned,
+    /// so the caller forces a full fallback.
+    ///
+    /// **Limitation:** this is a *length-only* fingerprint. It detects
+    /// appends (the common streaming case) but NOT same-length rewrites of
+    /// `thinking_content` (a correction/replacement at equal byte size). The
+    /// current append-only streaming protocol never rewrites thinking in
+    /// place, so this is safe today; if the daemon ever does in-place
+    /// thinking edits, a stale frozen prefix could be moved and the user
+    /// would see the old thinking text until the stream settles. Storing the
+    /// message `render_revision` (or a cheap hash) here would close that gap
+    /// without keeping the full `thinking_content`.
+    thinking_len: usize,
+}
+
+impl MarkdownIncrementalState {
+    /// The thinking-content length recorded when this state was built.
+    pub fn thinking_len(&self) -> usize {
+        self.thinking_len
+    }
+
+    /// Record the thinking-content length that produced this state. Called
+    /// by `render_standard_message_lines` after the markdown render so the
+    /// next tick can detect a thinking-block change and fall back to a
+    /// full render instead of moving a misaligned frozen prefix.
+    pub fn set_thinking_len(&mut self, len: usize) {
+        self.thinking_len = len;
+    }
+}
+
+/// Output of [`render_markdown_incremental`].
+pub struct MarkdownIncrementResult {
+    /// Markdown lines to append to the block. When
+    /// `frozen_markdown_move_count` is `Some` these are the SUFFIX only
+    /// (the frozen prefix is moved from the previous tick's block by
+    /// `build_transcript_cache`); when `None` (full fallback) these are
+    /// the complete markdown output.
+    pub lines: Vec<Line<'static>>,
+    pub wrapped: Vec<Vec<Line<'static>>>,
+    /// `Some(n)` when the incremental path applied: move `n` frozen
+    /// markdown lines from the previous block as the prefix. `None` for
+    /// the full fallback (use `lines` as the complete output).
+    pub frozen_markdown_move_count: Option<usize>,
+    pub new_state: MarkdownIncrementalState,
+}
+
+/// Render streaming markdown incrementally, reusing the frozen prefix.
+///
+/// Returns only the **suffix** lines (the newly-parsed remainder) plus the
+/// count of frozen markdown lines to move from the previous tick's block.
+/// On any cache miss (width/theme change, content is not an extension of
+/// the frozen prefix, or no prior state) this degrades to a full
+/// [`render_markdown`] pass — always correct, just slower for that tick.
+pub fn render_markdown_incremental(
+    prev: Option<MarkdownIncrementalState>,
+    content: &str,
+    theme: &Theme,
+    width: u16,
+) -> MarkdownIncrementResult {
+    // Fast path: no content.
+    if content.is_empty() {
+        return MarkdownIncrementResult {
+            lines: Vec::new(),
+            wrapped: Vec::new(),
+            frozen_markdown_move_count: None,
+            new_state: MarkdownIncrementalState {
+                frozen_content: String::new(),
+                state: MarkdownParseState::default(),
+                frozen_markdown_line_count: 0,
+                width,
+                theme: *theme,
+                thinking_len: 0,
+            },
+        };
+    }
+
+    // Validate cache. Any mismatch → full rebuild.
+    let can_increment = match &prev {
+        Some(p) => p.width == width && p.theme == *theme && content.starts_with(&p.frozen_content),
+        None => false,
+    };
+
+    if !can_increment {
+        let (lines, wrapped, state) = render_markdown_full(content, theme, width);
+        return MarkdownIncrementResult {
+            lines,
+            wrapped,
+            frozen_markdown_move_count: None,
+            new_state: state,
+        };
+    }
+
+    let prev = prev.unwrap();
+    let remainder = &content[prev.frozen_content.len()..];
+    let all_remainder_lines: Vec<&str> = remainder.lines().collect();
+
+    // Freeze boundary: everything up to the last `\n`, minus any trailing
+    // pipe-delimited lines (a table header/row may still grow).
+    let (complete_part, _trailing) = match remainder.rfind('\n') {
+        Some(i) => (&remainder[..=i], &remainder[i + 1..]),
+        None => ("", remainder),
+    };
+    let trimmed_complete = trim_trailing_table_candidate(complete_part);
+
+    // Suffix: parse the whole remainder (complete + trailing lines)
+    // together so a table spanning the trailing boundary is rendered as a
+    // table, not as separate plain lines. The frozen prefix (already in
+    // the previous tick's block) is NOT re-emitted here — eliminating the
+    // O(frozen) clone that made the prior implementation O(n²) total.
+    let full_outcome = parse_markdown_lines(&all_remainder_lines, prev.state.clone(), theme, width);
+    let suffix_lines = full_outcome.lines;
+    let suffix_wrapped: Vec<Vec<Line<'static>>> = suffix_lines
+        .iter()
+        .map(|line| super::transcript::wrap_line_to_visual_lines(line, width))
+        .collect();
+
+    // Frozen outcome: parse only the trimmed complete portion to advance
+    // the parser state and count the newly-frozen lines. Because it is a
+    // source-prefix of `all_remainder_lines` parsed from the same state,
+    // `frozen_outcome.lines.len()` is the output-prefix length of
+    // `suffix_lines` that becomes frozen this tick.
+    let frozen_outcome = if trimmed_complete.is_empty() {
+        MarkdownParseOutcome {
+            lines: Vec::new(),
+            state: prev.state.clone(),
+        }
+    } else {
+        let trimmed_lines: Vec<&str> = trimmed_complete.lines().collect();
+        parse_markdown_lines(&trimmed_lines, prev.state.clone(), theme, width)
+    };
+
+    let new_frozen_count = prev.frozen_markdown_line_count + frozen_outcome.lines.len();
+    let mut new_frozen_content = prev.frozen_content;
+    new_frozen_content.push_str(trimmed_complete);
+
+    let new_state = MarkdownIncrementalState {
+        frozen_content: new_frozen_content,
+        state: frozen_outcome.state,
+        frozen_markdown_line_count: new_frozen_count,
+        width,
+        theme: *theme,
+        thinking_len: prev.thinking_len,
+    };
+
+    MarkdownIncrementResult {
+        lines: suffix_lines,
+        wrapped: suffix_wrapped,
+        frozen_markdown_move_count: Some(prev.frozen_markdown_line_count),
+        new_state,
+    }
+}
+
+/// Strip trailing complete pipe-delimited lines from `s` (which must end
+/// at a `\n` boundary, or be empty). A trailing pipe line could be the
+/// header/row of a table that is still streaming, so it must not be
+/// frozen — the next tick re-parses it together with whatever follows.
+fn trim_trailing_table_candidate(mut s: &str) -> &str {
+    while !s.is_empty() {
+        let body = &s[..s.len() - 1]; // drop trailing '\n'
+        let last_line_start = match body.rfind('\n') {
+            Some(i) => i + 1,
+            None => 0,
+        };
+        let last_line = &body[last_line_start..];
+        if split_table_cells(last_line).is_some() {
+            s = &s[..last_line_start];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Full (non-incremental) render, producing a fresh incremental state.
+fn render_markdown_full(
+    content: &str,
+    theme: &Theme,
+    width: u16,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Vec<Line<'static>>>,
+    MarkdownIncrementalState,
+) {
+    let logical_lines = render_markdown(content, theme, width);
+    let wrapped_lines: Vec<Vec<Line<'static>>> = logical_lines
+        .iter()
+        .map(|line| super::transcript::wrap_line_to_visual_lines(line, width))
+        .collect();
+
+    // Freeze boundary: up to and including the last `\n`, minus trailing
+    // pipe lines (a table header/row may still grow).
+    let frozen_content = match content.rfind('\n') {
+        Some(i) => trim_trailing_table_candidate(&content[..=i]).to_string(),
+        None => String::new(),
+    };
+
+    // Re-parse the frozen prefix to get the state snapshot and the frozen
+    // line count (a separate parse — output line count differs from the
+    // source line count because code fences emit zero lines). Only the
+    // count is kept; the frozen `Line` trees themselves are not stored —
+    // they live in the block and are moved by `build_transcript_cache`.
+    let (frozen_count, state) = if frozen_content.is_empty() {
+        (0, MarkdownParseState::default())
+    } else {
+        let frozen_lines: Vec<&str> = frozen_content.lines().collect();
+        let outcome =
+            parse_markdown_lines(&frozen_lines, MarkdownParseState::default(), theme, width);
+        (outcome.lines.len(), outcome.state)
+    };
+
+    (
+        logical_lines,
+        wrapped_lines,
+        MarkdownIncrementalState {
+            frozen_content,
+            state,
+            frozen_markdown_line_count: frozen_count,
+            width,
+            theme: *theme,
+            thinking_len: 0,
+        },
+    )
 }
 
 pub fn contains_markdown_table(text: &str) -> bool {
@@ -814,5 +1115,196 @@ mod tests {
             width += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
         columns
+    }
+
+    /// Render `content` incrementally, feeding it in growing chunks (as a
+    /// stream would), and assert the final output matches a one-shot
+    /// [`render_markdown`] plus that each intermediate output is identical
+    /// to the full render of the content seen so far.
+    fn assert_incremental_equals_full(content: &str) {
+        let theme = test_theme();
+        let width = 40;
+        let full = render_markdown(content, &theme, width);
+        let full_text = full.iter().map(line_text).collect::<Vec<_>>();
+
+        // Feed chunk-by-chunk at every possible split point to exercise the
+        // incremental path thoroughly. The incremental path returns a
+        // SUFFIX only (the frozen prefix is moved from the previous tick's
+        // block by build_transcript_cache), so we reconstruct the full
+        // output by truncating to the frozen count then extending.
+        for split in 1..=content.len() {
+            let mut state: Option<MarkdownIncrementalState> = None;
+            let mut accumulated: Vec<Line<'static>> = Vec::new();
+            for (_start, end) in chunk_spans(content.len(), split) {
+                let result = render_markdown_incremental(state, &content[..end], &theme, width);
+                state = Some(result.new_state);
+                match result.frozen_markdown_move_count {
+                    None => accumulated = result.lines,
+                    Some(frozen_n) => {
+                        accumulated.truncate(frozen_n);
+                        accumulated.extend(result.lines);
+                    }
+                }
+
+                let expected = render_markdown(&content[..end], &theme, width);
+                let expected_text = expected.iter().map(line_text).collect::<Vec<_>>();
+                let actual_text = accumulated.iter().map(line_text).collect::<Vec<_>>();
+                assert_eq!(
+                    actual_text,
+                    expected_text,
+                    "incremental mismatch at prefix {:?}",
+                    &content[..end]
+                );
+            }
+            assert_eq!(
+                accumulated.iter().map(line_text).collect::<Vec<_>>(),
+                full_text,
+                "final incremental output differs from full render (split={split})"
+            );
+        }
+    }
+
+    /// Generate a sequence of `(start, end)` byte spans covering `len`
+    /// bytes in `chunk_size`-byte steps (the last chunk absorbs the rest).
+    fn chunk_spans(len: usize, chunk_size: usize) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
+        let mut start = 0;
+        while start < len {
+            let end = (start + chunk_size).min(len);
+            spans.push((start, end));
+            start = end;
+        }
+        spans
+    }
+
+    #[test]
+    fn incremental_matches_full_for_prose() {
+        assert_incremental_equals_full(
+            "Hello world, this is a streaming message.\nSecond line here.\nThird line.",
+        );
+    }
+
+    #[test]
+    fn incremental_matches_full_for_headings_and_lists() {
+        assert_incremental_equals_full(
+            "# Title\n## Section\n### Subsection\n- item one\n- item two\n1. first\n2. second\nplain text line",
+        );
+    }
+
+    #[test]
+    fn incremental_matches_full_for_code_block() {
+        assert_incremental_equals_full(
+            "Before the block.\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\nAfter the block.",
+        );
+    }
+
+    #[test]
+    fn incremental_matches_full_for_hr() {
+        assert_incremental_equals_full("top\n---\nbottom\n***\nend");
+    }
+
+    #[test]
+    fn incremental_matches_full_when_table_present() {
+        assert_incremental_equals_full(
+            "| Name | Status |\n| --- | --- |\n| xiaoO | ready |\n\nAfter the table.",
+        );
+    }
+
+    #[test]
+    fn incremental_handles_empty_and_single_line() {
+        let theme = test_theme();
+        let result = render_markdown_incremental(None, "", &theme, 40);
+        assert!(result.lines.is_empty());
+
+        // "single line" starts with the empty frozen prefix, so the
+        // incremental path applies with 0 frozen lines → suffix == full.
+        let result2 =
+            render_markdown_incremental(Some(result.new_state), "single line", &theme, 40);
+        let full = render_markdown("single line", &theme, 40);
+        assert_eq!(
+            result2.lines.iter().map(line_text).collect::<Vec<_>>(),
+            full.iter().map(line_text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn incremental_full_render_is_reference_identical() {
+        // A full render through the incremental path (no prior state) must
+        // be byte-identical in text to `render_markdown`.
+        let content = "# H\n\n```\ncode\n```\n\n- a\n- b\n\ntail";
+        let theme = test_theme();
+        let width = 30;
+        let result = render_markdown_incremental(None, content, &theme, width);
+        let full = render_markdown(content, &theme, width);
+        assert_eq!(
+            result.lines.iter().map(line_text).collect::<Vec<_>>(),
+            full.iter().map(line_text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Benchmark: stream a large prose document tick-by-tick (one word per
+    /// tick), comparing full re-render (`render_markdown`) vs the
+    /// incremental path (`render_markdown_incremental`). Prints a ratio.
+    #[test]
+    fn incremental_streaming_benchmark() {
+        let theme = test_theme();
+        let width = 80;
+
+        // ~180 lines of multi-line prose (newline-separated so the freeze
+        // boundary can advance — mirrors real streaming).
+        let content = (0..180)
+            .map(|i| {
+                if i % 5 == 0 {
+                    "paragraph-line-with-more-words"
+                } else if i % 3 == 0 {
+                    "- list item"
+                } else {
+                    "word"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let total_words = content.split_whitespace().count();
+        let _ = total_words;
+
+        // Incremental: grow content one line per tick (push_str, O(1) per
+        // tick — mirrors the real streaming model where the message content
+        // is the full accumulated text).
+        let mut state: Option<MarkdownIncrementalState> = None;
+        let mut incremental_elapsed = std::time::Duration::ZERO;
+        let mut acc = String::new();
+        let mut acc_lines = 0usize;
+        for line in content.lines() {
+            if acc_lines > 0 {
+                acc.push('\n');
+            }
+            acc.push_str(line);
+            acc_lines += 1;
+            let t0 = std::time::Instant::now();
+            let result = render_markdown_incremental(state, &acc, &theme, width);
+            state = Some(result.new_state);
+            incremental_elapsed += t0.elapsed();
+        }
+
+        // Full: re-render the whole accumulated content once per tick.
+        let mut full_elapsed = std::time::Duration::ZERO;
+        let mut acc2 = String::new();
+        let mut acc2_lines = 0usize;
+        for line in content.lines() {
+            if acc2_lines > 0 {
+                acc2.push('\n');
+            }
+            acc2.push_str(line);
+            acc2_lines += 1;
+            let t0 = std::time::Instant::now();
+            let _lines = render_markdown(&acc2, &theme, width);
+            full_elapsed += t0.elapsed();
+        }
+
+        let ratio = full_elapsed.as_secs_f64() / incremental_elapsed.as_secs_f64().max(1e-9);
+        eprintln!(
+            "PERF markdown streaming: {} lines/turns — full={:?} incremental={:?} ({:.1}×)",
+            acc_lines, full_elapsed, incremental_elapsed, ratio
+        );
     }
 }

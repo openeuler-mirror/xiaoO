@@ -319,7 +319,8 @@ impl ToolExecutor for BashExecutor {
             shell: Some("bash".to_string()),
             cwd: cwd_path,
             timeout_ms: Some(input.timeout.unwrap_or_else(default_timeout_ms)),
-            env: None,
+            extra: call.extra.clone(),
+            ..Default::default()
         };
 
         let result = backend.exec().exec(request).await.map_err(|e| {

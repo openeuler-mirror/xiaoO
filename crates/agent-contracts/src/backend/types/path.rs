@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 /// A path in the backend's filesystem namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BackendPath(pub String);
 
 impl fmt::Display for BackendPath {

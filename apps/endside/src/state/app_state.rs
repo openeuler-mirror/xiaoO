@@ -1,10 +1,9 @@
 use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
@@ -12,6 +11,7 @@ use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::render::markdown::MarkdownIncrementalState;
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::services::input_history::load_input_history;
@@ -80,6 +80,11 @@ impl SandboxDialog {
                 name: "Bubblewrap",
                 description: "Linux bubblewrap + local file policy。",
             });
+            options.push(SandboxOption {
+                id: "dynsandbox",
+                name: "Dyn-Sandbox",
+                description: "Linux dynsandbox + local file policy。",
+            });
         }
         let selected = options
             .iter()
@@ -121,32 +126,118 @@ pub struct SubagentOpenTarget {
 
 #[derive(Clone)]
 pub struct CachedMessageRender {
-    pub revision: u64,
     pub width: u16,
-    pub theme: Theme,
     pub lines: Vec<Line<'static>>,
+    pub wrapped_lines: Option<Vec<Vec<Line<'static>>>>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
+    /// `Some(n)` for the active streaming assistant message rendered via the
+    /// incremental markdown path: `lines` / `wrapped_lines` contain the
+    /// SUFFIX only (the frozen prefix of `n` logical lines is moved from the
+    /// previous tick's block by `build_transcript_cache`). `None` for every
+    /// other message — `lines` is the complete output.
+    pub frozen_prefix_line_count: Option<usize>,
 }
 
+/// Per-message visual render block stored inside [`TranscriptRenderCache`].
+///
+/// Non-dirty messages move their `lines` / `visual_lines` from the previous
+/// tick's cache into the new one (zero `Line` clone); only dirty messages
+/// re-wrap. `logical_to_visual_offset[i]` is the local visual row where
+/// logical line `i` begins within this block — kept so the flat
+/// `logical_line_visual_starts` index can be rebuilt without re-walking the
+/// (moved) `visual_lines`.
 #[derive(Clone)]
-pub struct CachedMessageLayout {
+pub struct MessageVisualBlock {
     pub message_index: usize,
     pub start_visual_row: usize,
+    pub logical_line_start: usize,
+    pub lines: Vec<Line<'static>>,
+    pub visual_lines: Vec<Line<'static>>,
+    pub logical_to_visual_offset: Vec<usize>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
 }
 
 #[derive(Clone)]
 pub struct TranscriptRenderCache {
-    pub all_lines: Vec<Line<'static>>,
-    pub visual_lines: Vec<Line<'static>>,
-    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
-    pub line_texts: Vec<String>,
-    pub line_is_header: Vec<bool>,
+    pub message_blocks: Vec<MessageVisualBlock>,
+    /// Flat index: visual row where each logical line begins (global).
+    /// Rebuilt each tick from `message_blocks` (O(n_logical), no `Line` clone).
     pub logical_line_visual_starts: Vec<usize>,
-    pub message_layouts: Vec<CachedMessageLayout>,
+    /// Flat per-logical-line plain text (mouse / selection copy source).
+    pub line_texts: Vec<String>,
+    /// Flat per-logical-line "is role/tool header" flag.
+    pub line_is_header: Vec<bool>,
+    /// Flat per-visual-line background colour (`paint_visible_line_backgrounds`).
+    pub visual_line_backgrounds: Vec<Option<ratatui::style::Color>>,
     pub total_lines: usize,
+}
+
+impl TranscriptRenderCache {
+    /// Number of logical lines across all blocks.
+    pub fn logical_line_count(&self) -> usize {
+        self.line_texts.len()
+    }
+
+    /// Borrow a single visual line by global visual row index.
+    pub fn visual_line(&self, visual_row: usize) -> Option<&Line<'static>> {
+        if visual_row >= self.total_lines {
+            return None;
+        }
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.start_visual_row <= visual_row)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = visual_row - block.start_visual_row;
+        block.visual_lines.get(local)
+    }
+
+    /// Borrow a single logical line by global logical line index.
+    pub fn logical_line(&self, logical_idx: usize) -> Option<&Line<'static>> {
+        let block_idx = self
+            .message_blocks
+            .partition_point(|b| b.logical_line_start <= logical_idx)
+            .saturating_sub(1);
+        let block = self.message_blocks.get(block_idx)?;
+        let local = logical_idx - block.logical_line_start;
+        block.lines.get(local)
+    }
+
+    /// Collect the visible visual-line window `[scroll_offset, visual_end)`
+    /// by cloning only the relevant slices from `message_blocks`. This is the
+    /// sole remaining `Line` clone site per frame, bounded by `inner_height`
+    /// instead of the full transcript.
+    pub fn collect_visible_visual_lines(
+        &self,
+        scroll_offset: usize,
+        visual_end: usize,
+    ) -> Vec<Line<'static>> {
+        if scroll_offset >= visual_end || scroll_offset >= self.total_lines {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(visual_end.saturating_sub(scroll_offset));
+        let mut row = scroll_offset;
+        while row < visual_end && row < self.total_lines {
+            let block_idx = self
+                .message_blocks
+                .partition_point(|b| b.start_visual_row <= row)
+                .saturating_sub(1);
+            let Some(block) = self.message_blocks.get(block_idx) else {
+                break;
+            };
+            let local = row - block.start_visual_row;
+            let block_remaining = block.visual_lines.len().saturating_sub(local);
+            let take = block_remaining.min(visual_end - row);
+            if take == 0 {
+                break;
+            }
+            out.extend(block.visual_lines[local..local + take].iter().cloned());
+            row += take;
+        }
+        out
+    }
 }
 
 #[derive(Default)]
@@ -154,7 +245,27 @@ pub struct RenderState {
     pub messages_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
     pub api_key_toggle_area: Option<Rect>,
-    pub message_renders: Vec<Option<CachedMessageRender>>,
+    /// Per-message last-applied `render_revision`. `None` means "not yet
+    /// rendered" (dirty). Replaces the former `message_renders:
+    /// Vec<Option<CachedMessageRender>>` — we now keep only the revision
+    /// fingerprint instead of the full render tree, and the render itself
+    /// lives inside `TranscriptRenderCache::message_blocks`.
+    pub message_render_revisions: Vec<Option<u64>>,
+    /// Incremental markdown render state for the single active streaming
+    /// message. Only one message streams at a time; invalidated on width /
+    /// theme / transcript changes (see `render_chat`). `None` for every
+    /// non-streaming message.
+    pub incremental_markdown: Option<MarkdownIncrementalState>,
+    /// Message index that `incremental_markdown` was produced for. When the
+    /// active streaming index moves (stream settles / switches), the state
+    /// is cleared so a stale cache is never reused.
+    pub incremental_markdown_index: Option<usize>,
+    /// Width used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-wrap).
+    pub last_render_width: Option<u16>,
+    /// Theme used to build the current `transcript_cache`. A change forces
+    /// every message dirty (re-style).
+    pub last_render_theme: Option<Theme>,
     pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub subagent_open_regions: Vec<SubagentOpenRegion>,
@@ -165,6 +276,19 @@ pub struct RenderState {
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
     pub active_transcript_key: Option<String>,
+    /// Cached terminal area for layout reuse across ticks.
+    /// When `frame.area()` matches `cached_area`, layout splits are skipped.
+    pub cached_area: Option<Rect>,
+    /// Cached vertical layout chunks (header, body, input, status).
+    pub cached_chunks: Vec<Rect>,
+    /// Cached body chunks (chat, sidebar).
+    pub cached_body_chunks: Vec<Rect>,
+    /// Cached sidebar visibility computed from last layout.
+    ///
+    /// Depends on `AppState::plan_state.is_some()` (at terminal widths
+    /// 60..=71); a Some<->None transition must invalidate `cached_area` so the
+    /// body split is recomputed. See `apply_todo_snapshot`.
+    pub cached_show_sidebar: bool,
 }
 
 #[derive(Default)]
@@ -173,24 +297,7 @@ pub struct SlashState {
     pub dismissed_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct SessionFileChangeStats {
-    pub additions: u32,
-    pub deletions: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionFileChangeEntry {
-    pub file_path: String,
-    pub additions: u32,
-    pub deletions: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ToolFileBaseline {
-    file_path: String,
-    absolute_path: PathBuf,
-}
+pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeStats};
 
 pub struct AppState {
     pub theme: Theme,
@@ -208,7 +315,6 @@ pub struct AppState {
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub cron_dialog: Option<crate::cron_dialog::CronDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
-    pub loading_tick: usize,
     pub agent_config: Config,
     pub active_agent_role: Option<String>,
     pub reasoning_effort: ReasoningEffort,
@@ -217,6 +323,12 @@ pub struct AppState {
     pub session_messages: Vec<llm_client::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
+    /// Per-process ephemeral UUID sent with every remote RPC; used by the
+    /// daemon's attach-lease table to enforce single-writer per session.
+    pub client_id: String,
+    /// Set when the daemon reports this session has been taken over by
+    /// another `client_id`; the TUI then refuses further submissions.
+    pub session_taken_over: bool,
     pub current_snapshot_context: Option<crate::session_snapshot_service::SnapshotContext>,
     pub slash: SlashState,
     pub interaction_prompt: Option<InteractionPromptState>,
@@ -226,10 +338,7 @@ pub struct AppState {
     /// Set when text is copied to clipboard; drives the toast notification.
     pub copy_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
-    pub session_file_changes: BTreeMap<String, SessionFileChangeStats>,
-    pub tool_file_changes: HashMap<String, crate::chat::FileChangeDelta>,
-    tool_file_baselines: HashMap<String, ToolFileBaseline>,
-    session_file_content_baselines: HashMap<String, Option<String>>,
+    pub diff_tracker: SessionDiffTracker,
 }
 
 impl AppState {
@@ -249,15 +358,16 @@ impl AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            loading_tick: 0,
             agent_config: Config::default(),
             active_agent_role: None,
             reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
-            workspace,
+            workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
+            client_id: uuid::Uuid::new_v4().to_string(),
+            session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
@@ -265,10 +375,7 @@ impl AppState {
             transcript_selection: None,
             copy_notice: None,
             external_commands: load_external_commands(),
-            session_file_changes: BTreeMap::new(),
-            tool_file_changes: HashMap::new(),
-            tool_file_baselines: HashMap::new(),
-            session_file_content_baselines: HashMap::new(),
+            diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
 
@@ -298,15 +405,18 @@ impl AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            loading_tick: 0,
             agent_config: config.clone(),
             active_agent_role: None,
             reasoning_effort: config.llm.reasoning_effort,
             config_path,
-            workspace,
+            workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
             session_id: uuid::Uuid::new_v4().to_string(),
+            // Fresh per-process UUID: sharing a persisted id would let two
+            // TUIs refresh each other's lease and bypass single-writer.
+            client_id: uuid::Uuid::new_v4().to_string(),
+            session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
             interaction_prompt: None,
@@ -314,10 +424,7 @@ impl AppState {
             external_commands: load_external_commands(),
             transcript_selection: None,
             copy_notice: None,
-            session_file_changes: BTreeMap::new(),
-            tool_file_changes: HashMap::new(),
-            tool_file_baselines: HashMap::new(),
-            session_file_content_baselines: HashMap::new(),
+            diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
 
@@ -334,10 +441,10 @@ impl AppState {
         self.session_snapshot_dialog = None;
         self.delete_dialog = None;
         self.api_key_dialog = None;
-        self.loading_tick = 0;
         self.session_messages.clear();
         self.plan_state = None;
         self.session_id = uuid::Uuid::new_v4().to_string();
+        self.session_taken_over = false;
         self.current_snapshot_context = None;
         self.slash = SlashState::default();
         self.reasoning_effort = ReasoningEffort::default();
@@ -346,10 +453,7 @@ impl AppState {
         self.transcript_selection = None;
         self.copy_notice = None;
         self.external_commands = load_external_commands();
-        self.session_file_changes.clear();
-        self.tool_file_changes.clear();
-        self.tool_file_baselines.clear();
-        self.session_file_content_baselines.clear();
+        self.diff_tracker.clear();
     }
 
     /// Mark that text was just copied; shows the toast for 1.5 s.
@@ -459,7 +563,9 @@ impl AppState {
     }
 
     pub fn invalidate_transcript_render_cache(&mut self) {
-        self.render_state.message_renders.clear();
+        self.render_state.message_render_revisions.clear();
+        self.render_state.last_render_width = None;
+        self.render_state.last_render_theme = None;
         self.render_state.transcript_cache = None;
         self.render_state.tool_toggle_regions.clear();
         self.render_state.subagent_open_regions.clear();
@@ -530,154 +636,75 @@ impl AppState {
         }
     }
 
-    pub fn reconcile_tool_file_change(
-        &mut self,
-        call_id: &str,
-        next: Option<crate::chat::FileChangeDelta>,
-    ) {
-        if let Some(previous) = self.tool_file_changes.remove(call_id) {
-            self.adjust_session_file_change(
-                &previous.file_path,
-                previous.additions,
-                previous.deletions,
-                false,
-            );
-        }
-
-        let Some(next) = next.filter(|change| change.additions > 0 || change.deletions > 0) else {
-            return;
-        };
-
-        self.adjust_session_file_change(&next.file_path, next.additions, next.deletions, true);
-        self.tool_file_changes.insert(call_id.to_string(), next);
-    }
-
-    pub fn capture_tool_file_baseline(&mut self, call_id: &str, tool: &str, args_preview: &str) {
-        if self.tool_file_baselines.contains_key(call_id) {
-            return;
-        }
-        let Some(file_path) = parse_tool_target_file_path(tool, args_preview) else {
-            return;
-        };
-        let absolute_path = resolve_workspace_file_path(&self.workspace, &file_path);
-        let current_content = read_file_if_exists(&absolute_path);
-        self.session_file_content_baselines
-            .entry(file_path.clone())
-            .or_insert_with(|| current_content.clone());
-        self.tool_file_baselines.insert(
-            call_id.to_string(),
-            ToolFileBaseline {
-                file_path,
-                absolute_path,
-            },
-        );
-    }
-
-    pub fn reconcile_tool_file_change_from_baseline(
-        &mut self,
-        call_id: &str,
-        fallback: Option<crate::chat::FileChangeDelta>,
-    ) {
-        let Some(baseline) = self.tool_file_baselines.remove(call_id) else {
-            if !self.tool_file_changes.contains_key(call_id) {
-                self.reconcile_tool_file_change(call_id, fallback);
-            }
-            return;
-        };
-
-        let current_content = read_file_if_exists(&baseline.absolute_path);
-        let computed = self
-            .session_file_content_baselines
-            .get(&baseline.file_path)
-            .and_then(|initial_content| {
-                if initial_content.is_none() && current_content.is_none() {
-                    None
-                } else {
-                    Some(file_content_delta(
-                        &baseline.file_path,
-                        initial_content.as_deref(),
-                        current_content.as_deref(),
-                    ))
-                }
-            });
-        if let Some(delta) = computed.or(fallback) {
-            self.session_file_changes.insert(
-                delta.file_path.clone(),
-                SessionFileChangeStats {
-                    additions: delta.additions,
-                    deletions: delta.deletions,
-                },
-            );
-            if delta.additions == 0 && delta.deletions == 0 {
-                self.session_file_changes.remove(&delta.file_path);
-            }
-        } else {
-            self.reconcile_tool_file_change(call_id, None);
-        }
-    }
-
-    pub fn discard_tool_file_baseline(&mut self, call_id: &str) {
-        self.tool_file_baselines.remove(call_id);
-    }
-
     pub fn clear_tool_file_baselines(&mut self) {
-        self.tool_file_baselines.clear();
+        self.diff_tracker.clear_tool_file_baselines();
+    }
+
+    /// High-level entry: tool transitioned to Running.
+    pub fn on_tool_running(&mut self, call_id: &str, tool: &str, args_preview: &str) {
+        self.diff_tracker
+            .on_tool_running(call_id, tool, args_preview);
+    }
+
+    /// High-level entry: tool transitioned to Completed. Returns the computed
+    /// delta (used in remote mode to forward to the TUI; local callers may
+    /// discard it).
+    pub fn on_tool_completed(
+        &mut self,
+        call_id: &str,
+        tool: &str,
+        args_preview: &str,
+        file_change: Option<crate::chat::FileChangeDelta>,
+    ) -> Option<crate::chat::FileChangeDelta> {
+        self.diff_tracker
+            .on_tool_completed(call_id, tool, args_preview, file_change.map(Into::into))
+            .map(Into::into)
+    }
+
+    /// High-level entry: tool transitioned to Failed.
+    pub fn on_tool_failed(
+        &mut self,
+        call_id: &str,
+        file_change: Option<crate::chat::FileChangeDelta>,
+    ) -> Option<crate::chat::FileChangeDelta> {
+        self.diff_tracker
+            .on_tool_failed(call_id, file_change.map(Into::into))
+            .map(Into::into)
+    }
+
+    /// Remote-mode entry: directly apply a delta precomputed by the daemon.
+    pub fn apply_remote_delta(&mut self, call_id: &str, delta: crate::chat::FileChangeDelta) {
+        self.diff_tracker.apply_remote_delta(call_id, delta.into());
+    }
+
+    /// Replace the tracker's session changes (used by snapshot restore).
+    pub fn restore_session_file_changes(
+        &mut self,
+        snapshot: std::collections::BTreeMap<String, SessionFileChangeStats>,
+    ) {
+        self.diff_tracker.restore(snapshot);
+    }
+
+    pub fn session_file_changes(
+        &self,
+    ) -> &std::collections::BTreeMap<String, SessionFileChangeStats> {
+        self.diff_tracker.session_file_changes()
     }
 
     pub fn sorted_session_file_changes(&self) -> Vec<SessionFileChangeEntry> {
-        let mut entries = self
-            .session_file_changes
-            .iter()
-            .map(|(file_path, stats)| SessionFileChangeEntry {
-                file_path: file_path.clone(),
-                additions: stats.additions,
-                deletions: stats.deletions,
-            })
-            .collect::<Vec<_>>();
-        entries.sort_by(|left, right| {
-            let left_total = left.additions + left.deletions;
-            let right_total = right.additions + right.deletions;
-            right_total
-                .cmp(&left_total)
-                .then(right.additions.cmp(&left.additions))
-                .then(left.file_path.cmp(&right.file_path))
-        });
-        entries
+        self.diff_tracker.sorted_session_file_changes()
+    }
+
+    /// Synchronize the diff tracker's workspace with `self.workspace`.
+    /// Must be called whenever `self.workspace` is mutated externally so
+    /// that [`Self::display_file_path`] strips prefixes against the active
+    /// workspace rather than a stale one captured at construction time.
+    pub fn sync_diff_tracker_workspace(&mut self) {
+        self.diff_tracker.set_workspace(self.workspace.clone());
     }
 
     pub fn display_file_path(&self, file_path: &str) -> String {
-        let path = Path::new(file_path);
-        if let Ok(relative) = path.strip_prefix(&self.workspace) {
-            let display = relative.display().to_string();
-            if !display.is_empty() {
-                return display;
-            }
-        }
-        file_path.to_string()
-    }
-
-    fn adjust_session_file_change(
-        &mut self,
-        file_path: &str,
-        additions: u32,
-        deletions: u32,
-        add: bool,
-    ) {
-        let entry = self
-            .session_file_changes
-            .entry(file_path.to_string())
-            .or_default();
-        if add {
-            entry.additions = entry.additions.saturating_add(additions);
-            entry.deletions = entry.deletions.saturating_add(deletions);
-        } else {
-            entry.additions = entry.additions.saturating_sub(additions);
-            entry.deletions = entry.deletions.saturating_sub(deletions);
-        }
-
-        if entry.additions == 0 && entry.deletions == 0 {
-            self.session_file_changes.remove(file_path);
-        }
+        self.diff_tracker.display_file_path(file_path)
     }
 
     /// Extract the plain text covered by the current transcript selection.
@@ -925,16 +952,6 @@ impl AppState {
     }
 }
 
-fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
-    match tool {
-        "file_edit" | "file_write" => {
-            let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
-            value.get("file_path")?.as_str().map(ToOwned::to_owned)
-        }
-        _ => None,
-    }
-}
-
 fn short_agent_id(agent_id: &str) -> String {
     let trimmed = agent_id.trim();
     if trimmed.chars().count() <= 8 {
@@ -948,141 +965,7 @@ pub(crate) fn file_change_delta_from_tool_args(
     tool: &str,
     args_preview: &str,
 ) -> Option<crate::chat::FileChangeDelta> {
-    let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;
-    let file_path = value.get("file_path")?.as_str()?.to_string();
-    let (additions, deletions) = match tool {
-        "file_edit" => {
-            let old_string = value.get("old_string")?.as_str()?;
-            let new_string = value.get("new_string")?.as_str()?;
-            line_change_counts(old_string, new_string)
-        }
-        "file_write" => {
-            let content = value.get("content")?.as_str()?;
-            (text_line_count(content), 0)
-        }
-        _ => return None,
-    };
-
-    if additions == 0 && deletions == 0 {
-        return None;
-    }
-
-    Some(crate::chat::FileChangeDelta {
-        file_path,
-        additions,
-        deletions,
-    })
-}
-
-fn resolve_workspace_file_path(workspace: &Path, file_path: &str) -> PathBuf {
-    let path = Path::new(file_path);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace.join(path)
-    }
-}
-
-fn read_file_if_exists(path: &Path) -> Option<String> {
-    match fs::read_to_string(path) {
-        Ok(content) => Some(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => None,
-    }
-}
-
-fn file_content_delta(
-    file_path: &str,
-    before: Option<&str>,
-    after: Option<&str>,
-) -> crate::chat::FileChangeDelta {
-    let (additions, deletions) = match (before, after) {
-        (Some(before), Some(after)) => line_change_counts(before, after),
-        (None, Some(after)) => (text_line_count(after), 0),
-        (Some(before), None) => (0, text_line_count(before)),
-        (None, None) => (0, 0),
-    };
-
-    crate::chat::FileChangeDelta {
-        file_path: file_path.to_string(),
-        additions,
-        deletions,
-    }
-}
-
-fn line_change_counts(before: &str, after: &str) -> (u32, u32) {
-    if before == after {
-        return (0, 0);
-    }
-
-    let before_lines = text_lines(before);
-    let after_lines = text_lines(after);
-    if before_lines.is_empty() {
-        return (after_lines.len() as u32, 0);
-    }
-    if after_lines.is_empty() {
-        return (0, before_lines.len() as u32);
-    }
-
-    let cell_count = before_lines.len().saturating_mul(after_lines.len());
-    let common = if cell_count > 20_000 {
-        coarse_common_line_count(&before_lines, &after_lines)
-    } else {
-        lcs_line_count(&before_lines, &after_lines)
-    };
-
-    (
-        after_lines.len().saturating_sub(common) as u32,
-        before_lines.len().saturating_sub(common) as u32,
-    )
-}
-
-fn lcs_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
-    let mut previous = vec![0usize; after_lines.len() + 1];
-    let mut current = vec![0usize; after_lines.len() + 1];
-    for before_line in before_lines {
-        for (after_index, after_line) in after_lines.iter().enumerate() {
-            current[after_index + 1] = if before_line == after_line {
-                previous[after_index] + 1
-            } else {
-                current[after_index].max(previous[after_index + 1])
-            };
-        }
-        std::mem::swap(&mut previous, &mut current);
-        current.fill(0);
-    }
-    previous[after_lines.len()]
-}
-
-fn coarse_common_line_count(before_lines: &[&str], after_lines: &[&str]) -> usize {
-    let mut prefix = 0usize;
-    while prefix < before_lines.len().min(after_lines.len())
-        && before_lines[prefix] == after_lines[prefix]
-    {
-        prefix += 1;
-    }
-
-    let mut suffix = 0usize;
-    while suffix < before_lines.len().saturating_sub(prefix)
-        && suffix < after_lines.len().saturating_sub(prefix)
-        && before_lines[before_lines.len() - 1 - suffix]
-            == after_lines[after_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-    prefix + suffix
-}
-
-fn text_line_count(text: &str) -> u32 {
-    text_lines(text).len() as u32
-}
-
-fn text_lines(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        text.lines().collect()
-    }
+    xiaoo_shared::session_diff::file_change_delta_from_tool_args(tool, args_preview).map(Into::into)
 }
 
 pub(crate) fn build_chat_state(config: &Config) -> ChatState {
@@ -1124,6 +1007,7 @@ pub(crate) fn current_sandbox_id(config: &Config) -> &'static str {
     match isolation.get("kind").and_then(|value| value.as_str()) {
         Some("macos_seatbelt") => "seatbelt",
         Some("linux_bubblewrap") => "bubblewrap",
+        Some("linux_dynsandbox") => "dynsandbox",
         _ => "local",
     }
 }
@@ -1143,6 +1027,7 @@ pub(crate) fn sandbox_display_name(backend: &Option<GatewayBackendConfig>) -> &'
     {
         Some("macos_seatbelt") => "Seatbelt",
         Some("linux_bubblewrap") => "Bubblewrap",
+        Some("linux_dynsandbox") => "Dyn-Sandbox",
         _ => "Local",
     }
 }
@@ -1177,6 +1062,15 @@ pub(crate) fn sandbox_backend_config(
                 "isolation".to_string(),
                 serde_json::json!({
                     "kind": "linux_bubblewrap"
+                }),
+            );
+            Some(GatewayBackendConfig::new("local", options))
+        }
+        "dynsandbox" => {
+            object.insert(
+                "isolation".to_string(),
+                serde_json::json!({
+                    "kind": "linux_dynsandbox"
                 }),
             );
             Some(GatewayBackendConfig::new("local", options))
@@ -1287,6 +1181,20 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_backend_config_preserves_local_options_when_enabling_dyn_sandbox() {
+        let current = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"default_shell": "/bin/bash"}),
+        ));
+
+        let updated = sandbox_backend_config("dynsandbox", &current).expect("backend");
+
+        assert_eq!(updated.kind, "local");
+        assert_eq!(updated.options["default_shell"], "/bin/bash");
+        assert_eq!(updated.options["isolation"]["kind"], "linux_dynsandbox");
+    }
+
+    #[test]
     fn sandbox_helpers_recognize_bubblewrap() {
         let mut config = Config::default();
         config.operation_backend = Some(GatewayBackendConfig::new(
@@ -1298,6 +1206,21 @@ mod tests {
         assert_eq!(
             sandbox_display_name(&config.operation_backend),
             "Bubblewrap"
+        );
+    }
+
+    #[test]
+    fn sandbox_helpers_recognize_dyn_sandbox() {
+        let mut config = Config::default();
+        config.operation_backend = Some(GatewayBackendConfig::new(
+            "local",
+            json!({"isolation": {"kind": "linux_dynsandbox"}}),
+        ));
+
+        assert_eq!(current_sandbox_id(&config), "dynsandbox");
+        assert_eq!(
+            sandbox_display_name(&config.operation_backend),
+            "Dyn-Sandbox"
         );
     }
 
@@ -1418,13 +1341,13 @@ mod tests {
 
         let mut state = AppState::new(PathBuf::from("config.toml"), workspace)
             .expect("app state should initialize");
-        state.capture_tool_file_baseline("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
+        state.on_tool_running("call-1", "file_edit", r#"{"file_path":"README.md"}"#);
 
         fs::write(&file, "one\ntwo\nTHREE\nfour\nfive\n").expect("modified");
-        state.reconcile_tool_file_change_from_baseline("call-1", None);
+        state.on_tool_completed("call-1", "file_edit", r#"{"file_path":"README.md"}"#, None);
 
         let stats = state
-            .session_file_changes
+            .session_file_changes()
             .get("README.md")
             .expect("session stats should be tracked");
         assert_eq!(stats.additions, 1);

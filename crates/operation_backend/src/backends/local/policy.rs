@@ -9,11 +9,19 @@ use std::sync::{Arc, Mutex};
 
 use super::backend::normalize_absolute_host_path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) enum LocalIsolationConfig {
+    #[default]
     None,
     MacosSeatbelt(PathIsolationConfig),
     LinuxBubblewrap(PathIsolationConfig),
+    LinuxDynsandbox(LinuxDynsandboxOptions),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LinuxDynsandboxOptions {
+    roots: PathIsolationConfig,
+    no_landlock: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +31,7 @@ pub(crate) struct PathIsolationConfig {
     writable_roots: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct LocalBackendPolicy {
     isolation: LocalIsolationConfig,
     grants: Arc<Mutex<GrantStore>>,
@@ -61,9 +69,23 @@ pub(crate) enum LocalIsolationOptions {
         #[serde(default)]
         writable_roots: Vec<String>,
     },
+    LinuxDynsandbox {
+        #[serde(default = "default_allow_network")]
+        allow_network: bool,
+        #[serde(default)]
+        readable_roots: Vec<String>,
+        #[serde(default)]
+        writable_roots: Vec<String>,
+        #[serde(default = "default_no_landlock")]
+        no_landlock: bool,
+    },
 }
 
 fn default_allow_network() -> bool {
+    true
+}
+
+fn default_no_landlock() -> bool {
     true
 }
 
@@ -84,37 +106,17 @@ impl LocalBackendPolicy {
             return Ok(Self::unrestricted());
         };
 
-        let (kind, allow_network, readable_roots, writable_roots) = match options {
+        return match options {
             LocalIsolationOptions::MacosSeatbelt {
                 allow_network,
                 readable_roots,
                 writable_roots,
-            } => (
-                "macos_seatbelt",
-                allow_network,
-                readable_roots,
-                writable_roots,
-            ),
-            LocalIsolationOptions::LinuxBubblewrap {
-                allow_network,
-                readable_roots,
-                writable_roots,
-            } => (
-                "linux_bubblewrap",
-                allow_network,
-                readable_roots,
-                writable_roots,
-            ),
-        };
-
-        match kind {
-            "macos_seatbelt" => {
+            } => {
                 if !cfg!(target_os = "macos") {
                     return Err(OperationBackendBuildError::Unsupported {
                         message: "macos_seatbelt isolation is only supported on macOS".to_string(),
                     });
                 }
-
                 Ok(Self {
                     isolation: LocalIsolationConfig::MacosSeatbelt(build_path_isolation_config(
                         allow_network,
@@ -126,7 +128,11 @@ impl LocalBackendPolicy {
                     grants: Arc::new(Mutex::new(GrantStore::default())),
                 })
             }
-            "linux_bubblewrap" => {
+            LocalIsolationOptions::LinuxBubblewrap {
+                allow_network,
+                readable_roots,
+                writable_roots,
+            } => {
                 if !cfg!(target_os = "linux") {
                     return Err(OperationBackendBuildError::Unsupported {
                         message: "linux_bubblewrap isolation is only supported on Linux"
@@ -139,7 +145,6 @@ impl LocalBackendPolicy {
                             .to_string(),
                     });
                 }
-
                 Ok(Self {
                     isolation: LocalIsolationConfig::LinuxBubblewrap(build_path_isolation_config(
                         allow_network,
@@ -151,17 +156,42 @@ impl LocalBackendPolicy {
                     grants: Arc::new(Mutex::new(GrantStore::default())),
                 })
             }
-            _ => unreachable!("all local isolation kinds are matched"),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn allow_network(&self) -> bool {
-        match &self.isolation {
-            LocalIsolationConfig::None => true,
-            LocalIsolationConfig::MacosSeatbelt(config) => config.allow_network,
-            LocalIsolationConfig::LinuxBubblewrap(config) => config.allow_network,
-        }
+            LocalIsolationOptions::LinuxDynsandbox {
+                allow_network,
+                readable_roots,
+                writable_roots,
+                no_landlock,
+            } => {
+                if !cfg!(target_os = "linux") {
+                    return Err(OperationBackendBuildError::Unsupported {
+                        message: "linux_dynsandbox isolation is only supported on Linux".to_string(),
+                    });
+                }
+                if !linux_dynsandbox_available() {
+                    return Err(OperationBackendBuildError::Unsupported {
+                        message: "linux_dynsandbox isolation requires dyn-sandbox in PATH".to_string(),
+                    });
+                }
+                let roots = build_path_isolation_config(
+                    allow_network,
+                    readable_roots,
+                    writable_roots,
+                    workspace_root,
+                    temp_root,
+                )?;
+                tracing::info!(
+                    "dyn-sandbox isolation enabled: allow_network={} no_landlock={} readable_roots={:?} writable_roots={:?}",
+                    allow_network, no_landlock, roots.readable_roots, roots.writable_roots
+                );
+                Ok(Self {
+                    isolation: LocalIsolationConfig::LinuxDynsandbox(LinuxDynsandboxOptions {
+                        roots,
+                        no_landlock,
+                    }),
+                    grants: Arc::new(Mutex::new(GrantStore::default())),
+                })
+            }
+        };
     }
 
     pub(crate) fn check_read(&self, path: &Path, operation: &str) -> Result<(), OperationError> {
@@ -272,8 +302,67 @@ impl LocalBackendPolicy {
                 }
                 Some(MacosSeatbeltProfile::from_config_and_grants(config, grants))
             }
-            LocalIsolationConfig::LinuxBubblewrap(_) => None,
+            LocalIsolationConfig::LinuxBubblewrap(_) | LocalIsolationConfig::LinuxDynsandbox(_) => None,
         }
+    }
+
+    /// Whether the isolation needs a piped stdin as a runtime control channel
+    /// (e.g. dyn-sandbox's streaming AUTH flow, where `ALLOW`/`DENY` lines are
+    /// written to stdin on demand).
+    pub(crate) fn requires_stdin(&self) -> bool {
+        matches!(self.isolation, LocalIsolationConfig::LinuxDynsandbox(_))
+    }
+
+    pub(crate) fn linux_dynsandbox_args(
+        &self,
+        cwd: &Path,
+        extra: Option<&serde_json::Value>,
+    ) -> Option<Vec<String>> {
+        let LocalIsolationConfig::LinuxDynsandbox(options) = &self.isolation else {
+            return None;
+        };
+        let grants = self.active_grants();
+        if grants
+            .iter()
+            .any(|grant| grant.capability == SandboxPermissionCapability::ExecRuntime)
+        {
+            return None;
+        }
+        let mut readable = options.roots.readable_roots.clone();
+        let mut writable = options.roots.writable_roots.clone();
+        for grant in grants {
+            match grant.capability {
+                SandboxPermissionCapability::Read | SandboxPermissionCapability::ExecCwd => {
+                    push_unique_path(&mut readable, grant.path);
+                }
+                SandboxPermissionCapability::ExecRuntime => {}
+                SandboxPermissionCapability::Write => {
+                    push_unique_path(&mut readable, grant.path.clone());
+                    push_unique_path(&mut writable, grant.path);
+                }
+            }
+        }
+
+        let mut args = Vec::new();
+        // Landlock is disabled at this stage.
+        // if options.no_landlock {
+        //     args.push("--no-landlock".to_string());
+        // }
+        for root in &readable {
+            if writable.iter().any(|writable| writable == root) {
+                continue;
+            }
+            args.push("--mount".to_string());
+            args.push(format!("{}:ro", root.display()));
+        }
+        for root in &writable {
+            args.push("--mount".to_string());
+            args.push(format!("{}:rw", root.display()));
+        }
+        args.push("-c".to_string());
+        args.push(cwd.to_string_lossy().into_owned());
+        append_linux_dynsandbox_rules(&mut args, extra);
+        Some(args)
     }
 
     pub(crate) fn bubblewrap_args(&self, cwd: &Path) -> Option<Vec<String>> {
@@ -288,12 +377,17 @@ impl LocalBackendPolicy {
                 }
                 Some(LinuxBubblewrapProfile::from_config_and_grants(config, grants).to_args(cwd))
             }
-            LocalIsolationConfig::None | LocalIsolationConfig::MacosSeatbelt(_) => None,
+            LocalIsolationConfig::None
+            | LocalIsolationConfig::MacosSeatbelt(_)
+            | LocalIsolationConfig::LinuxDynsandbox(_) => None,
         }
     }
 
     pub(crate) fn requires_exec_cwd(&self) -> bool {
-        matches!(self.isolation, LocalIsolationConfig::LinuxBubblewrap(_))
+        matches!(
+            self.isolation,
+            LocalIsolationConfig::LinuxBubblewrap(_) | LocalIsolationConfig::LinuxDynsandbox(_)
+        )
     }
 
     pub(crate) fn grant(
@@ -365,6 +459,7 @@ impl LocalBackendPolicy {
             LocalIsolationConfig::None => None,
             LocalIsolationConfig::MacosSeatbelt(config) => Some(("macos_seatbelt", config)),
             LocalIsolationConfig::LinuxBubblewrap(config) => Some(("linux_bubblewrap", config)),
+            LocalIsolationConfig::LinuxDynsandbox(options) => Some(("linux_dynsandbox", &options.roots)),
         }
     }
 
@@ -382,6 +477,10 @@ impl LocalBackendPolicy {
         };
         let isolation = match isolation_name {
             "linux_bubblewrap" => LocalIsolationConfig::LinuxBubblewrap(config),
+            "linux_dynsandbox" => LocalIsolationConfig::LinuxDynsandbox(LinuxDynsandboxOptions {
+                roots: config.clone(),
+                no_landlock: false,
+            }),
             _ => LocalIsolationConfig::MacosSeatbelt(config),
         };
         Self {
@@ -806,6 +905,15 @@ fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
+fn append_linux_dynsandbox_rules(args: &mut Vec<String>, extra: Option<&serde_json::Value>) {
+    if let Some(extra) = extra {
+        tracing::info!("dyn-sandbox per-invocation rules: received extra = {extra}");
+        // Rules are not yet translated into CLI args; wire format pending
+        // plugin alignment.
+    }
+    let _ = args;
+}
+
 #[cfg(target_os = "linux")]
 fn bubblewrap_available() -> bool {
     std::env::var_os("PATH")
@@ -815,6 +923,18 @@ fn bubblewrap_available() -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn bubblewrap_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn linux_dynsandbox_available() -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join("dyn-sandbox").is_file()))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_dynsandbox_available() -> bool {
     false
 }
 
@@ -1269,5 +1389,82 @@ mod tests {
             error,
             OperationBackendBuildError::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn linux_dynsandbox_config_deserializes_new_format() {
+        // Same serde path as config.toml `[operation_backend.options.isolation]`.
+        let options: LocalIsolationOptions =
+            serde_json::from_value(serde_json::json!({"kind": "linux_dynsandbox"})).unwrap();
+        let LocalIsolationOptions::LinuxDynsandbox {
+            allow_network,
+            no_landlock,
+            readable_roots,
+            writable_roots,
+        } = options
+        else {
+            panic!("expected dyn sandbox options");
+        };
+
+        assert!(allow_network);
+        // no_landlock defaults to true (landlock disabled) at this stage.
+        assert!(no_landlock);
+        assert!(readable_roots.is_empty());
+        assert!(writable_roots.is_empty());
+    }
+
+    #[test]
+    fn linux_dynsandbox_args_bind_configured_roots() {
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_dynsandbox",
+            vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/workspace/.tmp"),
+            ],
+            vec![PathBuf::from("/workspace/.tmp")],
+            false,
+        );
+
+        let args = policy
+            .linux_dynsandbox_args(Path::new("/workspace"), None)
+            .unwrap();
+
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--mount", "/workspace:ro"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--mount", "/workspace/.tmp:rw"]));
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["-c", "/workspace"]));
+        // test_isolated constructs LinuxDynsandbox with no_landlock=false.
+        assert!(!args.iter().any(|arg| arg == "--no-landlock"));
+    }
+
+    #[test]
+    fn linux_dynsandbox_checks_enforce_configured_roots() {
+        let policy = LocalBackendPolicy::test_isolated(
+            "linux_dynsandbox",
+            vec![PathBuf::from("/workspace")],
+            vec![PathBuf::from("/workspace/.tmp")],
+            false,
+        );
+
+        // Within configured roots -> allowed.
+        assert!(policy
+            .check_write(Path::new("/workspace/.tmp/out.txt"), "file_write")
+            .is_ok());
+        assert!(policy
+            .check_read(Path::new("/workspace/src/lib.rs"), "file_read")
+            .is_ok());
+        // Outside configured roots -> denied (reuses bwrap's path checks).
+        let error = policy
+            .check_read(Path::new("/etc/passwd"), "file_read")
+            .unwrap_err();
+        let OperationError::SandboxPolicyDenied { denial } = error else {
+            panic!("expected sandbox denial");
+        };
+        assert_eq!(denial.isolation, "linux_dynsandbox");
     }
 }

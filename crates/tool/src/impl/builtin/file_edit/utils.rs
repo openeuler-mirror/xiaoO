@@ -148,14 +148,6 @@ pub fn apply_edit_to_file(
     }
 }
 
-#[allow(dead_code)]
-pub fn strip_trailing_whitespace(s: &str) -> String {
-    s.lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 pub fn get_patch_for_edit(old_string: &str, new_string: &str) -> (StructuredPatch, String) {
     let diff = TextDiff::from_lines(old_string, new_string);
 

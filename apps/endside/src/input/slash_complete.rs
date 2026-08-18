@@ -20,11 +20,6 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/cron",
         summary: "管理 cron 定时任务：查看、配置、删除、启用/禁用。",
     },
-    // NOTE: /create-skill is not yet implemented; hidden from TUI until ready.
-    // SlashCommandSpec {
-    //     name: "/create-skill",
-    //     summary: "引导 agent 生成一个新的 skill。",
-    // },
     SlashCommandSpec {
         name: "/dir",
         summary: "切换当前工作目录。",
@@ -35,7 +30,11 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/load",
-        summary: "读取 session 快照并继续对话。可选名称，默认 latest。",
+        summary: "打开手动/自动存档列表；带名称时仅匹配手动存档。",
+    },
+    SlashCommandSpec {
+        name: "/mcp",
+        summary: "列出当前已配置的 MCP 服务端信息。",
     },
     SlashCommandSpec {
         name: "/new",
@@ -43,7 +42,7 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/save",
-        summary: "保存当前 session 快照。可选名称，默认 latest。",
+        summary: "保存手动检查点；不带名称时自动生成唯一名称。",
     },
     SlashCommandSpec {
         name: "/remote",
@@ -252,6 +251,7 @@ mod tests {
                 "/dir",
                 "/delete",
                 "/load",
+                "/mcp",
                 "/new",
                 "/save",
                 "/remote",
@@ -267,6 +267,7 @@ mod tests {
         assert_eq!(candidates_for_prefix("/con", NO_EXT), vec!["/connect"]);
         assert_eq!(candidates_for_prefix("/d", NO_EXT), vec!["/dir", "/delete"]);
         assert_eq!(candidates_for_prefix("/l", NO_EXT), vec!["/load"]);
+        assert_eq!(candidates_for_prefix("/m", NO_EXT), vec!["/mcp"]);
         assert_eq!(candidates_for_prefix("/n", NO_EXT), vec!["/new"]);
         assert_eq!(candidates_for_prefix("/r", NO_EXT), vec!["/remote"]);
         assert_eq!(

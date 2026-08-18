@@ -202,7 +202,7 @@ impl TraceBackend for MoiraiSqliteBackend {
         drop(active_spans);
 
         if !active_span_ids.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "moirai trace finalization called while spans are still active: count={} active_span_ids={:?}",
                 active_span_ids.len(),
                 active_span_ids
@@ -220,14 +220,16 @@ impl TraceBackend for MoiraiSqliteBackend {
                     .update_span_at(span_id, force_closed_fields, occurred_at_ms as i64)
                     .await
                 {
-                    eprintln!("moirai finalize update failed for active span {span_id}: {error}");
+                    tracing::warn!(
+                        "moirai finalize update failed for active span {span_id}: {error}"
+                    );
                 }
                 if let Err(error) = self
                     .context
                     .end_span_at(span_id, occurred_at_ms as i64)
                     .await
                 {
-                    eprintln!("moirai finalize end failed for active span {span_id}: {error}");
+                    tracing::warn!("moirai finalize end failed for active span {span_id}: {error}");
                 }
             }
         }
@@ -243,7 +245,7 @@ impl TraceBackend for MoiraiSqliteBackend {
             .end_with_parent(success, message.as_deref(), final_parent_span_id)
             .await
         {
-            eprintln!("moirai trace finalization failed: {error}");
+            tracing::error!("moirai trace finalization failed: {error}");
         }
 
         *finalized = true;
@@ -303,6 +305,23 @@ impl TraceBackend for MoiraiSqliteBackend {
             .unwrap_or_else(|error| panic!("moirai force trace finalization failed: {error}"));
 
         *finalized = true;
+    }
+}
+
+impl Drop for MoiraiSqliteBackend {
+    fn drop(&mut self) {
+        // Best-effort: mark the underlying moirai AgentContext as ended so
+        // its `Drop` impl does not warn about a missing `end()` call.
+        //
+        // This covers the case where the owning future (e.g. a session
+        // worker mid-turn) is cancelled while the daemon/runtime is
+        // shutting down, so the async `finalize_trace`/`force_finalize_trace`
+        // path never runs. The end span is not written to storage, but an
+        // abandoned trace has no meaningful end data anyway and its spans
+        // are already flushed incrementally (immediate_flush=true). When
+        // finalization did run, `ended` is already `true` and this is a
+        // no-op.
+        self.context.mark_ended();
     }
 }
 

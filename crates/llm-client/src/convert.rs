@@ -39,7 +39,11 @@ pub(crate) fn chat_message_to_wire(msg: &ChatMessage) -> WireMessage {
                     call_type: "function".to_string(),
                     function: WireToolCallFunction {
                         name: tool_name.clone(),
-                        arguments: input.to_string(),
+                        arguments: if input.is_null() {
+                            "{}".to_string()
+                        } else {
+                            input.to_string()
+                        },
                     },
                 };
                 tool_calls.get_or_insert_with(Vec::new).push(tc);
@@ -93,7 +97,6 @@ pub(crate) fn llm_request_to_wire(request: &LlmRequest, model: &str) -> WireRequ
         tool_choice,
         response_format,
         route_info: None,
-        extra_fields: None,
     }
 }
 
@@ -515,6 +518,91 @@ mod tests {
         assert_eq!(parsed["description"], "count workspace");
         assert_eq!(parsed["output_schema"]["type"], "object");
         assert_eq!(parsed["output_schema"]["required"][0], "count");
+    }
+
+    #[test]
+    fn test_chat_message_to_wire_null_arguments_becomes_empty_object() {
+        // When the LLM returns a tool call with invalid/empty JSON arguments,
+        // parse_tool_arguments returns Value::Null. When this is sent back to
+        // the LLM API in the conversation history, "null" is rejected by
+        // Dashscope ("function.arguments must be in JSON format").
+        // Fix: serialize Null as "{}" (empty JSON object).
+        let msg = ChatMessage::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolUse {
+                call_id: "call_null".to_string(),
+                tool_name: "spawn_subagent".to_string(),
+                input: serde_json::Value::Null,
+            }],
+            None,
+            0,
+            None,
+        );
+        let wire = chat_message_to_wire(&msg);
+        let tcs = wire.tool_calls.expect("tool_calls should exist");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].function.arguments, "{}");
+        assert_ne!(tcs[0].function.arguments, "null");
+    }
+
+    #[test]
+    fn test_chat_message_to_wire_valid_arguments_preserved() {
+        let msg = ChatMessage::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolUse {
+                call_id: "call_valid".to_string(),
+                tool_name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls -la"}),
+            }],
+            None,
+            0,
+            None,
+        );
+        let wire = chat_message_to_wire(&msg);
+        let tcs = wire.tool_calls.expect("tool_calls should exist");
+        assert_eq!(tcs.len(), 1);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tcs[0].function.arguments).expect("should be valid JSON");
+        assert_eq!(parsed["command"], "ls -la");
+    }
+
+    #[test]
+    fn test_end_to_end_null_arguments_round_trip() {
+        // Simulate the full flow:
+        // 1. LLM returns tool call with broken arguments
+        // 2. xiaoo parses → Null
+        // 3. xiaoo stores in conversation history
+        // 4. xiaoo sends next request with conversation history
+        // 5. function.arguments should be "{}" not "null"
+
+        // Empty/blank arguments parse to Null — the case that must round-trip
+        // as `"{}"` (not the bare JSON `null` literal) when re-serialized.
+        // Note: malformed-but-closable JSON (e.g. `{"a":"b`) is *repaired* by
+        // `repair_unclosed_json` into a valid object, so it would NOT reach
+        // Null and must not be used to assert the Null path.
+        let broken_arguments = "";
+        let parsed = parse_tool_arguments(broken_arguments);
+        assert!(parsed.is_null(), "blank arguments should parse to Null");
+
+        let msg = ChatMessage::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolUse {
+                call_id: "call_broken".to_string(),
+                tool_name: "spawn_subagent".to_string(),
+                input: parsed,
+            }],
+            None,
+            0,
+            None,
+        );
+        let wire = chat_message_to_wire(&msg);
+        let tcs = wire.tool_calls.expect("tool_calls should exist");
+        assert_eq!(tcs[0].function.arguments, "{}");
+
+        // Verify the serialized body would be accepted by Dashscope
+        let parsed_back: serde_json::Value =
+            serde_json::from_str(&tcs[0].function.arguments).expect("must be valid JSON");
+        assert!(parsed_back.is_object(), "must be a JSON object");
     }
 
     #[test]

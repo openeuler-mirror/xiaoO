@@ -30,7 +30,9 @@ prompt = { path = "../../crates/prompt" }
 prost = "0.13"
 regex = "1.11"
 reqwest.workspace = true
+rmcp = { version = "=2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }
 rust-embed.workspace = true
+schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
 skill = { path = "../../crates/skill" }
@@ -51,6 +53,7 @@ shellexpand.workspace = true
 
 agent-contracts = { path = "../../crates/agent-contracts" }
 agent-types = { path = "../../crates/agent-types" }
+subagent = { path = "../../crates/subagent" }
 tool = { path = "../../crates/tool" }
 xiaoo-shared = { path = "../shared" }
 

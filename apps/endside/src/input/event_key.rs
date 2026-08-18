@@ -10,6 +10,7 @@ use crate::cron_dialog::CronDialogMode;
 use crate::gateway::SessionStore;
 use crate::input::EventHandler;
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
+use crate::mcp_service::render_mcp_overview;
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
 use crate::provider_service::{
     copy_to_clipboard, persist_active_provider_selection, persisted_selection_settings,
@@ -22,9 +23,9 @@ use crate::remote_sessions_service::{
 use crate::services::input_history::save_input_history;
 use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{
-    apply_snapshot, build_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
-    save_snapshot_with_chain, snapshot_name_from_command, SessionSnapshotDialog,
-    SessionSnapshotListEntry,
+    apply_snapshot, list_session_snapshots, load_snapshot, load_snapshot_by_key,
+    manual_snapshot_name_from_command, save_manual_snapshot, snapshot_name_from_command,
+    SessionSnapshotDialog, SessionSnapshotListEntry,
 };
 use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
@@ -79,8 +80,7 @@ impl App {
             return Ok(());
         }
 
-        if key.code == KeyCode::Up
-            && key.modifiers.contains(event::KeyModifiers::SHIFT)
+        if is_leave_subagent_view_key(&key)
             && self.state.is_subagent_view_active()
             && self.state.api_key_dialog.is_none()
             && self.state.provider_dialog.is_none()
@@ -478,18 +478,10 @@ impl App {
             self.state.reset_for_new_session();
 
             if was_remote_mode {
-                tracing::info!(old_session_id = %old_session_id, "Closing old remote session");
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    self.gateway.close_remote_session(&old_session_id),
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(_) => {
-                        tracing::warn!("Remote session close timed out after 5 seconds");
-                    }
-                }
+                tracing::info!(old_session_id = %old_session_id, "Detaching old remote session (preserving on daemon)");
+                self.gateway
+                    .detach_remote_session_bounded(&old_session_id, "new_session")
+                    .await;
             } else {
                 tracing::info!(old_session_id = %old_session_id, "Releasing old local session backend");
                 match tokio::time::timeout(
@@ -573,28 +565,13 @@ impl App {
 
         if is_named_slash_command(trimmed, "/save") {
             self.state.chat_state.input.reset();
-            match snapshot_name_from_command(trimmed, "/save") {
-                Ok(name) => {
+            match manual_snapshot_name_from_command(trimmed, "/save") {
+                Ok(requested_name) => {
                     let record = self.gateway.session_snapshot(&self.state.session_id).await;
-                    let parent_chain = self
-                        .state
-                        .current_snapshot_context
-                        .as_ref()
-                        .filter(|ctx| !ctx.name.eq_ignore_ascii_case(&name))
-                        .map(|ctx| {
-                            let mut chain = ctx.parent_chain.clone();
-                            chain.push(ctx.name.clone());
-                            chain
-                        })
-                        .unwrap_or_default();
-                    let snapshot = build_snapshot(&self.state, record, parent_chain.clone());
-                    match save_snapshot_with_chain(&name, &snapshot, Some(&parent_chain)) {
-                        Ok(path) => {
-                            self.state.current_snapshot_context =
-                                Some(crate::session_snapshot_service::SnapshotContext {
-                                    name: name.clone(),
-                                    parent_chain,
-                                });
+                    match save_manual_snapshot(&self.state, record, requested_name.as_deref()) {
+                        Ok((path, context)) => {
+                            let name = context.name.clone();
+                            self.state.current_snapshot_context = Some(context);
                             self.state
                                 .chat_state
                                 .messages
@@ -637,23 +614,33 @@ impl App {
                 }) {
                     Ok((name, matches)) => {
                         if matches.len() == 1 {
-                            let (_, snapshot, parent_chain) = matches.into_iter().next().unwrap();
-                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
-                                .await;
+                            let (snapshot_key, snapshot, parent_chain) =
+                                matches.into_iter().next().unwrap();
+                            self.load_snapshot_into_state(
+                                &snapshot_key,
+                                &name,
+                                snapshot,
+                                parent_chain,
+                            )
+                            .await;
                         } else {
                             let entries: Vec<SessionSnapshotListEntry> = matches
                                 .into_iter()
-                                .map(|(snapshot_key, _, parent_chain)| SessionSnapshotListEntry {
-                                    name: name.clone(),
-                                    snapshot_key,
-                                    saved_at_ms: 0,
-                                    parent_name: parent_chain.last().cloned(),
-                                    parent_chain,
-                                    depth: 0,
+                                .map(|(snapshot_key, snapshot, parent_chain)| {
+                                    SessionSnapshotListEntry {
+                                        kind: snapshot.kind,
+                                        name: snapshot.name,
+                                        snapshot_key,
+                                        saved_at_ms: snapshot.saved_at_ms,
+                                        parent_name: parent_chain.last().cloned(),
+                                        parent_chain,
+                                        depth: 0,
+                                        base_manual_name: None,
+                                    }
                                 })
                                 .collect();
                             self.state.session_snapshot_dialog =
-                                Some(SessionSnapshotDialog::new(entries));
+                                Some(SessionSnapshotDialog::manual_only(entries));
                             self.state.input_mode = InputMode::SessionSnapshotSelection;
                             self.state
                                 .chat_state
@@ -711,6 +698,18 @@ impl App {
             return Ok(());
         }
 
+        if trimmed.eq_ignore_ascii_case("/mcp") {
+            self.state.chat_state.input.reset();
+            self.state
+                .chat_state
+                .messages
+                .push(crate::chat::Message::system(render_mcp_overview(
+                    &self.state.agent_config,
+                )));
+            self.state.chat_state.stick_to_bottom = true;
+            return Ok(());
+        }
+
         if trimmed.eq_ignore_ascii_case("/cron") {
             self.state.chat_state.input.reset();
             self.open_cron_dialog();
@@ -721,6 +720,7 @@ impl App {
                 Ok(path) => {
                     self.state.workspace = path;
                     self.state.status_panel.set_workspace(&self.state.workspace);
+                    self.state.sync_diff_tracker_workspace();
                     self.state
                         .chat_state
                         .messages
@@ -742,9 +742,6 @@ impl App {
             }
             return Ok(());
         }
-
-        // NOTE: /create-skill is not yet implemented; disabled until ready.
-        // if user_input.trim().starts_with("/create-skill") { ... }
 
         // External commands from ~/.xiaoo/commands/
         if let Some((body, command_context)) = self.external_command_body(trimmed) {
@@ -821,10 +818,14 @@ impl App {
             },
             "close" => {
                 let session_id = self.state.session_id.clone();
-                self.gateway.close_remote_session(&session_id).await;
-                crate::chat::Message::system(format!(
-                    "Remote session closed on daemon: {session_id}"
-                ))
+                match self.gateway.close_remote_session(&session_id).await {
+                    Ok(()) => crate::chat::Message::system(format!(
+                        "Remote session closed on daemon: {session_id}"
+                    )),
+                    Err(error) => {
+                        crate::chat::Message::error(format!("Remote session close failed: {error}"))
+                    }
+                }
             }
             base_url => {
                 let base_url = normalize_remote_url_input(base_url);
@@ -1236,7 +1237,7 @@ impl App {
 
     fn open_load_snapshot_dialog(&mut self) {
         match list_session_snapshots() {
-            Ok(entries) if entries.is_empty() => {
+            Ok(catalog) if catalog.is_empty() => {
                 self.state
                     .chat_state
                     .messages
@@ -1244,9 +1245,9 @@ impl App {
                         "No session snapshots found in ~/.xiaoo/session/.".to_string(),
                     ));
             }
-            Ok(entries) => {
+            Ok(catalog) => {
                 self.state.input_mode = InputMode::SessionSnapshotSelection;
-                self.state.session_snapshot_dialog = Some(SessionSnapshotDialog::new(entries));
+                self.state.session_snapshot_dialog = Some(SessionSnapshotDialog::new(catalog));
             }
             Err(error) => self
                 .state
@@ -1337,20 +1338,31 @@ impl App {
                     dialog.move_down();
                 }
             }
+            KeyCode::Tab | KeyCode::BackTab => {
+                if let Some(dialog) = self.state.session_snapshot_dialog.as_mut() {
+                    dialog.toggle_pane();
+                }
+            }
             KeyCode::Enter => {
                 let selected = self
                     .state
                     .session_snapshot_dialog
                     .as_ref()
                     .and_then(|dialog| dialog.selected_entry())
-                    .map(|entry| (entry.name.clone(), entry.snapshot_key.clone()));
+                    .map(|entry| entry.snapshot_key.clone());
                 self.state.input_mode = InputMode::Editing;
                 self.state.session_snapshot_dialog = None;
-                if let Some((name, snapshot_key)) = selected {
+                if let Some(snapshot_key) = selected {
                     match load_snapshot_by_key(&snapshot_key) {
                         Ok((snapshot, parent_chain)) => {
-                            self.load_snapshot_into_state(&name, snapshot, parent_chain)
-                                .await
+                            let name = snapshot.name.clone();
+                            self.load_snapshot_into_state(
+                                &snapshot_key,
+                                &name,
+                                snapshot,
+                                parent_chain,
+                            )
+                            .await
                         }
                         Err(error) => {
                             self.state
@@ -1371,22 +1383,23 @@ impl App {
 
     async fn load_snapshot_into_state(
         &mut self,
+        snapshot_key: &str,
         name: &str,
         snapshot: crate::session_snapshot_service::TuiSessionSnapshot,
         parent_chain: Vec<String>,
     ) {
         self.gateway.reset_for_new_session(&mut self.state);
+        let snapshot_context = crate::session_snapshot_service::SnapshotContext::from_snapshot(
+            snapshot_key.to_string(),
+            &snapshot,
+        );
         let record = apply_snapshot(&mut self.state, snapshot);
         let chain_display = if parent_chain.is_empty() {
             name.to_string()
         } else {
             format!("{} → {}", parent_chain.join(" → "), name)
         };
-        self.state.current_snapshot_context =
-            Some(crate::session_snapshot_service::SnapshotContext {
-                name: name.to_string(),
-                parent_chain,
-            });
+        self.state.current_snapshot_context = Some(snapshot_context);
         if let Some(record) = record {
             self.gateway.import_session_snapshot(record).await;
         }
@@ -1657,6 +1670,10 @@ fn editing_key_inserts_newline(code: KeyCode, modifiers: event::KeyModifiers) ->
     }
 }
 
+fn is_leave_subagent_view_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Left && key.modifiers.is_empty()
+}
+
 fn is_named_slash_command(trimmed: &str, command: &str) -> bool {
     let Some(first) = trimmed.split_whitespace().next() else {
         return false;
@@ -1809,6 +1826,30 @@ mod tests {
             KeyCode::Char('j'),
             event::KeyModifiers::ALT
         ));
+    }
+
+    #[test]
+    fn plain_left_leaves_subagent_view() {
+        assert!(is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Left,
+            event::KeyModifiers::empty()
+        )));
+    }
+
+    #[test]
+    fn modified_left_does_not_leave_subagent_view() {
+        assert!(!is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Left,
+            event::KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn former_shift_up_shortcut_does_not_leave_subagent_view() {
+        assert!(!is_leave_subagent_view_key(&KeyEvent::new(
+            KeyCode::Up,
+            event::KeyModifiers::SHIFT
+        )));
     }
 
     #[test]

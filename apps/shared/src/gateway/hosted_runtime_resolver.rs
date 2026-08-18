@@ -1,9 +1,9 @@
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::prompt_utils::{compose_subagent_delegation_rules, generate_skills_dirs_table};
 use crate::gateway::{
-    compose_repo_map, compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord,
-    SessionRuntimeBindings, SessionRuntimeBuildInput, SessionRuntimeDescriptor,
-    SessionRuntimeResolveError, SessionRuntimeResolver,
+    compose_repo_map, compose_workspace_system_prompt, MemoryAutomationConfig,
+    ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings, SessionRuntimeBuildInput,
+    SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
 use agent_types::common::ids::{AgentId, ToolName};
@@ -65,6 +65,7 @@ pub struct HostedSessionRuntimeConfig {
     pub skills_config: SkillsConfig,
     pub subagent_roles: BTreeMap<String, SubagentRoleConfigEntry>,
     pub mcp_servers: Vec<mcp::McpServerConfig>,
+    pub memory_automation: MemoryAutomationConfig,
 }
 
 pub struct HostedSessionRuntimeResolver {
@@ -76,6 +77,11 @@ pub struct HostedSessionRuntimeResolver {
 
 impl HostedSessionRuntimeResolver {
     pub fn new(config: HostedSessionRuntimeConfig, bindings: SessionRuntimeBindings) -> Self {
+        let disable_plugin_tools = config
+            .operation_backend
+            .as_ref()
+            .map(|backend| backend.kind == "e2b")
+            .unwrap_or(false);
         let subagent_roles = config
             .subagent_roles
             .iter()
@@ -92,6 +98,7 @@ impl HostedSessionRuntimeResolver {
             })
             .collect();
         let initial_services = ToolRuntimeServices {
+            disable_plugin_tools,
             lsp_registry: config.lsp_registry.clone(),
             workspace_root: Some(config.descriptor.workspace_root.clone()),
             subagent_roles,
@@ -355,6 +362,10 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
             compression_pipeline: self.config.compression_pipeline.clone(),
             hooker: self.config.hooker.clone(),
             operation_backend: self.config.operation_backend.clone(),
+            backend_workspace_root: self.config.descriptor.workspace_root.clone(),
+            e2b_bootstrap: None,
+            bootstrap_binding: None,
+            e2b_finalized: false,
         })
     }
 }

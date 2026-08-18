@@ -213,7 +213,6 @@ fn install_skill(src: &Path, dst: &Path) -> io::Result<()> {
         let backup_path = format!("{}.bak", dst.display());
         let backup = Path::new(&backup_path);
 
-        // Remove old backup if exists
         if backup.exists() {
             fs::remove_dir_all(backup)?;
         }

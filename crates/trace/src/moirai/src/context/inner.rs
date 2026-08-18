@@ -15,8 +15,6 @@ pub(super) struct PendingUpdate {
 
 pub(super) struct Inner {
     pub(super) trace_id: String,
-    #[allow(dead_code)]
-    pub(super) agent_id: String,
     pub(super) chronology_tail_span_id: String,
     pub(super) root_span_start_time: i64,
     pub(super) open_spans: Vec<String>,

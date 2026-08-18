@@ -27,9 +27,39 @@ import os
 import sys
 from datetime import datetime
 
-from audit_policy_checker.main import audit_action
+# 在导入 audit_policy_checker 之前，先把插件根目录（audit.py 所在目录）
+# 注入环境变量。audit.py 始终位于插件根目录（不被 pip 装进 venv），
+# 是唯一可靠的"插件根目录锚点"——无论 pip 安装还是 RPM 源码直跑，
+# 都能用它定位到统一的 audit_settings.json 位置（插件根目录）。
+_PLUGIN_ROOT = os.path.dirname(os.path.abspath(__file__))
+os.environ.setdefault("AUDIT_PLUGIN_ROOT", _PLUGIN_ROOT)
 
-_LOG_PATH = os.environ.get("AUDIT_LOG_PATH", "/dev/null")
+from audit_policy_checker.config import get_log_path  # noqa: E402
+from audit_policy_checker.main import audit_action  # noqa: E402
+
+
+def _resolve_log_path() -> str:
+    """
+    解析日志路径，优先级：环境变量 > audit_settings.json > /dev/null。
+
+    与设置环境变量效果一致：在 audit_settings.json 中配置 AUDIT_LOG_PATH
+    即可让 HOOK_INPUT/HOOK_OUTPUT 等全量日志写入指定文件。
+    get_log_path 内部已实现"环境变量 > settings > 默认"，此处再兜底 /dev/null。
+    """
+    try:
+        path = get_log_path()
+        if not path:
+            path = os.environ.get("AUDIT_LOG_PATH", "")
+        return path or "/dev/null"
+    except (json.JSONDecodeError, OSError) as exc:
+        # audit_settings.json 损坏或不可读时，安全降级到 /dev/null，
+        # 避免 JSON 解析异常导致 audit.py 在模块导入阶段直接崩溃，
+        # 影响面从"日志路径错"扩大到"整个 hook 失效"。
+        print(f"[run_audit] audit_settings.json 读取失败，日志降级到 /dev/null: {exc}", file=sys.stderr)
+        return os.environ.get("AUDIT_LOG_PATH", "") or "/dev/null"
+
+
+_LOG_PATH = _resolve_log_path()
 
 
 def _log(tag: str, payload: object) -> None:
@@ -144,4 +174,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # 用 os._exit 而非 sys.exit：跳过解释器清理，不等非守护线程。
+    # audit_agent 的 L3 用 ThreadPoolExecutor 调 LLM，worker 是非守护线程；
+    # 当 call_llm 卡死（http 超时失效）且 future.result 超时后，worker 仍永久阻塞，
+    # sys.exit 会在进程退出阶段等它 → 卡死。os._exit 立即退出，worker 随进程消亡。
+    # audit.py 是一次性 hook 脚本，无 atexit/需清理资源，flush stdout 后直接退出安全。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)

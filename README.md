@@ -91,6 +91,24 @@ See [docs/skill_usage.md](./docs/skill_usage.md) for details.
 
 The build wrapper can install the `audit_agent` hooker, which audits tool execution for risky operations. Plugin installation details are available in [docs/plugins.md](./docs/plugins.md).
 
+### Docker
+
+Build a single image containing both `xiaoo` and `xiaoo-daemon`. The image
+ships **no** `config.toml` — pass your own at run time via `XIAOO_CONFIG`:
+
+```bash
+docker build -t xiaoo:latest .
+docker run --rm -d -p 18080:18080 -p 28081:28081 \
+  -v $PWD/my.toml:/cfg.toml:ro \
+  -e XIAOO_CONFIG=/cfg.toml \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  xiaoo:latest
+```
+
+The container starts `xiaoo-daemon` by default. Pass `xiaoo` for the TUI
+(`docker run -it xiaoo:latest xiaoo`) or `xiaoo --cli run -p "..."` for one-shot CLI.
+See [docs/docker_deploy.md](./docs/docker_deploy.md) for full instructions.
+
 ## Quick Start
 
 Create `~/.config/xiaoo/config.toml`:
@@ -244,10 +262,12 @@ More daemon configuration details are in [docs/daemon_config.md](./docs/daemon_c
 - [Memory & Context Compression](./docs/memory_context_system.md)
 - [Plugin System](./docs/plugins.md)
 - [Skill Usage](./docs/skill_usage.md)
+- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
 - [Custom Agents](./docs/custom_agent.md)
 - [Remote TUI](./docs/remote_tui.md)
 - [Feishu Deployment](./docs/feishu_deploy.md)
 - [Telegram Deployment](./docs/telegram_deploy.md)
+- [Docker Deployment](./docs/docker_deploy.md)
 
 ## License
 

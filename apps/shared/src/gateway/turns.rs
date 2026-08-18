@@ -1,6 +1,7 @@
 use agent_types::ChatMessage;
 use agent_types::ReasoningEffort;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -10,6 +11,7 @@ pub enum GatewayEntryKind {
     HttpApi,
     ScheduledJob,
     Cli,
+    Mcp,
 }
 
 /// Terminal kind of a completed (non-error) root turn, mirroring the four
@@ -138,6 +140,12 @@ pub struct AppTurnRequest {
     pub reasoning_effort: ReasoningEffort,
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
+    /// Absolute path on the daemon host to snapshot into a newly-created E2B runtime.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
+    /// Ordered daemon-host skill search roots. Each root contains skill directories.
+    #[serde(default)]
+    pub skills: Option<Vec<PathBuf>>,
     /// When the turn originates from a slash command
     /// (`~/.xiaoo/commands/<name>.md`), carries the command name and raw
     /// arguments so the `*.Chat.command.before` hooker can fire with full
@@ -152,6 +160,11 @@ pub struct AppTurnRequest {
     /// default 128). Set by the host; plugins cannot influence it directly.
     #[serde(default)]
     pub chain_depth: usize,
+    /// Process identifier propagated from `SessionOpenRequest.client_id`.
+    /// The `SessionActor` uses it to fail-fast queued turns whose holder
+    /// changed after a takeover. `None` for legacy / anonymous callers.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 pub type RuntimeTurnRequest = AppTurnRequest;
@@ -177,12 +190,40 @@ mod tests {
             mentions: Vec::new(),
             reasoning_effort: ReasoningEffort::default(),
             llm: None,
+            workspace: None,
+            skills: None,
             command_context: None,
             chain_depth: 0,
+            client_id: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");
         assert_eq!(value["runtime_id"], "runtime-1");
         assert!(value.get("session_id").is_none());
+        assert!(value["workspace"].is_null());
+        assert!(value["skills"].is_null());
+    }
+
+    #[test]
+    fn runtime_turn_request_accepts_explicit_empty_skills() {
+        let request: RuntimeTurnRequest = serde_json::from_str(
+            r#"{
+                "runtime_id":"runtime-1",
+                "conversation_id":"conversation",
+                "sender_id":"user",
+                "text":"hello",
+                "channel":null,
+                "message_id":null,
+                "channel_instance_id":null,
+                "reply_to_message_id":null,
+                "root_message_id":null,
+                "mentions":[],
+                "skills":[]
+            }"#,
+        )
+        .expect("turn request");
+
+        assert_eq!(request.skills, Some(Vec::new()));
+        assert!(request.workspace.is_none());
     }
 }

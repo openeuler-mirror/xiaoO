@@ -19,10 +19,11 @@ pub fn load_tool_sources_with_services(
 ) -> Vec<Box<dyn ToolSource>> {
     let workspace_root = services.workspace_root.clone();
     let mcp_servers = services.mcp_servers.take().unwrap_or_default();
-    let mut sources: Vec<Box<dyn ToolSource>> = vec![
-        Box::new(BuiltinToolSource::new(services)),
-        Box::new(PluginToolSource::new(workspace_root)),
-    ];
+    let disable_plugin_tools = services.disable_plugin_tools;
+    let mut sources: Vec<Box<dyn ToolSource>> = vec![Box::new(BuiltinToolSource::new(services))];
+    if !disable_plugin_tools {
+        sources.push(Box::new(PluginToolSource::new(workspace_root)));
+    }
     if !mcp_servers.is_empty() {
         sources.push(Box::new(McpToolSource::new(mcp_servers)));
     }

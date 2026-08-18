@@ -5,6 +5,12 @@
 2. 意图一致性检测 — 动作是否与原始 prompt 意图一致
 3. 敏感路径访问检测 — 访问系统关键文件
 4. 危险操作模式检测 — 批量删除/修改、通配符滥用
+5. 密码修改授权检测 — 非交互式密码修改需用户授权
+6. 用户删除授权检测 — 删除系统用户需用户授权
+
+规则来源优先级：
+  runtime JSON 用户本地副本 > 源码种子默认值
+  禁用的分类/规则在 runtime JSON 中 enabled/category_enabled=False，加载时自动过滤。
 """
 
 import json
@@ -13,45 +19,63 @@ import re
 from pathlib import Path
 
 from .types import LogicRuleResult
+from ..runtime_config import (
+    load_runtime_config,
+    get_enabled_l2_sensitive_paths_or_default,
+    get_enabled_l2_intent_patterns_or_default,
+    get_enabled_l2_password_patterns_or_default,
+    get_enabled_l2_user_deletion_patterns_or_default,
+    is_l2_category_enabled,
+)
 
 # ==================== 敏感路径列表 ====================
 SENSITIVE_PATHS: list[dict] = [
-    # 认证与密钥
-    {"path": "/etc/shadow", "risk_level": "critical", "desc": "系统密码文件"},
-    {"path": "/etc/gshadow", "risk_level": "critical", "desc": "系统组密码文件"},
+    # 认证与密钥（credential=True — 只读也算泄密，无论读写都拦截）
+    {"path": "/etc/shadow", "risk_level": "critical", "desc": "系统密码文件", "credential": True},
+    {"path": "/etc/gshadow", "risk_level": "critical", "desc": "系统组密码文件", "credential": True},
     {"path": "/etc/passwd", "risk_level": "high", "desc": "系统用户文件"},
-    {"path": "/etc/sudoers", "risk_level": "critical", "desc": "sudo 配置"},
-    {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥"},
-    {"path": ".ssh/id_ed25519", "risk_level": "critical", "desc": "SSH 私钥 (ed25519)"},
-    {"path": ".ssh/authorized_keys", "risk_level": "high", "desc": "SSH 授权密钥"},
-    # 系统配置
+    {"path": "/etc/sudoers", "risk_level": "critical", "desc": "sudo 配置", "credential": True},
+    {"path": ".ssh/id_rsa", "risk_level": "critical", "desc": "SSH 私钥", "credential": True},
+    {"path": ".ssh/id_ed25519", "risk_level": "critical", "desc": "SSH 私钥 (ed25519)", "credential": True},
+    {"path": ".ssh/authorized_keys", "risk_level": "high", "desc": "SSH 授权密钥", "credential": True},
+    # 系统配置（仅拦截写入）
     {"path": "/etc/hosts", "risk_level": "medium", "desc": "DNS 解析配置"},
     {"path": "/etc/crontab", "risk_level": "high", "desc": "系统定时任务"},
+    {"path": "/etc/cron.d/", "risk_level": "high", "desc": "系统定时任务目录（拆分式 crontab）"},
+    {"path": "/var/spool/cron/", "risk_level": "high", "desc": "用户级定时任务目录"},
     {"path": "/etc/systemd/", "risk_level": "high", "desc": "systemd 服务配置"},
     {"path": "/etc/ssh/sshd_config", "risk_level": "high", "desc": "SSH 服务配置"},
-    # 危险目录
+    {"path": "/etc/pam.d/", "risk_level": "high", "desc": "PAM 可插拔认证模块配置"},
+    # 危险目录（仅拦截写入）
     {"path": "/boot/", "risk_level": "critical", "desc": "启动引导目录"},
     {"path": "/proc/sys/", "risk_level": "high", "desc": "内核参数"},
     {"path": "/sys/", "risk_level": "high", "desc": "sysfs 内核接口"},
     # 设备文件
-    {"path": "/dev/zero", "risk_level": "high", "desc": "零设备（无限空字节输出）"},
-    {"path": "/dev/null", "risk_level": "medium", "desc": "空设备（丢弃所有写入）"},
-    {"path": "/dev/random", "risk_level": "medium", "desc": "随机数设备"},
-    {"path": "/dev/urandom", "risk_level": "medium", "desc": "伪随机数设备"},
-    {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备"},
+    # /dev/null、/dev/zero、/dev/urandom 已移除（误报率极高，详见 docs/l2_sensitive_paths_audit.md）
+    # /dev/random 保留但改为 read_only=True：读取可耗尽熵池导致 TLS 阻塞（攻击向量），
+    #   写入是投喂熵（增强安全），不应拦截
+    {"path": "/dev/random", "risk_level": "high", "desc": "阻塞式随机数设备（读取耗尽熵池）", "read_only": True},
+    {"path": "/dev/mem", "risk_level": "critical", "desc": "物理内存访问设备（读写均危险）", "credential": True},
     {"path": "/dev/kmsg", "risk_level": "high", "desc": "内核消息缓冲区"},
+    # 持久化与命令劫持（仅拦截写入）
+    {"path": "~/.bashrc", "risk_level": "high", "desc": "用户 Shell 初始化脚本"},
+    {"path": "~/.bash_profile", "risk_level": "high", "desc": "用户 Shell 登录脚本"},
+    {"path": "~/.profile", "risk_level": "high", "desc": "用户通用登录脚本"},
+    # SSH 主机私钥（credential=True — 泄露可 MITM 劫持所有 SSH 连接）
+    {"path": "/etc/ssh/ssh_host_rsa_key", "risk_level": "critical", "desc": "SSH 主机 RSA 私钥", "credential": True},
+    {"path": "/etc/ssh/ssh_host_ed25519_key", "risk_level": "critical", "desc": "SSH 主机 Ed25519 私钥", "credential": True},
+    {"path": "/etc/ssh/ssh_host_ecdsa_key", "risk_level": "critical", "desc": "SSH 主机 ECDSA 私钥", "credential": True},
     # xiaoO 系统级安全 Skill（系统级路径 - 所有用户共享的内置 skill）
     {"path": "/usr/lib/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 系统级安全防护 Skill 目录"},
     # xiaoO 用户级安全 Skill（用户级路径 - 兼容旧版本）
     {"path": "~/.xiaoo/skills/xiaoo-guardian/", "risk_level": "critical", "desc": "xiaoO 用户级安全防护 Skill 目录"},
-    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免部分匹配误报）
+    # 凭据文件（credential=True — 无论读写都拦截，使用 \b 边界匹配避免非文件名拼接误报）
     {"path": "credentials.yml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
     {"path": "credentials.yaml", "risk_level": "high", "desc": "凭据配置文件", "credential": True},
     {"path": "secrets.yml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
     {"path": "secrets.yaml", "risk_level": "high", "desc": "密钥配置文件", "credential": True},
     {"path": ".env", "risk_level": "high", "desc": "环境变量/凭据配置文件", "credential": True},
 ]
-
 # ==================== 写入操作关键词 ====================
 WRITE_KEYWORDS = [
     "write", "写入", "save", "保存", "modify", "修改",
@@ -66,6 +90,68 @@ READ_KEYWORDS = [
     "view", "查看", "open", "打开", "load", "加载",
     "grep", "search", "搜索", "find", "查找",
 ]
+
+# ==================== 重定向写判定豁免命令集合 ====================
+# 仅包含「绝不可能有写文件意图」的传统文本查看/过滤命令。首命令在此集合内时，
+# 即使带 `>` 重定向也不判为写文件意图。
+# 必须保持保守：systemctl/sysctl/ip/ifconfig/route/fdisk/parted 等命令能改系统状态，
+# 不能进此集合，否则 `systemctl > ~/.bashrc`、`sysctl > /var/spool/cron/x` 等会因
+# is_write_op=False 绕过 sensitive_path_access（这些路径不在 dangerous_redirect 的
+# /etc|/boot|/proc 兜底范围内）。
+# 注：sed/awk 虽能原地编辑(-i)，此处仍按只读看待——原地改写由其他规则另行覆盖。
+# 注：lsblk/blockdev/smartctl 等系统工具的 `2>/dev/null` 误报由 _DEVNULL_REDIRECT_RE
+# 在判定前剔除解决，不依赖它们留在本集合。
+REDIRECT_WRITE_EXEMPT_COMMANDS: set[str] = {
+    # 传统文本查看/过滤
+    "cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
+    "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump", "tr",
+    "file", "stat", "du", "df", "ls", "dir", "tree", "nl", "tac", "rev",
+}
+
+# 重定向到 /dev/null 的丢弃写法（2>/dev/null、&>/dev/null、>/dev/null）——这是丢弃输出的标准
+# shell 实践，不是写文件意图，不应计入"写操作"判定。
+_DEVNULL_REDIRECT_RE = re.compile(r"(?:2|&|1)?\s*>\s*/dev/null\b")
+
+# ==================== 写/删命令模式（用于写操作判定）====================
+# WRITE_KEYWORDS 走子串匹配，无法可靠识别 `rm`/`cp`/`dd` 等命令（"rm" 会误命中 arm/form），
+# 故单独用词边界正则识别这些命令出现即视为写/删意图。覆盖：删除、复制写入、重定向写入、
+# 块设备写入、文件系统格式化等。
+_WRITE_COMMAND_RES = [
+    re.compile(r"\brm\b"),          # 删除文件
+    re.compile(r"\bunlink\b"),      # 删除文件
+    re.compile(r"\brmdir\b"),       # 删除目录
+    re.compile(r"\bshred\b"),       # 安全擦除
+    re.compile(r"\bcp\b"),          # 复制（会写目标）
+    re.compile(r"\bmv\b"),          # 移动（覆盖目标）
+    re.compile(r"\binstall\b"),     # 复制并设置属性
+    re.compile(r"\btee\b"),         # 从 stdin 写文件
+    re.compile(r"\bdd\b"),          # 块复制（常写块设备）
+    re.compile(r"\bmkfs\b"),        # 格式化文件系统
+    re.compile(r"\b(fdisk|parted|cfdisk|sfdisk)\b"),  # 分区表写入
+    re.compile(r"\bchmod\b"),       # 改权限
+    re.compile(r"\bchown\b"),       # 改属主
+    re.compile(r"\btruncate\b"),    # 截断文件
+    # 任意重定向写入（> file、>> file）由 _is_write_operation 末尾的重定向分支处理，
+    # 那里会先排除 /dev/null 丢弃并跳过只读命令，避免在此误判 2>/dev/null。
+]
+
+
+def _is_write_operation(action_type: str, action_detail: str) -> bool:
+    """综合判定是否为写/删操作：关键词命中 或 写/删命令命中 或（真实重定向且非只读命令）。
+    统一供 _check_read_before_write 与 _check_sensitive_path_access 使用，避免两处逻辑漂移。
+    """
+    if any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS):
+        return True
+    if any(rx.search(action_detail) for rx in _WRITE_COMMAND_RES):
+        return True
+    # 重定向写入：先排除 /dev/null 丢弃，再看是否还有真实重定向且首命令非只读
+    if ">" in action_detail:
+        detail_without_devnull = _DEVNULL_REDIRECT_RE.sub("", action_detail)
+        if ">" in detail_without_devnull:
+            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
+            if first_word not in REDIRECT_WRITE_EXEMPT_COMMANDS:
+                return True
+    return False
 
 # ==================== 非交互式密码修改命令模式 ====================
 PASSWORD_MODIFY_PATTERNS: list[str] = [
@@ -96,18 +182,34 @@ INTENT_DEVIATION_PATTERNS: list[dict] = [
     {
         "intent_keywords": ["读取", "查看", "分析", "read", "analyze", "view", "list", "列出"],
         "dangerous_actions": ["删除", "remove", "delete", "rm ", "格式化", "format"],
-        "reason": "原始意图为读取/分析，但执行了删除操作",
+        "reason": "原始意图为读取/分析，下一步动作疑似偏离意图执行了删除操作",
     },
     {
         "intent_keywords": ["查询", "搜索", "search", "query", "find"],
         "dangerous_actions": ["修改", "修改", "update", "write", "写入", "alter"],
-        "reason": "原始意图为查询/搜索，但执行了修改操作",
+        "reason": "原始意图为查询/搜索，下一步动作疑似偏离意图执行了修改操作",
     },
 ]
 
 
 class LogicRulesChecker:
-    """逻辑规则检测器"""
+    """逻辑规则检测器
+
+    规则来源：优先从 runtime JSON 加载启用的规则，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    分类级别开关：category_enabled=False 时跳过整个分类的检测。
+    """
+
+    def __init__(self):
+        # 从 runtime config 加载规则；
+        # 仅在配置文件不存在时回退到源码硬编码默认值，
+        # 配置文件存在但规则列表为空（用户逐条禁用）时不回退。
+        runtime = load_runtime_config()
+        self._sensitive_paths = get_enabled_l2_sensitive_paths_or_default(runtime)
+        self._intent_patterns = get_enabled_l2_intent_patterns_or_default(runtime)
+        self._password_patterns = get_enabled_l2_password_patterns_or_default(runtime)
+        self._user_deletion_patterns = get_enabled_l2_user_deletion_patterns_or_default(runtime)
+        self._runtime = runtime
 
     def check(
         self,
@@ -128,35 +230,41 @@ class LogicRulesChecker:
         Returns:
             LogicRuleResult: 检测结果
         """
-        # 1. read_before_write 原则
-        rbw_result = self._check_read_before_write(action_history, a_next, reason)
-        if rbw_result.hit:
-            return rbw_result
+        # 1. read_before_write 原则（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "read_before_write"):
+            rbw_result = self._check_read_before_write(action_history, a_next, reason)
+            if rbw_result.hit:
+                return rbw_result
 
-        # 2. 意图一致性检测
-        intent_result = self._check_intent_consistency(prompt_session, a_next)
-        if intent_result.hit:
-            return intent_result
+        # 2. 意图一致性检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "intent_consistency"):
+            intent_result = self._check_intent_consistency(prompt_session, a_next)
+            if intent_result.hit:
+                return intent_result
 
-        # 3. 敏感路径访问检测
-        path_result = self._check_sensitive_path_access(a_next)
-        if path_result.hit:
-            return path_result
+        # 3. 敏感路径访问检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "sensitive_path_access"):
+            path_result = self._check_sensitive_path_access(a_next)
+            if path_result.hit:
+                return path_result
 
-        # 4. 危险操作模式检测
-        dangerous_result = self._check_dangerous_patterns(a_next)
-        if dangerous_result.hit:
-            return dangerous_result
+        # 4. 危险操作模式检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "dangerous_patterns"):
+            dangerous_result = self._check_dangerous_patterns(a_next)
+            if dangerous_result.hit:
+                return dangerous_result
 
-        # 5. 密码修改授权检测
-        consent_result = self._check_password_consent(action_history, a_next)
-        if consent_result.hit:
-            return consent_result
+        # 5. 密码修改授权检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "password_modify_consent"):
+            consent_result = self._check_password_consent(action_history, a_next)
+            if consent_result.hit:
+                return consent_result
 
-        # 6. 用户删除授权检测
-        user_del_result = self._check_user_deletion_consent(action_history, a_next)
-        if user_del_result.hit:
-            return user_del_result
+        # 6. 用户删除授权检测（分类开关控制）
+        if is_l2_category_enabled(self._runtime, "user_deletion_consent"):
+            user_del_result = self._check_user_deletion_consent(action_history, a_next)
+            if user_del_result.hit:
+                return user_del_result
 
         return LogicRuleResult(hit=False)
 
@@ -176,17 +284,8 @@ class LogicRulesChecker:
         if any(t in action_type or t in action_detail for t in non_write_tools):
             return LogicRuleResult(hit=False)
 
-        # 判断是否为写入操作
-        is_write = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
-
-        # 补充检测 shell 重定向写入（>、>>）
-        # 排除只读命令后的重定向（如 cat file > /dev/null 不是写入意图）
-        if not is_write and ">" in action_detail:
-            read_only_cmds = {"cat", "head", "tail", "less", "more", "grep", "find", "awk", "sed",
-                              "sort", "uniq", "wc", "cut", "strings", "od", "xxd", "hexdump"}
-            first_word = action_detail.split()[0].strip().lower() if action_detail.split() else ""
-            if first_word not in read_only_cmds:
-                is_write = True
+        # 判断是否为写入操作（统一用 _is_write_operation，含关键词/写删命令/重定向）
+        is_write = _is_write_operation(action_type, action_detail)
 
         if not is_write:
             return LogicRuleResult(hit=False)
@@ -257,7 +356,7 @@ class LogicRulesChecker:
         prompt_lower = prompt_session.lower()
         action_detail = a_next.get("action_detail", "").lower()
 
-        for pattern in INTENT_DEVIATION_PATTERNS:
+        for pattern in self._intent_patterns:
             intent_matched = any(kw in prompt_lower for kw in pattern["intent_keywords"])
             dangerous_matched = any(kw in action_detail for kw in pattern["dangerous_actions"])
             if intent_matched and dangerous_matched:
@@ -276,24 +375,37 @@ class LogicRulesChecker:
         敏感路径访问检测：
         检查 a_next 中是否包含对敏感路径的修改/删除操作（读取操作放行）。
         支持 ~ 路径展开，同时检查原始模式和展开后的绝对路径。
+
+        拦截模式由 deny_mode 控制（deny_write / deny_read / deny_both），
+        向后兼容：无 deny_mode 时从 credential / read_only 推导。
         """
         action_type = a_next.get("action_type", "").lower()
         action_detail = a_next.get("action_detail", "").lower()
 
-        # 判断是否为写入/删除操作
-        is_write_op = any(kw in action_type or kw in action_detail for kw in WRITE_KEYWORDS)
+        # 判断是否为写入/删除操作（统一用 _is_write_operation，与 read_before_write 对齐）
+        is_write_op = _is_write_operation(action_type, action_detail)
 
-        for sp in SENSITIVE_PATHS:
+        for sp in self._sensitive_paths:
             raw_path = sp["path"]
             path = raw_path.lower()
-            is_credential = sp.get("credential", False)
+
+            # 确定拦截模式：优先 deny_mode，向后兼容 credential / read_only
+            deny_mode = sp.get("deny_mode", "")
+            if not deny_mode:
+                if sp.get("credential"):
+                    deny_mode = "deny_both"
+                elif sp.get("read_only"):
+                    deny_mode = "deny_read"
+                else:
+                    deny_mode = "deny_write"
 
             # 检查路径是否在操作中出现
-            if is_credential:
-                # 凭据文件使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
-                # 以 . 开头的文件（如 .env）在 . 前 \b 不匹配，用 (?:^|[\s/\\]) 替代
+            # deny_both 路径使用边界匹配，避免非文件名拼接（如 something_credentials_yml）误报
+            if deny_mode == "deny_both":
+                # 以 . 或 / 开头的路径，其首字符不是单词字符，\b 在它前面不构成边界
+                # （空格→/ 之间没有 \b），故用 (?:^|[\s/\\]) 替代前导 \b。
                 escaped = re.escape(path)
-                if path.startswith("."):
+                if path.startswith(".") or path.startswith("/"):
                     path_match = bool(re.search(rf"(?:^|[\s/\\]){escaped}\b", action_detail))
                 else:
                     path_match = bool(re.search(rf"\b{escaped}\b", action_detail))
@@ -314,8 +426,8 @@ class LogicRulesChecker:
                             path_match = True
 
             if path_match:
-                # 凭据文件：无论读写都拦截（读凭据文件同样危险）
-                if is_credential:
+                if deny_mode == "deny_both":
+                    # 读写均拦截（凭据/密钥类：cat /etc/shadow 也拦）
                     return LogicRuleResult(
                         hit=True,
                         violated_rule="sensitive_path_access",
@@ -323,10 +435,22 @@ class LogicRulesChecker:
                         reason=f"访问敏感路径: {sp['desc']} ({sp['path']})",
                         risk_type="file_access",
                     )
-                # 对于 xiaoo-guardian 保护目录：只拦截写入/删除操作，读取操作放行
-                if raw_path.startswith("~") and not is_write_op:
+                if deny_mode == "deny_read":
+                    # 仅拦截读取，写入/删除放行（如 /dev/random：读耗熵池，写投喂熵）
+                    if is_write_op:
+                        continue  # 允许写入操作
+                    return LogicRuleResult(
+                        hit=True,
+                        violated_rule="sensitive_path_access",
+                        risk_level=sp["risk_level"],
+                        reason=f"读取敏感路径: {sp['desc']} ({sp['path']})",
+                        risk_type="file_access",
+                    )
+                # deny_write（默认）：仅拦截写入/删除，只读访问放行
+                # lsblk、smartctl 查设备信息放行。修复历史误报：只读访问 /sys/、/proc/sys/、
+                # /dev/* 被一刀切拦截。
+                if not is_write_op:
                     continue  # 允许读取操作
-                # 对于其他敏感路径，所有访问都拦截（保持原有逻辑）
                 return LogicRuleResult(
                     hit=True,
                     violated_rule="sensitive_path_access",
@@ -395,7 +519,7 @@ class LogicRulesChecker:
             return LogicRuleResult(hit=False)
 
         is_password_modify = any(
-            re.search(p, action_detail, re.IGNORECASE) for p in PASSWORD_MODIFY_PATTERNS
+            re.search(p, action_detail, re.IGNORECASE) for p in self._password_patterns
         )
         if not is_password_modify:
             return LogicRuleResult(hit=False)
@@ -435,7 +559,7 @@ class LogicRulesChecker:
             return LogicRuleResult(hit=False)
 
         is_user_deletion = any(
-            re.search(p, action_detail, re.IGNORECASE) for p in USER_DELETION_PATTERNS
+            re.search(p, action_detail, re.IGNORECASE) for p in self._user_deletion_patterns
         )
         if not is_user_deletion:
             return LogicRuleResult(hit=False)

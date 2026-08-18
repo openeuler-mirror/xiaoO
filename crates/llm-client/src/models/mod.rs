@@ -74,17 +74,25 @@ pub async fn resolve_model_context_length(
     config: &ResolvedConfig,
     model: &str,
 ) -> Result<Option<u64>, LlmError> {
+    let known = get_known_model_context_length(model);
     let dynamic_from_catalog = if config.supports_model_catalog {
-        let catalog = create_model_catalog(config)?;
-        let models = catalog.list_models().await?;
-        find_model_summary(&models, model).and_then(|summary| {
-            summary.context_length.or_else(|| {
-                summary
-                    .raw
-                    .as_ref()
-                    .and_then(extract_context_length_from_raw)
-            })
-        })
+        let catalog = match create_model_catalog(config) {
+            Ok(catalog) => catalog,
+            Err(_) if known.is_some() => return Ok(known),
+            Err(error) => return Err(error),
+        };
+        match catalog.list_models().await {
+            Ok(models) => find_model_summary(&models, model).and_then(|summary| {
+                summary.context_length.or_else(|| {
+                    summary
+                        .raw
+                        .as_ref()
+                        .and_then(extract_context_length_from_raw)
+                })
+            }),
+            Err(_) if known.is_some() => return Ok(known),
+            Err(error) => return Err(error),
+        }
     } else {
         None
     };
@@ -93,7 +101,7 @@ pub async fn resolve_model_context_length(
         return Ok(dynamic_from_catalog);
     }
 
-    if let Some(known) = get_known_model_context_length(model) {
+    if let Some(known) = known {
         return Ok(Some(known));
     }
 
@@ -113,7 +121,7 @@ pub fn get_known_model_context_length(model: &str) -> Option<u64> {
     let models = KNOWN_MODELS.get_or_init(|| {
         let content = include_str!("known_models.toml");
         let parsed: toml::Value = toml::from_str(content).expect("Invalid known_models.toml");
-        parsed
+        let mut models: Vec<_> = parsed
             .get("models")
             .and_then(|v| v.as_table())
             .expect("known_models.toml must have a [models] section")
@@ -125,7 +133,16 @@ pub fn get_known_model_context_length(model: &str) -> Option<u64> {
                     as u64;
                 (normalize_model_id(pattern), context)
             })
-            .collect()
+            .collect();
+
+        // Model IDs may include provider prefixes or provider-specific suffixes,
+        // so matching intentionally uses `contains`. Prefer the most specific
+        // pattern to keep a family entry such as `glm-5` from shadowing
+        // versioned entries such as `glm-5.2`.
+        models.sort_by(|(left, _), (right, _)| {
+            right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+        });
+        models
     });
 
     let normalized = normalize_model_id(model);
@@ -221,7 +238,12 @@ fn key_looks_like_context_length(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_context_length_from_raw, find_model_summary, ModelSummary};
+    use super::{
+        extract_context_length_from_raw, find_model_summary, get_known_model_context_length,
+        resolve_model_context_length, ModelSummary,
+    };
+    use crate::provider_registry::ProtocolFamily;
+    use crate::resolver::ResolvedConfig;
 
     #[test]
     fn find_model_summary_matches_gemini_prefixed_names() {
@@ -238,5 +260,50 @@ mod tests {
         });
 
         assert_eq!(extract_context_length_from_raw(&raw), Some(200000));
+    }
+
+    #[test]
+    fn known_model_context_matches_provider_prefixed_new_models() {
+        assert_eq!(
+            get_known_model_context_length("openai/gpt-5.6-luna"),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            get_known_model_context_length("anthropic/claude-sonnet-5"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_known_model_context_length("moonshotai/kimi-k3"),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            get_known_model_context_length("z-ai/glm-5.2"),
+            Some(1_000_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn known_model_context_survives_catalog_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/models")
+            .with_status(503)
+            .with_body("catalog unavailable")
+            .create_async()
+            .await;
+        let config = ResolvedConfig {
+            provider: Some("openai".to_string()),
+            protocol: ProtocolFamily::OpenAiCompatible,
+            api_key: Some("test-key".to_string()),
+            base_url: server.url(),
+            supports_model_catalog: true,
+        };
+
+        let resolved = resolve_model_context_length(&config, "gpt-5.6-sol")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, Some(1_050_000));
+        mock.assert_async().await;
     }
 }

@@ -40,9 +40,10 @@ impl Hooker for BuiltinSessionClosedHooker {
     ) -> Result<HookInvokeOutput, HookInvokeError> {
         match input {
             HookInvokeInput::SessionClosed { input, .. } => {
-                println!(
+                tracing::info!(
                     "[BuiltinSessionClosedHooker] session '{}' closed for sender '{}'",
-                    input.session_id, input.sender_id
+                    input.session_id,
+                    input.sender_id
                 );
                 Ok(HookInvokeOutput::SessionClosed(
                     SessionHookResult::Acknowledged,

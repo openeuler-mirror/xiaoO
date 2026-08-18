@@ -88,13 +88,11 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 .exec(ExecRequest {
                     command: "go".to_string(),
                     args: vec!["install".to_string(), package.to_string()],
-                    shell: None,
-                    cwd: None,
-                    timeout_ms: None,
                     env: Some(vec![(
                         "GOBIN".to_string(),
                         bin_dir.to_string_lossy().into_owned(),
                     )]),
+                    ..Default::default()
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -125,10 +123,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                         "--user".to_string(),
                         package.to_string(),
                     ],
-                    shell: None,
-                    cwd: None,
-                    timeout_ms: None,
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -153,10 +148,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                 .exec(ExecRequest {
                     command: "npm".to_string(),
                     args: vec!["install".to_string(), "-g".to_string(), package.to_string()],
-                    shell: None,
-                    cwd: None,
-                    timeout_ms: None,
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|e| e.to_string())?;
@@ -187,10 +179,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                         root_str,
                         package.to_string(),
                     ],
-                    shell: None,
-                    cwd: None,
-                    timeout_ms: None,
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|e| e.to_string())?;

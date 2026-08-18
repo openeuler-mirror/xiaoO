@@ -17,7 +17,9 @@ use crate::remote_sessions_service::{
     RemoteSessionDialogMode,
 };
 use crate::services::turn_delete::DeleteDialog;
-use crate::session_snapshot_service::{format_snapshot_time, SessionSnapshotDialog};
+use crate::session_snapshot_service::{
+    format_snapshot_time, SessionSnapshotDialog, SessionSnapshotListEntry, SessionSnapshotPane,
+};
 
 use super::utils::{line_prefix_width, sanitize_terminal_text};
 
@@ -312,7 +314,7 @@ impl App {
         } else if self.state.provider_dialog.is_some() {
             " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
         } else if readonly_subagent_view {
-            " Subagent view is read-only | Shift+↑ Back "
+            " Subagent view is read-only | ← Back "
         } else if self.state.chat_state.is_loading {
             " Enter 加入队列 | Esc 取消当前任务 "
         } else if has_tool_cards {
@@ -793,9 +795,11 @@ impl App {
         area: Rect,
         dialog: &SessionSnapshotDialog,
     ) {
-        let dialog_width = area.width.min(86).max(54);
-        let desired_height = (dialog.entries.len() as u16 + 4).clamp(8, 22);
-        let dialog_height = area.height.min(desired_height).max(8);
+        let dialog_width = area.width.min(96).max(54);
+        let visible_manual = dialog.manual_entries.len().min(8) as u16;
+        let visible_automatic = dialog.automatic_entries.len().min(8) as u16;
+        let desired_height = (visible_manual + visible_automatic + 9).clamp(14, 30);
+        let dialog_height = area.height.min(desired_height).max(14);
         let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
         let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
         let dialog_area = Rect {
@@ -814,20 +818,72 @@ impl App {
             .style(Style::default().bg(self.state.theme.background))
             .padding(Padding::horizontal(1));
         let inner = block.inner(dialog_area);
+        frame.render_widget(block, dialog_area);
 
-        let name_width = dialog
-            .entries
-            .iter()
-            .map(|entry| entry.name.chars().count())
-            .max()
-            .unwrap_or(4)
-            .clamp(8, 28);
-        let items: Vec<ListItem> = dialog
-            .entries
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+        self.render_snapshot_pane(
+            frame,
+            chunks[0],
+            " 手动存档 ",
+            &dialog.manual_entries,
+            dialog.manual_selected,
+            dialog.active_pane == SessionSnapshotPane::Manual,
+        );
+        self.render_snapshot_pane(
+            frame,
+            chunks[1],
+            " 自动存档 ",
+            &dialog.automatic_entries,
+            dialog.automatic_selected,
+            dialog.active_pane == SessionSnapshotPane::Automatic,
+        );
+
+        let hint = Paragraph::new("↑↓ 选择  Tab 切换分栏  Enter 读取  Esc 取消")
+            .style(Style::default().fg(self.state.theme.muted))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(hint, chunks[2]);
+    }
+
+    fn render_snapshot_pane(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        entries: &[SessionSnapshotListEntry],
+        selected_index: usize,
+        active: bool,
+    ) {
+        let block = Block::default()
+            .title(format!("{title}({}) ", entries.len()))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(self.state.theme.border_style(active))
+            .style(Style::default().bg(self.state.theme.background));
+
+        if entries.is_empty() {
+            frame.render_widget(
+                Paragraph::new("暂无存档")
+                    .block(block)
+                    .style(Style::default().fg(self.state.theme.muted)),
+                area,
+            );
+            return;
+        }
+
+        let content_width = area.width.saturating_sub(4) as usize;
+        let items: Vec<ListItem> = entries
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let selected = index == dialog.selected;
+                let selected = active && index == selected_index;
                 let style = if selected {
                     Style::default()
                         .fg(self.state.theme.foreground)
@@ -836,25 +892,41 @@ impl App {
                 } else {
                     Style::default().fg(self.state.theme.foreground)
                 };
+                let time = format_snapshot_time(entry.saved_at_ms);
+                let detail = match entry.kind {
+                    crate::session_snapshot_service::SnapshotKind::Manual => entry
+                        .parent_name
+                        .as_ref()
+                        .map(|parent| format!("fork: {parent}"))
+                        .unwrap_or_default(),
+                    crate::session_snapshot_service::SnapshotKind::Auto => entry
+                        .base_manual_name
+                        .as_ref()
+                        .map(|name| format!("来源: {name}"))
+                        .unwrap_or_else(|| "未绑定".to_string()),
+                };
                 let prefix = if entry.depth == 0 {
                     String::new()
                 } else {
                     format!("{}└ ", "  ".repeat(entry.depth.saturating_sub(1)))
                 };
+                let detail_width = if detail.is_empty() {
+                    0
+                } else {
+                    (content_width / 3).clamp(8, 24)
+                };
+                let detail = truncate_chars(&detail, detail_width);
+                let reserved = time.chars().count() + detail_width + 4;
+                let name_width = content_width.saturating_sub(reserved).max(1);
                 let name = truncate_chars(&format!("{prefix}{}", entry.name), name_width);
-                let time = format_snapshot_time(entry.saved_at_ms);
                 let mut spans = vec![
                     Span::styled(format!("{name:<name_width$}"), style),
                     Span::styled("  ", style),
                     Span::styled(time, style),
                 ];
-                if let Some(parent) = entry.parent_name.as_ref() {
+                if !detail.is_empty() {
                     spans.push(Span::styled(
-                        "  fork: ",
-                        Style::default().fg(self.state.theme.muted),
-                    ));
-                    spans.push(Span::styled(
-                        parent.clone(),
+                        format!("  {detail}"),
                         Style::default().fg(self.state.theme.muted),
                     ));
                 }
@@ -862,19 +934,9 @@ impl App {
             })
             .collect();
 
-        let list = List::new(items).block(block);
-        frame.render_widget(list, dialog_area);
-
-        let hint = Paragraph::new("Enter 读取  Esc 取消")
-            .style(Style::default().fg(self.state.theme.muted))
-            .wrap(Wrap { trim: true });
-        let hint_area = Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
-            height: 1,
-        };
-        frame.render_widget(hint, hint_area);
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected_index.min(entries.len() - 1)));
+        frame.render_stateful_widget(List::new(items).block(block), area, &mut list_state);
     }
 
     pub(crate) fn render_delete_dialog(

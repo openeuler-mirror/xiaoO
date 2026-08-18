@@ -160,6 +160,16 @@ impl InteractionHandle for ChannelInteractionHandle {
             }
         }
     }
+
+    /// `ask` enforces its own timeout (rounded up to whole minutes) and
+    /// cleans up the `PendingInteractionStore` entry + sends the user a
+    /// "timed out" notice in its `Err(_)` branch. Returning `true` lets the
+    /// gateway skip its defensive outer `tokio::select!` timeout so the
+    /// inner future is never dropped mid-cleanup (which would leak the
+    /// pending entry and skip the user-facing notice).
+    fn has_builtin_timeout(&self) -> bool {
+        true
+    }
 }
 
 impl ChannelInteractionHandle {

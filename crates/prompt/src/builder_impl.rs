@@ -31,29 +31,21 @@ impl PromptBuilderImpl {
 
         let decision = decide_prompt(&input.messages, !input.visible_tools.is_empty())?;
         let context = collect_prompt_context(&input);
-        // Compose the system prompt once: stable prefix parts (base, workspace,
-        // skills) un-joined, plus the per-turn-volatile `# Context` tail. The
-        // stable parts feed both the joined `stable_system` string and the
-        // `system_parts` array exposed to the `*.Chat.system.transform` hooker.
-        let (stable_parts, volatile_system) =
-            compose_system_sections(&input.system_prompt, &context);
-        let stable_system = stable_parts.join("\n\n");
+        // Compose the system prompt: cache-stable parts only (base, workspace,
+        // skills, repo map, environment), un-joined. They feed both the joined
+        // system message and the `system_parts` array exposed to the
+        // `*.Chat.system.transform` hooker. Per-turn-volatile context is NOT
+        // part of the system message — see the reminder injection below.
+        let system_parts = compose_system_sections(&input.system_prompt, &context);
+        let system_text = system_parts.join("\n\n");
 
-        if stable_system.trim().is_empty() {
+        if system_text.trim().is_empty() {
             return Err(PromptBuildError::BuildFailed {
                 message: "missing required context: system_prompt".to_string(),
             });
         }
 
-        // `system_parts` carries the volatile tail (when non-empty) so the
-        // `*.Chat.system.transform` hooker sees the full prompt; `system_text`
-        // is the same array joined, matching `compose_system_text` byte-for-byte.
-        let mut system_parts = stable_parts;
-        if let Some(v) = volatile_system.as_ref().filter(|v| !v.trim().is_empty()) {
-            system_parts.push(v.clone());
-        }
-        let system_text = system_parts.join("\n\n");
-        let mut messages = Vec::with_capacity(input.messages.len() + 1);
+        let mut messages = Vec::with_capacity(input.messages.len() + 2);
         messages.push(ChatMessage::system(system_text));
 
         messages.extend(
@@ -63,6 +55,23 @@ impl PromptBuilderImpl {
                 .filter(|m| m.role != MessageRole::System)
                 .cloned(),
         );
+
+        // Per-turn-volatile context (horizon, plan, memory) rides in an
+        // ephemeral `<system-reminder>` user message appended at the very END
+        // of the request, never persisted into session history. Rationale:
+        // the request token stream is [system, history..., reminder]; putting
+        // per-turn churn in the system tail would invalidate provider prefix
+        // caches for the whole history every turn, while a tail message keeps
+        // everything before it byte-identical. A dedicated user message (not
+        // a text block on the last history message) is required because the
+        // OpenAI-family wire conversion collapses a Tool message to a single
+        // `content` field — an extra text block there would clobber the tool
+        // result.
+        if let Some(reminder) =
+            crate::compose::compose_turn_context_reminder(&context).filter(|r| !r.trim().is_empty())
+        {
+            messages.push(ChatMessage::user(reminder));
+        }
 
         let request = LlmRequest {
             messages,
@@ -236,7 +245,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn build_projects_tools_into_llm_request() {
         let builder = PromptBuilderImpl::new();
         let input = PromptBuildInput {
@@ -296,7 +304,81 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    fn build_appends_volatile_context_as_trailing_reminder_message() {
+        let builder = PromptBuilderImpl::new();
+        let input = PromptBuildInput {
+            system_prompt: "You are a coding agent.".to_string(),
+            messages: vec![
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("working on it", 0),
+                ChatMessage::user("continue"),
+            ],
+            visible_tools: Vec::new(),
+            skill_summaries: Vec::new(),
+            memory_snippets: vec![
+                MemorySnippet {
+                    source: "horizon".to_string(),
+                    content: "- turn: 9/10 (1 remaining)".to_string(),
+                    relevance_score: 1.0,
+                },
+                MemorySnippet {
+                    source: "plan".to_string(),
+                    content: "[ ] fix the bug".to_string(),
+                    relevance_score: 0.9,
+                },
+            ],
+            environment: EnvironmentInfo {
+                model: "gpt-test".to_string(),
+                cwd: "/tmp".to_string(),
+                workspace_root: None,
+                date: "2026-04-10".to_string(),
+                agent_id: "main".to_string(),
+            },
+            feature_flags: FeatureFlags::default(),
+            turn_count: 9,
+            budget: TokenBudgetConfig {
+                total_budget: 1024,
+                reserved_for_output: 256,
+                reserved_for_system: 128,
+                hard_limit_ratio: 0.9,
+            },
+        };
+
+        let result = futures::executor::block_on(builder.build(input)).unwrap();
+        let messages = &result.request.messages;
+
+        // [system, user, assistant, user, reminder]
+        assert_eq!(messages.len(), 5);
+
+        // The system message stays cache-stable: environment yes, per-turn
+        // volatile context no.
+        let system_text = messages[0].text_content().unwrap();
+        assert!(matches!(messages[0].role, agent_types::MessageRole::System));
+        assert!(system_text.contains("## Environment"));
+        assert!(!system_text.contains("system-reminder"));
+        assert!(!system_text.contains("## Progress"));
+        assert!(!system_text.contains("## Active plan"));
+
+        // The volatile context rides in an ephemeral trailing user message.
+        let reminder = messages.last().unwrap();
+        assert!(matches!(reminder.role, agent_types::MessageRole::User));
+        let reminder_text = reminder.text_content().unwrap();
+        assert!(reminder_text.starts_with("<system-reminder>"));
+        assert!(reminder_text.ends_with("</system-reminder>"));
+        assert!(reminder_text.contains("## Progress"));
+        assert!(reminder_text.contains("- turn: 9/10 (1 remaining)"));
+        assert!(reminder_text.contains("## Active plan"));
+        assert!(reminder_text.contains("[ ] fix the bug"));
+
+        // `system_parts` (fed to the system.transform hooker) excludes the
+        // reminder as well.
+        assert!(result
+            .system_parts
+            .iter()
+            .all(|part| !part.contains("system-reminder")));
+    }
+
+    #[test]
     fn build_fails_fast_when_budget_is_zero() {
         let builder = PromptBuilderImpl::new();
         let input = PromptBuildInput {

@@ -65,11 +65,22 @@ impl BackendRegistryEntry {
         session_ids: Vec<String>,
         owner_process_id: String,
         instance_id: String,
+        initial_session_status: Option<(&str, usize)>,
     ) -> Self {
         let now_ms = current_time_ms();
         let session_statuses = session_ids
             .iter()
-            .map(|id| (id.clone(), SessionStatusSnapshot::default()))
+            .map(|id| {
+                let snapshot = match initial_session_status {
+                    Some((status, queue_depth)) => SessionStatusSnapshot {
+                        status: status.to_string(),
+                        queue_depth,
+                        updated_at_ms: now_ms,
+                    },
+                    None => SessionStatusSnapshot::default(),
+                };
+                (id.clone(), snapshot)
+            })
             .collect();
         Self {
             backend_id,
@@ -414,6 +425,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-1".to_string(),
             "e2b-sandbox-1".to_string(),
+            None,
         );
 
         registry.register(entry).await.expect("should register");
@@ -449,6 +461,7 @@ mod tests {
                 vec![format!("session-mv2-{}", i)],
                 format!("process-mv2-{}", i),
                 format!("e2b-sandbox-mv2-{}", i),
+                None,
             );
             registry.register(entry).await.expect("should register");
         }
@@ -470,6 +483,7 @@ mod tests {
             vec!["session-eviction".to_string()],
             "process-eviction".to_string(),
             "e2b-sandbox-eviction".to_string(),
+            None,
         );
 
         registry.register(entry).await.expect("should register");
@@ -509,6 +523,7 @@ mod tests {
             vec!["session-activity".to_string()],
             "process-activity".to_string(),
             "e2b-sandbox-activity".to_string(),
+            None,
         );
 
         registry
@@ -542,6 +557,7 @@ mod tests {
             vec!["session-p1".to_string()],
             "process-A".to_string(),
             "e2b-sandbox-p1".to_string(),
+            None,
         );
         let entry2 = BackendRegistryEntry::new(
             "backend-pv2-2".to_string(),
@@ -549,6 +565,7 @@ mod tests {
             vec!["session-p2".to_string()],
             "process-A".to_string(),
             "e2b-sandbox-p2".to_string(),
+            None,
         );
         let entry3 = BackendRegistryEntry::new(
             "backend-pv2-3".to_string(),
@@ -556,6 +573,7 @@ mod tests {
             vec!["session-p3".to_string()],
             "process-B".to_string(),
             "e2b-sandbox-p3".to_string(),
+            None,
         );
 
         registry.register(entry1).await.expect("should register");
@@ -585,6 +603,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-1".to_string(),
             "e2b-sandbox-status".to_string(),
+            None,
         );
 
         registry.register(entry).await.expect("should register");
@@ -630,6 +649,7 @@ mod tests {
             vec!["session-1".to_string(), "session-2".to_string()],
             "process-1".to_string(),
             "e2b-sandbox-idle".to_string(),
+            None,
         );
 
         registry.register(entry).await.expect("should register");
@@ -674,6 +694,7 @@ mod tests {
             vec!["session-a".to_string()],
             "process-A".to_string(),
             "e2b-hb-a".to_string(),
+            None,
         );
         let entry_b = BackendRegistryEntry::new(
             "backend-hb-b".to_string(),
@@ -681,6 +702,7 @@ mod tests {
             vec!["session-b".to_string()],
             "process-B".to_string(),
             "e2b-hb-b".to_string(),
+            None,
         );
         registry.register(entry_a).await.expect("register a");
         registry.register(entry_b).await.expect("register b");
@@ -723,6 +745,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-dead".to_string(),
             "e2b-sandbox-stale".to_string(),
+            None,
         );
         // Session is running (not idle), but owner heartbeat is very old.
         entry.update_session_status("session-1", "running", 1);
@@ -750,6 +773,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-alive".to_string(),
             "e2b-sandbox-alive".to_string(),
+            None,
         );
         entry.update_session_status("session-1", "idle", 0);
         registry.register(entry).await.expect("register");
@@ -774,6 +798,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-alive".to_string(),
             "e2b-sandbox-busy".to_string(),
+            None,
         );
         entry.update_session_status("session-1", "running", 1);
         registry.register(entry).await.expect("register");
@@ -786,6 +811,50 @@ mod tests {
         assert!(!retrieved.is_all_sessions_idle());
         assert!(!retrieved.is_owner_stale(30_000));
         assert!(!retrieved.is_evictable(30_000));
+    }
+
+    /// Regression test for the root-turn race (apps/shared/src/gateway/
+    /// session_supervisor.rs::run_root_turn):
+    ///
+    /// When `ensure_session_backend` creates a new backend for a session
+    /// that is about to run a turn, the caller passes
+    /// `initial_session_status: Some(("running", 1))` so the freshly
+    /// registered backend is not eligible for eviction while the turn is
+    /// in flight. Before this fix, `BackendRegistryEntry::new` always
+    /// initialised `session_statuses` to the "idle" default, and another
+    /// process under sandbox pressure could evict the brand-new sandbox
+    /// mid-turn.
+    #[tokio::test]
+    async fn test_new_with_initial_running_status_is_not_evictable() {
+        let (_dir, registry) = temp_registry();
+        let key = SandboxCounterKey::new("e2b", "test-initial-running");
+        let entry = BackendRegistryEntry::new(
+            "backend-initial-running".to_string(),
+            key,
+            vec!["session-1".to_string()],
+            "process-alive".to_string(),
+            "e2b-sandbox-initial-running".to_string(),
+            Some(("running", 1)),
+        );
+        registry.register(entry).await.expect("register");
+
+        let retrieved = registry
+            .get_entry("backend-initial-running")
+            .await
+            .expect("get")
+            .expect("has entry");
+        // Constructed with status="running", queue_depth=1 → not idle and
+        // not evictable while the owner is alive. This is the property that
+        // closes the root-turn eviction race.
+        assert!(!retrieved.is_all_sessions_idle());
+        assert!(!retrieved.is_owner_stale(30_000));
+        assert!(!retrieved.is_evictable(30_000));
+
+        let status = retrieved
+            .get_session_status("session-1")
+            .expect("session-1 status");
+        assert_eq!(status.status, "running");
+        assert_eq!(status.queue_depth, 1);
     }
 
     /// Regression test for the cross-process eviction bug.
@@ -809,6 +878,7 @@ mod tests {
             vec!["session-1".to_string()],
             "process-alive".to_string(),
             "e2b-sandbox-marked".to_string(),
+            None,
         );
         // Session is idle and owner is alive — the normal "evict me" case.
         entry.update_session_status("session-1", "idle", 0);

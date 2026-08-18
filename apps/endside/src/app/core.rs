@@ -7,7 +7,7 @@ use ratatui::Terminal;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 
 use crate::app_state::AppState;
 use crate::config::Config;
@@ -17,6 +17,10 @@ pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
     pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+    /// Wall-clock origin for the loading spinner (see `loading_animation`).
+    /// The spinner frame is `elapsed_ms / 16 % FRAMES`, decoupling the
+    /// animation cadence from the event-loop cycle time.
+    pub(crate) animation_origin: Instant,
 }
 
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
@@ -27,10 +31,13 @@ impl App {
         config_path: PathBuf,
         workspace: PathBuf,
     ) -> Result<Self, anyhow::Error> {
+        let state = AppState::new_with_config(config, config_path, workspace)?;
+        let gateway = GatewayRuntime::new(state.client_id.clone());
         Ok(Self {
-            state: AppState::new_with_config(config, config_path, workspace)?,
-            gateway: GatewayRuntime::new(),
+            state,
+            gateway,
             pending_local_model_fetch: None,
+            animation_origin: Instant::now(),
         })
     }
 
@@ -38,6 +45,8 @@ impl App {
         &mut self,
         terminal: &mut Terminal<impl ratatui::backend::Backend>,
     ) -> Result<()> {
+        #[cfg(debug_assertions)]
+        tracing::debug!("PERF_PROBES_ACTIVE");
         let mut event_stream = EventStream::new();
         let mut pending_event: Option<Event> = None;
         let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
@@ -45,6 +54,38 @@ impl App {
         let mut cursor_visible = true;
         let mut last_cursor_blink_toggle = Instant::now();
         let mut needs_redraw = true;
+        // Absolute deadline of the next animation frame while streaming.
+        // `Delay`-style: each tick advances by a fixed 16ms from the previous
+        // deadline (in the select! sleep branch — never per-iteration), so the
+        // draw time is compensated and the cycle stays at ~16ms (60fps) as
+        // long as draw < 16ms, while fast event-driven iterations cannot push
+        // the deadline into the future. Started at `now`: the first active
+        // iteration's `next_wake` equals it, so the deadline falls in the past
+        // once the initial draw has run and is reset to `now + period`.
+        let animation_period = Duration::from_millis(16);
+        let mut next_animation_frame = tokio::time::Instant::now();
+        // Heartbeat interval for renewing the daemon's attach lease.
+        let mut heartbeat_interval =
+            tokio::time::interval(crate::gateway_api::http_timeouts::HEARTBEAT_INTERVAL);
+        heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the immediate first tick so we don't fire before any session
+        // is open.
+        heartbeat_interval.tick().await;
+
+        // Periodic full redraw while idle/ASK: refreshes the header clock
+        // (which only updates on `draw`) and recovers from external screen
+        // corruption (terminal wake/scrollback clear/reattach) that ratatui's
+        // diff optimization would otherwise miss — the previous buffer still
+        // matches the last frame, so an unchanged state produces an empty
+        // diff and the actual (cleared) screen is never rewritten. Skipped
+        // while loading: the 16ms tick already redraws constantly and any
+        // streaming state change yields a non-empty diff that recovers the
+        // screen naturally. `swap_buffers()` resets the back buffer (without
+        // emitting `\x1b[2J`, so no visible clear/flicker) so the next
+        // `draw()` writes the full frame instead of a no-op diff.
+        let mut force_redraw_interval = tokio::time::interval(Duration::from_secs(1));
+        force_redraw_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        force_redraw_interval.tick().await;
 
         #[cfg(unix)]
         let mut sigterm =
@@ -57,9 +98,33 @@ impl App {
         }
 
         loop {
+            #[cfg(debug_assertions)]
+            let _tick_start = std::time::Instant::now();
             if needs_redraw {
+                #[cfg(debug_assertions)]
+                let _draw_start = std::time::Instant::now();
                 terminal.draw(|frame| self.ui(frame))?;
                 needs_redraw = false;
+                #[cfg(debug_assertions)]
+                {
+                    let draw_elapsed = _draw_start.elapsed();
+                    if draw_elapsed > std::time::Duration::from_micros(500) {
+                        tracing::debug!("PERF terminal_draw: {}µs", draw_elapsed.as_micros());
+                    }
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let tick_elapsed = _tick_start.elapsed();
+                if tick_elapsed > std::time::Duration::from_millis(15)
+                    && self.state.chat_state.is_loading
+                {
+                    tracing::debug!(
+                        "PERF event_loop_tick: {}µs active_refresh=true",
+                        tick_elapsed.as_micros()
+                    );
+                }
             }
             if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
                 cursor_visible = !cursor_visible;
@@ -73,10 +138,27 @@ impl App {
 
             let active_refresh =
                 self.state.chat_state.is_loading || self.gateway.needs_active_refresh();
-            let tick_duration = if active_refresh {
-                Duration::from_millis(16)
+            // While streaming, wake at the absolute animation deadline (Delay-
+            // style: compensated for draw time → ~16ms cycle = 60fps). While
+            // idle, a 250ms relative sleep is enough — the spinner doesn't
+            // run and `force_redraw_interval` (1s) handles idle refresh.
+            //
+            // The deadline is ADVANCED only when the sleep actually fires
+            // (see the select! sleep branch), never here: advancing per loop
+            // iteration would let a burst of fast event-driven iterations
+            // (scroll wheel, key auto-repeat) push the deadline 16ms into the
+            // future each time, stalling the loop until it caught up.
+            let next_wake = if active_refresh {
+                let now = tokio::time::Instant::now();
+                // Fallen behind (idle→active switch, or draw > period):
+                // restart the deadline from now instead of firing a catch-up
+                // burst.
+                if next_animation_frame < now {
+                    next_animation_frame = now + animation_period;
+                }
+                next_animation_frame
             } else {
-                Duration::from_millis(250)
+                tokio::time::Instant::now() + Duration::from_millis(250)
             };
 
             let mut handled_event = None;
@@ -88,10 +170,19 @@ impl App {
                 #[cfg(unix)]
                 {
                     tokio::select! {
-                        _ = sleep(tick_duration) => {
-                            if self.state.chat_state.is_loading {
-                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
-                                needs_redraw = true;
+                        _ = sleep_until(next_wake) => {
+                            // Advance the animation deadline only when this
+                            // sleep fires (Delay semantics) — see the
+                            // `next_wake` comment above. Spinner frames are
+                            // wall-clock derived; only `is_loading` needs the
+                            // forced redraw (the reveal drain and stream
+                            // updates drive their own redraws via
+                            // `poll_stream_updates`).
+                            if active_refresh {
+                                next_animation_frame += animation_period;
+                                if self.state.chat_state.is_loading {
+                                    needs_redraw = true;
+                                }
                             }
                         }
                         maybe_event = event_stream.next().fuse() => {
@@ -109,6 +200,15 @@ impl App {
                                 }
                             }
                             needs_redraw = true;
+                        }
+                        _ = heartbeat_interval.tick() => {
+                            needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
+                        }
+                        _ = force_redraw_interval.tick() => {
+                            if !self.state.chat_state.is_loading {
+                                terminal.swap_buffers();
+                                needs_redraw = true;
+                            }
                         }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
@@ -130,10 +230,19 @@ impl App {
                 #[cfg(not(unix))]
                 {
                     tokio::select! {
-                        _ = sleep(tick_duration) => {
-                            if self.state.chat_state.is_loading {
-                                self.state.loading_tick = (self.state.loading_tick + 1) % 12;
-                                needs_redraw = true;
+                        _ = sleep_until(next_wake) => {
+                            // Advance the animation deadline only when this
+                            // sleep fires (Delay semantics) — see the
+                            // `next_wake` comment above. Spinner frames are
+                            // wall-clock derived; only `is_loading` needs the
+                            // forced redraw (the reveal drain and stream
+                            // updates drive their own redraws via
+                            // `poll_stream_updates`).
+                            if active_refresh {
+                                next_animation_frame += animation_period;
+                                if self.state.chat_state.is_loading {
+                                    needs_redraw = true;
+                                }
                             }
                         }
                         maybe_event = event_stream.next().fuse() => {
@@ -151,6 +260,15 @@ impl App {
                                 }
                             }
                             needs_redraw = true;
+                        }
+                        _ = heartbeat_interval.tick() => {
+                            needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
+                        }
+                        _ = force_redraw_interval.tick() => {
+                            if !self.state.chat_state.is_loading {
+                                terminal.swap_buffers();
+                                needs_redraw = true;
+                            }
                         }
                         _ = tokio::signal::ctrl_c() => {
                             tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
@@ -213,11 +331,23 @@ impl App {
                     }
                 }
             }
+
+            #[cfg(debug_assertions)]
+            {
+                let tick_elapsed = _tick_start.elapsed();
+                if tick_elapsed > std::time::Duration::from_millis(15)
+                    && self.state.chat_state.is_loading
+                {
+                    tracing::debug!(
+                        "PERF event_loop_tick: {}µs active_refresh=true",
+                        tick_elapsed.as_micros()
+                    );
+                }
+            }
         }
         // If the user interrupted the runtime (Ctrl+C / SIGINT / SIGTERM),
-        // persist the session so it can be resumed later. This mirrors the
-        // `/save` command but derives the name automatically as
-        // `{date}-{topic}` (date to the second, topic = first prompt summary).
+        // persist the session to its rolling automatic slot. Manual
+        // checkpoints are never written by this shutdown path.
         if self.state.quit_via_interrupt {
             let record = self.gateway.session_snapshot(&self.state.session_id).await;
             match crate::session_snapshot_service::autosave_on_interrupt(&self.state, record) {
@@ -244,6 +374,77 @@ impl App {
             let models = fetch_models_from_local_api(&api_base).await;
             let _ = tx.send(models);
         });
+    }
+
+    /// Periodic attach-lease heartbeat. Runs every 15 s while the TUI is in
+    /// remote mode. On `TakenOver { stale: Some(true) }` it first attempts a
+    /// reclaim via `open_remote_session_with_record` (the recorded holder is
+    /// itself stale, so `open_session`'s `acquire` will take it over for us,
+    /// avoiding a needless takeover notice). On reclaim failure or a live
+    /// holder it flips `session_taken_over = true` and pushes a notice so
+    /// `handle_event` can short-circuit submissions instead of letting them
+    /// fail at the daemon. `Network` errors are just logged — the next tick
+    /// retries; a long outage eventually resolves as `TakenOver` or recovery.
+    ///
+    /// Returns `true` iff this tick changed visible state (so the caller can
+    /// skip a needless redraw on `Network` errors / `Ok(())`).
+    async fn run_heartbeat_tick(&mut self) -> bool {
+        if !self.gateway.is_remote_mode() || self.state.session_taken_over {
+            return false;
+        }
+        let session_id = self.state.session_id.clone();
+        match self.gateway.heartbeat_remote_session(&session_id).await {
+            Ok(()) => false,
+            Err(crate::gateway_api::remote::HeartbeatError::TakenOver { detail, stale }) => {
+                // Stale lease: the recorded holder is presumed dead. Attempt
+                // a reclaim before flagging a takeover — saves the user a
+                // manual `/remote` or `/sessions` round-trip. Only `Some(true)`
+                // reclaims; `None` (parse failure) and `Some(false)` (live
+                // holder) fall through to the taken-over notice so a parse
+                // regression or genuinely-live holder never widens the bypass.
+                if stale == Some(true) {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "heartbeat rejected with stale lease; attempting to reclaim via open"
+                    );
+                    if self
+                        .gateway
+                        .open_remote_session_with_record(&mut self.state)
+                        .await
+                        .is_ok()
+                    {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "reclaimed stale lease via open; resuming normal operation"
+                        );
+                        return true;
+                    }
+                    // Reclaim failed (another client beat us, or network).
+                }
+                tracing::warn!(
+                    session_id = %session_id,
+                    detail = %detail,
+                    "session taken over by another xiaoo process; further submissions will be rejected"
+                );
+                self.state.session_taken_over = true;
+                // Sync `remote_session_open` so `disconnect_remote` /
+                // `close_sessions` skip the now-meaningless detach (the lease
+                // is held by another client; our detach would be a no-op).
+                self.gateway.mark_remote_session_taken_over();
+                self.state
+                    .chat_state
+                    .messages
+                    .push(crate::chat::Message::system(
+                        crate::gateway_api::runtime_request::session_taken_over_notice_glyph(),
+                    ));
+                self.state.chat_state.stick_to_bottom = true;
+                true
+            }
+            Err(crate::gateway_api::remote::HeartbeatError::Network(error)) => {
+                tracing::warn!(error = %error, "session heartbeat failed; will retry next tick");
+                false
+            }
+        }
     }
 
     /// Execute a single hook action received after a turn terminates.

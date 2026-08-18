@@ -11,4 +11,4 @@ mod tool;
 mod test_support;
 
 pub(crate) use builder::build_plugin_hookers;
-pub(crate) use core::{run_plugin_subprocess, PLUGIN_HOOK_COMMAND_TIMEOUT_MS};
+pub(crate) use core::PLUGIN_HOOK_COMMAND_TIMEOUT_MS;

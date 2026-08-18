@@ -1,10 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use agent_contracts::context::prompt::input::PromptBuildInput;
 use agent_contracts::events::LoopEventSink;
-use agent_contracts::tool::ToolCallBuilder;
 use agent_contracts::trace::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
 use agent_contracts::{Hooker, RuntimeView};
 use agent_llm::{AssistantMessageExt, ChatMessageExt, MessageRoleExt};
@@ -78,6 +78,10 @@ pub struct LoopContext<'a> {
     pub state: &'a mut LoopState,
     pub input: AgentLoopInput,
     pub turn: TurnState,
+    /// Borrowed reference to the per-run token estimator so push sites can
+    /// populate `ChatMessage::estimated_tokens` before appending. Without
+    /// this, every pre-check / compress call re-estimates unchanged messages.
+    pub estimator: &'a TokenEstimator,
 }
 
 pub async fn run_agent_loop(
@@ -111,7 +115,9 @@ pub async fn run_agent_loop(
                 if let Some(reason) = deny {
                     let deny_text =
                         format!("Command '{}' denied by plugin: {}", cmd_ctx.command, reason);
-                    let deny_msg = ChatMessage::text(MessageRole::Assistant, &deny_text, now_ms());
+                    let mut deny_msg =
+                        ChatMessage::text(MessageRole::Assistant, &deny_text, now_ms());
+                    estimator.update_message_cache(&mut deny_msg);
                     state.messages.write().push(deny_msg);
                     if let Some(ref sink) = input.event_sink {
                         let agent_id = agent_id_or_anonymous(input.agent_id.as_ref());
@@ -130,7 +136,7 @@ pub async fn run_agent_loop(
         }
         let candidate = ChatMessage::text(MessageRole::User, &input.user_message, now_ms());
         // chat.message — fires before the user message is persisted.
-        let final_message = apply_chat_message_hook(
+        let mut final_message = apply_chat_message_hook(
             input.runtime_view.as_ref(),
             &state.session_id.to_string(),
             input.agent_id.as_ref(),
@@ -142,6 +148,7 @@ pub async fn run_agent_loop(
         if let Some(text) = final_message.text_content() {
             input.user_message = text.to_string();
         }
+        estimator.update_message_cache(&mut final_message);
         state.messages.write().push(final_message);
     }
 
@@ -150,6 +157,7 @@ pub async fn run_agent_loop(
         state,
         input,
         turn: TurnState::new(1),
+        estimator: &estimator,
     };
 
     loop {
@@ -372,12 +380,20 @@ pub async fn run_agent_loop(
 
     finalize_trace_for_ctx(&ctx, TraceOutcome::Ok, None, "complete").await;
 
+    // Extract the messages snapshot and token estimate to locals before
+    // constructing the return value so the `RwLockReadGuard` temporary is
+    // dropped before `ctx` (and therefore `estimator`) goes out of scope.
+    let messages = ctx.state.messages.read().clone();
+    let turn_count = ctx.state.turn_count;
+    let token_usage = ctx.state.token_usage.clone();
+    let estimated_input_tokens = current_turn_estimated_input_tokens(&ctx);
+
     Ok(LoopRunResult::Complete(AgentOutcome::Complete {
         reply,
-        messages: ctx.state.messages.read().clone(),
-        turn_count: ctx.state.turn_count,
-        token_usage: ctx.state.token_usage.clone(),
-        estimated_input_tokens: current_turn_estimated_input_tokens(&ctx),
+        messages,
+        turn_count,
+        token_usage,
+        estimated_input_tokens,
     }))
 }
 
@@ -391,13 +407,14 @@ async fn drain_pending_user_messages(ctx: &mut LoopContext<'_>) {
             continue;
         }
         let candidate = ChatMessage::text(MessageRole::User, &message, now_ms());
-        let final_message = apply_chat_message_hook(
+        let mut final_message = apply_chat_message_hook(
             ctx.input.runtime_view.as_ref(),
             &ctx.state.session_id,
             ctx.input.agent_id.as_ref(),
             candidate,
         )
         .await;
+        ctx.estimator.update_message_cache(&mut final_message);
         ctx.state.messages.write().push(final_message);
     }
 }
@@ -520,12 +537,13 @@ async fn pre_check_token_budget(
     ctx: &mut LoopContext<'_>,
     estimator: &TokenEstimator,
 ) -> Result<(), AgentError> {
-    let messages = ctx.state.messages.read().clone();
-    let estimated_input = estimator.estimate_input_tokens(
-        &ctx.snapshot.system_prompt,
-        ctx.snapshot.tool_registry.list_specs().len(),
-        &messages,
-    );
+    let estimated_input = ctx.state.with_messages(|messages| {
+        estimator.estimate_input_tokens(
+            &ctx.snapshot.system_prompt,
+            ctx.snapshot.tool_registry.spec_count(),
+            messages,
+        )
+    });
 
     let context_window = ctx.snapshot.token_budget_config.total_budget;
     let max_tokens = ctx.snapshot.token_budget_config.reserved_for_output;
@@ -556,12 +574,13 @@ async fn pre_check_token_budget(
     compress(ctx, CompressionTrigger::PreCheckExceeded).await?;
     build_messages(ctx).await?;
 
-    let new_messages = ctx.state.messages.read().clone();
-    let new_estimated = estimator.estimate_input_tokens(
-        &ctx.snapshot.system_prompt,
-        ctx.snapshot.tool_registry.list_specs().len(),
-        &new_messages,
-    );
+    let new_estimated = ctx.state.with_messages(|new_messages| {
+        estimator.estimate_input_tokens(
+            &ctx.snapshot.system_prompt,
+            ctx.snapshot.tool_registry.spec_count(),
+            new_messages,
+        )
+    });
 
     if new_estimated <= available_for_input {
         tracing::info!(
@@ -626,19 +645,22 @@ async fn compress(
         None
     };
 
-    // Clone messages before potential .await to avoid holding RwLockReadGuard across await point
-    let messages = ctx.state.messages.read().clone();
-    let analysis = ctx
-        .snapshot
-        .compression_pipeline
-        .analyze(&messages, &*ctx.snapshot.token_budget_policy);
+    // Analyze under the read guard — `analyze` is sync and borrows
+    // `&[ChatMessage]`; release before any subsequent `.await`.
+    let (analysis, msg_count_for_log) = ctx.state.with_messages(|messages| {
+        let analysis = ctx
+            .snapshot
+            .compression_pipeline
+            .analyze(messages, &*ctx.snapshot.token_budget_policy);
+        (analysis, messages.len())
+    });
 
     tracing::debug!(
         estimated = analysis.estimated_tokens,
         available = analysis.available_tokens,
         ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
         severity = ?analysis.severity,
-        msg_count = messages.len(),
+        msg_count = msg_count_for_log,
         "compression analysis"
     );
 
@@ -685,7 +707,17 @@ async fn compress(
         .map_err(|e| AgentError::Compression(e.to_string()));
 
     match view {
-        Ok(view) => {
+        Ok(mut view) => {
+            // Prune stale tool output as part of the compression event and
+            // persist the result. Compression already invalidates the
+            // provider prefix cache wholesale (history is rewritten), so
+            // piggybacking the prune here is free — whereas pruning per turn
+            // would move the prune frontier every turn and permanently cap
+            // cache hits at it. Between compressions history stays strictly
+            // append-only. Note: the summarizer above saw the full outputs;
+            // only the retained messages are pruned.
+            prune_stale_tool_output(&mut view.messages);
+
             tracing::info!(
                 severity = ?analysis.severity,
                 usage_ratio = format!("{:.1}%", analysis.usage_ratio * 100.0),
@@ -717,7 +749,14 @@ async fn compress(
                     .await;
             }
 
-            *ctx.state.messages.write() = view.messages.clone();
+            // Compression may synthesize/trim messages; the returned
+            // `view.messages` is a fresh Vec without per-message token
+            // caches. Populate them so the next analyze reads cached values.
+            let mut new_messages = view.messages.clone();
+            for msg in &mut new_messages {
+                ctx.estimator.update_message_cache(msg);
+            }
+            *ctx.state.messages.write() = new_messages;
             ctx.state.compression_meta = view.updated_meta.clone();
             ctx.turn.compression_output = Some(view);
 
@@ -762,9 +801,12 @@ fn prune_stale_tool_output(messages: &mut [ChatMessage]) {
     }
 }
 
-/// Per-turn dynamic context re-injected into the system prompt: the remaining
-/// horizon and the live `todo_write` plan. Rendered into the volatile tail of
-/// the system message (see `prompt::compose`), after the cache-stable prefix.
+/// Per-turn dynamic context: the remaining horizon and the live `todo_write`
+/// plan. Rendered by the prompt builder into an ephemeral `<system-reminder>`
+/// message appended at the END of each request (see
+/// `prompt::compose::compose_turn_context_reminder`) — never into the system
+/// prompt, whose per-turn churn would break provider prefix caching for the
+/// entire conversation history behind it.
 fn live_context_snippets(
     ctx: &LoopContext<'_>,
 ) -> Vec<agent_types::context::prompt::MemorySnippet> {
@@ -857,8 +899,11 @@ async fn build_messages(ctx: &mut LoopContext<'_>) -> Result<(), AgentError> {
         ctx.input.visible_tools.clone()
     };
 
-    let mut projected_messages = ctx.state.messages.read().clone();
-    prune_stale_tool_output(&mut projected_messages);
+    // History is projected as-is: append-only between compressions so every
+    // request shares a byte-identical prefix with the previous one (provider
+    // prefix caching). Stale tool output is pruned only inside `compress`,
+    // where the cache is being invalidated wholesale anyway.
+    let projected_messages = ctx.state.messages.read().clone();
 
     let input = PromptBuildInput {
         system_prompt: ctx.snapshot.system_prompt.to_string(),
@@ -1286,12 +1331,20 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let event_sink = ctx.input.event_sink.clone();
     let streamed_text = Mutex::new(String::new());
     let streamed_reasoning = Mutex::new(String::new());
+    // Throttle state for in-stream sink emits (last_emit_len, last_emit_at).
+    // Without throttling, every chunk forces an O(history) clone + filter,
+    // making streaming O(N²) in the response length.
+    let last_text_emit: Mutex<StreamEmitState> = Mutex::new(StreamEmitState::default());
+    let last_reasoning_emit: Mutex<StreamEmitState> = Mutex::new(StreamEmitState::default());
 
-    // Extract secrets from message history to filter in assistant messages
-    let messages = ctx.state.messages.read().clone();
-    let secrets = extract_secrets_from_messages(&messages);
+    // Extract secrets under the read guard — no clone needed.
+    let secrets = ctx
+        .state
+        .with_messages(|messages| extract_secrets_from_messages(messages));
 
     let runtime_view = ctx.input.runtime_view.as_deref();
+    // Clone the agent_id once for the whole stream (it doesn't change mid-stream).
+    let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref()).clone();
     let response = if std::env::var("XIAOO_NON_STREAMING").is_ok() {
         ctx.snapshot
             .llm_provider
@@ -1308,12 +1361,13 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         std::sync::atomic::Ordering::Relaxed,
                     );
                 }
-                let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref()).clone();
                 stream_assistant_chunk(
                     event_sink.as_deref(),
                     &agent_id,
                     &streamed_text,
                     &streamed_reasoning,
+                    &last_text_emit,
+                    &last_reasoning_emit,
                     chunk,
                     &secrets,
                 );
@@ -1342,15 +1396,30 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     ctx.state.token_usage.completion_tokens = completion_tokens;
     ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
 
-    let streamed_text = streamed_text
-        .into_inner()
-        .expect("assistant stream text mutex should not be poisoned");
+    // Flush the final filtered text/reasoning only when the last in-stream
+    // emit did not already cover the full content (throttling may have
+    // skipped the last few chunks, or no in-stream emit happened — e.g.
+    // non-streaming path).
     if let Some(ref sink) = event_sink {
+        let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
         if let Some(ref text) = response.message.text {
-            if streamed_text != *text {
-                let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
+            let last_emit_len = last_text_emit
+                .lock()
+                .map(|state| state.last_emit_len())
+                .unwrap_or(0);
+            if last_emit_len != text.len() {
                 let filtered_text = filter_secrets_in_text(text, &secrets);
                 sink.on_assistant_message(agent_id, &filtered_text);
+            }
+        }
+        if let Some(ref reasoning) = response.message.reasoning_content {
+            let last_emit_len = last_reasoning_emit
+                .lock()
+                .map(|state| state.last_emit_len())
+                .unwrap_or(0);
+            if last_emit_len != reasoning.len() {
+                let filtered_reasoning = filter_secrets_in_text(reasoning, &secrets);
+                sink.on_assistant_reasoning(agent_id, &filtered_reasoning);
             }
         }
     }
@@ -1528,40 +1597,109 @@ async fn llm_call_with_recovery(ctx: &mut LoopContext<'_>) -> Result<(), AgentEr
     }
 }
 
+// Throttle parameters for in-stream sink emits. Without throttling, every
+// chunk forces an O(history-length) clone + filter pass, making streaming
+// O(N²) in the response length.
+//   - emit when >= `MIN_DELTA_CHARS` new chars accumulated since last emit, OR
+//   - emit when `MAX_LATENCY` elapsed since last emit (slow streams still progress).
+const STREAM_EMIT_MIN_DELTA_CHARS: usize = 32;
+const STREAM_EMIT_MAX_LATENCY: Duration = Duration::from_millis(80);
+
+#[derive(Clone, Copy, Default)]
+struct StreamEmitState {
+    last_emit_len: usize,
+    last_emit_at: Option<std::time::Instant>,
+}
+
+impl StreamEmitState {
+    fn should_emit(&mut self, current_len: usize) -> bool {
+        let now = std::time::Instant::now();
+        let delta_ok =
+            current_len.saturating_sub(self.last_emit_len) >= STREAM_EMIT_MIN_DELTA_CHARS;
+        let latency_ok = self
+            .last_emit_at
+            .is_some_and(|t| now.duration_since(t) >= STREAM_EMIT_MAX_LATENCY);
+        let should = delta_ok || latency_ok;
+        if should {
+            self.last_emit_len = current_len;
+            self.last_emit_at = Some(now);
+        }
+        should
+    }
+
+    /// Length of streamed content at the last in-stream emit (0 if none).
+    /// Used by the post-stream flush to skip when the last emit already
+    /// covered the full content.
+    fn last_emit_len(&self) -> usize {
+        self.last_emit_len
+    }
+}
+
 fn stream_assistant_chunk(
     sink: Option<&dyn LoopEventSink>,
     agent_id: &AgentId,
     streamed_text: &Mutex<String>,
     streamed_reasoning: &Mutex<String>,
+    last_text_emit: &Mutex<StreamEmitState>,
+    last_reasoning_emit: &Mutex<StreamEmitState>,
     chunk: StreamChunk,
     secrets: &[String],
 ) {
+    // No sink → nothing to emit. The post-stream flush reads
+    // `response.message.text` / `reasoning_content` directly, so we skip
+    // accumulating into the streamed_* Mutexes (their contents are never
+    // read after the stream ends).
+    if sink.is_none() {
+        return;
+    }
+
     if let Some(delta_reasoning) = chunk.delta_reasoning {
-        let snapshot = {
+        let current_len = {
             let mut full_reasoning = streamed_reasoning
                 .lock()
                 .expect("assistant stream reasoning mutex should not be poisoned");
             full_reasoning.push_str(&delta_reasoning);
-            full_reasoning.clone()
+            // Release the streamed_reasoning lock before acquiring the emit
+            // state lock to avoid lock-ordering issues.
+            full_reasoning.len()
         };
-        if let Some(sink) = sink {
-            let filtered_reasoning = filter_secrets_in_text(&snapshot, secrets);
-            sink.on_assistant_reasoning(agent_id, &filtered_reasoning);
+        let should_emit = last_reasoning_emit
+            .lock()
+            .expect("assistant stream reasoning emit state mutex should not be poisoned")
+            .should_emit(current_len);
+        if should_emit {
+            if let Some(sink) = sink {
+                let snapshot = streamed_reasoning
+                    .lock()
+                    .expect("assistant stream reasoning mutex should not be poisoned")
+                    .clone();
+                let filtered_reasoning = filter_secrets_in_text(&snapshot, secrets);
+                sink.on_assistant_reasoning(agent_id, &filtered_reasoning);
+            }
         }
     }
 
     if let Some(delta_text) = chunk.delta_text {
-        let snapshot = {
+        let current_len = {
             let mut full_text = streamed_text
                 .lock()
                 .expect("assistant stream text mutex should not be poisoned");
             full_text.push_str(&delta_text);
-            full_text.clone()
+            full_text.len()
         };
-
-        if let Some(sink) = sink {
-            let filtered_text = filter_secrets_in_text(&snapshot, secrets);
-            sink.on_assistant_message(agent_id, &filtered_text);
+        let should_emit = last_text_emit
+            .lock()
+            .expect("assistant stream text emit state mutex should not be poisoned")
+            .should_emit(current_len);
+        if should_emit {
+            if let Some(sink) = sink {
+                let snapshot = streamed_text
+                    .lock()
+                    .expect("assistant stream text mutex should not be poisoned")
+                    .clone();
+                let filtered_text = filter_secrets_in_text(&snapshot, secrets);
+                sink.on_assistant_message(agent_id, &filtered_text);
+            }
         }
     }
 }
@@ -1674,8 +1812,14 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
     }
     append_assistant_to_history(ctx);
 
-    // Emit error events for invalid calls, but do not write them into history unless
-    // we can safely pair them to a real tool_use call.
+    // Emit error events for invalid calls (not written to history). Extract
+    // secrets once before the loop — messages aren't mutated during iteration.
+    let invalid_call_secrets = if !invalid_calls.is_empty() && ctx.input.event_sink.is_some() {
+        ctx.state
+            .with_messages(|messages| extract_secrets_from_messages(messages))
+    } else {
+        Vec::new()
+    };
     for inv in &invalid_calls {
         tracing::warn!(
             call_id = %inv.call_id,
@@ -1686,12 +1830,10 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
         if let Some(ref sink) = ctx.input.event_sink {
             let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
 
-            let messages = ctx.state.messages.read().clone();
-            let secrets = extract_secrets_from_messages(&messages);
             let args_preview =
                 serde_json::to_string_pretty(&inv.input).unwrap_or_else(|_| inv.input.to_string());
             let filtered_args_preview = if inv.tool_name == "bash" {
-                filter_bash_args_preview(&args_preview, &secrets)
+                filter_bash_args_preview(&args_preview, &invalid_call_secrets)
             } else {
                 args_preview
             };
@@ -1709,7 +1851,13 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
         }
     }
 
-    // Pass 1 — build every call (borrows ctx for the per-call tool filter).
+    // Pass 1 — build every call. The tool filter is built once for the
+    // whole batch (all calls share `visible_tools`), avoiding per-call
+    // HashMap + Vec allocation.
+    let per_batch_filter = tool_filter_from_specs(
+        &ctx.input.visible_tools,
+        ctx.snapshot.tool_registry.as_ref(),
+    );
     let mut built = Vec::with_capacity(valid_calls.len());
     for tc in &valid_calls {
         let raw_tool_call = RawToolCall {
@@ -1721,18 +1869,10 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
             call_id: raw_tool_call.call_id.clone(),
             tool_name: raw_tool_call.tool_name.clone(),
             input: raw_tool_call.input.clone(),
+            ..Default::default()
         };
 
-        let per_call_filter = tool_filter_from_specs(
-            &ctx.input.visible_tools,
-            ctx.snapshot.tool_registry.as_ref(),
-        );
-
-        match ToolCallBuilderImpl::new()
-            .with_raw_llm_tool_call(raw_tool_call)
-            .with_tool_filter(per_call_filter)
-            .build()
-        {
+        match ToolCallBuilderImpl::build_with_filter_ref(raw_tool_call, per_batch_filter.as_ref()) {
             Ok(tool_call) => built.push(Ok(tool_call)),
             Err(error) => built.push(Err(build_framework_failed_tool_result(
                 fallback_final_call,
@@ -1815,7 +1955,8 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
             continue;
         }
 
-        let tool_result_message = build_tool_result_message(&result);
+        let mut tool_result_message = build_tool_result_message(&result);
+        ctx.estimator.update_message_cache(&mut tool_result_message);
         ctx.state.messages.write().push(tool_result_message);
         // Track repeated identical failing calls; any note is pushed after all
         // tool results so the assistant/tool-result protocol stays intact.
@@ -1834,7 +1975,9 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
     // hold the streak nudge until everything is resolved (drop it this turn).
     if suspended_calls.is_empty() {
         if let Some(note) = streak_note {
-            ctx.state.messages.write().push(ChatMessage::user(note));
+            let mut msg = ChatMessage::user(note);
+            ctx.estimator.update_message_cache(&mut msg);
+            ctx.state.messages.write().push(msg);
         }
     }
 
@@ -2056,9 +2199,11 @@ fn emit_tool_result_event(ctx: &LoopContext<'_>, result: &ToolExecutionResult) {
     if should_emit {
         let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
 
-        // Extract secrets and filter args_preview for bash commands
-        let messages = ctx.state.messages.read().clone();
-        let secrets = extract_secrets_from_messages(&messages);
+        // Extract secrets under the read guard — avoids an O(history)
+        // clone per tool result in a batch.
+        let secrets = ctx
+            .state
+            .with_messages(|messages| extract_secrets_from_messages(messages));
         let args_preview = serde_json::to_string_pretty(&result.final_call().input)
             .unwrap_or_else(|_| result.final_call().input.to_string());
         let filtered_args_preview = if result.tool_name() == "bash" {
@@ -2248,7 +2393,9 @@ fn decide(ctx: &mut LoopContext<'_>) {
                 open.len(),
                 open.join("\n")
             );
-            ctx.state.messages.write().push(ChatMessage::user(reminder));
+            let mut msg = ChatMessage::user(reminder);
+            ctx.estimator.update_message_cache(&mut msg);
+            ctx.state.messages.write().push(msg);
             ctx.turn.decision = Some(LoopDecision::Continue);
             return;
         }
@@ -2299,7 +2446,7 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         });
     }
 
-    ctx.state.messages.write().push(ChatMessage {
+    let mut msg = ChatMessage {
         role: MessageRole::Assistant,
         blocks,
         message_id: None,
@@ -2307,11 +2454,13 @@ fn append_assistant_to_history(ctx: &mut LoopContext<'_>) {
         api_usage_tokens: Some(msg.usage.total_tokens),
         reasoning_content: msg.reasoning_content.clone(),
         estimated_tokens: None,
-    });
+    };
+    ctx.estimator.update_message_cache(&mut msg);
+    ctx.state.messages.write().push(msg);
 }
 
 pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
-    let (call_id, tool_name, output, is_error) = match result {
+    let (call_id, tool_name, mut output, is_error) = match result {
         ToolExecutionResult::Completed {
             final_call,
             raw_outcome,
@@ -2360,6 +2509,8 @@ pub fn build_tool_result_message(result: &ToolExecutionResult) -> ChatMessage {
             true,
         ),
     };
+
+    output = truncate_tool_output(&tool_name, &call_id, &output);
 
     ChatMessage {
         role: MessageRole::Tool,
@@ -2443,6 +2594,119 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+const MAX_TOOL_OUTPUT_BYTES: usize = 50 * 1024;
+const TRUNCATED_TOOL_OUTPUT_DIR: &str = "truncated_tool_output";
+const TRUNCATED_RETENTION_DAYS: u64 = 7;
+
+static LAST_CLEANUP_DAY: AtomicU64 = AtomicU64::new(0);
+
+/// Returns the largest byte index `<= index` that falls on a UTF-8 character
+/// boundary.  Equivalent to `str::floor_char_boundary` (stable since Rust
+/// 1.80) but written inline so it compiles on any Rust version the CI may
+/// pin.
+fn char_boundary_before(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let bytes = s.as_bytes();
+    let mut i = index;
+    while i > 0 && bytes[i] & 0xC0 == 0x80 {
+        i -= 1;
+    }
+    i
+}
+
+/// Truncates tool output to [`MAX_TOOL_OUTPUT_BYTES`] bytes.  Full content
+/// is saved to `~/.xiaoo/truncated_tool_output/` so the model can access it
+/// via `file_read` or `grep`.  This mirrors the opencode tool-output design
+/// (see opencode/specs/tool_design.md).
+fn truncate_tool_output(tool_name: &str, call_id: &str, output: &str) -> String {
+    if output.len() <= MAX_TOOL_OUTPUT_BYTES {
+        return output.to_string();
+    }
+
+    // Char-safe truncation boundary
+    let safe_boundary = char_boundary_before(output, MAX_TOOL_OUTPUT_BYTES);
+    let truncated = &output[..safe_boundary];
+    let omitted = output.len() - safe_boundary;
+
+    // Save full output to ~/.xiaoo/truncated_tool_output/
+    let saved_path = std::env::var("HOME").ok().and_then(|home| {
+        let dir = std::path::PathBuf::from(home)
+            .join(".xiaoo")
+            .join(TRUNCATED_TOOL_OUTPUT_DIR);
+        std::fs::create_dir_all(&dir).ok()?;
+        let filename = format!("{}.{}.{}.txt", tool_name, now_ms(), call_id);
+        let path = dir.join(&filename);
+        std::fs::write(&path, output).ok().map(|_| {
+            maybe_cleanup_truncated_dir();
+            path
+        })
+    });
+
+    let hint = match saved_path {
+        Some(path) => format!(
+            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+             Full output saved to: {}\n\
+             Use `file_read` with offset/limit to view specific sections, or \
+             `grep` to search the full content.",
+            omitted,
+            MAX_TOOL_OUTPUT_BYTES,
+            path.display(),
+        ),
+        None => format!(
+            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+             Use `file_read` with offset/limit or `grep` to search the full content.",
+            omitted, MAX_TOOL_OUTPUT_BYTES,
+        ),
+    };
+
+    format!("{}{}", truncated, hint)
+}
+
+/// Lazy cleanup of truncated tool output files older than
+/// [`TRUNCATED_RETENTION_DAYS`].  Runs at most once per day to avoid
+/// unnecessary filesystem scans on every truncated tool call.
+fn maybe_cleanup_truncated_dir() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86400)
+        .unwrap_or(0);
+    let last = LAST_CLEANUP_DAY.load(Ordering::Relaxed);
+    if last >= now {
+        return;
+    }
+    LAST_CLEANUP_DAY.store(now, Ordering::Relaxed);
+
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let dir = std::path::PathBuf::from(home)
+        .join(".xiaoo")
+        .join(TRUNCATED_TOOL_OUTPUT_DIR);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let retention = std::time::Duration::from_secs(TRUNCATED_RETENTION_DAYS * 86400);
+    for entry in entries.flatten() {
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mtime = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if let Ok(age) = mtime.elapsed() {
+            if age > retention {
+                std::fs::remove_file(entry.path()).ok();
+            }
+        }
+    }
 }
 
 fn build_outcome_max_turns(ctx: &LoopContext<'_>) -> AgentOutcome {
@@ -3073,10 +3337,15 @@ mod tests {
             outcome,
             LoopRunResult::Complete(AgentOutcome::Complete { .. })
         ));
-        assert_eq!(
-            sink.take_assistant_messages(),
-            vec!["Hello".to_string(), "Hello world".to_string()]
+        // Throttling (STREAM_EMIT_MIN_DELTA_CHARS=32) suppresses in-stream
+        // emits for short responses like "Hello world" (11 chars); the
+        // post-stream flush emits the final text exactly once.
+        let emitted = sink.take_assistant_messages();
+        assert!(
+            !emitted.is_empty(),
+            "sink should receive at least the final flush emit"
         );
+        assert_eq!(emitted.last().map(String::as_str), Some("Hello world"));
         assert_eq!(loop_state.token_usage.total_tokens, 5);
         assert_eq!(
             loop_state
@@ -3157,17 +3426,20 @@ mod tests {
             AgentLoopInput::new("plan").with_stop_rules([LoopStopRule::AfterSuccessfulTool {
                 tool_name: "todo_write".to_string(),
             }]);
+        let estimator = TokenEstimator::new();
         let ctx = LoopContext {
             snapshot: runtime.snapshot(),
             state: &mut loop_state,
             input,
             turn: TurnState::new(1),
+            estimator: &estimator,
         };
         let result = ToolExecutionResult::Completed {
             final_call: agent_types::tool::FinalToolCall {
                 call_id: "call_1".to_string(),
                 tool_name: "todo_write".to_string(),
                 input: serde_json::json!({}),
+                ..Default::default()
             },
             raw_outcome: RawToolOutcome::Success {
                 output: "ok".to_string(),
@@ -3180,6 +3452,7 @@ mod tests {
                 call_id: "call_2".to_string(),
                 tool_name: "todo_write".to_string(),
                 input: serde_json::json!({}),
+                ..Default::default()
             },
             raw_outcome: RawToolOutcome::Error {
                 message: "bad input".to_string(),

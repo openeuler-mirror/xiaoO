@@ -35,7 +35,9 @@ pub fn load_skills(config: &SkillsConfig) -> Vec<Skill> {
             ..SkillAuditOptions::default()
         };
 
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
             let skill_dir = entry.path();
             if !skill_dir.is_dir() {
                 continue;

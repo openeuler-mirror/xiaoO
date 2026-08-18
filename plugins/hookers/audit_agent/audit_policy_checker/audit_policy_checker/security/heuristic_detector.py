@@ -6,6 +6,10 @@
 3. InjectionKeywordChecker — Prompt 注入检测（工具结果注入关键词匹配）
 
 三者由 HeuristicDetector 统一协调，按优先级依次执行，支持短路返回。
+
+规则来源优先级：
+  runtime JSON 用户本地副本 > 源码种子默认值
+  禁用的规则/skill 在 runtime JSON 中 enabled=False，加载时自动过滤。
 """
 
 import json
@@ -13,6 +17,11 @@ import re
 from pathlib import Path
 
 from .types import HeuristicResult
+from ..runtime_config import (
+    load_runtime_config,
+    get_enabled_l1_command_patterns_or_default,
+    get_enabled_l1_injection_keywords_or_default,
+)
 
 # 默认用户规则文件路径
 DEFAULT_RULES_PATH = Path(__file__).parent.parent / "rules" / "user_rules.json"
@@ -424,6 +433,12 @@ READONLY_SENSITIVE_BASH_PATTERNS = [
     r"^cut\s+",
     r"^sort(?:\s|$)",
     r"^uniq(?:\s|$)",
+    # ── passwd 安全子命令（只读/查询/帮助），跳过 L3，保留 L2 ──
+    # 注意：必须用精确模式，不能写 ^passwd，否则 passwd -d/-l 等危险变体会被前缀匹配而误放行。
+    # 危险变体（passwd -d/-l/--stdin、管道 | passwd）由 L1 CommandPatternScanner 单独拦截。
+    r"^passwd$",            # 裸 passwd（交互式改密，无参数）
+    r"^passwd\s+--help\b",  # passwd --help 帮助
+    r"^passwd\s+-S\b",      # passwd -S 查看密码状态
 ]
 
 # 向后兼容：合并为完整安全列表（原 SAFE_BASH_PATTERNS）
@@ -489,13 +504,21 @@ class UserRuleMatcher:
 
 
 class CommandPatternScanner:
-    """子检测器：关键命令正则扫描"""
+    """子检测器：关键命令正则扫描
+
+    规则来源：优先从 runtime JSON 加载启用的规则，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    """
 
     def __init__(self):
-        all_patterns = CRITICAL_COMMAND_PATTERNS + EXTRA_DANGEROUS_PATTERNS
+        # 从 runtime config 加载启用的规则；
+        # 仅在配置文件不存在时回退到源码硬编码默认值，
+        # 配置文件存在但规则列表为空（用户逐条禁用）时不回退。
+        runtime = load_runtime_config()
+        patterns = get_enabled_l1_command_patterns_or_default(runtime)
         self._compiled = [
             {**p, "regex": re.compile(p["pattern"], re.IGNORECASE)}
-            for p in all_patterns
+            for p in patterns
         ]
 
     def scan(self, action_detail: str) -> HeuristicResult:
@@ -530,10 +553,18 @@ def is_inline_script_command(action_detail: str) -> bool:
 
 
 class InjectionKeywordChecker:
-    """子检测器：Prompt 注入关键词检测"""
+    """子检测器：Prompt 注入关键词检测
+
+    规则来源：优先从 runtime JSON 加载启用的关键词，
+    如果 runtime JSON 无效则回退到源码硬编码默认值。
+    """
+
+    def __init__(self):
+        runtime = load_runtime_config()
+        self._keywords = get_enabled_l1_injection_keywords_or_default(runtime)
 
     def check(self, text: str) -> HeuristicResult:
-        hits = [p for p in INJECTION_KEYWORDS if p["keyword"].lower() in text]
+        hits = [p for p in self._keywords if p["keyword"].lower() in text]
         if not hits:
             return HeuristicResult(hit=False)
 
@@ -550,6 +581,10 @@ class InjectionKeywordChecker:
         )
 
 
+# /dev/null 重定向排除模式（与 logic_rules.py 中 _DEVNULL_REDIRECT_RE 保持一致）
+_DEVNULL_REDIRECT_RE = re.compile(r"(?:2|&|1)?\s*>\s*/dev/null\b")
+
+
 def _extract_first_command(command: str) -> str:
     """提取管道和链式命令的第一段"""
     main_cmd = command.split("|")[0].strip()
@@ -561,8 +596,17 @@ def _extract_first_command(command: str) -> str:
 
 
 def is_fully_safe_bash_command(command: str) -> bool:
-    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）"""
+    """检查是否为完全安全的 bash 命令（跳过 L2 + L3）
+
+    重定向写入（如 echo xxx > /path）不是只读操作，不应归类为完全安全。
+    此类命令降级为 READONLY_SENSITIVE（只跳 L3，保留 L2），让 L2 敏感路径规则有机会拦截。
+    """
     main_cmd = _extract_first_command(command)
+    # 带真实重定向写入的命令不是"完全安全"：排除 /dev/null 丢弃后，如果还有 > 则为写入
+    if ">" in main_cmd:
+        cmd_without_devnull = _DEVNULL_REDIRECT_RE.sub("", main_cmd)
+        if ">" in cmd_without_devnull:
+            return False
     return any(p.match(main_cmd) for p in FULLY_SAFE_BASH_COMPILED)
 
 

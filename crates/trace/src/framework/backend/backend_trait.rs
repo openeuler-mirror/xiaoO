@@ -57,7 +57,6 @@ pub(crate) trait TraceBackend: Send + Sync {
         fields: Value,
     );
 
-    #[allow(dead_code)]
     async fn force_finalize_trace(
         &self,
         occurred_at_ms: u64,

@@ -226,7 +226,7 @@ async fn handle_request(
                     shell,
                     cwd: cwd.map(BackendPath),
                     timeout_ms,
-                    env: None,
+                    ..Default::default()
                 })
                 .await?;
             Ok(exec_result_json(&result))
@@ -332,11 +332,6 @@ fn strip_jsonc_comments(input: &str) -> String {
     }
 
     output
-}
-
-#[allow(dead_code)]
-fn default_exclude_vcs() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize)]

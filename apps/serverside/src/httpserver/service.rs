@@ -34,20 +34,17 @@ impl GatewayService {
         let request = build_channel_turn_request(&message);
         let visible_reply = self
             .session_service
-            .run_turn_with_interaction(request, event_sink, interaction_handle, channel_file_sender)
+            .run_turn_with_interaction(
+                request,
+                event_sink,
+                interaction_handle,
+                channel_file_sender,
+                None,
+                None,
+            )
             .await?
             .visible_reply;
 
         Ok(GatewayTurnResponse { visible_reply })
-    }
-
-    #[allow(dead_code)]
-    pub async fn handle_channel_message_with_events(
-        &self,
-        message: GatewayChannelMessage,
-        event_sink: Option<Arc<dyn LoopEventSink>>,
-    ) -> Result<GatewayTurnResponse, GatewayServiceError> {
-        self.handle_channel_message_with_interaction(message, event_sink, None, None)
-            .await
     }
 }

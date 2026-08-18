@@ -1,4 +1,4 @@
-use std::net::ToSocketAddrs;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +8,7 @@ use agent_contracts::tool::{ToolExecutor, ToolSpecView};
 use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
-use crate::r#impl::reqwest_util::{build_http_client, format_reqwest_error};
+use crate::r#impl::reqwest_util::{build_http_client_with_dns_override, format_reqwest_error};
 
 use super::constants::{default_timeout_ms, max_timeout_ms, MAX_RESPONSE_BYTES};
 use super::input::{WebFetchFormat, WebFetchInput};
@@ -31,49 +31,76 @@ impl WebFetchExecutor {
             .unwrap_or_else(default_timeout_ms)
             .min(max_timeout_ms());
 
-        // Layer 2 SSRF protection: resolve hostname → validate all resulting IPs
-        // This prevents DNS rebinding attacks where a hostname resolves to safe IP
-        // during validation but to a blocked IP during actual request.
-        let host = extract_host_for_dns(&input.url);
-        let port = if input.url.starts_with("https://") {
-            443
-        } else {
-            80
+        let mut current_url = url::Url::parse(&input.url)
+            .map_err(|error| format!("invalid URL {}: {error}", input.url))?;
+        let mut redirects = 0usize;
+        let response = loop {
+            let url_check = validation::validate_url_string(current_url.as_str());
+            if !url_check.result {
+                return Err(url_check
+                    .message
+                    .unwrap_or_else(|| "redirect target is not allowed".to_string()));
+            }
+
+            // Resolve once, validate every result, and pin the HTTP client to
+            // those exact addresses. This closes the validation/request DNS
+            // rebinding gap. A fresh pinned client is built for every redirect.
+            let host = current_url
+                .host_str()
+                .ok_or_else(|| format!("URL has no host: {current_url}"))?;
+            let port = current_url
+                .port_or_known_default()
+                .ok_or_else(|| format!("URL has no usable port: {current_url}"))?;
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(|error| format!("DNS resolution failed for '{host}': {error}"))?
+                .collect();
+            if addrs.is_empty() {
+                return Err(format!("DNS resolution returned no addresses for '{host}'"));
+            }
+            let dns_check = validation::validate_resolved_addrs(&addrs);
+            if !dns_check.result {
+                return Err(dns_check
+                    .message
+                    .unwrap_or_else(|| "URL resolves to blocked IP".to_string()));
+            }
+
+            let client =
+                build_http_client_with_dns_override(timeout_ms, Some((host, addrs.as_slice())))?;
+            let response = client
+                .get(current_url.clone())
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                )
+                .header(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,\
+                     image/avif,image/webp,image/apng,*/*;q=0.8",
+                )
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .send()
+                .await
+                .map_err(|error| format_reqwest_error(error, &format!("fetching {current_url}")))?;
+
+            if !response.status().is_redirection() {
+                break response;
+            }
+            if redirects >= 10 {
+                return Err("too many redirects (maximum 10)".to_string());
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| "redirect response is missing Location header".to_string())?
+                .to_str()
+                .map_err(|_| "redirect Location header is not valid UTF-8".to_string())?;
+            current_url = current_url
+                .join(location)
+                .map_err(|error| format!("invalid redirect target `{location}`: {error}"))?;
+            redirects += 1;
         };
-        let host_port = format!("{}:{}", host, port);
-        match host_port.to_socket_addrs() {
-            Ok(addrs) => {
-                let addr_vec: Vec<_> = addrs.collect();
-                let dns_check = validation::validate_resolved_addrs(&addr_vec);
-                if !dns_check.result {
-                    return Err(dns_check
-                        .message
-                        .unwrap_or_else(|| "URL resolves to blocked IP".to_string()));
-                }
-            }
-            Err(e) => {
-                return Err(format!("DNS resolution failed for '{}': {}", host, e));
-            }
-        }
-
-        let client = build_http_client(timeout_ms)?;
-
-        let response = client
-            .get(&input.url)
-            .header(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            .header(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,\
-                 image/avif,image/webp,image/apng,*/*;q=0.8",
-            )
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .send()
-            .await
-            .map_err(|e| format_reqwest_error(e, &format!("fetching {}", &input.url)))?;
 
         if !response.status().is_success() {
             return Err(format!(
@@ -135,7 +162,7 @@ impl WebFetchExecutor {
 
         Ok(WebFetchOutput {
             content,
-            url: input.url.clone(),
+            url: current_url.to_string(),
             content_type,
             format: input.format.to_string(),
         })
@@ -148,36 +175,6 @@ fn extract_text_from_html(html: &str) -> String {
 
 fn convert_html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| extract_text_from_html(html))
-}
-
-/// Extract host from URL for DNS resolution.
-/// Returns just the hostname (no scheme, port, path) suitable for `ToSocketAddrs`.
-fn extract_host_for_dns(url_str: &str) -> &str {
-    let after_scheme = url_str
-        .strip_prefix("http://")
-        .or_else(|| url_str.strip_prefix("https://"))
-        .unwrap_or(url_str);
-
-    let authority = after_scheme
-        .find(&['/', '?', '#'][..])
-        .map(|i| &after_scheme[..i])
-        .unwrap_or(after_scheme);
-
-    // Strip userinfo (@ separates credentials from host)
-    let host_port = authority
-        .rfind('@')
-        .map(|i| &authority[i + 1..])
-        .unwrap_or(authority);
-
-    if host_port.starts_with('[') {
-        if let Some(bracket_end) = host_port.find(']') {
-            return &host_port[1..bracket_end];
-        }
-    } else if let Some(colon_pos) = host_port.rfind(':') {
-        return &host_port[..colon_pos];
-    }
-
-    host_port
 }
 
 impl Default for WebFetchExecutor {

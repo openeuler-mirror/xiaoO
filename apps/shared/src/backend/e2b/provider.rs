@@ -9,11 +9,13 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::io::ReaderStream;
 
 use super::backend::{
-    join_url, normalize_backend_path, E2bBackendState, E2bLifecycle, E2bOperationBackend,
-    DEFAULT_API_BASE, DEFAULT_ENVD_PORT, DEFAULT_HOME_DIR, DEFAULT_SHELL, DEFAULT_TEMPLATE_ID,
-    DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS, DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
+    envd_host, join_url, normalize_backend_path, E2bBackendState, E2bLifecycle,
+    E2bOperationBackend, DEFAULT_API_BASE, DEFAULT_DOMAIN, DEFAULT_ENVD_PORT, DEFAULT_HOME_DIR,
+    DEFAULT_SHELL, DEFAULT_TEMPLATE_ID, DEFAULT_TEMP_ROOT, DEFAULT_TIMEOUT_SECS,
+    DEFAULT_WORKSPACE_ROOT, E2B_PROVIDER_KIND,
 };
 use super::error::E2bFailure;
 use super::exec::E2bExec;
@@ -31,6 +33,7 @@ pub(crate) struct E2bCreateBackendInput {
     pub(crate) provider_options: Value,
     pub(crate) resource_limits: agent_contracts::backend::BackendResourceLimits,
     pub(crate) metadata: Value,
+    pub(crate) bootstrap: Option<Arc<super::bootstrap::E2bBootstrapArchive>>,
 }
 
 pub(crate) struct E2bCreatedBackend {
@@ -65,8 +68,10 @@ pub(crate) struct E2bSnapshotResult {
 struct E2bProviderOptions {
     api_key: Option<String>,
     api_key_env: Option<String>,
-    #[serde(alias = "apiBase")]
+    #[serde(alias = "apiBase", alias = "api_url", alias = "apiUrl")]
     api_base: Option<String>,
+    #[serde(alias = "sandbox_domain", alias = "sandboxDomain")]
+    domain: Option<String>,
     #[serde(alias = "templateID", alias = "template")]
     template_id: Option<String>,
     #[serde(alias = "timeout")]
@@ -90,6 +95,9 @@ struct E2bProviderOptions {
     temp_root: Option<String>,
     #[serde(alias = "defaultShell")]
     default_shell: Option<String>,
+    /// `multipart` for legacy envd; omitted or any other value keeps octet-stream.
+    #[serde(alias = "envdFileUpload")]
+    envd_file_upload: Option<String>,
     username: Option<String>,
     metadata: Option<BTreeMap<String, String>>,
     #[serde(alias = "envVars")]
@@ -121,18 +129,22 @@ struct CreateSnapshotResponse {
     names: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct E2bConnectionOptions {
+    api_base: String,
+    sandbox_domain: String,
+}
+
 pub(crate) async fn create_backend(
     input: E2bCreateBackendInput,
 ) -> Result<E2bCreatedBackend, BackendError> {
+    let bootstrap = input.bootstrap.clone();
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
     let http = new_e2b_http_client()?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let connection = resolve_connection_options(&options)?;
+    let api_base = connection.api_base;
+    let sandbox_domain = connection.sandbox_domain;
     let template_id = options
         .template_id
         .as_deref()
@@ -171,7 +183,12 @@ pub(crate) async fn create_backend(
 
     let now = current_time_ms();
     let backend_id = input.backend_id;
-    let endpoint = provider_handle(&created, envd_port, envd_scheme.as_str());
+    let endpoint = provider_handle(
+        &created,
+        envd_port,
+        envd_scheme.as_str(),
+        sandbox_domain.as_str(),
+    );
     let instance = BackendInstance {
         backend_id: backend_id.clone(),
         provider: BackendProviderKind(E2B_PROVIDER_KIND.to_string()),
@@ -212,6 +229,7 @@ pub(crate) async fn create_backend(
         api_base,
         api_key,
         sandbox_id: created.sandbox_id,
+        sandbox_domain,
         envd_access_token: created.envd_access_token,
         envd_port,
         envd_scheme,
@@ -225,12 +243,25 @@ pub(crate) async fn create_backend(
                 .unwrap_or_else(|| DEFAULT_SHELL.to_string()),
         ),
         username: options.username.filter(|value| !value.trim().is_empty()),
+        envd_file_upload_multipart: options
+            .envd_file_upload
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("multipart")),
         http,
         lifecycle: Mutex::new(E2bLifecycle::Active),
     });
     let backend = Arc::new(E2bOperationBackend::new(Arc::clone(&state)));
 
-    if let Err(error) = ensure_remote_roots(&state).await {
+    let initialization = async {
+        ensure_remote_roots(&state).await?;
+        if let Some(bootstrap) = bootstrap.as_deref() {
+            install_bootstrap_archive(&state, bootstrap).await?;
+        }
+        Ok::<(), OperationError>(())
+    }
+    .await;
+
+    if let Err(error) = initialization {
         if let Err(cleanup_error) = state.delete_sandbox().await {
             tracing::warn!(
                 operation = "cleanup_failed_workspace_initialization",
@@ -240,7 +271,7 @@ pub(crate) async fn create_backend(
             );
         }
         return Err(BackendError::BuildFailed {
-            message: format!("e2b sandbox created but workspace initialization failed: {error}"),
+            message: format!("e2b sandbox created but bootstrap initialization failed: {error}"),
         });
     }
 
@@ -252,12 +283,7 @@ pub(crate) async fn create_snapshot(
 ) -> Result<E2bSnapshotResult, BackendError> {
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let mut body = Map::new();
@@ -315,12 +341,7 @@ pub(crate) async fn delete_snapshot(input: E2bDeleteSnapshotInput) -> Result<boo
 
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let response = http
@@ -364,12 +385,7 @@ pub(crate) async fn delete_sandbox_by_id(input: E2bDeleteSandboxInput) -> Result
 
     let options = parse_options(&input.provider_options)?;
     let api_key = resolve_api_key(&options)?;
-    let api_base = options
-        .api_base
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(DEFAULT_API_BASE)
-        .to_string();
+    let api_base = resolve_connection_options(&options)?.api_base;
     let http = new_e2b_http_client()?;
 
     let response = http
@@ -407,6 +423,61 @@ fn parse_options(value: &Value) -> Result<E2bProviderOptions, BackendError> {
     serde_json::from_value(value).map_err(|error| BackendError::InvalidRequest {
         message: format!("invalid e2b backend options: {error}"),
     })
+}
+
+fn resolve_connection_options(
+    options: &E2bProviderOptions,
+) -> Result<E2bConnectionOptions, BackendError> {
+    let api_url_env = std::env::var("E2B_API_URL").ok();
+    let domain_env = std::env::var("E2B_DOMAIN").ok();
+    resolve_connection_options_from_values(options, api_url_env.as_deref(), domain_env.as_deref())
+}
+
+fn resolve_connection_options_from_values(
+    options: &E2bProviderOptions,
+    api_url_env: Option<&str>,
+    domain_env: Option<&str>,
+) -> Result<E2bConnectionOptions, BackendError> {
+    let raw_domain = non_empty(options.domain.as_deref())
+        .or_else(|| non_empty(domain_env))
+        .unwrap_or(DEFAULT_DOMAIN);
+    let sandbox_domain = normalize_sandbox_domain(raw_domain)?;
+    let api_base = non_empty(options.api_base.as_deref())
+        .or_else(|| non_empty(api_url_env))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if sandbox_domain == DEFAULT_DOMAIN {
+                DEFAULT_API_BASE.to_string()
+            } else {
+                format!("https://api.{sandbox_domain}")
+            }
+        });
+
+    Ok(E2bConnectionOptions {
+        api_base,
+        sandbox_domain,
+    })
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_sandbox_domain(value: &str) -> Result<String, BackendError> {
+    let domain = value.trim().trim_end_matches('.');
+    if domain.is_empty()
+        || domain.contains("://")
+        || domain.contains('/')
+        || domain.contains('?')
+        || domain.contains('#')
+    {
+        return Err(BackendError::InvalidRequest {
+            message: format!(
+                "invalid e2b domain {value:?}; expected a hostname without scheme or path"
+            ),
+        });
+    }
+    Ok(domain.to_string())
 }
 
 fn resolve_api_key(options: &E2bProviderOptions) -> Result<String, BackendError> {
@@ -627,12 +698,13 @@ fn provider_handle(
     sandbox: &CreateSandboxResponse,
     envd_port: u16,
     envd_scheme: &str,
+    sandbox_domain: &str,
 ) -> BackendEndpoint {
     BackendEndpoint::ProviderHandle {
         value: json!({
             "provider": "e2b",
             "sandbox_id": sandbox.sandbox_id.clone(),
-            "envd_host": format!("{}-{}.e2b.app", envd_port, sandbox.sandbox_id),
+            "envd_host": envd_host(envd_port, sandbox.sandbox_id.as_str(), sandbox_domain),
             "envd_port": envd_port,
             "envd_scheme": envd_scheme,
         }),
@@ -642,9 +714,10 @@ fn provider_handle(
 async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), OperationError> {
     let exec = E2bExec::new(Arc::clone(state));
     let script = format!(
-        "mkdir -p {} {}",
+        "mkdir -p {} {} {}",
         super::backend::shell_quote(state.workspace_root.0.as_str()),
-        super::backend::shell_quote(state.temp_root.0.as_str())
+        super::backend::shell_quote(state.temp_root.0.as_str()),
+        super::backend::shell_quote("/home/user/.xiaoo")
     );
     let output = retry_workspace_initialization(
         state.sandbox_id.as_str(),
@@ -658,6 +731,134 @@ async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), Operati
     }
     Err(OperationError::ExecutionFailed {
         message: String::from_utf8_lossy(output.stderr.as_slice()).to_string(),
+    })
+}
+
+async fn install_bootstrap_archive(
+    state: &Arc<E2bBackendState>,
+    archive: &super::bootstrap::E2bBootstrapArchive,
+) -> Result<(), OperationError> {
+    use reqwest::header::ACCEPT;
+    use reqwest::multipart::{Form, Part};
+    use reqwest::Method;
+
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let remote_archive = format!("/tmp/xiaoo-bootstrap-{nonce}.tar");
+    let remote_manifest = format!("/home/user/.xiaoo/.bootstrap-manifest-{nonce}.json");
+
+    let file = tokio::fs::File::open(archive.path())
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to open E2B bootstrap archive: {error}"),
+        })?;
+    let stream = ReaderStream::new(file);
+    let archive_part =
+        Part::stream_with_length(reqwest::Body::wrap_stream(stream), archive.size_bytes())
+            .file_name(remote_archive.clone());
+    let response = state
+        .envd_request(Method::POST, "/files")
+        .query(&[("path", remote_archive.as_str())])
+        .header(ACCEPT, "application/json")
+        // Older envd releases only accept multipart uploads. Newer releases
+        // also support application/octet-stream, but multipart remains
+        // compatible with both variants.
+        .multipart(Form::new().part("file", archive_part))
+        .send()
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to stream E2B bootstrap archive: {error}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(super::backend::http_error("upload E2B bootstrap archive", response).await);
+    }
+
+    let manifest = archive
+        .manifest_json()
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to encode E2B bootstrap manifest: {error}"),
+        })?;
+    let manifest_part = Part::bytes(manifest).file_name(remote_manifest.clone());
+    let response = state
+        .envd_request(Method::POST, "/files")
+        .query(&[("path", remote_manifest.as_str())])
+        .header(ACCEPT, "application/json")
+        .multipart(Form::new().part("file", manifest_part))
+        .send()
+        .await
+        .map_err(|error| OperationError::Transport {
+            message: format!("failed to upload E2B bootstrap manifest: {error}"),
+        })?;
+    if !response.status().is_success() {
+        return Err(super::backend::http_error("upload E2B bootstrap manifest", response).await);
+    }
+
+    let q = super::backend::shell_quote;
+    let stage_pattern = format!("/home/user/.xiaoo/bootstrap-stage-{nonce}.XXXXXX");
+    let workspace_target = "/home/user/workspace";
+    let skills_target = "/home/user/.xiaoo/skills";
+    let workspace_old = format!("/home/user/.xiaoo/workspace-old-{nonce}");
+    let skills_old = format!("/home/user/.xiaoo/skills-old-{nonce}");
+    let manifest_target = "/home/user/.xiaoo/bootstrap/manifest.json";
+    let script = format!(
+        r#"set -eu
+archive={archive}
+manifest={manifest}
+expected={expected}
+actual=$(sha256sum "$archive" | awk '{{print $1}}')
+[ "$actual" = "$expected" ] || {{ echo "bootstrap archive SHA-256 mismatch" >&2; exit 41; }}
+stage=$(mktemp -d {stage_pattern})
+tar --no-same-owner --same-permissions -xf "$archive" -C "$stage"
+[ -d "$stage/workspace" ] || {{ echo "bootstrap workspace payload missing" >&2; exit 42; }}
+[ -d "$stage/skills" ] || {{ echo "bootstrap skills payload missing" >&2; exit 43; }}
+workspace_target={workspace_target}
+skills_target={skills_target}
+workspace_old={workspace_old}
+skills_old={skills_old}
+had_workspace=0
+had_skills=0
+workspace_installed=0
+skills_installed=0
+rollback() {{
+  set +e
+  [ "$skills_installed" = 0 ] || rm -rf "$skills_target"
+  [ "$had_skills" = 0 ] || mv "$skills_old" "$skills_target"
+  [ "$workspace_installed" = 0 ] || rm -rf "$workspace_target"
+  [ "$had_workspace" = 0 ] || mv "$workspace_old" "$workspace_target"
+  rm -rf "$stage" "$archive" "$manifest"
+  exit 44
+}}
+rm -rf "$workspace_old" "$skills_old"
+if [ -e "$workspace_target" ]; then mv "$workspace_target" "$workspace_old"; had_workspace=1; fi
+mv "$stage/workspace" "$workspace_target" || rollback
+workspace_installed=1
+if [ -e "$skills_target" ]; then mv "$skills_target" "$skills_old"; had_skills=1; fi
+mv "$stage/skills" "$skills_target" || rollback
+skills_installed=1
+mkdir -p $(dirname {manifest_target}) || rollback
+mv "$manifest" {manifest_target} || rollback
+rm -rf "$workspace_old" "$skills_old" "$stage" "$archive" || true
+"#,
+        archive = q(&remote_archive),
+        manifest = q(&remote_manifest),
+        expected = q(archive.sha256()),
+        stage_pattern = q(&stage_pattern),
+        workspace_target = q(workspace_target),
+        skills_target = q(skills_target),
+        workspace_old = q(&workspace_old),
+        skills_old = q(&skills_old),
+        manifest_target = q(manifest_target),
+    );
+    let exec = E2bExec::new(Arc::clone(state));
+    let output = exec.run_shell_script(script.as_str(), None).await?;
+    if output.exit_code == Some(0) {
+        return Ok(());
+    }
+    Err(OperationError::ExecutionFailed {
+        message: format!(
+            "E2B bootstrap install failed (exit {:?}): {}",
+            output.exit_code,
+            String::from_utf8_lossy(&output.stderr)
+        ),
     })
 }
 
@@ -766,6 +967,7 @@ mod tests {
             }),
             resource_limits: Default::default(),
             metadata: json!({"purpose": "structured grep live smoke"}),
+            bootstrap: None,
         })
         .await
         .expect("create live E2B backend");
@@ -794,10 +996,9 @@ mod tests {
                         r"W\s*=".to_string(),
                         "grep-smoke.py".to_string(),
                     ],
-                    shell: None,
                     cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
                     timeout_ms: Some(30_000),
-                    env: None,
+                    ..Default::default()
                 })
                 .await
                 .map_err(|error| format!("execute structured grep: {error}"))?;
@@ -904,6 +1105,98 @@ mod tests {
                 .as_deref()
                 .unwrap_or(DEFAULT_TEMPLATE_ID),
             "base"
+        );
+    }
+
+    #[test]
+    fn connection_options_default_to_e2b_cloud() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(&options, None, None)
+            .expect("connection options");
+
+        assert_eq!(connection.api_base, DEFAULT_API_BASE);
+        assert_eq!(connection.sandbox_domain, DEFAULT_DOMAIN);
+    }
+
+    #[test]
+    fn connection_options_derive_api_url_from_self_hosted_domain() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            None,
+            Some(" self-hosted.example.com. "),
+        )
+        .expect("connection options");
+
+        assert_eq!(connection.api_base, "https://api.self-hosted.example.com");
+        assert_eq!(connection.sandbox_domain, "self-hosted.example.com");
+    }
+
+    #[test]
+    fn connection_options_accept_api_url_and_domain_environment_values() {
+        let options = parse_options(&json!({})).expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            Some(" https://control.self-hosted.example.com/ "),
+            Some("self-hosted.example.com"),
+        )
+        .expect("connection options");
+
+        assert_eq!(
+            connection.api_base,
+            "https://control.self-hosted.example.com/"
+        );
+        assert_eq!(connection.sandbox_domain, "self-hosted.example.com");
+    }
+
+    #[test]
+    fn explicit_connection_options_override_environment_values() {
+        let options = parse_options(&json!({
+            "apiUrl": "https://control.internal.example.com/",
+            "sandboxDomain": "sandboxes.internal.example.com"
+        }))
+        .expect("options");
+        let connection = resolve_connection_options_from_values(
+            &options,
+            Some("https://api.from-env.example.com"),
+            Some("from-env.example.com"),
+        )
+        .expect("connection options");
+
+        assert_eq!(connection.api_base, "https://control.internal.example.com/");
+        assert_eq!(connection.sandbox_domain, "sandboxes.internal.example.com");
+    }
+
+    #[test]
+    fn rejects_domain_with_scheme() {
+        let options = parse_options(&json!({
+            "domain": "https://self-hosted.example.com"
+        }))
+        .expect("options");
+        let error = resolve_connection_options_from_values(&options, None, None)
+            .expect_err("domain with a scheme must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("hostname without scheme or path"));
+    }
+
+    #[test]
+    fn provider_handle_uses_configured_sandbox_domain() {
+        let sandbox = CreateSandboxResponse {
+            sandbox_id: "sandbox-test".to_string(),
+            template_id: "base".to_string(),
+            envd_access_token: Some("access-token".to_string()),
+            traffic_access_token: None,
+        };
+        let endpoint = provider_handle(&sandbox, 49_983, "https", "self-hosted.example.com");
+        let BackendEndpoint::ProviderHandle { value } = endpoint else {
+            panic!("expected provider handle");
+        };
+
+        assert_eq!(
+            value["envd_host"],
+            "49983-sandbox-test.self-hosted.example.com"
         );
     }
 

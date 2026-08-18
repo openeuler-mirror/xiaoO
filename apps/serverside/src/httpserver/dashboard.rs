@@ -315,6 +315,7 @@ mod tests {
                 max_turns: None,
                 tool_manifest: None,
                 subagent_roles: Default::default(),
+                bootstrap_binding: None,
             },
             backend_instance: None,
             paused_backend_checkpoint: None,

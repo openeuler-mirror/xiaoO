@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -17,8 +17,6 @@ use super::DurableMemoryStore;
 
 pub struct SqliteDurableMemoryStore {
     conn: Arc<Mutex<Connection>>,
-    #[allow(dead_code)]
-    db_path: PathBuf,
     embedder: Arc<dyn EmbeddingProvider>,
     vector_weight: f32,
     keyword_weight: f32,
@@ -48,7 +46,6 @@ impl SqliteDurableMemoryStore {
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            db_path,
             embedder,
             vector_weight,
             keyword_weight,
@@ -140,8 +137,12 @@ impl SqliteDurableMemoryStore {
             }
             Some((old_name, old_dims)) => {
                 // Model changed — invalidate all embeddings
-                eprintln!(
-                    "embedding model changed: {old_name}({old_dims}d) -> {current_name}({current_dims}d), invalidating embeddings"
+                tracing::warn!(
+                    "embedding model changed: {}({}d) -> {}({}d), invalidating embeddings",
+                    old_name,
+                    old_dims,
+                    current_name,
+                    current_dims
                 );
                 conn.execute("UPDATE memories SET embedding = NULL", [])
                     .map_err(|e| MemoryError::Embedding {
@@ -306,7 +307,7 @@ impl SqliteDurableMemoryStore {
         ) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("warning: FTS5 query prepare failed (FTS5 may be unavailable): {e}");
+                tracing::warn!("FTS5 query prepare failed (FTS5 may be unavailable): {}", e);
                 return Vec::new();
             }
         };

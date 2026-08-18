@@ -10,12 +10,53 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 pub(crate) fn map_reqwest_error(err: reqwest::Error) -> LlmError {
+    let cause_chain = render_error_chain(&err);
     if err.is_timeout() {
-        LlmError::HttpError(format!("Request timeout: {}", err))
+        LlmError::HttpError(format!(
+            "Request timeout: {} | cause chain: {}",
+            err, cause_chain
+        ))
     } else if err.is_connect() {
-        LlmError::HttpError(format!("Connection failed: {}", err))
+        LlmError::HttpError(format!(
+            "Connection failed: {} | cause chain: {}",
+            err, cause_chain
+        ))
+    } else if err.is_decode() {
+        LlmError::StreamError {
+            message: format!(
+                "error decoding response body: {} | cause chain: {}",
+                err, cause_chain
+            ),
+        }
     } else {
-        LlmError::HttpError(err.to_string())
+        LlmError::HttpError(format!("{} | cause chain: {}", err, cause_chain))
+    }
+}
+
+/// Walk `std::error::Error::source()` chain and join each level's `Display`
+/// with ` -> `. reqwest's top-level `Display` is usually a generic
+/// "error sending request for url (...)", while the actual root cause
+/// (DNS, TCP, TLS handshake, proxy handshake) lives in the source chain.
+/// Without this, callers only see the generic top-level message and cannot
+/// tell TLS cert rejection from connection refused from DNS failure.
+fn render_error_chain(err: &dyn std::error::Error) -> String {
+    let mut chain = Vec::new();
+    let mut current: Option<&dyn std::error::Error> = Some(err);
+    while let Some(e) = current {
+        let s = e.to_string();
+        // Skip duplicates: many error wrappers just re-display their source.
+        if chain
+            .last()
+            .map_or(true, |last: &String| last.as_str() != s.as_str())
+        {
+            chain.push(s);
+        }
+        current = e.source();
+    }
+    if chain.len() <= 1 {
+        "(no underlying cause)".to_string()
+    } else {
+        chain.join(" -> ")
     }
 }
 

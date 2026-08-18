@@ -144,25 +144,6 @@ impl FeishuClient {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn get_chat_info(&self, chat_id: &str) -> ChannelResult<FeishuChatInfo> {
-        let token = self.fetch_tenant_access_token().await?;
-        let response = self
-            .client
-            .get(format!(
-                "{}/open-apis/im/v1/chats/{chat_id}",
-                self.config.base_url()
-            ))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|error| ChannelError::Transport {
-                message: format!("feishu get_chat_info request failed: {error}"),
-            })?;
-
-        parse_chat_info_response(response).await
-    }
-
     async fn fetch_tenant_access_token(&self) -> ChannelResult<String> {
         let app_secret =
             std::env::var(&self.config.app_secret_env).map_err(|_| ChannelError::Config {
@@ -553,19 +534,6 @@ fn parse_member_list_payload(
     };
 
     Ok((members, next_page_token))
-}
-
-#[allow(dead_code)]
-async fn parse_chat_info_response(response: reqwest::Response) -> ChannelResult<FeishuChatInfo> {
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| ChannelError::Transport {
-            message: format!("failed to read feishu get_chat_info response: {error}"),
-        })?;
-
-    parse_chat_info_payload(status, &body)
 }
 
 #[allow(dead_code)]

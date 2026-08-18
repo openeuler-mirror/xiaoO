@@ -646,6 +646,7 @@ mod tests {
             api_base: "https://api.e2b.test".to_string(),
             api_key: "test-key".to_string(),
             sandbox_id: "sandbox-test".to_string(),
+            sandbox_domain: "e2b.test".to_string(),
             envd_access_token: None,
             envd_port: 49_983,
             envd_scheme: "https".to_string(),
@@ -654,6 +655,7 @@ mod tests {
             temp_root: BackendPath("/tmp".to_string()),
             default_shell: default_shell.map(str::to_string),
             username: None,
+            envd_file_upload_multipart: false,
             http: reqwest::Client::new(),
             lifecycle: Mutex::new(E2bLifecycle::Active),
         }))
@@ -663,10 +665,8 @@ mod tests {
         ExecRequest {
             command: command.to_string(),
             args: Vec::new(),
-            shell: None,
             cwd: Some(BackendPath("/home/user/workspace".to_string())),
-            timeout_ms: None,
-            env: None,
+            ..Default::default()
         }
     }
 

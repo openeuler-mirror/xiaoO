@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -25,7 +24,6 @@ pub(crate) struct AnthropicProvider {
     api_key: Option<String>,
     base_url: String,
     capabilities: ProviderCapabilities,
-    current_event: Mutex<Option<String>>,
     api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
@@ -36,6 +34,9 @@ impl AnthropicProvider {
         model: String,
         api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
+        let max_context_window = crate::models::get_known_model_context_length(&model)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(200000);
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
@@ -47,10 +48,9 @@ impl AnthropicProvider {
                 supports_streaming: true,
                 supports_tool_calls: true,
                 supports_json_mode: true,
-                max_context_window: 200000,
+                max_context_window,
                 model_name: model,
             },
-            current_event: Mutex::new(None),
             api_key_provider,
         }
     }
@@ -65,11 +65,32 @@ impl AnthropicProvider {
 
     fn build_body(&self, request: &LlmRequest, stream: bool) -> serde_json::Value {
         let system_blocks = anthropic_system_blocks(&request.messages);
-        let other_messages = anthropic_messages(&request.messages);
+        let mut other_messages = anthropic_messages(&request.messages);
 
-        let max_tokens = request.max_tokens.unwrap_or(16384);
-        let (max_tokens, thinking_budget) =
-            anthropic_reasoning_budget(request.reasoning_effort, max_tokens);
+        // Incremental prefix caching over the conversation history: mark the
+        // final content block of the last two non-system messages as cache
+        // breakpoints. The prompt builder appends the per-turn `<system-reminder>`
+        // context as the final message (ephemeral, never persisted), so the
+        // breakpoint on the second-to-last message is the one that lands on
+        // stable history and yields the cache hit next turn; the one on the
+        // tail costs only a small re-write of the reminder itself. Budget:
+        // 2 breakpoints here + system breakpoints stays within Anthropic's
+        // limit of 4.
+        for msg in other_messages.iter_mut().rev().take(2) {
+            if let Some(last_block) = msg["content"]
+                .as_array_mut()
+                .and_then(|blocks| blocks.last_mut())
+            {
+                last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+            }
+        }
+
+        let requested_max_tokens = request.max_tokens.unwrap_or(16384);
+        let (max_tokens, thinking, output_effort) = anthropic_reasoning_config(
+            &self.capabilities.model_name,
+            request.reasoning_effort,
+            requested_max_tokens,
+        );
 
         let mut body = serde_json::json!({
             "model": self.capabilities.model_name,
@@ -108,22 +129,82 @@ impl AnthropicProvider {
         let wire_tool_choice = crate::convert::tool_choice_to_wire(&request.tool_choice);
         body["tool_choice"] = to_anthropic_tool_choice(&wire_tool_choice);
 
+        let mut output_config = serde_json::Map::new();
         let wire_format = crate::convert::response_format_to_wire(&request.response_format);
         if let Some(ref wf) = wire_format {
             if let Some(output_format) = to_anthropic_output_format(wf) {
-                body["output_config"] = serde_json::json!({ "format": output_format });
+                output_config.insert("format".to_string(), output_format);
             }
         }
 
-        if let Some(budget_tokens) = thinking_budget {
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": budget_tokens,
-            });
+        if let Some(effort) = output_effort {
+            output_config.insert("effort".to_string(), serde_json::json!(effort));
+        }
+        if !output_config.is_empty() {
+            body["output_config"] = serde_json::Value::Object(output_config);
+        }
+
+        if let Some(thinking) = thinking {
+            body["thinking"] = thinking;
         }
 
         body
     }
+}
+
+fn anthropic_reasoning_config(
+    model: &str,
+    effort: ReasoningEffort,
+    requested_max_tokens: usize,
+) -> (usize, Option<serde_json::Value>, Option<&'static str>) {
+    if is_claude_fable_5_model(model) || is_claude_sonnet_5_model(model) {
+        return match effort {
+            ReasoningEffort::Off if is_claude_sonnet_5_model(model) => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "disabled" })),
+                None,
+            ),
+            // Fable 5 always uses adaptive thinking, so its "off" setting is
+            // represented by omitting an unsupported disabled request.
+            ReasoningEffort::Off => (requested_max_tokens, None, None),
+            ReasoningEffort::High => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "adaptive" })),
+                Some("high"),
+            ),
+            ReasoningEffort::Max => (
+                requested_max_tokens,
+                Some(serde_json::json!({ "type": "adaptive" })),
+                Some("max"),
+            ),
+        };
+    }
+
+    let (max_tokens, thinking_budget) = anthropic_reasoning_budget(effort, requested_max_tokens);
+    let thinking = thinking_budget.map(|budget_tokens| {
+        serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+        })
+    });
+    (max_tokens, thinking, None)
+}
+
+fn is_claude_fable_5_model(model: &str) -> bool {
+    normalized_model_leaf(model).starts_with("claude-fable-5")
+}
+
+fn is_claude_sonnet_5_model(model: &str) -> bool {
+    normalized_model_leaf(model).starts_with("claude-sonnet-5")
+}
+
+fn normalized_model_leaf(model: &str) -> String {
+    model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
 }
 
 fn anthropic_reasoning_budget(
@@ -148,6 +229,32 @@ fn anthropic_reasoning_budget(
             (max_tokens, Some(budget))
         }
     }
+}
+
+fn anthropic_stop_reason(reason: &str) -> StopReason {
+    match reason {
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "refusal" => StopReason::ContentFilter,
+        _ => StopReason::EndTurn,
+    }
+}
+
+fn anthropic_response_text(response: &serde_json::Value) -> Option<String> {
+    let content = response["content"].as_array().map(|blocks| {
+        blocks
+            .iter()
+            .filter_map(|block| block["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("")
+    });
+
+    content.filter(|text| !text.is_empty()).or_else(|| {
+        response["stop_details"]["explanation"]
+            .as_str()
+            .filter(|explanation| !explanation.is_empty())
+            .map(str::to_string)
+    })
 }
 
 #[async_trait]
@@ -184,11 +291,7 @@ impl LlmProvider for AnthropicProvider {
         let anthropic_response: serde_json::Value =
             serde_json::from_str(&resp_body).map_err(map_serde_error)?;
 
-        let content = anthropic_response["content"]
-            .as_array()
-            .and_then(|arr| arr.iter().find_map(|c| c["text"].as_str()))
-            .unwrap_or("")
-            .to_string();
+        let content = anthropic_response_text(&anthropic_response);
         let reasoning_content = anthropic_response["content"].as_array().and_then(|arr| {
             let thinking = arr
                 .iter()
@@ -212,11 +315,7 @@ impl LlmProvider for AnthropicProvider {
         let finish_reason = anthropic_response["stop_reason"]
             .as_str()
             .unwrap_or("end_turn");
-        let stop_reason = match finish_reason {
-            "tool_use" => StopReason::ToolUse,
-            "max_tokens" => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        };
+        let stop_reason = anthropic_stop_reason(finish_reason);
 
         let tool_use_blocks: Vec<ToolUseBlock> = tool_calls
             .iter()
@@ -230,7 +329,7 @@ impl LlmProvider for AnthropicProvider {
         Ok(LlmResponse {
             message: AssistantMessage {
                 text: if tool_use_blocks.is_empty() {
-                    Some(content)
+                    content
                 } else {
                     None
                 },
@@ -283,6 +382,9 @@ impl LlmProvider for AnthropicProvider {
 
         let mut buffer = String::new();
         let mut byte_stream = response.bytes_stream();
+        // Per-stream event_type state. Scoped locally so concurrent streams
+        // on the same shared provider don't race on a shared Mutex.
+        let mut current_event: Option<String> = None;
 
         while let Some(chunk_result) = byte_stream.next().await {
             let bytes = chunk_result.map_err(|e| {
@@ -300,15 +402,19 @@ impl LlmProvider for AnthropicProvider {
             let text = String::from_utf8_lossy(&bytes);
             buffer.push_str(&text);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].to_string();
-                buffer = buffer[pos + 1..].to_string();
+            // Cursor-based SSE scanning: find each '\n' without rebuilding
+            // the buffer per line; drain the consumed prefix in place.
+            let mut start = 0;
+            while let Some(relative) = buffer[start..].find('\n') {
+                let pos = start + relative;
+                let line = &buffer[start..pos];
+                start = pos + 1;
 
                 if line.is_empty() {
                     continue;
                 }
 
-                if let Some(parsed) = self.parse_anthropic_stream_line(&line)? {
+                if let Some(parsed) = Self::parse_anthropic_stream_line(&mut current_event, line)? {
                     if let Some(ref content) = parsed.content {
                         full_text.push_str(content);
                     }
@@ -320,11 +426,7 @@ impl LlmProvider for AnthropicProvider {
                             Some(merge_usage(final_usage.take(), wire_usage_to_usage(usage)));
                     }
                     if let Some(ref reason) = parsed.finish_reason {
-                        final_stop_reason = match reason.as_str() {
-                            "tool_use" => StopReason::ToolUse,
-                            "max_tokens" => StopReason::MaxTokens,
-                            _ => StopReason::EndTurn,
-                        };
+                        final_stop_reason = anthropic_stop_reason(reason);
                     }
                     super::openai_family::accumulate_tool_call_deltas_pub(
                         &mut full_tool_calls,
@@ -334,6 +436,10 @@ impl LlmProvider for AnthropicProvider {
                     let stream_chunk = parsed_chunk_to_stream_chunk(&parsed);
                     on_chunk(stream_chunk);
                 }
+            }
+            // Drop the consumed prefix in place; no per-line allocation.
+            if start > 0 {
+                buffer.drain(..start);
             }
         }
 
@@ -372,9 +478,16 @@ impl LlmProvider for AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    fn parse_anthropic_stream_line(&self, line: &str) -> Result<Option<ParsedChunk>, LlmError> {
+    /// Parses one SSE line, using `current_event` to remember the last
+    /// `event:` line so subsequent `data:` lines can dispatch on the event
+    /// type. State is caller-supplied (a local in `complete_stream`) so
+    /// concurrent streams on the same shared provider don't race.
+    fn parse_anthropic_stream_line(
+        current_event: &mut Option<String>,
+        line: &str,
+    ) -> Result<Option<ParsedChunk>, LlmError> {
         if let Some(event_type) = line.strip_prefix("event: ") {
-            *self.current_event.lock().unwrap() = Some(event_type.to_string());
+            *current_event = Some(event_type.to_string());
             return Ok(Some(ParsedChunk::default()));
         }
 
@@ -388,7 +501,9 @@ impl AnthropicProvider {
             Err(_) => return Ok(Some(ParsedChunk::default())),
         };
 
-        let event_type = self.current_event.lock().unwrap().clone();
+        // Clone the event_type out to release the borrow on `current_event`
+        // before the match below.
+        let event_type = current_event.clone();
 
         match event_type.as_deref() {
             Some("message_start") => {
@@ -504,36 +619,45 @@ mod tests {
     use agent_types::LlmRequest;
 
     fn make_provider() -> AnthropicProvider {
+        make_provider_for_model("claude-sonnet-4-6")
+    }
+
+    fn make_provider_for_model(model: &str) -> AnthropicProvider {
         AnthropicProvider::new(
             Some("test-key".to_string()),
             "https://api.anthropic.com/v1".to_string(),
-            "claude-sonnet-4-6".to_string(),
+            model.to_string(),
             None,
         )
     }
 
     #[test]
     fn test_parse_content_block_delta() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().content, Some("Hello".to_string()));
     }
 
     #[test]
     fn test_parse_message_delta() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_delta")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_delta")
             .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let chunk = result.unwrap();
         assert_eq!(chunk.finish_reason, Some("end_turn".to_string()));
         assert!(chunk.usage.is_some());
@@ -542,15 +666,14 @@ mod tests {
 
     #[test]
     fn test_parse_message_start_usage() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_start")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_start")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(
-                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
-            )
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":21}}}"#,
+        )
+        .unwrap();
         let chunk = result.unwrap();
         assert!(chunk.usage.is_some());
         assert_eq!(chunk.usage.unwrap().prompt_tokens, 21);
@@ -580,25 +703,30 @@ mod tests {
 
     #[test]
     fn test_parse_message_stop() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: message_stop")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: message_stop")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"message_stop"}"#)
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"message_stop"}"#,
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_parse_input_json_delta_as_tool_call() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":\"Tok"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let chunk = result.unwrap();
         let tool_calls = chunk.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
@@ -611,13 +739,17 @@ mod tests {
 
     #[test]
     fn test_parse_content_block_stop() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_stop")
-            .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"content_block_stop","index":0}"#)
-            .unwrap();
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_stop",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -655,6 +787,47 @@ mod tests {
         assert_eq!(system[1]["text"], "# Context\n\nvolatile tail");
         assert!(system[1].get("cache_control").is_none());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_body_marks_last_two_messages_as_cache_breakpoints() {
+        let provider = make_provider();
+        let request = LlmRequest {
+            messages: vec![
+                agent_types::ChatMessage::system("base system"),
+                agent_types::ChatMessage::user("first question"),
+                agent_types::ChatMessage::assistant("first answer", 0),
+                agent_types::ChatMessage::user("second question"),
+                agent_types::ChatMessage::user(
+                    "<system-reminder>\n# Context\nper-turn state\n</system-reminder>",
+                ),
+            ],
+            tools: Vec::new(),
+            tool_choice: agent_types::ToolChoice::Auto,
+            max_tokens: None,
+            temperature: None,
+            response_format: agent_types::ResponseFormat::Text,
+            reasoning_effort: agent_types::ReasoningEffort::Off,
+        };
+
+        let body = provider.build_body(&request, false);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+
+        // Older history carries no breakpoint.
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert!(messages[1]["content"][0].get("cache_control").is_none());
+        // The last two messages do: the second-to-last lands on stable
+        // history (cache hit next turn); the last covers the ephemeral
+        // per-turn reminder tail.
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[3]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
@@ -708,14 +881,95 @@ mod tests {
     }
 
     #[test]
+    fn claude_5_capability_uses_known_context_window() {
+        let provider = make_provider_for_model("claude-sonnet-5");
+
+        assert_eq!(provider.capabilities.max_context_window, 1_000_000);
+    }
+
+    #[test]
+    fn sonnet_5_disables_thinking_when_reasoning_effort_is_off() {
+        let provider = make_provider_for_model("claude-sonnet-5");
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn fable_5_does_not_request_unsupported_disabled_thinking() {
+        let provider = make_provider_for_model("claude-fable-5");
+        let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+
+        let body = provider.build_body(&request, false);
+
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn claude_5_uses_adaptive_thinking_and_model_effort() {
+        let provider = make_provider_for_model("anthropic/claude-sonnet-5");
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = ReasoningEffort::Max;
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn claude_5_merges_structured_output_format_with_effort() {
+        let provider = make_provider_for_model("claude-fable-5");
+        let mut request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
+        request.reasoning_effort = ReasoningEffort::High;
+        request.response_format = agent_types::ResponseFormat::JsonSchema {
+            name: "answer".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string" } }
+            }),
+        };
+
+        let body = provider.build_body(&request, false);
+
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn refusal_maps_to_content_filter_and_uses_explanation_text() {
+        assert!(matches!(
+            anthropic_stop_reason("refusal"),
+            StopReason::ContentFilter
+        ));
+        let response = serde_json::json!({
+            "content": [],
+            "stop_reason": "refusal",
+            "stop_details": { "explanation": "I can't help with that request." }
+        });
+
+        assert_eq!(
+            anthropic_response_text(&response).as_deref(),
+            Some("I can't help with that request.")
+        );
+    }
+
+    #[test]
     fn test_parse_unknown_event() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: unknown_event")
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "event: unknown_event")
             .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line(r#"data: {"type":"unknown_event"}"#)
-            .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            r#"data: {"type":"unknown_event"}"#,
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -723,13 +977,17 @@ mod tests {
 
     #[test]
     fn test_parse_malformed_data() {
-        let provider = make_provider();
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider
-            .parse_anthropic_stream_line("data: invalid json")
-            .unwrap();
+        let mut current_event = None;
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "data: invalid json",
+        )
+        .unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -737,8 +995,9 @@ mod tests {
 
     #[test]
     fn test_parse_empty_line() {
-        let provider = make_provider();
-        let result = provider.parse_anthropic_stream_line("").unwrap();
+        let mut current_event = None;
+        let result =
+            AnthropicProvider::parse_anthropic_stream_line(&mut current_event, "").unwrap();
         assert!(result.is_some());
         let chunk = result.unwrap();
         assert!(chunk.content.is_none());
@@ -746,22 +1005,30 @@ mod tests {
 
     #[test]
     fn test_multiple_content_deltas() {
-        let provider = make_provider();
+        let mut current_event = None;
 
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.unwrap().content, Some("Hello".to_string()));
 
-        provider
-            .parse_anthropic_stream_line("event: content_block_delta")
-            .unwrap();
-        let result = provider.parse_anthropic_stream_line(
+        AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
+            "event: content_block_delta",
+        )
+        .unwrap();
+        let result = AnthropicProvider::parse_anthropic_stream_line(
+            &mut current_event,
             r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" World"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.unwrap().content, Some(" World".to_string()));
     }
 }

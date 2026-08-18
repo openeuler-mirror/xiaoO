@@ -11,12 +11,21 @@ use super::spec::DeclarativeToolSpec;
 /// A plugin tool source.
 pub struct PluginToolSource {
     workspace_root: Option<PathBuf>,
+    home_dir: Option<PathBuf>,
 }
 
 impl PluginToolSource {
     /// Creates a new plugin tool source.
     pub fn new(workspace_root: Option<PathBuf>) -> Self {
-        Self { workspace_root }
+        Self::with_home(workspace_root, std::env::var_os("HOME").map(PathBuf::from))
+    }
+
+    /// Creates a plugin tool source with an explicit home directory.
+    pub fn with_home(workspace_root: Option<PathBuf>, home_dir: Option<PathBuf>) -> Self {
+        Self {
+            workspace_root,
+            home_dir,
+        }
     }
 
     fn discovery_dirs(&self) -> Vec<PathBuf> {
@@ -30,8 +39,8 @@ impl PluginToolSource {
             dirs.push(workspace_root.join(".xiaoo").join("tools"));
         }
 
-        if let Some(home) = std::env::var_os("HOME") {
-            let home_tools = PathBuf::from(home).join(".xiaoo").join("tools");
+        if let Some(home) = &self.home_dir {
+            let home_tools = home.join(".xiaoo").join("tools");
             if !dirs.contains(&home_tools) {
                 dirs.push(home_tools);
             }
@@ -334,7 +343,7 @@ stdout = "text"
         .expect("manifest");
         std::fs::write(tools_dir.join("echo_payload.sh"), "cat\n").expect("script");
 
-        let source = PluginToolSource::new(Some(workspace.clone()));
+        let source = PluginToolSource::with_home(Some(workspace.clone()), None);
         let tools = source.discover();
         let echo_tool = tools
             .iter()
@@ -349,6 +358,7 @@ stdout = "text"
                     call_id: "call-1".to_string(),
                     tool_name: "echo_payload".to_string(),
                     input: json!({"message": "hello"}),
+                    ..Default::default()
                 },
                 &runtime,
             )
@@ -414,9 +424,7 @@ args = ["workspace"]
         )
         .expect("workspace manifest");
 
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &home_dir);
-        let source = PluginToolSource::new(Some(workspace.clone()));
+        let source = PluginToolSource::with_home(Some(workspace.clone()), Some(home_dir.clone()));
         let tools = source.discover();
 
         assert_eq!(
@@ -430,12 +438,6 @@ args = ["workspace"]
             "Workspace version",
             "Workspace tools should have priority over home tools"
         );
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
@@ -463,9 +465,7 @@ args = ["test"]
         )
         .expect("manifest");
 
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &dir);
-        let source = PluginToolSource::new(Some(dir.clone()));
+        let source = PluginToolSource::with_home(Some(dir.clone()), Some(dir.clone()));
         let tools = source.discover();
 
         assert_eq!(
@@ -474,11 +474,5 @@ args = ["test"]
             "Tool should only be discovered once when workspace == home"
         );
         assert_eq!(tools[0].spec.name().0, "unique_tool");
-
-        if let Some(home) = original_home {
-            std::env::set_var("HOME", home);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 }
