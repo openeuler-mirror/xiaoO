@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use agent_contracts::backend::capability::exec::{ExecRequest, ExecResult, OperationExec};
+use agent_contracts::backend::capability::exec::{
+    ExecRequest, ExecResult, LineSink, OperationExec,
+};
 use agent_contracts::backend::capability::export::{ExportFileRequest, OperationExport};
 use agent_contracts::backend::capability::filesystem::{
     OperationFileSystem, ReadBytesRequest, TempPathRequest, WriteBytesOutcome, WriteBytesRequest,
@@ -266,6 +268,16 @@ impl OperationExec for PermissionAwareExec {
             .await?;
             retries += 1;
         }
+        annotate_seatbelt_stderr(&mut result);
+        Ok(result)
+    }
+
+    async fn exec_streaming(
+        &self,
+        request: ExecRequest,
+        sink: Arc<dyn LineSink>,
+    ) -> Result<ExecResult, OperationError> {
+        let mut result = self.inner.exec().exec_streaming(request, sink).await?;
         annotate_seatbelt_stderr(&mut result);
         Ok(result)
     }
@@ -1011,6 +1023,7 @@ mod tests {
             stderr: b"cat: /Users/me/.ssh/config: Operation not permitted\n".to_vec(),
             exit_code: Some(1),
             timed_out: false,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -1101,6 +1114,7 @@ mod tests {
             stderr: b"cat: /data/secret.txt: No such file or directory\n".to_vec(),
             exit_code: Some(1),
             timed_out: false,
+            ..Default::default()
         };
 
         let denial = runtime_bubblewrap_denial(Some(&control), "cat /data/secret.txt", &result)
@@ -1122,6 +1136,7 @@ mod tests {
             stderr: b"cat: /missing/path.txt: No such file or directory\n".to_vec(),
             exit_code: Some(1),
             timed_out: false,
+            ..Default::default()
         };
 
         assert!(
@@ -1189,6 +1204,7 @@ mod tests {
             stderr: vec![],
             exit_code: None,
             timed_out: false,
+            ..Default::default()
         };
 
         assert!(is_silent_seatbelt_exec_denial(&result));
@@ -1264,6 +1280,7 @@ mod tests {
             stderr: vec![],
             exit_code: None,
             timed_out: true,
+            ..Default::default()
         };
 
         assert!(!is_silent_seatbelt_exec_denial(&result));

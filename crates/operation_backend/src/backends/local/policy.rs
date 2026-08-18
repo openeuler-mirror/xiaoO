@@ -1435,6 +1435,7 @@ mod tests {
             .windows(2)
             .any(|window| window == ["--mount", "/workspace/.tmp:rw"]));
         assert!(args.windows(2).any(|window| window == ["-c", "/workspace"]));
+        // test_isolated constructs LinuxDynsandbox with no_landlock=false.
         assert!(!args.iter().any(|arg| arg == "--no-landlock"));
     }
 

@@ -1,4 +1,6 @@
-use agent_contracts::backend::capability::exec::{ExecRequest, ExecResult, OperationExec};
+use agent_contracts::backend::capability::exec::{
+    ExecRequest, ExecResult, LineSink, OperationExec,
+};
 use agent_contracts::backend::capability::filesystem::{
     OperationFileSystem, ReadBytesRequest, TempPathRequest, WriteBytesOutcome, WriteBytesRequest,
 };
@@ -184,5 +186,18 @@ impl OperationExec for DirtyTrackedExec {
         let result = self.inner.exec().exec(request).await?;
         self.tracker.mark_dirty();
         Ok(result)
+    }
+
+    async fn exec_streaming(
+        &self,
+        request: ExecRequest,
+        sink: std::sync::Arc<dyn LineSink>,
+    ) -> Result<ExecResult, OperationError> {
+        // Delegate to the inner backend so a streaming-capable override
+        // (e.g. LocalExec) is actually used. DirtyTrackedExec wraps a
+        // session backend to track filesystem writes; line-streaming of
+        // stdout is read-only and doesn't itself dirty anything, so we
+        // skip `mark_dirty` here — non-streaming `exec` still marks it.
+        self.inner.exec().exec_streaming(request, sink).await
     }
 }
