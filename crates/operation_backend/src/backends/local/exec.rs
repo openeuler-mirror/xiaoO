@@ -4,7 +4,8 @@ use std::os::unix::process::CommandExt;
 
 use crate::backends::local::backend::LocalBackendState;
 use agent_contracts::backend::{
-    capability::{exec::ExecRequest, exec::ExecResult, OperationExec},
+    capability::exec::exec_streaming_via_exec,
+    capability::{exec::ExecRequest, exec::ExecResult, exec::LineSink, OperationExec},
     OperationError,
 };
 use agent_types::interaction::{InteractionRequest, InteractionResponse};
@@ -35,55 +36,13 @@ impl OperationExec for LocalExec {
     }
 
     async fn exec(&self, request: ExecRequest) -> Result<ExecResult, OperationError> {
-        let command_spec = build_command_spec(&request)?;
-        let command_cwd = if let Some(cwd) = request.cwd.as_ref() {
-            let cwd = self._state.backend_path_to_host(cwd)?;
-            self._state.policy.check_exec_cwd(cwd.as_path())?;
-            self._state.ensure_directory(cwd.as_path())?;
-            Some(cwd)
-        } else if self._state.policy.requires_exec_cwd() {
-            let cwd = self._state.workspace_root_host.clone();
-            self._state.policy.check_exec_cwd(cwd.as_path())?;
-            self._state.ensure_directory(cwd.as_path())?;
-            Some(cwd)
-        } else {
-            None
-        };
-
-        let mut command =
-            command_from_spec(&request, command_spec, &self._state.policy, command_cwd.as_deref());
-
-        if let Some(env_vars) = &request.env {
-            for (k, v) in env_vars {
-                command.env(k, v);
-            }
-        }
-
-        if let Some(cwd) = command_cwd {
-            command.current_dir(cwd);
-        }
-
         let stream_auth = self._state.policy.requires_stdin();
-        if stream_auth {
-            // dyn-sandbox's stdin doubles as the AUTH control channel: we must
-            // hold the pipe open to write `ALLOW\n`/`DENY\n` on demand.
-            command.stdin(std::process::Stdio::piped());
+        let stdin = if stream_auth {
+            std::process::Stdio::piped()
         } else {
-            command.stdin(std::process::Stdio::null());
-        }
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
-
-        let mut child = command
-            .spawn()
-            .map_err(|error| OperationError::ExecutionFailed {
-                message: error.to_string(),
-            })?;
+            std::process::Stdio::null()
+        };
+        let mut child = self.spawn_child(&request, stdin)?;
 
         #[cfg(unix)]
         let pgid = child.id().unwrap_or(0) as i32;
@@ -96,7 +55,8 @@ impl OperationExec for LocalExec {
         if stream_auth {
             tracing::info!(
                 "dyn-sandbox streaming exec start: pgid={} timeout_ms={:?}",
-                pgid, request.timeout_ms
+                pgid,
+                request.timeout_ms
             );
             let stdin = child
                 .stdin
@@ -161,11 +121,7 @@ impl OperationExec for LocalExec {
                 }
                 Err(_) => {
                     #[cfg(unix)]
-                    {
-                        crate::process_group::send_sigterm_to_group(pgid);
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                        crate::process_group::send_sigkill_to_group(pgid);
-                    }
+                    kill_process_group(pgid).await;
                     #[cfg(not(unix))]
                     {
                         let _ = child.kill().await;
@@ -214,7 +170,152 @@ impl OperationExec for LocalExec {
             stderr,
             exit_code,
             timed_out,
+            ..Default::default()
         })
+    }
+
+    /// Streaming variant of [`Self::exec`]. Reads stdout line-by-line
+    /// through `sink`; when the sink returns `false`, the child process
+    /// group is killed. The dyn-sandbox path falls back to
+    /// buffer-then-sink (AUTH stdin is incompatible with stdout streaming).
+    async fn exec_streaming(
+        &self,
+        request: ExecRequest,
+        sink: Arc<dyn LineSink>,
+    ) -> Result<ExecResult, OperationError> {
+        let stream_auth = self._state.policy.requires_stdin();
+        if stream_auth {
+            // dyn-sandbox doubles stdin as the AUTH control channel — can't
+            // stream stdout independently. Fall back to buffer-then-sink via
+            // the free function (NOT `OperationExec::exec_streaming(self, ...)`,
+            // which would recurse into this override).
+            return exec_streaming_via_exec(self, request, sink).await;
+        }
+
+        let mut child = self.spawn_child(&request, std::process::Stdio::null())?;
+
+        #[cfg(unix)]
+        let pgid = child.id().unwrap_or(0) as i32;
+        #[cfg(not(unix))]
+        let pgid: i32 = 0;
+        #[cfg(unix)]
+        if pgid > 0 {
+            crate::process_group::register_pgid(pgid);
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| OperationError::ExecutionFailed {
+                message: "failed to capture stdout".to_string(),
+            })?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| OperationError::ExecutionFailed {
+                message: "failed to capture stderr".to_string(),
+            })?;
+
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut stderr_task = spawn_pipe_drainer(stderr, stderr_buf.clone());
+
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+
+        let mut stopped_early = false;
+        let line_loop = async {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if !sink.on_line(&line) {
+                            stopped_early = true;
+                            break;
+                        }
+                    }
+                    Ok(None) => break, // EOF
+                    Err(_) => break,   // pipe error — child likely dead
+                }
+            }
+        };
+
+        let (exit_code, timed_out) = if let Some(timeout_ms) = request.timeout_ms {
+            match timeout(Duration::from_millis(timeout_ms), line_loop).await {
+                Ok(_) => {
+                    if stopped_early {
+                        kill_process_group(pgid).await;
+                    }
+                    let status = reap_child(&mut child, pgid).await;
+                    #[cfg(unix)]
+                    crate::process_group::unregister_pgid(pgid);
+                    (status.ok().and_then(|s| s.code()), false)
+                }
+                Err(_) => {
+                    kill_process_group(pgid).await;
+                    let _ = child.wait().await;
+                    #[cfg(unix)]
+                    crate::process_group::unregister_pgid(pgid);
+                    (None, true)
+                }
+            }
+        } else {
+            line_loop.await;
+            if stopped_early {
+                kill_process_group(pgid).await;
+            }
+            let status = reap_child(&mut child, pgid).await;
+            #[cfg(unix)]
+            crate::process_group::unregister_pgid(pgid);
+            (status.ok().and_then(|s| s.code()), false)
+        };
+
+        let _ = timeout(DRAIN_GRACE, &mut stderr_task).await;
+        stderr_task.abort();
+
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(|e| e.into_inner()));
+
+        Ok(ExecResult {
+            stdout: Vec::new(),
+            stderr,
+            exit_code,
+            timed_out,
+            stopped_early,
+        })
+    }
+}
+
+/// Kill the child's process group. On Unix: SIGTERM, brief grace, SIGKILL.
+/// On non-Unix: no-op (caller must `child.kill()` separately).
+async fn kill_process_group(pgid: i32) {
+    #[cfg(unix)]
+    {
+        crate::process_group::send_sigterm_to_group(pgid);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        crate::process_group::send_sigkill_to_group(pgid);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+    }
+}
+
+/// Reap the child with a bounded wait. If it doesn't exit within
+/// `DRAIN_GRACE` (e.g. a background process holds stdout open), kill
+/// the process group and reap unconditionally.
+async fn reap_child(
+    child: &mut tokio::process::Child,
+    pgid: i32,
+) -> std::io::Result<std::process::ExitStatus> {
+    match timeout(DRAIN_GRACE, child.wait()).await {
+        Ok(s) => s,
+        Err(_) => {
+            #[cfg(unix)]
+            kill_process_group(pgid).await;
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill().await;
+            }
+            child.wait().await
+        }
     }
 }
 
@@ -225,6 +326,55 @@ struct AuthEvent {
 }
 
 impl LocalExec {
+    /// Build the command (spec, cwd, env, stdio, process group) and spawn
+    /// the child. Shared by `exec` and `exec_streaming` to avoid divergence.
+    fn spawn_child(
+        &self,
+        request: &ExecRequest,
+        stdin: std::process::Stdio,
+    ) -> Result<tokio::process::Child, OperationError> {
+        let command_spec = build_command_spec(request)?;
+        let command_cwd = if let Some(cwd) = request.cwd.as_ref() {
+            let cwd = self._state.backend_path_to_host(cwd)?;
+            self._state.policy.check_exec_cwd(cwd.as_path())?;
+            self._state.ensure_directory(cwd.as_path())?;
+            Some(cwd)
+        } else if self._state.policy.requires_exec_cwd() {
+            let cwd = self._state.workspace_root_host.clone();
+            self._state.policy.check_exec_cwd(cwd.as_path())?;
+            self._state.ensure_directory(cwd.as_path())?;
+            Some(cwd)
+        } else {
+            None
+        };
+        let mut command = command_from_spec(
+            request,
+            command_spec,
+            &self._state.policy,
+            command_cwd.as_deref(),
+        );
+        if let Some(env_vars) = &request.env {
+            for (k, v) in env_vars {
+                command.env(k, v);
+            }
+        }
+        if let Some(cwd) = &command_cwd {
+            command.current_dir(cwd);
+        }
+        command.stdin(stdin);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+        command
+            .spawn()
+            .map_err(|error| OperationError::ExecutionFailed {
+                message: error.to_string(),
+            })
+    }
+
     /// Streaming execution for dyn-sandbox: the sandbox keeps the process alive
     /// and emits `AUTH_REQ:filename:path` on stderr when it blocks an operation.
     /// We read stderr line-by-line, prompt via the attached auth interaction,
@@ -282,7 +432,8 @@ impl LocalExec {
                             };
                             tracing::info!(
                                 "dyn-sandbox AUTH_REQ received: filename={} path={}",
-                                filename, path
+                                filename,
+                                path
                             );
                             if auth_tx.send(event).await.is_err() {
                                 break;
@@ -336,7 +487,8 @@ impl LocalExec {
                     timed_out = true;
                     tracing::warn!(
                         "dyn-sandbox exec timed out (timeout_ms={:?}), killing process group {}",
-                        timeout_ms, pgid
+                        timeout_ms,
+                        pgid
                     );
                     Self::kill_process_group(&mut child, pgid).await;
                     break;
@@ -405,6 +557,7 @@ impl LocalExec {
             stderr,
             exit_code,
             timed_out,
+            ..Default::default()
         })
     }
 
@@ -420,7 +573,8 @@ impl LocalExec {
         let Some(interaction) = interaction else {
             tracing::warn!(
                 "dyn-sandbox auto-deny (no auth interaction attached): filename={} path={}",
-                filename, path
+                filename,
+                path
             );
             return b"DENY\n".to_vec();
         };
@@ -435,9 +589,9 @@ impl LocalExec {
             })
             .await;
         match response {
-            InteractionResponse::Choice {
-                value: Some(value),
-            } if value == "Allow" => b"ALLOW\n".to_vec(),
+            InteractionResponse::Choice { value: Some(value) } if value == "Allow" => {
+                b"ALLOW\n".to_vec()
+            }
             _ => b"DENY\n".to_vec(),
         }
     }
@@ -954,7 +1108,11 @@ mod linux_dynsandbox_tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = runtime.block_on(linux_dynsandbox_exec_bash(backend.as_ref(), workspace, command));
+        let result = runtime.block_on(linux_dynsandbox_exec_bash(
+            backend.as_ref(),
+            workspace,
+            command,
+        ));
         let prompts = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let _ = std::fs::remove_dir_all(root.as_path());
         (result, prompts)
@@ -964,7 +1122,8 @@ mod linux_dynsandbox_tests {
     fn linux_dynsandbox_streaming_allows_blocked_path() {
         let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "allow");
         let workspace = root.join("workspace");
-        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
+        let (result, prompts) =
+            linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
 
         assert_eq!(result.exit_code, Some(0));
         assert!(
@@ -985,7 +1144,8 @@ mod linux_dynsandbox_tests {
     fn linux_dynsandbox_streaming_denies_on_user_choice() {
         let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "deny");
         let workspace = root.join("workspace");
-        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
+        let (result, prompts) =
+            linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
 
         assert_eq!(result.exit_code, Some(0));
         assert!(
@@ -994,6 +1154,104 @@ mod linux_dynsandbox_tests {
             String::from_utf8_lossy(result.stdout.as_slice())
         );
         assert_eq!(prompts.len(), 1);
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    /// Regression test for the UFCS recursion bug in `exec_streaming`:
+    /// when `policy.requires_stdin()` is true (LinuxDynsandbox
+    /// isolation), the override used to call
+    /// `OperationExec::exec_streaming(self, request, sink)` — UFCS that
+    /// resolves to `<LocalExec as OperationExec>::exec_streaming` (this
+    /// same override), not the trait's default impl. Result: infinite
+    /// recursion → stack overflow on every `exec_streaming` call under
+    /// dyn-sandbox isolation. The existing streaming tests above use
+    /// `exec()` (not `exec_streaming()`), so they didn't cover the
+    /// fallback branch.
+    ///
+    /// With the fix, the override calls `exec_streaming_via_exec`
+    /// (free function), which delegates to `exec()` (the AUTH-aware
+    /// override) and feeds buffered stdout through the sink.
+    #[test]
+    fn linux_dynsandbox_exec_streaming_does_not_recurse() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        install_fake_linux_dynsandbox();
+        let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "stream-norecurse");
+        let workspace = root.join("workspace");
+        let writable = workspace.join("tmp");
+        std::fs::create_dir_all(writable.as_path()).unwrap();
+
+        let backend = linux_dynsandbox_backend(workspace.to_path_buf(), writable);
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        backend.attach_interaction(Arc::new(ScriptedInteraction {
+            allow: true,
+            prompts: prompts.clone(),
+        }));
+
+        // Sink that collects every line it sees, never asks to stop.
+        // Under the bug, `exec_streaming` would recurse before any line
+        // reached the sink — so an empty `seen` + a process exit is the
+        // first observable symptom of the stack-overflow path.
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        struct CollectAll {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl super::LineSink for CollectAll {
+            // LineSink::on_line is sync — no async needed.
+            fn on_line(&self, line: &str) -> bool {
+                self.seen.lock().unwrap().push(line.to_string());
+                true
+            }
+        }
+        let sink: Arc<dyn super::LineSink> = Arc::new(CollectAll { seen: seen.clone() });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            // Hard ceiling so a re-introduced recursion doesn't hang
+            // the test suite forever — the original bug would spin
+            // until the OS killed the process for OOM/stack overflow.
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(backend.exec().exec_streaming(
+                ExecRequest {
+                    command: "cat /etc/shadow".to_string(),
+                    args: vec![],
+                    shell: Some("bash".to_string()),
+                    cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                    timeout_ms: Some(5_000),
+                    ..Default::default()
+                },
+                sink,
+            ))
+            .unwrap();
+
+        // The fake dyn-sandbox script echoes "verdict:ALLOW" on stdout
+        // after the AUTH handshake. The sink must have seen it — proves
+        // we reached the buffer-then-sink fallback instead of recursing.
+        let seen_guard = seen.lock().unwrap();
+        assert!(
+            seen_guard.iter().any(|line| line.contains("verdict:ALLOW")),
+            "sink must have received the verdict line; got {seen_guard:?}"
+        );
+
+        // Output ownership contract: `exec_streaming_via_exec` clears
+        // stdout unconditionally (the sink owns collected state).
+        assert!(
+            result.stdout.is_empty(),
+            "exec_streaming result.stdout must be empty (sink owns state); got {} bytes",
+            result.stdout.len()
+        );
+        assert!(!result.stopped_early, "sink never returned false");
+        assert_eq!(result.exit_code, Some(0));
+
+        // AUTH handshake still fired once — proves the fallback used
+        // `exec()` (the AUTH-aware override), not some non-AUTH path.
+        let prompts_guard = prompts.lock().unwrap();
+        assert_eq!(prompts_guard.len(), 1, "AUTH prompt must fire exactly once");
+
         let _ = std::fs::remove_dir_all(root.as_path());
     }
 
@@ -1026,28 +1284,27 @@ mod linux_dynsandbox_tests {
             .build()
             .expect("runtime");
         let start = std::time::Instant::now();
-        let result = runtime
-            .block_on(async {
-                let mut child = Command::new("sh")
-                    .arg("-c")
-                    .arg("exec 2>&-; sleep 5")
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .process_group(0)
-                    .spawn()
-                    .expect("spawn child");
-                let pgid = child.id().unwrap_or(0) as i32;
-                if pgid > 0 {
-                    crate::process_group::register_pgid(pgid);
-                }
-                let stdin = child.stdin.take().expect("stdin");
-                let stdout = child.stdout.take().expect("stdout");
-                let stderr = child.stderr.take().expect("stderr");
-                exec.exec_linux_dynsandbox(Some(500), child, stdin, stdout, stderr, pgid)
-                    .await
-                    .expect("exec_linux_dynsandbox")
-            });
+        let result = runtime.block_on(async {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("exec 2>&-; sleep 5")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("spawn child");
+            let pgid = child.id().unwrap_or(0) as i32;
+            if pgid > 0 {
+                crate::process_group::register_pgid(pgid);
+            }
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            exec.exec_linux_dynsandbox(Some(500), child, stdin, stdout, stderr, pgid)
+                .await
+                .expect("exec_linux_dynsandbox")
+        });
         let elapsed = start.elapsed();
 
         assert!(
@@ -1090,32 +1347,31 @@ mod linux_dynsandbox_tests {
             .enable_all()
             .build()
             .expect("runtime");
-        let result = runtime
-            .block_on(async {
-                let mut child = Command::new("sh")
-                    .arg("-c")
-                    .arg(
-                        "printf '\\377\\376\\377\\n' >&2; printf 'ok-line\\n' >&2; \
+        let result = runtime.block_on(async {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(
+                    "printf '\\377\\376\\377\\n' >&2; printf 'ok-line\\n' >&2; \
                          echo 'AUTH_REQ:shadow:/etc/shadow' >&2; IFS= read -r resp; \
                          echo \"verdict:$resp\"",
-                    )
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .process_group(0)
-                    .spawn()
-                    .expect("spawn child");
-                let pgid = child.id().unwrap_or(0) as i32;
-                if pgid > 0 {
-                    crate::process_group::register_pgid(pgid);
-                }
-                let stdin = child.stdin.take().expect("stdin");
-                let stdout = child.stdout.take().expect("stdout");
-                let stderr = child.stderr.take().expect("stderr");
-                exec.exec_linux_dynsandbox(Some(5_000), child, stdin, stdout, stderr, pgid)
-                    .await
-                    .expect("exec_linux_dynsandbox")
-            });
+                )
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("spawn child");
+            let pgid = child.id().unwrap_or(0) as i32;
+            if pgid > 0 {
+                crate::process_group::register_pgid(pgid);
+            }
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            exec.exec_linux_dynsandbox(Some(5_000), child, stdin, stdout, stderr, pgid)
+                .await
+                .expect("exec_linux_dynsandbox")
+        });
 
         assert_eq!(result.exit_code, Some(0), "stderr={:?}", result.stderr);
         assert_eq!(
@@ -1141,6 +1397,7 @@ mod linux_dynsandbox_tests {
 mod pipe_drain_tests {
     use crate::backends::local::factory::local_backend;
     use agent_contracts::backend::{capability::exec::ExecRequest, BackendPath};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     // Regression test for the stdout-pipe deadlock: a background process spawned
@@ -1241,6 +1498,181 @@ mod pipe_drain_tests {
         assert!(out.contains("done"), "stdout was: {out:?}");
         assert!(out.contains("bg-1"), "stdout was: {out:?}");
         assert!(out.contains("bg-3"), "stdout was: {out:?}");
+
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    // Streaming exec + line sink that returns `false` after N lines must
+    // (a) kill the child process group, (b) set `stopped_early = true`,
+    // (c) not buffer the remaining N+1..∞ lines into memory. This is the
+    // upstream throttle that bounds runaway `rg`/`grep` output before it
+    // ever reaches the downstream truncation layer in `agent_loop.rs`.
+    //
+    // We use `seq 1 1_000_000` as the producer (one million lines, takes
+    // seconds to fully emit) and a sink that stops after 5 lines. The
+    // streaming exec must return well before the producer finishes
+    // (otherwise this test would take seconds).
+    struct FiveLineCollector {
+        kept: Mutex<Vec<String>>,
+    }
+    impl super::LineSink for FiveLineCollector {
+        fn on_line(&self, line: &str) -> bool {
+            let mut guard = self.kept.lock().unwrap();
+            if guard.len() >= 5 {
+                return false;
+            }
+            guard.push(line.to_string());
+            true
+        }
+    }
+
+    #[test]
+    fn exec_streaming_kills_child_when_sink_returns_false() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-stream-", "kill");
+        let workspace = root.join("workspace");
+
+        let backend =
+            local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let collector = Arc::new(FiveLineCollector {
+            kept: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn super::LineSink> = Arc::clone(&collector) as Arc<dyn super::LineSink>;
+
+        let start = Instant::now();
+        let result = runtime.block_on(async {
+            backend
+                .exec()
+                .exec_streaming(
+                    ExecRequest {
+                        // `seq 1 1000000` emits a million lines over a few
+                        // seconds. If streaming + early kill works, we return
+                        // immediately after 5 lines.
+                        command: "seq 1 1000000".to_string(),
+                        args: vec![],
+                        shell: Some("bash".to_string()),
+                        cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                        timeout_ms: Some(30_000), // generous upper bound; we expect to return way before
+                        ..Default::default()
+                    },
+                    sink,
+                )
+                .await
+                .unwrap()
+        });
+        let elapsed = start.elapsed();
+
+        // Sink asked for early termination — flag must be set.
+        assert!(
+            result.stopped_early,
+            "stopped_early must be true when the sink returned false; got {result:?}"
+        );
+
+        // We must NOT have hit the overall timeout — that's the whole
+        // point of streaming + early kill.
+        assert!(
+            !result.timed_out,
+            "must not time out; expected to kill child after 5 lines"
+        );
+
+        // Bounded wall-clock: a million lines take seconds to emit
+        // fully. The early-kill path should return in well under a
+        // second (5 lines + process-group teardown ~300ms grace).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "exec_streaming took {elapsed:?}, expected to return within seconds after early kill"
+        );
+
+        // Sink collected exactly 5 lines (the cap), no more — i.e. the
+        // remaining 999,995 lines were never read into memory.
+        let guard = collector.kept.lock().unwrap();
+        assert_eq!(
+            guard.len(),
+            5,
+            "collector must hold exactly 5 lines, got {}",
+            guard.len()
+        );
+        assert_eq!(guard[0], "1");
+        assert_eq!(guard[4], "5");
+
+        // stdout in the result is empty — the sink owns collected state,
+        // streaming bypassed the buffering.
+        assert!(
+            result.stdout.is_empty(),
+            "streaming result.stdout must be empty (sink owns state); got {} bytes",
+            result.stdout.len()
+        );
+
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    // Streaming exec with a sink that never returns `false` (consumer
+    // wants everything) must behave like the non-streaming `exec` —
+    // exit code is the child's natural exit, `stopped_early = false`,
+    // and the sink sees every line in order.
+    struct AllLinesCollector {
+        kept: Mutex<Vec<String>>,
+    }
+    impl super::LineSink for AllLinesCollector {
+        fn on_line(&self, line: &str) -> bool {
+            self.kept.lock().unwrap().push(line.to_string());
+            true
+        }
+    }
+
+    #[test]
+    fn exec_streaming_drains_to_eof_when_sink_never_stops() {
+        let _guard = crate::process_group::process_group_test_lock()
+            .lock()
+            .unwrap();
+        let root = super::test_workspace_root("xiaoo-stream-", "eof");
+        let workspace = root.join("workspace");
+
+        let backend =
+            local_backend(workspace.clone(), None, None, Some("bash".to_string())).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let collector = Arc::new(AllLinesCollector {
+            kept: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn super::LineSink> = Arc::clone(&collector) as Arc<dyn super::LineSink>;
+
+        let result = runtime.block_on(async {
+            backend
+                .exec()
+                .exec_streaming(
+                    ExecRequest {
+                        command: "printf 'a\\nb\\nc\\n'".to_string(),
+                        args: vec![],
+                        shell: Some("bash".to_string()),
+                        cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                        timeout_ms: Some(5_000),
+                        ..Default::default()
+                    },
+                    sink,
+                )
+                .await
+                .unwrap()
+        });
+
+        // Child exited naturally → exit_code 0, no early kill.
+        assert_eq!(result.exit_code, Some(0));
+        assert!(!result.stopped_early);
+        assert!(!result.timed_out);
+
+        // Sink observed all 3 lines in order.
+        let guard = collector.kept.lock().unwrap();
+        assert_eq!(*guard, vec!["a", "b", "c"]);
 
         let _ = std::fs::remove_dir_all(root.as_path());
     }

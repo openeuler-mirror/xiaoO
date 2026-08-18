@@ -164,12 +164,14 @@ impl LocalBackendPolicy {
             } => {
                 if !cfg!(target_os = "linux") {
                     return Err(OperationBackendBuildError::Unsupported {
-                        message: "linux_dynsandbox isolation is only supported on Linux".to_string(),
+                        message: "linux_dynsandbox isolation is only supported on Linux"
+                            .to_string(),
                     });
                 }
                 if !linux_dynsandbox_available() {
                     return Err(OperationBackendBuildError::Unsupported {
-                        message: "linux_dynsandbox isolation requires dyn-sandbox in PATH".to_string(),
+                        message: "linux_dynsandbox isolation requires dyn-sandbox in PATH"
+                            .to_string(),
                     });
                 }
                 let roots = build_path_isolation_config(
@@ -302,7 +304,9 @@ impl LocalBackendPolicy {
                 }
                 Some(MacosSeatbeltProfile::from_config_and_grants(config, grants))
             }
-            LocalIsolationConfig::LinuxBubblewrap(_) | LocalIsolationConfig::LinuxDynsandbox(_) => None,
+            LocalIsolationConfig::LinuxBubblewrap(_) | LocalIsolationConfig::LinuxDynsandbox(_) => {
+                None
+            }
         }
     }
 
@@ -459,7 +463,9 @@ impl LocalBackendPolicy {
             LocalIsolationConfig::None => None,
             LocalIsolationConfig::MacosSeatbelt(config) => Some(("macos_seatbelt", config)),
             LocalIsolationConfig::LinuxBubblewrap(config) => Some(("linux_bubblewrap", config)),
-            LocalIsolationConfig::LinuxDynsandbox(options) => Some(("linux_dynsandbox", &options.roots)),
+            LocalIsolationConfig::LinuxDynsandbox(options) => {
+                Some(("linux_dynsandbox", &options.roots))
+            }
         }
     }
 
@@ -1435,9 +1441,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|window| window == ["--mount", "/workspace/.tmp:rw"]));
-        assert!(args
-            .windows(2)
-            .any(|window| window == ["-c", "/workspace"]));
+        assert!(args.windows(2).any(|window| window == ["-c", "/workspace"]));
         // test_isolated constructs LinuxDynsandbox with no_landlock=false.
         assert!(!args.iter().any(|arg| arg == "--no-landlock"));
     }
