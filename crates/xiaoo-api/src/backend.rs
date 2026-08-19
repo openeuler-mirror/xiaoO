@@ -15,11 +15,11 @@
 //! 属深度集成。
 //!
 //! 其余管理面（`list`、`BackendInfo`、`BackendListFilter`、E2B bootstrap 工具族）
-//! 是 daemon 独有（`refactor.md` §3.5），不导出。
+//! 是 daemon 独有，不导出。
 //!
 //! ## GatewayBackendConfig
 //!
-//! [`GatewayBackendConfig::new(kind, options)`]：`kind ∈ {"local", "e2b", "conch"}`，
+//! [`GatewayBackendConfig::new(kind, options)`]：`kind ∈ {"local", "e2b"}`，
 //! `options` 为 provider 专属键值（E2B 的 api_key_env / template 等）。xiaoo
 //! 的 sandbox 切换对话框用它构造，经 [`crate::host::SessionOptions::backend`]
 //! 传入。

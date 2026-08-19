@@ -1,9 +1,9 @@
 //! `TurnHandle` / `TurnEvent` / `InteractionResponder` / `TurnOptions`。
 //!
 //! 【L0 门面层】一轮对话的流式句柄与事件流。事件词汇与远程 SSE 模型
-//! （§3.4.3）对齐，本地/远程消费代码可以共用。
+//! 对齐，本地/远程消费代码可以共用。
 //!
-//! 提炼自 endside 现有代码（按 §3.3.8 映射表逐行对照）：
+//! 提炼自 endside 现有代码（逐行对照）：
 //! - 通道适配 ⇐ `session_sink.rs` / `session_interaction.rs` / `cli/mod.rs:50-107`
 //! - 文本快照 → 增量 diff 逻辑 ⇐ `CliEventSink`（`cli/mod.rs:50-107`）
 //! - `InteractionResponder` 缺省应答语义 ⇐ `ChannelInteractionHandle`（`session_interaction.rs:143-150`）
@@ -36,7 +36,7 @@ use xiaoo_shared::plan::SpawnSubagentMetadata;
 /// 计算，不进 API；本地 TUI 靠前端反解析）。需要 plan/diff 的调用方从 `Tool`
 /// 事件用 [`crate::plan::todo_snapshot_from_tool_args`] /
 /// [`crate::diff::file_change_delta_from_tool_args`]（L1）反解析——与现状一致。
-/// `#[non_exhaustive]` 预留 `PlanUpdate` / `FileChange` 变体（§7.4 治理后由内核
+/// `#[non_exhaustive]` 预留 `PlanUpdate` / `FileChange` 变体（未来由内核
 /// 产出），届时与 SSE 模型对齐。
 ///
 /// ## hook_actions 不自动执行
@@ -98,7 +98,13 @@ pub enum TurnEvent {
         meta: SpawnSubagentMetadata,
     },
     /// 本轮收尾摘要（`LoopEndSummary`）。终值仍以 [`TurnHandle::result`] 为准。
+    ///
+    /// `agent_id` 标识收尾 agent 的泳道。该字段不可缺省：若用空值填充，TUI
+    /// 桥接函数会让子泳道 `is_running` 永不归位。现与 `RuntimeSseEvent::LoopEnd`
+    /// 对齐，由 sink 适配器从 `on_loop_end` 的 `agent_id` 参数透出真实值。
     End {
+        /// 收尾 agent 的泳道 id；`None` 表示未知。
+        agent_id: Option<AgentId>,
         /// 收尾摘要。
         summary: LoopEndSummary,
     },
@@ -133,7 +139,7 @@ impl InteractionResponder {
 
 /// 一轮对话的流式句柄：事件流 + 取消 + 追加输入 + 结果。
 ///
-/// ## 并发与生命周期（§3.3.7）
+/// ## 并发与生命周期
 ///
 /// - **单消费者**：`next_event(&mut self)` 同一时刻只能一个调用方持有 `&mut`。
 /// - `cancel` / `queue_input` 用 `&self`，可从事件循环外并发触发。
@@ -147,7 +153,7 @@ impl InteractionResponder {
 /// 本 API 以 endside `session_sink.rs` 现有通道实现为基准——使用
 /// `tokio::sync::mpsc::unbounded_channel`（**无界**）。生产者（agent 内核
 /// sink 回调）不反压消费者（`next_event`）；消费方读取慢时事件在通道中
-/// 无界积压。这是 endside 现有行为，本 API 与现状一致（§3.3.5 背压纪律）。
+/// 无界积压。这是 endside 现有行为，本 API 与现状一致（背压纪律）。
 pub struct TurnHandle {
     /// 事件通道接收端。直接持有（非 Mutex），`next_event(&mut self)` 独占访问。
     pub(crate) event_rx: Option<mpsc::UnboundedReceiver<TurnEvent>>,
@@ -159,14 +165,24 @@ pub struct TurnHandle {
     pub(crate) task_handle: Option<
         tokio::task::JoinHandle<Result<AppTurnResult, SessionServiceError>>,
     >,
-    /// 同会话单活动 turn 锁（§3.3.7）。drop TurnHandle 时释放锁。
+    /// 同会话单活动 turn 锁。drop TurnHandle 时释放锁。
     pub(crate) _active_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
 impl TurnHandle {
-    /// 取下一条事件；turn 终止后返回 `None`。事件顺序与内核 sink 回调顺序一致。
+    /// 取下一条事件。事件顺序与内核 sink 回调顺序一致。
     ///
-    /// `&mut self` 签名在类型层面强制单消费者（§3.3.7）。
+    /// 返回 `None` 的条件：当事件通道的所有发送端被 drop 时返回 `None`。但消费方
+    /// **不可依赖此条件退出循环**——`AppBootstrap::from_session_components_…`
+    /// spawn 的 orphan reaper 后台任务持有 `Arc<CoreBackedSessionService>` → 持有
+    /// `runtime_resolver` → 持有 `bindings` → 持有 sink 适配器 → 持有 `event_tx`
+    /// 克隆，**只要 deps 还活着通道就永不关闭**，`next_event()` 永不返回 `None`。
+    ///
+    /// 正确模式：消费方在收到 [`TurnEvent::End`] 后立即 `break` 并调
+    /// [`result()`](Self::result)，**不要**用 `while let Some(ev) = next_event().await`
+    /// 等通道关闭——这会让循环永不退出。
+    ///
+    /// `&mut self` 签名在类型层面强制单消费者。
     pub async fn next_event(&mut self) -> Option<TurnEvent> {
         match &mut self.event_rx {
             Some(rx) => rx.recv().await,
@@ -174,8 +190,7 @@ impl TurnHandle {
         }
     }
 
-    /// 请求取消本轮（触发 `CancellationToken`，语义同
-    /// `SessionInput::CancelActiveTurn`）。取消结果经 `result()` 返回
+    /// 请求取消本轮（触发 `CancellationToken`）。取消结果经 `result()` 返回
     /// （沿用底层 `run_turn_with_interaction` 的取消语义）。
     pub fn cancel(&self) {
         self.cancel_token.cancel();

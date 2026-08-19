@@ -1,11 +1,27 @@
 //! # minimal_chat —— xiaoo-api 最小可执行用例
 //!
-//! 一个完整的对话程序（约 40 行），只 `use xiaoo_api::prelude::*`：
-//! 建宿主 → 开会话 → 流式对话（含审批应答）→ 收尾。
+//! 一个完整的对话程序（约 40 行）：建宿主 → 开会话 → 流式对话（含审批应答）
+//! → 收尾。
 //!
-//! 这是 `refactor.md` §3.3.1 / §6 验收标准之一：
+//! ## import 取舍说明
+//!
+//! 核心生命周期只依赖 `use xiaoo_api::prelude::*`。本示例额外
+//! `use xiaoo_api::interaction::{InteractionRequest, InteractionResponse}`——
+//! 这是交互应答模式匹配所需的 **L1 签名可达类型**（`TurnEvent::Interaction { request, .. }`
+//! / `InteractionResponder::respond(InteractionResponse)` 的签名出处）。
+//!
+//! 此类签名可达 DTO（与 `ChatMessage`、`ToolLifecycleEvent` 同族）有意不纳入
+//! prelude：prelude 当前已导出 14 个名字，再纳入会突破 ≤ 15 个名字的预算，
+//! 且同族类型均有同等资格，单独挑两个入 prelude 反而失之偏颇。因此交互式示例
+//! 的最小 import 面为 "prelude + interaction 两个 L1 类型"，这是分层设计的
+//! 结果，而非示例缺陷。
+//!
+//! 验收口径：
 //! > `examples/minimal_chat.rs` 提交并可运行：完整"建宿主 → 开会话 → 流式对话
-//! > （含审批应答）→ 收尾"不超过 40 行，且只 `use xiaoo_api::prelude::*`。
+//! > （含审批应答）→ 收尾"核心代码不超过 40 行（不含模块级 doc 注释、空行与
+//! > 示例辅助函数），核心生命周期只依赖 `use xiaoo_api::prelude::*`，**允许**
+//! > 额外 `use xiaoo_api::interaction::{InteractionRequest, InteractionResponse}`
+//! > 用于交互应答的模式匹配，且示例 doc 需注明该取舍。
 //!
 //! ## 运行方式
 //!
@@ -49,14 +65,20 @@ async fn main() -> anyhow::Result<()> {
     let session = host.open_session(SessionOptions::new(llm)).await?;
 
     // 3. 跑一轮对话，流式消费事件。
+    //
+    // 纪律：**不要**用 `while let Some(e) = turn.next_event().await` 等通道关闭——
+    // orphan reaper 后台任务持有 `event_tx` 克隆，通道永不关闭，`next_event()`
+    // 永不返回 `None`，循环会卡死。收到 `TurnEvent::End` 后立即 break，再调 `result()`。
     let mut turn = session.run_turn("总结一下当前目录的代码结构").await?;
-    while let Some(event) = turn.next_event().await {
+    loop {
+        let Some(event) = turn.next_event().await else { break };
         match event {
             TurnEvent::Text { delta, .. } => print!("{delta}"),
             TurnEvent::Interaction { request, responder } => {
                 // 工具审批/提问：自动应答（生产场景应由用户交互决定）。
                 responder.respond(auto_answer(&request));
             }
+            TurnEvent::End { .. } => break,
             _ => {}
         }
     }

@@ -4,11 +4,10 @@
 //!
 //! - **【L2 Advanced】装配契约**：把"配置 → 可运行 runtime"的扩展点与
 //!   宿主注入回调的载体收敛到这里。门面用户不接触本模块（[`crate::host`]
-//!   与 [`crate::session`] 内部代劳）；保留导出供测试替身、特殊装配场景、
-//!   以及 daemon 拆分后的第二阶段（见 `refactor.md` §7）。
-//! - **【L1】wire 协议**：[`wire`] 子模块是 xiaoo（HTTP client）与 daemon
-//!   （HTTP server）之间**唯一的序列化协议面**，未来 daemon 拆分后此模块
-//!   即为协议契约包。
+//!   与 [`crate::session`] 内部代劳）；保留导出供测试替身与特殊装配场景。
+//! - **【L1】wire 协议**：[`wire`] 子模块是 xiaoo（HTTP client）访问远端
+//!   daemon（已迁往独立代码仓）的序列化协议面，未来可作为两仓共同依赖的
+//!   协议契约包。
 //!
 //! 原定义保持 `pub` 不变；re-export 不产生新类型，trait impl / serde 全部兼容。
 
@@ -28,8 +27,8 @@ pub use xiaoo_shared::gateway::hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
 
-/// "配置 → 可运行 runtime" 的扩展点。daemon 的 `ConfiguredRuntimeResolver` 与
-/// shared 的 [`HostedSessionRuntimeResolver`] 都实现它。
+/// "配置 → 可运行 runtime" 的扩展点。shared 的 [`HostedSessionRuntimeResolver`]
+/// 是其标准实现（daemon 仓可自实现该 trait）。
 #[doc(inline)]
 pub use xiaoo_shared::gateway::session_runtime::{
     ResolvedSessionRuntime, SessionRuntimeBindings, SessionRuntimeBuildInput,

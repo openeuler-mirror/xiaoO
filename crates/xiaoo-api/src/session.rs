@@ -12,6 +12,14 @@ pub use xiaoo_shared::gateway::session_service::{
     SessionControlPlane, SessionService, SessionServiceError,
 };
 
+/// 租约心跳判定的陈旧阈值（毫秒）。
+///
+/// 本常量在 `apps/endside/src/gateway_api/http_timeouts.rs` 的 rustdoc 链接中
+/// 被引用，先经本模块 re-export，再让 endside 把 doc-link 改为
+/// `crate::api::session::…`。
+#[doc(inline)]
+pub use xiaoo_shared::gateway::STALE_LEASE_THRESHOLD_MS;
+
 // ---- 会话存储（实现偏 L2：门面用户经 host.session_store() 取得）----
 #[doc(inline)]
 pub use xiaoo_shared::gateway::session_store::{
@@ -22,8 +30,7 @@ pub use xiaoo_shared::gateway::session_store::{
 #[doc(inline)]
 pub use xiaoo_shared::gateway::session_base::{
     channel_session_id, SessionCancelRequest, SessionCloseRequest, SessionDetachRequest,
-    SessionForkRequest, SessionForkResult, SessionHeartbeatRequest, SessionInput,
-    SessionInputKind, SessionInteractionRequest, SessionOpenRequest, SessionSubmitReceipt,
+    SessionHeartbeatRequest, SessionInteractionRequest, SessionOpenRequest,
 };
 
 #[doc(inline)]

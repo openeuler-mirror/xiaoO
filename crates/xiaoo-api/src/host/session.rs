@@ -4,7 +4,7 @@
 //! HostedSessionRuntimeConfig)`。`send` / `run_turn` / `run_turn_with` /
 //! `update_options` / `export` / `close` 在本阶段全部落地。
 //!
-//! 提炼纪律：对照 `refactor.md` §3.3.4 / §3.3.8，**不新增行为**。
+//! 提炼纪律：**不新增行为**。
 
 use std::sync::Arc;
 
@@ -25,8 +25,13 @@ use xiaoo_shared::gateway::bootstrap::AppBootstrap;
 /// 会话句柄：绑定 `session_id` 与派生时缓存的 `(SessionOpenRequest,
 /// HostedSessionRuntimeConfig)`。
 ///
-/// 内部持 `Arc`，`Clone` 廉价；同会话单活动 turn（§3.3.7）。`close(self)` 显式
-/// 关闭；drop 不隐式关闭。本地模式租约主体即本进程，调用方无需心跳。
+/// 内部持 `Arc`，`Clone` 廉价；同一会话同时只允许一个活动 turn。`close(self)`
+/// 显式关闭；drop 不隐式关闭。本地模式租约主体即本进程，调用方无需心跳。
+///
+/// `#[derive(Clone)]` 落实 "Clone（内部 Arc）" 语义：内部仅一个
+/// `Arc<SessionInner>` 字段，派生即正确实现；TUI 等需要持有同一 `Session`
+/// 多个句柄引用的场景可直接 clone。
+#[derive(Clone)]
 pub struct Session {
     inner: Arc<SessionInner>,
 }
@@ -39,7 +44,7 @@ struct SessionInner {
     open_request: tokio::sync::Mutex<SessionOpenRequest>,
     /// 派生时缓存的 `HostedSessionRuntimeConfig`。`update_options` 会替换它。
     runtime_config: tokio::sync::Mutex<HostedSessionRuntimeConfig>,
-    /// 单活动 turn 锁（§3.3.7：同一 Session 同时只允许一个活动 turn）。
+    /// 单活动 turn 锁（同一 Session 同时只允许一个活动 turn）。
     /// `Arc<Mutex<>>` 让 `lock_owned()` 返回 `OwnedMutexGuard` 可移动到 TurnHandle。
     active_turn: Arc<tokio::sync::Mutex<()>>,
 }
@@ -113,7 +118,7 @@ impl Session {
         text: impl Into<String>,
         options: TurnOptions,
     ) -> Result<TurnHandle, SessionServiceError> {
-        // 同会话单活动 turn（§3.3.7）—— 持锁到 turn 结束。锁在 `TurnHandle`
+        // 同会话单活动 turn—— 持锁到 turn 结束。锁在 `TurnHandle`
         // 被 drop 时释放（`_active_guard` 持有 `OwnedMutexGuard` 直到 TurnHandle
         // 消亡）。
         //
@@ -181,8 +186,8 @@ impl Session {
                 Ok(d) => d,
                 Err(e) => {
                     // bootstrap 失败：event_tx drop 后 receiver 返回 None；
-                    // result() 返回 Err。不通过 event 流传递错误（§3.3.5 无
-                    // Error 变体）。
+                    // result() 返回 Err。不通过 event 流传递错误（TurnEvent
+                    // 无 Error 变体）。
                     return Err(SessionServiceError::RuntimeBuild {
                         message: e.to_string(),
                     });
@@ -212,7 +217,7 @@ impl Session {
         })
     }
 
-    /// 更新会话配置（重新执行 §3.3.3 派生），下一轮 turn 生效。
+    /// 更新会话配置（重新执行派生），下一轮 turn 生效。
     /// 覆盖场景：TUI 运行中切模型、切 sandbox backend。
     pub async fn update_options(&self, options: SessionOptions) -> Result<(), SessionServiceError> {
         let (open_request, runtime_config) = options.derive().await?;
