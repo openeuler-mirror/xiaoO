@@ -4,9 +4,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-mod daemon_sinks;
-pub use daemon_sinks::{DiffComputingLoopSink, DiffComputingToolSink, SessionDiffForwarder};
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionFileChangeStats {
     pub additions: u32,

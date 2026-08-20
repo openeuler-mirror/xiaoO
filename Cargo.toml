@@ -2,7 +2,9 @@
 members = [
     "apps/shared",
     "apps/endside",
-    "apps/serverside",
+    # xiaoo-daemon (apps/serverside) is no longer built. Source kept under
+    # apps/serverside/ but excluded from the workspace so it is not compiled.
+    # "apps/serverside",
     "apps/vault",
     "crates/llm-client",
     "crates/llm-client-cli",

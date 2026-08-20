@@ -1,7 +1,7 @@
 //! 阶段 2.1 测试：派生 helper 行为快照 + 派生结果字段对照。
 //!
 //! 覆盖：
-//! - skills 4 级优先级解析（§阶段 2.1 行为快照，对照
+//! - skills 4 级优先级解析（行为快照，对照
 //!   `support/config.rs:330-370` 与 `cli/entry.rs:340-436` 两份合一）
 //! - context window 解析链（对照 `support/config.rs:560-571` 与
 //!   `cli/mod.rs:182-195` 两份合一）
@@ -321,7 +321,7 @@ mod derive_field_by_field {
     use xiaoo_shared::gateway::GatewayEntryKind;
 
     /// 最小 SessionOptions（无 API key，ollama provider）派生应成功。
-    /// 验证默认值与 §3.3.3 派生规则表一致。
+    /// 验证默认值与派生规则表一致。
     #[tokio::test]
     async fn minimal_options_derive_defaults() {
         let options = SessionOptions::new(
@@ -367,7 +367,7 @@ mod derive_field_by_field {
         );
         // api_key 在 descriptor 中始终为 None（实际 key 在 HostedSessionRuntimeConfig.api_key）
         assert!(llm_in_descriptor.api_key.is_none());
-        // system_prompt 默认空字符串（与 §3.3.3 一致；endside 翻译层负责注入）
+        // system_prompt 默认空字符串；endside 翻译层负责注入
         assert!(runtime_config.descriptor.system_prompt.is_empty());
         // feature_flags 默认（tool_execution=true 等）
         assert!(runtime_config.descriptor.feature_flags.tool_execution);
@@ -387,7 +387,7 @@ mod derive_field_by_field {
         // max_turns 默认 None（用内核默认）
         assert!(runtime_config.descriptor.max_turns.is_none());
 
-        // ---- subagent_roles：默认含内置 plan 角色（§3.3.3 派生规则）----
+        // ---- subagent_roles：默认含内置 plan 角色（派生规则）----
         assert!(runtime_config.subagent_roles.contains_key(PLAN_AGENT_ID));
         let plan_entry = runtime_config
             .subagent_roles
@@ -429,9 +429,9 @@ mod derive_field_by_field {
         // hooker 默认空（enabled/disabled/policies/plugins 全空）
         assert!(runtime_config.hooker.enabled.is_empty());
         assert!(runtime_config.hooker.disabled.is_empty());
-        // lsp_registry 默认 None（§3.3.3：缺省不启用）
+        // lsp_registry 默认 None（缺省不启用）
         assert!(runtime_config.lsp_registry.is_none());
-        // operation_backend 默认 None（§3.3.3：由 backend() 显式传入）
+        // operation_backend 默认 None（由 backend() 显式传入）
         assert!(runtime_config.operation_backend.is_none());
         // skills_config 走四级优先级解析
         assert!(!runtime_config.skills_config.skills_dirs.is_empty());
@@ -646,7 +646,7 @@ mod derive_field_by_field {
 }
 
 // ===========================================================================
-// LocalSessionHost + Session 生命周期（对照 §3.3.2 / §3.3.4 / §3.3.8）
+// LocalSessionHost + Session 生命周期
 // ===========================================================================
 
 mod host_lifecycle {
@@ -699,7 +699,7 @@ mod host_lifecycle {
             Ok(_) => panic!("open_session with unknown provider should fail"),
             Err(e) => e,
         };
-        // 派生失败折叠进 SessionServiceError::RuntimeBuild（§3.3.6）
+        // 派生失败折叠进 SessionServiceError::RuntimeBuild
         let msg = err.to_string();
         assert!(
             msg.contains("provider") || msg.contains("Provider"),
@@ -912,10 +912,41 @@ mod host_lifecycle {
         // （get_decrypted_api_key 会回退到 env var）
         let _ = host;
     }
+
+    /// `Session` 实现 `Clone`：clone 后两个句柄 `id()` 一致、共享同一活动 turn
+    /// 锁——验证 clone 后任一句柄未持有的 turn 锁不会阻塞另一句柄开新 turn
+    /// （内部 `Arc<SessionInner>` 共享 `active_turn`）。
+    #[tokio::test]
+    async fn session_clone_shares_inner() {
+        let host = LocalSessionHost::builder()
+            .build()
+            .await
+            .expect("host build should succeed");
+
+        let options = SessionOptions::new(
+            LlmOptions::new("ollama", "qwen2.5:7b")
+                .api_base("http://localhost:11434")
+                .context_window(8192),
+        );
+        let session = host
+            .open_session(options)
+            .await
+            .expect("open_session should succeed");
+
+        // clone：id 一致
+        let cloned = session.clone();
+        assert_eq!(session.id(), cloned.id());
+
+        // drop 克隆句柄不应影响原句柄（验证 Arc 共享语义）
+        drop(cloned);
+        assert!(!session.id().is_empty());
+
+        host.shutdown(Duration::from_secs(1)).await;
+    }
 }
 
 // ===========================================================================
-// TurnHandle / TurnEvent / run_turn / run_turn_with（对照 §3.3.5）
+// TurnHandle / TurnEvent / run_turn / run_turn_with
 // ===========================================================================
 
 mod turn_handle_lifecycle {
@@ -963,7 +994,7 @@ mod turn_handle_lifecycle {
 
     /// `run_turn` 不持锁过久：drop TurnHandle 后立即可再开 turn。
     ///
-    /// 验证 §3.3.7 "drop TurnHandle 不取消 turn，但释放 active_turn 锁"。
+    /// 验证 "drop TurnHandle 不取消 turn，但释放 active_turn 锁"。
     #[tokio::test]
     async fn drop_turn_handle_releases_active_turn_lock() {
         let host = LocalSessionHost::builder()
@@ -1027,23 +1058,32 @@ mod turn_handle_lifecycle {
         assert!(opts.entry.is_some());
     }
 
-    /// `TurnEvent::End` 不含 `agent_id` 字段（§3.3.5 文档要求）。
-    /// 编译期检查：End variant 的字段结构。
+    /// `TurnEvent::End` 携带 `agent_id` 字段。缺失该字段会导致 TUI 子泳道
+    /// `is_running` 永不归位。
     #[test]
-    fn turn_event_end_variant_has_no_agent_id() {
+    fn turn_event_end_variant_carries_agent_id() {
+        use agent_types::common::ids::AgentId;
         let summary = agent_types::events::LoopEndSummary {
             turn_count: 1,
             total_tokens: 100,
             stop_reason: "complete".to_string(),
         };
-        let event = TurnEvent::End { summary };
-        // 模式匹配验证字段结构
+        let agent_id = AgentId("agent-1".to_string());
+        let event = TurnEvent::End {
+            agent_id: Some(agent_id.clone()),
+            summary,
+        };
+        // 模式匹配验证字段结构：End 必须携带 agent_id。
         match event {
-            TurnEvent::End { summary } => {
+            TurnEvent::End {
+                agent_id: Some(aid),
+                summary,
+            } => {
+                assert_eq!(aid, agent_id);
                 assert_eq!(summary.turn_count, 1);
                 assert_eq!(summary.stop_reason, "complete");
             }
-            _ => unreachable!(),
+            _ => unreachable!("expected End with agent_id"),
         }
     }
 
@@ -1228,9 +1268,15 @@ mod turn_handle_lifecycle {
         // 应有 ToolResult + End 两个事件
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], TurnEvent::ToolResult { .. }));
-        // End 不含 agent_id（§3.3.5）
+        // End 携带 agent_id；sink 从 on_loop_end 的 agent_id 透出。
         match &events[1] {
-            TurnEvent::End { summary } => assert_eq!(summary.turn_count, 1),
+            TurnEvent::End {
+                agent_id,
+                summary,
+            } => {
+                assert!(agent_id.is_some(), "End should carry agent_id");
+                assert_eq!(summary.turn_count, 1);
+            }
             _ => panic!("expected End event"),
         }
     }
@@ -1297,7 +1343,7 @@ mod turn_handle_lifecycle {
 }
 
 // ===========================================================================
-// DummyProvider 全生命周期测试（对照 §阶段 2.5：build → open → run_turn →
+// DummyProvider 全生命周期测试：build → open → run_turn →
 // 事件消费 → close → shutdown）
 // ===========================================================================
 
@@ -1424,22 +1470,38 @@ mod dummy_lifecycle {
             .await
             .expect("run_turn should return TurnHandle");
 
-        // 消费事件流——期望至少一个 Text delta + End
+        // 消费事件流——期望至少一个 Text delta + End。
+        //
+        // 纪律：orphan reaper 持有 `event_tx` 克隆，通道永不关闭，
+        // `next_event()` 不保证返回 `None`。**收到 `TurnEvent::End` 后立即
+        // break**，不依赖通道关闭或 timeout 退出——原实现用
+        // `while let Ok(Some(e)) = timeout_at(..., next_event())` 等 timeout 到期，
+        // 每次测试浪费 10s（通道不关闭，循环靠 timeout 才退出）。
         let mut got_text = false;
         let mut got_end = false;
-        // 加超时以防 DummyProvider 路径意外卡住
+        // 保留外层 timeout 防止 DummyProvider 路径意外卡住（不应发生，但兜底）。
         let timeout = tokio::time::Duration::from_secs(10);
         let deadline = tokio::time::Instant::now() + timeout;
-        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, turn.next_event()).await {
+        loop {
+            let Ok(Some(event)) = tokio::time::timeout_at(deadline, turn.next_event()).await
+            else {
+                break;
+            };
             match event {
                 TurnEvent::Text { delta, .. } => {
                     assert!(!delta.is_empty());
                     got_text = true;
                 }
                 TurnEvent::AssistantSnapshot { .. } => { /* 也应产生 */ }
-                TurnEvent::End { summary } => {
+                TurnEvent::End {
+                    agent_id,
+                    summary,
+                } => {
+                    assert!(agent_id.is_some(), "End should carry agent_id");
                     assert!(summary.turn_count >= 1);
                     got_end = true;
+                    // 收到 End 立即 break，不等通道关闭。
+                    break;
                 }
                 _ => { /* 其它事件（Tool/ToolResult 等）可能不产生 */ }
             }

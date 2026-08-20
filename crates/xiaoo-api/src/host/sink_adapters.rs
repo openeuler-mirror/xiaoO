@@ -6,7 +6,7 @@
 //! - `ChannelPendingUserMessages`（`session.rs:146-235`）
 //! - `CliEventSink` 的文本快照 → 增量 diff 逻辑（`cli/mod.rs:50-107`）
 //!
-//! 背压语义（§3.3.5）：本 API 不另行发明语义，以 endside 现有 `session_sink.rs`
+//! 背压语义：本 API 不另行发明语义，以 endside 现有 `session_sink.rs`
 //! 的通道实现为基准——使用 `tokio::sync::mpsc::unbounded_channel`（**无界**），
 //! send 失败（receiver 已 drop）静默丢弃（`let _ = ... .send(...)`）。无界
 //! 通道意味着生产者（agent 内核 sink 回调）不会反压消费者（`TurnHandle::next_event`），
@@ -38,7 +38,7 @@ use super::turn_handle::{InteractionResponder, TurnEvent};
 /// 快照做 char-boundary-aware 切片得到 `Text` delta；agent 切换时 reset 长度
 /// 但 delta 仍为全文（与现状一致）。
 ///
-/// 同时透出 `AssistantSnapshot`（§3.3.5：与 `Text` 增量二选一消费）。
+/// 同时透出 `AssistantSnapshot`（与 `Text` 增量二选一消费）。
 pub(crate) struct InternalLoopEventSink {
     event_tx: mpsc::UnboundedSender<TurnEvent>,
     state: Mutex<LoopSinkState>,
@@ -67,7 +67,7 @@ impl InternalLoopEventSink {
 
 impl LoopEventSink for InternalLoopEventSink {
     fn on_turn_start(&self, _agent_id: &AgentId, _turn: u32) {
-        // §3.3.5 无 TurnStart 变体；仅重置 assistant/thinking 流状态
+        // TurnEvent 无 TurnStart 变体；仅重置 assistant/thinking 流状态
         // （同 agent 的下一 turn 也算"新流"，下次 on_assistant_message 走全文 delta）。
         if let Ok(mut state) = self.state.lock() {
             state.active_assistant_agent = None;
@@ -99,7 +99,7 @@ impl LoopEventSink for InternalLoopEventSink {
             });
         }
 
-        // AssistantSnapshot（§3.3.5：原样透出，供需要完整消息形态的渲染方使用）
+        // AssistantSnapshot（原样透出，供需要完整消息形态的渲染方使用）
         let message = ChatMessage {
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text {
@@ -139,7 +139,7 @@ impl LoopEventSink for InternalLoopEventSink {
                 delta,
             });
         }
-        // §3.3.5 无 ThinkingSnapshot 变体；不透出快照形态。
+        // TurnEvent 无 ThinkingSnapshot 变体；不透出快照形态。
 
         state.active_thinking_agent = Some(agent_id.0.clone());
         state.last_thinking_text_len = text.len();
@@ -156,9 +156,10 @@ impl LoopEventSink for InternalLoopEventSink {
         });
     }
 
-    fn on_loop_end(&self, _agent_id: &AgentId, summary: &LoopEndSummary) {
-        // §3.3.5 End 变体无 agent_id 字段（与其它变体不同），按文档对齐。
+    fn on_loop_end(&self, agent_id: &AgentId, summary: &LoopEndSummary) {
+        // End 变体携带 agent_id（缺失会导致子泳道 is_running 不归位）。
         let _ = self.event_tx.send(TurnEvent::End {
+            agent_id: Some(agent_id.clone()),
             summary: summary.clone(),
         });
     }
@@ -171,7 +172,7 @@ impl LoopEventSink for InternalLoopEventSink {
 /// `ToolEventSink` → `TurnEvent::Tool` 适配器。
 ///
 /// `ToolLifecycleEvent` 的 `AgentScoped` 变体携带 agent_id；非 scoped 的事件
-/// agent_id 为 `None`（§3.3.5：`Option<AgentId>`）。
+/// agent_id 为 `None`（类型为 `Option<AgentId>`）。
 pub(crate) struct InternalToolEventSink {
     event_tx: mpsc::UnboundedSender<TurnEvent>,
 }

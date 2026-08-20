@@ -2,19 +2,14 @@
 //!
 //! 【L1 支撑类型层；v1.2 落地】
 //!
-//! 现状问题：daemon 在 `apps/serverside/src/httpserver/sse_sink.rs` 手工拼
-//! JSON 事件，xiaoo 在 `apps/endside/src/gateway_api/remote.rs` 与
-//! `cli/entry.rs` 两处手工解析——协议存在但没有共享类型，双方靠字符串
-//! 字段名隐式耦合。
+//! 本模块提供强类型模型 [`RuntimeSseEvent`]，是 xiaoo（HTTP client）消费
+//! daemon SSE 流的**客户端协议面**。字段名/结构与 daemon 的 `SseStreamEvent`
+//! 序列化逐字段对齐（对齐基线：daemon 移出本仓前的
+//! `apps/serverside/src/httpserver/sse_sink.rs:20-129`）。
+//! daemon（服务端/生产者侧）已迁往独立代码仓；本仓只保留反序列化消费方。
 //!
-//! 本模块提供强类型模型 [`RuntimeSseEvent`]，**字段名/结构与 daemon 现有
-//! 序列化逐字段对齐**（对照 `apps/serverside/src/httpserver/sse_sink.rs:20-129`
-//! 的 `SseStreamEvent`）。daemon 侧代码**不改**（C-1/C-5）；本模块当前由
-//! xiaoo 客户端用于反序列化，daemon 拆分后应改用本模块序列化，使协议
-//! 单点定义（§7）。
-//!
-//! 事件词汇与门面 [`crate::host::TurnEvent`]（§3.3.5）对齐——远程 Session
-//! 实现（§7）把 `RuntimeSseEvent` 1:1 映射为 `TurnEvent`。
+//! 事件词汇与门面 [`crate::host::TurnEvent`] 语义对齐——远程 Session 实现
+//! 把 `RuntimeSseEvent` 语义映射为 `TurnEvent`。
 //!
 //! ## 兼容性纪律
 //!
@@ -28,21 +23,17 @@
 //!   `detail` / `actions` / `turn_count` / `total_tokens` / `stop_reason`
 //!   等backward-compat 字段。
 
-use agent_types::common::ids::AgentId;
-use agent_types::events::{ToolLifecycleEvent, ToolResultEvent};
 use agent_types::hook::HookAction;
 use agent_types::interaction::InteractionRequest;
 use agent_types::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
-use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUpdate};
-use xiaoo_shared::session_diff::FileChangeDelta;
+use xiaoo_shared::plan::TodoSnapshotItem;
 
 /// SSE 流中的一条事件。`agent_id` 区分主 Agent 与 Subagent 泳道。
 ///
-/// 字段名/结构与 daemon `SseStreamEvent`（`apps/serverside/src/httpserver/
-/// sse_sink.rs:20-129`）逐字段对齐——daemon 序列化什么，本类型就反序列化
-/// 什么。本类型同时实现 `Serialize` 以便 daemon 拆分后改用本模块序列化
-/// （§7），届时协议单点定义。
+/// 字段名/结构与 daemon `SseStreamEvent` 逐字段对齐——daemon 序列化什么，
+/// 本类型就反序列化什么。本类型同时实现 `Serialize`，供 daemon 仓未来
+/// 复用本模块序列化，届时协议单点定义。
 //
 // 字段不单独写 rustdoc：每个变体的 doc 已说明语义，字段名与 daemon
 // wire 契约逐字段对齐（serde 表示即文档）。允许 missing_docs 以避免
@@ -166,152 +157,6 @@ pub enum ToolCallStatus {
     Failed,
     /// Tool args were rejected by the policy layer before execution.
     Denied,
-}
-
-// ---- 便利构造器（对照 daemon 侧 forwarder 们）----
-//
-// 这些构造器把高层语义类型（`ToolResultEvent` / `ToolLifecycleEvent` /
-// `FileChangeDelta` / `TodoSnapshotUpdate` / `SpawnSubagentMetadata`）
-// 转成 wire 形态的 `RuntimeSseEvent`。daemon 拆分后应改用这些构造器
-// 而非 `SseStreamEvent`，届时协议单点定义（§7）。
-
-impl RuntimeSseEvent {
-    /// 从 `ToolResultEvent` 构造 wire 形态的 `ToolResult` 事件。
-    /// 对照 daemon `SseLoopEventSink::on_tool_result`（`sse_sink.rs:253-262`）。
-    pub fn from_tool_result(agent_id: &AgentId, event: &ToolResultEvent) -> Self {
-        Self::ToolResult {
-            agent_id: agent_id.0.clone(),
-            call_id: event.call_id.clone(),
-            tool_name: event.tool_name.clone(),
-            output_preview: event.output_preview.clone(),
-            is_error: event.is_error,
-            args_preview: event.args_preview.clone(),
-        }
-    }
-
-    /// 从 `ToolLifecycleEvent` 构造 wire 形态的 `ToolCall` 事件。
-    /// 仅 `Running`/`Pending` 状态转发；终态返回 `None`（对照 daemon
-    /// `SseToolEventSink::emit`，`sse_sink.rs:471-494`）。
-    pub fn from_tool_lifecycle(
-        event: ToolLifecycleEvent,
-        fallback_agent_id: AgentId,
-    ) -> Option<Self> {
-        let (agent_id, call_id, tool_name, args_preview, status, detail) =
-            flatten_tool_lifecycle(event, fallback_agent_id);
-        // 跳过终态——后续 ToolResult 事件承载（对照 daemon 实现）
-        if status != ToolCallStatus::Running {
-            return None;
-        }
-        Some(Self::ToolCall {
-            agent_id: agent_id.0,
-            call_id,
-            tool_name,
-            args_preview,
-            status,
-            detail,
-        })
-    }
-
-    /// 从 `FileChangeDelta` 构造 wire 形态的 `ToolFileChange` 事件。
-    /// 对照 daemon `SseDeltaForwarder::forward_delta`（`sse_sink.rs:307-316`）。
-    pub fn from_file_change_delta(call_id: &str, delta: FileChangeDelta) -> Self {
-        Self::ToolFileChange {
-            call_id: call_id.to_string(),
-            file_path: delta.file_path,
-            additions: delta.additions,
-            deletions: delta.deletions,
-        }
-    }
-
-    /// 从 `TodoSnapshotUpdate` 构造 wire 形态的 `PlanUpdate` 事件。
-    /// 对照 daemon `SsePlanForwarder::forward_plan`（`sse_sink.rs:332-339`）。
-    pub fn from_plan_update(update: TodoSnapshotUpdate) -> Self {
-        Self::PlanUpdate {
-            title: update.title,
-            items: update.items,
-        }
-    }
-
-    /// 从 `SpawnSubagentMetadata` 构造 wire 形态的 `SubagentSpawn` 事件。
-    /// 对照 daemon `SseSubagentMetaForwarder::forward_subagent_meta`
-    /// （`sse_sink.rs:355-365`）。
-    pub fn from_subagent_meta(meta: SpawnSubagentMetadata) -> Self {
-        Self::SubagentSpawn {
-            agent_id: meta.agent_id,
-            parent_agent_id: meta.parent_agent_id,
-            title: meta.title,
-            description: meta.description,
-            task_goal: meta.task_goal,
-        }
-    }
-}
-
-/// 递归解包 `AgentScoped` 层并提取 wire-format 字段。
-/// 对照 daemon `sse_sink.rs:400-464` 的 `flatten_tool_lifecycle`。
-fn flatten_tool_lifecycle(
-    event: ToolLifecycleEvent,
-    fallback_agent_id: AgentId,
-) -> (AgentId, String, String, String, ToolCallStatus, String) {
-    match event {
-        ToolLifecycleEvent::AgentScoped { agent_id, event } => {
-            flatten_tool_lifecycle(*event, agent_id)
-        }
-        ToolLifecycleEvent::Pending {
-            call_id,
-            tool_name,
-            args_preview,
-        }
-        | ToolLifecycleEvent::Running {
-            call_id,
-            tool_name,
-            args_preview,
-        } => (
-            fallback_agent_id,
-            call_id,
-            tool_name,
-            args_preview,
-            ToolCallStatus::Running,
-            String::new(),
-        ),
-        ToolLifecycleEvent::Completed {
-            call_id,
-            tool_name,
-            args_preview,
-        } => (
-            fallback_agent_id,
-            call_id,
-            tool_name,
-            args_preview,
-            ToolCallStatus::Completed,
-            String::new(),
-        ),
-        ToolLifecycleEvent::Failed {
-            call_id,
-            tool_name,
-            error,
-            args_preview,
-        } => (
-            fallback_agent_id,
-            call_id,
-            tool_name,
-            args_preview,
-            ToolCallStatus::Failed,
-            error,
-        ),
-        ToolLifecycleEvent::Denied {
-            call_id,
-            tool_name,
-            reason,
-            args_preview,
-        } => (
-            fallback_agent_id,
-            call_id,
-            tool_name,
-            args_preview,
-            ToolCallStatus::Denied,
-            reason,
-        ),
-    }
 }
 
 /// 解析一行 SSE `data:` 载荷。

@@ -1,10 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-mod daemon_sinks;
-pub use daemon_sinks::{
-    PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
-};
-
 /// Display status of a single todo item in the TUI's plan panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

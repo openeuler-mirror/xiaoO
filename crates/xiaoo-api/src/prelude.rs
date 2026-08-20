@@ -10,12 +10,12 @@
 //! - `TurnHandle` / `TurnEvent` / `TurnOptions` / `InteractionResponder`
 //! - 签名直接需要的 `AppTurnResult` / `SessionRecord` / `SessionServiceError`
 //!
-//! 导出面共 14 个名字，达到 §3.2 设计的 ≤ 15 个名字目标。
+//! 导出面共 14 个名字，达到 ≤ 15 个名字的设计目标
+//! （占位类型 `SessionOptionsError` 已删除，回落 14 名）。
 
 pub use crate::host::{
     HostBuildError, InteractionResponder, LocalSessionHost, LocalSessionHostBuilder, LlmOptions,
-    SecretsInit, Session, SessionOptions, SessionOptionsError, TurnEvent, TurnHandle,
-    TurnOptions,
+    SecretsInit, Session, SessionOptions, TurnEvent, TurnHandle, TurnOptions,
 };
 
 // 签名直接需要的支撑类型（来自 L1 层，调用方在写完整程序时会触达）。

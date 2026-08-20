@@ -4,7 +4,7 @@
 //! 记忆自动化连接、密钥 provider），并暴露 `open_session` / `shutdown` 主入口。
 //! 一个进程通常只建一个 host；多会话共享同一 host。
 //!
-//! 提炼纪律：逐行对照 `refactor.md` §3.3.8 的门面 → 现有实现映射表，**不新增行为**。
+//! 提炼纪律：逐行对照门面 → 现有实现的映射表，**不新增行为**。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,15 +33,15 @@ use super::options::SessionOptions;
 ///   返回 `None`（无 provider），派生自动回退到 provider 惯例环境变量。
 ///   适用于进程未配置加密密钥、直接读环境变量的场景。
 /// - `WithProvider { path, use_sdf }`：调用
-///   [`crate::secrets::init_secret_provider`](init_secret_provider) 初始化全局 provider，
+///   [`crate::secrets::init_secret_provider`] 初始化全局 provider，
 ///   `path` 指向 `llm_secrets.json`。SDF/TEE 场景设 `use_sdf = true`。
 /// - `Inherit`：进程已自行初始化（或测试替身），host 不再初始化。行为同 `OnDemand`，
 ///   但语义上声明"已初始化"，便于调用方文档化其约定。
 ///
-/// **与 §3.3.2 的差异**：原文 `OnDemand` 描述为 `init_on_demand_secret_provider`，
-/// 该函数需要一个 `config_path` 才能定位 `llm_secrets.json`，而 `OnDemand` 无字段。
-/// 本实现选择"不显式初始化"作为缺省语义——这是最不会出错的默认（不会因为没有
-/// 配置文件而报错），调用方需要密钥加密时改用 `WithProvider { path, use_sdf }`。
+/// **设计取舍**：`OnDemand` 不持有 `config_path` 字段，因此无法直接定位
+/// `llm_secrets.json`。本实现选择"不显式初始化"作为缺省语义——这是最不会
+/// 出错的默认（不会因为没有配置文件而报错），调用方需要密钥加密时改用
+/// `WithProvider { path, use_sdf }`。
 #[derive(Debug, Clone)]
 pub enum SecretsInit {
     /// 不显式初始化（缺省）。`get_decrypted_api_key` 返回 `None`，
@@ -66,7 +66,7 @@ impl Default for SecretsInit {
 
 /// `LocalSessionHostBuilder::build` 的失败原因。
 ///
-/// §3.3.6：本类型为 host 构建阶段的独立错误；派生类失败折叠进
+/// 本类型为 host 构建阶段的独立错误；派生类失败折叠进
 /// `SessionServiceError`。`LocalSessionHost::open_session` / `Session::send` 等
 /// 后续操作的失败统一用 `SessionServiceError` 表达。
 #[derive(Debug, Error)]
@@ -86,11 +86,11 @@ pub enum HostBuildError {
 /// 进程级资源容器：会话存储、backend 管理器、hooker 注册表、记忆自动化连接、
 /// 密钥 provider。
 ///
-/// 一个进程通常只建一个 [`LocalSessionHost`]；多会话共享同一 host（§3.3.7）。
+/// 一个进程通常只建一个 [`LocalSessionHost`]；多会话共享同一 host。
 /// `shutdown` 后既有 `Session` 句柄的调用返回 `SessionServiceError`（会话不存在）。
 ///
 /// 提炼自 endside 现有代码：`cli/entry.rs:1053-1077`、`session_core.rs:33-71`、
-/// `session_core.rs:315-349`、`session_core.rs:73-146`（按 §3.3.8 映射表逐行对照）。
+/// `session_core.rs:315-349`、`session_core.rs:73-146`（逐行对照）。
 pub struct LocalSessionHost {
     pub(crate) inner: Arc<HostInner>,
 }
@@ -121,7 +121,7 @@ impl LocalSessionHost {
 
     /// 打开（或按 `options.session_id` 幂等复用 / 恢复）会话，返回会话句柄。
     ///
-    /// 内部：`SessionOptions` 派生（§3.3.3）→ `HostedSessionRuntimeResolver` 构造
+    /// 内部：`SessionOptions` 派生 → `HostedSessionRuntimeResolver` 构造
     /// （per-open，empty bindings）→ `AppBootstrap` → `control_plane.open_session`
     /// （对照 endside `session_core.rs:49-71`、`297-313`）。返回的 `Session` 缓存
     /// `(open_request, runtime_config)` 供后续 turn 使用。
@@ -233,6 +233,11 @@ impl LocalSessionHost {
     }
 
     // ---- Advanced 访问器（L2；深度集成/测试用）----
+    //
+    // 注：本组不提供 `service()` 访问器。host 级只经 `lifecycle_only` 持有 noop
+    // `SessionService`（仅能 force_close，不能 run_turn——run_turn 走 per-turn
+    // bootstrap）。需要直接触达 `SessionService` 的调用方用
+    // `Session::run_turn_raw`（advanced 直连）。
 
     /// 共享会话存储。
     pub fn session_store(&self) -> Arc<dyn SessionStore> {
@@ -244,7 +249,7 @@ impl LocalSessionHost {
         self.inner.backend_manager.clone()
     }
 
-    /// 生命周期 control plane（用于 force_close / 快照 / 评测 / 暂停等 19 个方法）。
+    /// 生命周期 control plane（`open_session` / `force_close_session`）。
     pub fn control_plane(&self) -> Arc<dyn SessionControlPlane> {
         self.inner.lifecycle_control_plane.clone()
     }

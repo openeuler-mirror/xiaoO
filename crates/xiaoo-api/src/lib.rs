@@ -2,7 +2,7 @@
 //!
 //! 顶层 API crate：让"用 xiaoo 能力写程序"变得简单。
 //!
-//! 本 crate 由两部分组成（见 `refactor.md`）：
+//! 本 crate 由两部分组成：
 //!
 //! 1. **门面层（L0，[`prelude`]）**：把"建宿主 → 开会话 → 跑 turn → 关会话"的完整链路
 //!    封装成少量高层对象——`LocalSessionHost` / `Session` / `TurnHandle` / `TurnEvent`。
@@ -23,9 +23,13 @@
 //!         .open_session(SessionOptions::new(LlmOptions::new("openai", "qwen3-max")))
 //!         .await?;
 //!     let mut turn = session.run_turn("总结一下当前目录的代码结构").await?;
-//!     while let Some(event) = turn.next_event().await {
+    //!     // 收到 End 立即 break——不可用 `while let Some(e) = next_event()` 等通道
+    //!     // 关闭（orphan reaper 持有 event_tx 克隆，通道永不关闭）。
+//!     loop {
+//!         let Some(event) = turn.next_event().await else { break };
 //!         match event {
 //!             TurnEvent::Text { delta, .. } => print!("{delta}"),
+//!             TurnEvent::End { .. } => break,
 //!             _ => {}
 //!         }
 //!     }
@@ -37,8 +41,6 @@
 //! }
 //! ```
 //!
-//! > 门面尚未实现（阶段 2 才落地）；本阶段仅提供 L1/L2 支撑类型层与门面占位。
-//!
 //! ## 模块层级
 //!
 //! - **L0 门面层**：[`prelude`]、[`host`]（≤ 15 个公开名字）。
@@ -46,11 +48,6 @@
 //!   [`diff`]、[`interaction`]、[`chat`]、[`memory`]、[`backend`]、[`secrets`]、[`config`]。
 //! - **L2 advanced 层**：[`runtime`]（装配契约）、[`llm`]、[`skills`]。
 //!
-//! 可见性策略与准入判据见 `refactor.md` §3.2。
-// 阶段 1 占位：本 crate 的 doc 中含对阶段 2 才落地的 `crate::host::*`
-// 门面类型的向前引用（[`crate::host::SessionOptions`] 等），阶段 2
-// 实现 host 模块后这些链接会自动 resolve；届时删除此 allow。
-#![allow(rustdoc::broken_intra_doc_links)]
 #![deny(missing_docs)]
 
 pub mod backend;

@@ -1,9 +1,9 @@
 //! `SessionOptions` / `LlmOptions`：门面与 60+ 字段 `HostedSessionRuntimeConfig`
 //! 之间的降维层。
 //!
-//! 调用方只声明"差异"，其余由 [`SessionOptions::derive`]（§3.3.3 派生规则）派生。
+//! 调用方只声明"差异"，其余由 [`SessionOptions::derive`] 派生。
 //! 派生逻辑即现有 endside 组装代码（`cli/entry.rs:956-1038`、
-//! `runtime_request.rs:247-326`）与五个解析 helper（§3.3.9）的下沉合并。
+//! `runtime_request.rs:247-326`）与五个解析 helper 的下沉合并。
 //!
 //! 设计纪律：本模块**不新增运行时行为**——派生的每个字段值都来自现有 endside
 //! 组装路径的提取。差异点见 MR 描述。
@@ -27,7 +27,7 @@ use super::derive::derive_session;
 /// LLM 子配置：provider / model / API key / 上下文窗口 / 推理力度。
 ///
 /// `provider` 与 `model` 为必填；其余字段全部可选，缺省由派生填充。
-/// 优先级见 `refactor.md` §3.3.3 派生规则表。
+/// 字段缺省与优先级由 `SessionOptions::derive` 派生填充。
 #[derive(Clone, Debug)]
 pub struct LlmOptions {
     pub(crate) provider: String,
@@ -91,9 +91,9 @@ impl LlmOptions {
 /// 会话选项：调用方仅声明与缺省不同的部分，其余由 [`SessionOptions::derive`]
 /// 派生为 `(SessionOpenRequest, HostedSessionRuntimeConfig)`。
 ///
-/// 派生规则见 `refactor.md` §3.3.3。本阶段**未**为 `system_prompt` / `hooker` /
+/// 派生规则见 `SessionOptions::derive`。当前**未**为 `system_prompt` / `hooker` /
 /// `trace` / `compact_overrides` / `enable_tools` / `max_turns` / `memory_automation`
-/// 暴露 builder 方法——这些字段使用类型 `Default`（§3.3.3 派生规则：
+/// 暴露 builder 方法——这些字段使用类型 `Default`（按派生规则：
 /// "feature_flags / token_budget / 类型 Default"）或经派生内部填充。
 /// endside 的 TOML 配置 → `SessionOptions` 的翻译层（薄层）在阶段 3 中替代
 /// 原两处 60+ 字段的 `HostedSessionRuntimeConfig` 手工组装。
@@ -116,7 +116,7 @@ pub struct SessionOptions {
     pub(crate) lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub(crate) backend: Option<GatewayBackendConfig>,
     /// 额外 subagent 角色表，会与内置 plan 角色合并；不允许覆盖 plan。
-    /// 偏离 §3.3.3：原文为 `Vec<SubagentRoleConfigEntry>`，但
+    /// 设计取舍：曾考虑 `Vec<SubagentRoleConfigEntry>`，但
     /// `SubagentRoleConfigEntry` 无 `role_id` 字段，故取 Map 以匹配
     /// `HostedSessionRuntimeConfig.subagent_roles` 的字段类型与 endside 现有
     /// 组装路径（`cli/entry.rs:1021-1035`、`runtime_request.rs:308-323`）。
@@ -190,7 +190,7 @@ impl SessionOptions {
     }
 
     /// 显式 skills roots，跳过四级优先级解析。缺省：四级优先级解析
-    /// （§3.3.9 `resolve_skills_config`）。
+    /// （`resolve_skills_config`）。
     pub fn skills(mut self, dirs: Vec<PathBuf>) -> Self {
         self.skills = Some(dirs);
         self
@@ -209,14 +209,18 @@ impl SessionOptions {
         self
     }
 
-    /// sandbox backend 配置（local/e2b/conch）。缺省：`GatewayBackendConfig::new("local", …)`。
+    /// sandbox backend 配置（local/e2b）。缺省：`GatewayBackendConfig::new("local", …)`。
+    ///
+    /// 注：仅 `local` / `e2b` 受支持；conch backend 已随 daemon 移出本仓，
+    /// `apps/shared/src/backend/mod.rs` 的白名单不认 `conch`，传入会在
+    /// open/turn 路径返回 `OperationBackendBuildError::UnsupportedBackend`。
     pub fn backend(mut self, config: GatewayBackendConfig) -> Self {
         self.backend = Some(config);
         self
     }
 
     /// 额外 subagent 角色表，与内置 plan 角色合并。**不允许**覆盖 plan 角色
-    /// （键 `"plan"` 触发 `SessionOptionsError`）。
+    /// （键 `"plan"` 触发 `SessionServiceError::InvalidRequest`）。
     pub fn subagent_roles(mut self, roles: BTreeMap<String, SubagentRoleConfigEntry>) -> Self {
         self.subagent_roles = roles;
         self
@@ -246,7 +250,7 @@ impl SessionOptions {
     /// 未显式设置时生效；派生内部用此 section 走四级优先级解析。
     /// 缺省：`None`（仅用四级默认目录，无用户额外目录）。
     ///
-    /// 偏离 §3.3.3：原文未列出本方法。补充它是为让 §3.3.9 的
+    /// 设计取舍：派生规则未列出本方法。补充它是为让
     /// `resolve_skills_config(workspace_root, section)` 的 `section` 参数在
     /// 生产路径（endside 翻译层注入 TOML `[skills]` 段）中有用武之地，否则
     /// 该参数将退化为永远 `None` 的死代码。
@@ -257,26 +261,13 @@ impl SessionOptions {
 
     /// 派生为 `(SessionOpenRequest, HostedSessionRuntimeConfig)`。
     ///
-    /// 派生规则见 `refactor.md` §3.3.3；实现对照基准为
+    /// 派生规则见 `SessionOptions::derive`；实现对照基准为
     /// `apps/endside/src/cli/entry.rs:956-1038` 与
     /// `apps/endside/src/gateway_api/runtime_request.rs:247-326`。
     ///
-    /// 错误折叠进 `SessionServiceError`（§3.3.6）：LLM provider / 压缩管道
+    /// 错误折叠进 `SessionServiceError`：LLM provider / 压缩管道
     /// 构建失败 → `RuntimeBuild`；覆盖内置 plan 角色 → `InvalidRequest`。
     pub async fn derive(self) -> Result<(SessionOpenRequest, HostedSessionRuntimeConfig), SessionServiceError> {
         derive_session(self).await
     }
-}
-
-/// `SessionOptions::derive` 的失败原因（折叠进 `SessionServiceError`，§3.3.6）。
-///
-/// 本类型当前为占位——§3.3.6 明确"不为此新造第三个错误类型"。保留为枚举
-/// 仅为后续阶段评审是否需要独立错误类型时使用，当前所有派生失败都经
-/// `SessionServiceError` 表达。
-#[derive(Debug, thiserror::Error)]
-pub enum SessionOptionsError {
-    /// 其它未分类的派生失败。当前所有失败均折叠进 `SessionServiceError`，
-    /// 本变体保留供后续阶段评审使用。
-    #[error("session options derive failed: {0}")]
-    Other(String),
 }
