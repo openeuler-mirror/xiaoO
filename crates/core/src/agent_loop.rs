@@ -618,6 +618,35 @@ async fn compress(
     ctx: &mut LoopContext<'_>,
     trigger: CompressionTrigger,
 ) -> Result<(), AgentError> {
+    // Cheap, model-agnostic per-turn cleanup before any LLM-backed compaction.
+    // microcompact drops stale tool_use/tool_result pairs from completed turns
+    // (no API call), so it is the first line of defense against context bloat:
+    // it keeps history lean between full compression events, which is exactly
+    // what stops the expensive LLM collapse from firing every turn on active
+    // sessions. Its 120s staleness + tail-window protection make it a no-op
+    // during rapid turns, so history stays effectively append-only here.
+    let now_ms = now_ms();
+    {
+        let messages = ctx.state.messages.read().clone();
+        let micro = ctx
+            .snapshot
+            .compression_pipeline
+            .microcompact(&messages, now_ms);
+        if micro.applied {
+            tracing::info!(
+                removed = micro.removed_count,
+                token_delta = micro.token_delta,
+                removed_call_ids = ?micro.removed_call_ids,
+                "microcompact: pruned stale tool_use/tool_result pairs"
+            );
+            let mut new_messages = micro.messages;
+            for msg in &mut new_messages {
+                ctx.estimator.update_message_cache(msg);
+            }
+            *ctx.state.messages.write() = new_messages;
+        }
+    }
+
     let agent_id_str = ctx
         .input
         .agent_id

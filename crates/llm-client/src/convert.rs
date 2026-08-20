@@ -18,7 +18,16 @@ pub(crate) fn chat_message_to_wire(msg: &ChatMessage) -> WireMessage {
     let mut content: Option<String> = None;
     let mut tool_calls: Option<Vec<WireToolCall>> = None;
     let mut tool_call_id: Option<String> = None;
-    let reasoning_content = if msg.role == agent_types::MessageRole::Assistant {
+    // Pass back the reasoning trace only on tool-call rounds. Providers such as
+    // DeepSeek ignore the CoT of pure-text rounds, so forwarding it on every
+    // assistant turn only inflates the request body and keeps stale reasoning
+    // accumulating in the context window — a major driver of unnecessary
+    // compression. Align with that rule: drop reasoning on text-only rounds.
+    let has_tool_use = msg
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
+    let reasoning_content = if msg.role == agent_types::MessageRole::Assistant && has_tool_use {
         msg.reasoning_content.clone()
     } else {
         None
@@ -403,6 +412,28 @@ mod tests {
 
         assert_eq!(wire.role, "assistant");
         assert_eq!(wire.reasoning_content, Some("thinking trace".to_string()));
+    }
+
+    #[test]
+    fn test_chat_message_to_wire_drops_reasoning_on_text_only_rounds() {
+        let mut msg = ChatMessage::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
+                text: "plain answer".to_string(),
+            }],
+            None,
+            0,
+            None,
+        );
+        msg.reasoning_content = Some("thinking trace".to_string());
+
+        let wire = chat_message_to_wire(&msg);
+
+        assert_eq!(wire.role, "assistant");
+        assert_eq!(
+            wire.reasoning_content, None,
+            "text-only rounds must not forward the reasoning trace"
+        );
     }
 
     #[test]
