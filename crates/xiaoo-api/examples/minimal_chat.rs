@@ -1,107 +1,56 @@
-//! # minimal_chat —— xiaoo-api 最小可执行用例
+//! Minimal pure-runtime example.
 //!
-//! 一个完整的对话程序（约 40 行）：建宿主 → 开会话 → 流式对话（含审批应答）
-//! → 收尾。
-//!
-//! ## import 取舍说明
-//!
-//! 核心生命周期只依赖 `use xiaoo_api::prelude::*`。本示例额外
-//! `use xiaoo_api::interaction::{InteractionRequest, InteractionResponse}`——
-//! 这是交互应答模式匹配所需的 **L1 签名可达类型**（`TurnEvent::Interaction { request, .. }`
-//! / `InteractionResponder::respond(InteractionResponse)` 的签名出处）。
-//!
-//! 此类签名可达 DTO（与 `ChatMessage`、`ToolLifecycleEvent` 同族）有意不纳入
-//! prelude：prelude 当前已导出 14 个名字，再纳入会突破 ≤ 15 个名字的预算，
-//! 且同族类型均有同等资格，单独挑两个入 prelude 反而失之偏颇。因此交互式示例
-//! 的最小 import 面为 "prelude + interaction 两个 L1 类型"，这是分层设计的
-//! 结果，而非示例缺陷。
-//!
-//! 验收口径：
-//! > `examples/minimal_chat.rs` 提交并可运行：完整"建宿主 → 开会话 → 流式对话
-//! > （含审批应答）→ 收尾"核心代码不超过 40 行（不含模块级 doc 注释、空行与
-//! > 示例辅助函数），核心生命周期只依赖 `use xiaoo_api::prelude::*`，**允许**
-//! > 额外 `use xiaoo_api::interaction::{InteractionRequest, InteractionResponse}`
-//! > 用于交互应答的模式匹配，且示例 doc 需注明该取舍。
-//!
-//! ## 运行方式
-//!
-//! 本示例需要真实 LLM（默认用 ollama 本地模型）。先确保 ollama 在
-//! `http://localhost:11434` 运行并已 `ollama pull qwen2.5:7b`，然后：
-//!
-//! ```bash
-//! cargo run -p xiaoo-api --example minimal_chat
-//! ```
-//!
-//! 也可通过环境变量切换 provider / model / api_key：
-//!
-//! ```bash
-//! XIAOO_PROVIDER=openai XIAOO_MODEL=gpt-4.1 XIAOO_API_KEY=sk-... \
-//!   cargo run -p xiaoo-api --example minimal_chat
-//! ```
+//! The caller owns runtime state and injects runtime dependencies directly;
+//! there is no host, session service, lease, or backend manager involved.
 
-use std::time::Duration;
+use std::sync::Arc;
+
+use agent_types::context::TokenBudgetConfig;
+use compact::{build_context_manager, CompactionPolicy};
+use llm_client::{create_llm_provider, LlmProviderConfig};
+use prompt::PromptBuilderImpl;
+use tool::EmptyToolRegistry;
 use xiaoo_api::prelude::*;
-use xiaoo_api::interaction::{InteractionRequest, InteractionResponse};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // 从环境变量读 provider / model / api_key，缺省用 ollama 本地模型。
-    let provider = std::env::var("XIAOO_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
+    let provider_name = std::env::var("XIAOO_PROVIDER").unwrap_or_else(|_| "ollama".to_string());
     let model = std::env::var("XIAOO_MODEL").unwrap_or_else(|_| "qwen2.5:7b".to_string());
-    let api_base = std::env::var("XIAOO_API_BASE").ok();
-    let api_key = std::env::var("XIAOO_API_KEY").ok();
+    let budget = TokenBudgetConfig {
+        total_budget: 8_192,
+        reserved_for_output: 1_024,
+        reserved_for_system: 512,
+        hard_limit_ratio: 0.9,
+    };
 
-    // 1. 建宿主：secrets 初始化、hooker、backend、memory automation 全部走缺省。
-    let host = LocalSessionHost::builder().build().await?;
+    let provider = create_llm_provider(
+        &LlmProviderConfig::new(provider_name, model),
+        Some("example".to_string()),
+        None,
+    )?;
+    let provider = Arc::new(provider);
+    let compression = build_context_manager(None, provider.clone())?;
+    let runtime = Runtime::builder()
+        .llm_provider(provider)
+        .compression_pipeline(compression)
+        .prompt_builder(Arc::new(PromptBuilderImpl::new()))
+        .system_prompt("You are a concise coding assistant.")
+        .tool_registry(Arc::new(EmptyToolRegistry::new()))
+        .skill_registry(Arc::new(xiaoo_core::EmptySkillRegistry::new()))
+        .token_budget_config(budget.clone())
+        .token_budget_policy(Arc::new(CompactionPolicy::from_budget(&budget)))
+        .build()?;
 
-    // 2. 开会话：只写与缺省不同的配置，其余 60+ 字段由 API 内部派生。
-    let mut llm = LlmOptions::new(&provider, &model);
-    if let Some(base) = api_base {
-        llm = llm.api_base(&base);
+    let mut state = runtime.new_state("example-conversation");
+    let result = runtime
+        .run(
+            &mut state,
+            RuntimeInput::new("Summarize the current project."),
+        )
+        .await?;
+    match result {
+        RuntimeOutput::Complete(_) => println!("completed"),
+        RuntimeOutput::Suspended(calls) => println!("suspended tool calls: {}", calls.len()),
     }
-    if let Some(key) = api_key {
-        llm = llm.api_key(&key);
-    }
-    let session = host.open_session(SessionOptions::new(llm)).await?;
-
-    // 3. 跑一轮对话，流式消费事件。
-    //
-    // 纪律：**不要**用 `while let Some(e) = turn.next_event().await` 等通道关闭——
-    // orphan reaper 后台任务持有 `event_tx` 克隆，通道永不关闭，`next_event()`
-    // 永不返回 `None`，循环会卡死。收到 `TurnEvent::End` 后立即 break，再调 `result()`。
-    let mut turn = session.run_turn("总结一下当前目录的代码结构").await?;
-    loop {
-        let Some(event) = turn.next_event().await else { break };
-        match event {
-            TurnEvent::Text { delta, .. } => print!("{delta}"),
-            TurnEvent::Interaction { request, responder } => {
-                // 工具审批/提问：自动应答（生产场景应由用户交互决定）。
-                responder.respond(auto_answer(&request));
-            }
-            TurnEvent::End { .. } => break,
-            _ => {}
-        }
-    }
-    let result = turn.result().await?;
-    println!("\n[tokens: total={}, prompt={}, completion={}]",
-             result.total_tokens, result.prompt_tokens, result.completion_tokens);
-
-    // 4. 收尾。
-    session.close().await?;
-    host.shutdown(Duration::from_secs(10)).await;
     Ok(())
-}
-
-/// 交互请求的自动应答（示例用——生产场景应由 UI/用户决定）。
-fn auto_answer(request: &InteractionRequest) -> InteractionResponse {
-    match request {
-        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: true },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-            value: Some("ok".to_string()),
-            display_value: None,
-        },
-        InteractionRequest::Choice { options, .. } => InteractionResponse::Choice {
-            value: options.first().cloned(),
-        },
-    }
 }

@@ -6,17 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
-tokio-util.workspace = true
-tracing.workspace = true
-dirs.workspace = true
-uuid = { workspace = true, features = ["v4"] }
 
-xiaoo-shared = { path = "../../apps/shared" }
 xiaoo-core = { path = "../core" }
 agent-types = { path = "../agent-types" }
 agent-contracts = { path = "../agent-contracts" }
@@ -24,6 +15,4 @@ llm-client = { path = "../llm-client" }
 compact = { path = "../compact" }
 tool = { path = "../tool" }
 skill = { path = "../skill" }
-mcp = { path = "../mcp" }
-lsp = { path = "../lsp" }
-operation_backend = { path = "../operation_backend" }
+prompt = { path = "../prompt" }
