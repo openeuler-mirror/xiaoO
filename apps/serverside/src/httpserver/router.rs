@@ -375,6 +375,33 @@ pub struct GatewayHealthResponse {
     pub version: &'static str,
 }
 
+/// Stable, read-only protocol metadata used by GUI clients before opening a
+/// runtime. Keep this endpoint additive: older clients ignore new fields and
+/// newer clients can fail early when the protocol major version is unknown.
+#[derive(Debug, Serialize)]
+pub struct GatewayCapabilitiesResponse {
+    pub service: &'static str,
+    pub version: &'static str,
+    pub protocol_version: u32,
+    pub minimum_client_protocol_version: u32,
+    pub transport: &'static str,
+    pub runtime_api: Vec<&'static str>,
+    pub sse_events: Vec<&'static str>,
+    pub interaction_kinds: Vec<&'static str>,
+    pub features: GatewayFeatureCapabilities,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GatewayFeatureCapabilities {
+    pub session_persistence: bool,
+    pub runtime_leases: bool,
+    pub checkpoints: bool,
+    pub file_operations: bool,
+    pub file_change_summary: bool,
+    pub file_change_patch: bool,
+    pub sse_resume: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GatewayErrorResponse {
     pub error: String,
@@ -480,6 +507,7 @@ fn create_router_from_state(
 
     let router = Router::new()
         .route("/api/v1/health", get(health_check))
+        .route("/api/v1/capabilities", get(capabilities))
         .route(
             "/api/v1/channels/:channel_id/events",
             post(handle_channel_events),
@@ -576,6 +604,59 @@ async fn health_check() -> Json<GatewayHealthResponse> {
     Json(GatewayHealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
+    Json(GatewayCapabilitiesResponse {
+        service: "xiaoo-daemon",
+        version: env!("CARGO_PKG_VERSION"),
+        protocol_version: 1,
+        minimum_client_protocol_version: 1,
+        transport: "http+sse",
+        runtime_api: vec![
+            "open",
+            "input",
+            "interaction",
+            "cancel",
+            "close",
+            "heartbeat",
+            "detach",
+            "checkpoint",
+            "checkpoint_delete_snapshot",
+            "pause",
+            "resume",
+            "checkout",
+            "exec",
+            "read_file",
+            "write_file",
+            "export",
+        ],
+        sse_events: vec![
+            "turn_start",
+            "text_delta",
+            "thinking_delta",
+            "tool_result",
+            "tool_file_change",
+            "plan_update",
+            "subagent_spawn",
+            "tool_call",
+            "loop_end",
+            "interaction_requested",
+            "done",
+            "error",
+            "cancelled",
+        ],
+        interaction_kinds: vec!["confirm", "text_input", "choice"],
+        features: GatewayFeatureCapabilities {
+            session_persistence: false,
+            runtime_leases: true,
+            checkpoints: true,
+            file_operations: true,
+            file_change_summary: true,
+            file_change_patch: false,
+            sse_resume: false,
+        },
     })
 }
 
@@ -1730,7 +1811,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bearer_auth_does_not_apply_to_health_or_feishu_webhook() {
+    async fn bearer_auth_does_not_apply_to_metadata_or_feishu_webhook() {
         let router = create_router_with_auth(
             Arc::new(FakeSessionService::new("unused")),
             Some(HttpBearerAuthConfig::new("secret-token")),
@@ -1749,6 +1830,26 @@ mod tests {
             .await
             .expect("health route should respond");
         assert_eq!(health_response.status(), StatusCode::OK);
+
+        let capabilities_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/capabilities")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("capabilities route should respond");
+        assert_eq!(capabilities_response.status(), StatusCode::OK);
+        let capabilities_body = to_bytes(capabilities_response.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body should read");
+        let capabilities: serde_json::Value = serde_json::from_slice(&capabilities_body)
+            .expect("capabilities response should be JSON");
+        assert_eq!(capabilities["protocol_version"], 1);
+        assert_eq!(capabilities["features"]["runtime_leases"], true);
 
         let feishu_response = router
             .oneshot(

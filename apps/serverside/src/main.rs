@@ -22,6 +22,7 @@ use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
 use std::env;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +49,9 @@ async fn main() -> Result<()> {
         cli.port,
         cli.dashboard_host,
         cli.dashboard_port,
+        cli.no_dashboard,
+        cli.ready_stdio,
+        cli.bearer_token_env,
     )
     .await
 }
@@ -59,6 +63,9 @@ async fn run_daemon(
     port: u16,
     dashboard_cli_host: Option<String>,
     dashboard_cli_port: Option<u16>,
+    no_dashboard: bool,
+    ready_stdio: bool,
+    bearer_token_env: Option<String>,
 ) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path).with_context(|| {
@@ -76,7 +83,18 @@ async fn run_daemon(
     )?;
     let mcp_server_config = config.resolve_mcp_server_config()?;
     let hooker_config = config.app.hooker.clone();
-    let bearer_auth = config.http_bearer_token()?.map(HttpBearerAuthConfig::new);
+    let bearer_auth = match bearer_token_env {
+        Some(env_name) => {
+            let token = std::env::var(&env_name).with_context(|| {
+                format!("bearer token environment variable `{env_name}` is not set")
+            })?;
+            if token.trim().is_empty() {
+                bail!("bearer token environment variable `{env_name}` is empty");
+            }
+            Some(HttpBearerAuthConfig::new(token))
+        }
+        None => config.http_bearer_token()?.map(HttpBearerAuthConfig::new),
+    };
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
@@ -203,19 +221,23 @@ async fn run_daemon(
         // API port (and its bearer auth). When `[http.dashboard].enabled = false`
         // is set in the config, `dashboard_port` resolves to `None` and no
         // dashboard server is started.
-        if let Some(dash_addr) = spawn_dashboard_server(
-            &config,
-            dashboard_cli_host,
-            dashboard_cli_port,
-            session_store.clone(),
-            backend_manager.clone(),
-        )
-        .await?
-        {
-            tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
-            eprintln!("dashboard ready at http://{dash_addr}");
+        if no_dashboard {
+            tracing::info!("dashboard disabled by --no-dashboard");
         } else {
-            tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
+            if let Some(dash_addr) = spawn_dashboard_server(
+                &config,
+                dashboard_cli_host,
+                dashboard_cli_port,
+                session_store.clone(),
+                backend_manager.clone(),
+            )
+            .await?
+            {
+                tracing::info!(%dash_addr, "dashboard ready at http://{dash_addr}");
+                eprintln!("dashboard ready at http://{dash_addr}");
+            } else {
+                tracing::info!("dashboard disabled by config ([http.dashboard].enabled = false)");
+            }
         }
 
         let addr: SocketAddr = format!("{host}:{port}")
@@ -224,7 +246,24 @@ async fn run_daemon(
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("failed to bind {addr}"))?;
-        tracing::info!(config = %config_path.display(), %addr, "starting rebuild daemon");
+        let resolved_addr = listener
+            .local_addr()
+            .context("failed to resolve daemon listener address")?;
+        tracing::info!(config = %config_path.display(), %resolved_addr, "starting xiaoo daemon");
+        if ready_stdio {
+            let ready = serde_json::json!({
+                "type": "ready",
+                "service": "xiaoo-daemon",
+                "host": resolved_addr.ip().to_string(),
+                "port": resolved_addr.port(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocol_version": 1,
+            });
+            println!("{ready}");
+            std::io::stdout()
+                .flush()
+                .context("failed to flush daemon ready message")?;
+        }
         let serve_result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal())
             .await
@@ -466,6 +505,9 @@ struct Cli {
     port: u16,
     dashboard_host: Option<String>,
     dashboard_port: Option<u16>,
+    no_dashboard: bool,
+    ready_stdio: bool,
+    bearer_token_env: Option<String>,
     help: bool,
 }
 
@@ -480,6 +522,9 @@ impl Cli {
         let mut port = 18080_u16;
         let mut dashboard_host: Option<String> = None;
         let mut dashboard_port: Option<u16> = None;
+        let mut no_dashboard = false;
+        let mut ready_stdio = false;
+        let mut bearer_token_env = None;
         let remaining = args.into_iter().collect::<Vec<_>>();
         let mut index = 0;
         while index < remaining.len() {
@@ -492,6 +537,9 @@ impl Cli {
                         port,
                         dashboard_host,
                         dashboard_port,
+                        no_dashboard,
+                        ready_stdio,
+                        bearer_token_env,
                         help: true,
                     });
                 }
@@ -537,6 +585,22 @@ impl Cli {
                             .with_context(|| format!("invalid dashboard port `{value}`"))?,
                     );
                 }
+                "--no-dashboard" => {
+                    no_dashboard = true;
+                }
+                "--ready-stdio" => {
+                    ready_stdio = true;
+                }
+                "--bearer-token-env" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --bearer-token-env")?;
+                    if value.trim().is_empty() {
+                        bail!("--bearer-token-env must not be empty");
+                    }
+                    bearer_token_env = Some(value.clone());
+                }
                 other => bail!("unknown argument `{other}`"),
             }
             index += 1;
@@ -548,6 +612,9 @@ impl Cli {
             port,
             dashboard_host,
             dashboard_port,
+            no_dashboard,
+            ready_stdio,
+            bearer_token_env,
             help: false,
         })
     }
@@ -556,7 +623,8 @@ impl Cli {
 fn print_usage() {
     eprintln!(
         "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
-         \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\n\
+         \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\
+         \x20                  [--no-dashboard] [--ready-stdio] [--bearer-token-env <name>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -578,6 +646,10 @@ mod tests {
                 "127.0.0.1",
                 "--port",
                 "18080",
+                "--no-dashboard",
+                "--ready-stdio",
+                "--bearer-token-env",
+                "XIAOO_CLIENT_DAEMON_TOKEN",
             ]
             .into_iter()
             .map(str::to_string),
@@ -587,6 +659,12 @@ mod tests {
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, 18080);
+        assert!(cli.no_dashboard);
+        assert!(cli.ready_stdio);
+        assert_eq!(
+            cli.bearer_token_env.as_deref(),
+            Some("XIAOO_CLIENT_DAEMON_TOKEN")
+        );
         assert!(!cli.help);
     }
 
