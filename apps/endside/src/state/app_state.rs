@@ -447,7 +447,7 @@ impl AppState {
         self.session_taken_over = false;
         self.current_snapshot_context = None;
         self.slash = SlashState::default();
-        self.reasoning_effort = ReasoningEffort::default();
+        self.reasoning_effort = self.agent_config.llm.reasoning_effort;
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
         self.transcript_selection = None;

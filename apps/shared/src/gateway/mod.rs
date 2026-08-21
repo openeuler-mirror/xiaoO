@@ -1,7 +1,6 @@
 mod backend_workspace_context;
 pub mod bootstrap;
 pub mod channel_interaction;
-pub mod decrypted_api_keys;
 mod e2b_runtime;
 pub mod hosted_runtime_resolver;
 pub mod memory_automation;
@@ -32,7 +31,6 @@ pub mod subagent_interaction;
 pub mod turns;
 pub mod workspace_prompt;
 
-pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
 pub(crate) use e2b_runtime::finalize_e2b_runtime;
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};

@@ -693,12 +693,6 @@ fn resolve_api_key_env(
     env_name: &str,
     fail_when_missing: bool,
 ) -> Result<Option<String>, SessionRuntimeResolveError> {
-    if let Some(api_key) = xiaoo_shared::gateway::get_decrypted_api_key(env_name) {
-        if !api_key.trim().is_empty() {
-            return Ok(Some(api_key));
-        }
-    }
-
     match env::var(env_name) {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
         Ok(_) | Err(env::VarError::NotPresent) if fail_when_missing => {
@@ -1224,7 +1218,7 @@ mod tests {
 
         xiaoo_shared::llm_secrets::save_llm_secret(&config_path, env_name, "secret-key")
             .expect("save encrypted LLM secret");
-        xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path)
+        xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path)
             .expect("initialize secret provider");
 
         let resolved = resolve_effective_provider_config(&EffectiveLlmConfig {
