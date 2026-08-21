@@ -4524,6 +4524,7 @@ dependencies = [
  "unicode-width 0.1.14",
  "uuid",
  "xiaoo-core",
+ "xiaoo-protocol",
  "xiaoo-shared",
 ]
 

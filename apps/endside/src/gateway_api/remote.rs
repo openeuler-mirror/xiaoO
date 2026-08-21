@@ -9,7 +9,7 @@ use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUp
 
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
-use crate::gateway::{
+use xiaoo_protocol::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
 };

@@ -47,6 +47,7 @@ agent-types = { path = "../../crates/agent-types" }
 compact = { path = "../../crates/compact" }
 xiaoo-core = { path = "../../crates/core" }
 xiaoo-shared = { path = "../shared" }
+xiaoo-protocol = { path = "../../crates/xiaoo-protocol" }
 
 [dev-dependencies]
 tempfile.workspace = true
