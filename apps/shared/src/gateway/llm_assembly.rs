@@ -20,8 +20,6 @@ use llm_client::{create_llm_provider_from_resolved, resolve_provider_profile, Ll
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
 
-use crate::gateway::get_decrypted_api_key;
-
 /// LLM provider 装配输入。字段只用基本类型与 shared 已导出的句柄。
 #[derive(Clone, Debug)]
 pub struct LlmAssemblyInput {
@@ -48,11 +46,11 @@ pub enum LlmAssemblyError {
     InvalidApiKeyEnv(String),
 }
 
-/// 解析 api-key：显式 > 解密存储 > 环境变量 > provider profile 默认 env。
+/// 解析 api-key：显式 > 环境变量 > provider profile 默认 env。
 ///
 /// 与原 serverside `resolve_llm_api_key` / `resolve_api_key_env` 等价：
 /// - `api_key` 直接给 → 用它。
-/// - `api_key_env` 给了 → 先查 shared 解密存储，再查进程环境；缺失则报错
+/// - `api_key_env` 给了 → 查进程环境；缺失则报错
 ///   （应用装配时 api_key_env 是强约束）。
 /// - 都没给 → 回退到 provider profile 的 `default_api_key_env`（如有），此时
 ///   缺失不报错（profile 可能允许匿名）。
@@ -78,12 +76,6 @@ fn resolve_api_key_env(
     env_name: &str,
     fail_when_missing: bool,
 ) -> Result<Option<String>, LlmAssemblyError> {
-    if let Some(api_key) = get_decrypted_api_key(env_name) {
-        if !api_key.trim().is_empty() {
-            return Ok(Some(api_key));
-        }
-    }
-
     match env::var(env_name) {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
         Ok(_) | Err(env::VarError::NotPresent) if fail_when_missing => {

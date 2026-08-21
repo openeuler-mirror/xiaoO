@@ -31,29 +31,22 @@ pub(crate) enum OpenAiFamilyAuthStyle {
 #[derive(Clone)]
 pub(crate) struct OpenAiFamilyProvider {
     client: reqwest::Client,
-    api_key: Option<String>,
+    api_key: String,
     api_base: String,
     auth_style: OpenAiFamilyAuthStyle,
     default_headers: Vec<(String, String)>,
     capabilities: ProviderCapabilities,
-    api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
-    // Cache the successful endpoint URL after first successful call
     cached_endpoint_url: Arc<RwLock<Option<String>>>,
 }
 
 impl OpenAiFamilyProvider {
     pub(crate) fn new(
-        api_key: Option<String>,
+        api_key: String,
         api_base: String,
         model: String,
         auth_style: OpenAiFamilyAuthStyle,
         default_headers: Vec<(String, String)>,
-        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
-        // Mirror Node's convention: NODE_TLS_REJECT_UNAUTHORIZED=0 disables
-        // peer certificate verification. Useful for corporate gateways whose
-        // root CA is not in the system trust store. Any other value (or
-        // unset) keeps verification enabled.
         let skip_tls_verify = std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
             .map(|v| v.trim() == "0")
             .unwrap_or(false);
@@ -79,16 +72,7 @@ impl OpenAiFamilyProvider {
                 max_context_window,
                 model_name: model,
             },
-            api_key_provider,
             cached_endpoint_url: Arc::new(RwLock::new(None)),
-        }
-    }
-
-    fn get_api_key(&self) -> String {
-        if let Some(provider) = &self.api_key_provider {
-            provider()
-        } else {
-            self.api_key.clone().unwrap_or_default()
         }
     }
 
@@ -118,10 +102,9 @@ impl OpenAiFamilyProvider {
 
     fn apply_common_headers(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         req = req.header("Content-Type", "application/json");
-        let api_key = self.get_api_key();
         req = match self.auth_style {
             OpenAiFamilyAuthStyle::Bearer => {
-                req.header("Authorization", format!("Bearer {}", api_key))
+                req.header("Authorization", format!("Bearer {}", self.api_key))
             }
         };
         for (name, value) in &self.default_headers {
@@ -849,12 +832,11 @@ mod tests {
 
     fn make_provider() -> OpenAiFamilyProvider {
         OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.openai.com/v1".to_string(),
             "gpt-5.4".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         )
     }
 
@@ -883,12 +865,11 @@ mod tests {
     #[test]
     fn new_model_capability_uses_known_context_window() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.openai.com/v1".to_string(),
             "gpt-5.6-sol".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
 
         assert_eq!(provider.capabilities.max_context_window, 1_050_000);
@@ -897,12 +878,11 @@ mod tests {
     #[test]
     fn gpt_5_6_with_tools_sets_none_reasoning_effort_when_off() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.openai.com/v1".to_string(),
             "gpt-5.6-sol".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
         let request =
             LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]).with_tools(vec![
@@ -921,12 +901,11 @@ mod tests {
     #[test]
     fn gpt_5_6_without_tools_sets_none_reasoning_effort_when_off() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.openai.com/v1".to_string(),
             "openai/gpt-5.6-terra".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
 
@@ -938,12 +917,11 @@ mod tests {
     #[test]
     fn kimi_k3_maps_supported_reasoning_effort_values() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.moonshot.cn/v1".to_string(),
             "kimi-k3".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
             .with_reasoning_effort(ReasoningEffort::Max);
@@ -956,12 +934,11 @@ mod tests {
     #[test]
     fn glm_5_2_disables_thinking_when_reasoning_is_off() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://open.bigmodel.cn/api/paas/v4".to_string(),
             "glm-5.2".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);
 
@@ -974,12 +951,11 @@ mod tests {
     #[test]
     fn glm_5_2_maps_max_reasoning_effort_to_max() {
         let provider = OpenAiFamilyProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://open.bigmodel.cn/api/paas/v4".to_string(),
             "z-ai/glm-5.2".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")])
             .with_reasoning_effort(ReasoningEffort::Max);
@@ -1008,12 +984,11 @@ mod tests {
             .await;
 
         let provider = OpenAiFamilyProvider::new(
-            Some("bad-key".to_string()),
+            "bad-key".to_string(),
             server.url(),
             "gpt-5.4".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
 
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -1046,12 +1021,11 @@ mod tests {
             .await;
 
         let provider = OpenAiFamilyProvider::new(
-            Some("bad-key".to_string()),
+            "bad-key".to_string(),
             server.url(),
             "gpt-5.4".to_string(),
             OpenAiFamilyAuthStyle::Bearer,
             vec![],
-            None,
         );
 
         let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hi")]);
@@ -1076,23 +1050,20 @@ mod tests {
 /// Configuration for creating an OpenAI-compatible provider directly.
 pub struct OpenAiCompatibleProviderConfig {
     pub api_base: String,
-    pub api_key: Option<String>,
+    pub api_key: String,
     pub capabilities: ProviderCapabilities,
-    pub api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl OpenAiCompatibleProviderConfig {
     pub fn new(
         api_base: impl Into<String>,
-        api_key: Option<String>,
+        api_key: impl Into<String>,
         capabilities: ProviderCapabilities,
-        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
     ) -> Self {
         Self {
             api_base: api_base.into(),
-            api_key,
+            api_key: api_key.into(),
             capabilities,
-            api_key_provider,
         }
     }
 }
@@ -1109,7 +1080,7 @@ impl OpenAiCompatibleProvider {
                 "api_base must not be empty".to_string(),
             ));
         }
-        if config.api_key.is_none() && config.api_key_provider.is_none() {
+        if config.api_key.is_empty() {
             return Err(LlmError::ConfigError(
                 "api_key must not be empty".to_string(),
             ));
@@ -1121,7 +1092,6 @@ impl OpenAiCompatibleProvider {
             model,
             OpenAiFamilyAuthStyle::Bearer,
             Vec::new(),
-            config.api_key_provider,
         );
         inner.capabilities = config.capabilities;
         Ok(Self { inner })

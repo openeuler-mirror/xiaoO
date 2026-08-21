@@ -1,15 +1,9 @@
-use std::sync::Arc;
-
-pub type ApiKeyProviderFn = Arc<dyn Fn() -> String + Send + Sync>;
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct LlmProviderConfig {
     pub provider: String,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
     pub model: String,
-    pub api_key_env: Option<String>,
-    pub api_key_provider: Option<ApiKeyProviderFn>,
 }
 
 impl LlmProviderConfig {
@@ -19,8 +13,6 @@ impl LlmProviderConfig {
             api_key: None,
             api_base: None,
             model: model.into(),
-            api_key_env: None,
-            api_key_provider: None,
         }
     }
 
@@ -31,11 +23,6 @@ impl LlmProviderConfig {
 
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = Some(api_base.into());
-        self
-    }
-
-    pub fn with_api_key_provider(mut self, provider: ApiKeyProviderFn) -> Self {
-        self.api_key_provider = Some(provider);
         self
     }
 }

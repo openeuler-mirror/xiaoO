@@ -11,7 +11,7 @@ use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
 use llm_client::{
-    create_llm_provider, factory::ApiKeyProviderFn, LlmProviderConfig, LlmProviderWrapper,
+    create_llm_provider, LlmProviderConfig, LlmProviderWrapper,
 };
 use lsp::LspServiceRegistry;
 use serde_json::Value;
@@ -117,32 +117,20 @@ impl HostedSessionRuntimeResolver {
             return Ok(Some(api_key.clone()));
         }
 
-        if let Some(env_name) = self.config.api_key_env.as_deref() {
-            if let Some(api_key) = crate::gateway::get_decrypted_api_key(env_name) {
-                return Ok(Some(api_key));
-            }
-        }
+        let Some(env_name) = self.config.api_key_env.as_deref() else {
+            return Ok(None);
+        };
 
-        if let Some(env_name) = self.config.api_key_env.as_deref() {
-            match env::var(env_name) {
-                Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-                Ok(_) | Err(env::VarError::NotPresent) => {
-                    Err(SessionRuntimeResolveError::ResolveFailed {
-                        message: format!(
-                            "missing required API key environment variable: {env_name}"
-                        ),
-                    })
-                }
-                Err(env::VarError::NotUnicode(_)) => {
-                    Err(SessionRuntimeResolveError::ResolveFailed {
-                        message: format!(
-                            "API key environment variable is not valid unicode: {env_name}"
-                        ),
-                    })
-                }
+        match env::var(env_name) {
+            Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
+            Ok(_) | Err(env::VarError::NotPresent) => {
+                Err(SessionRuntimeResolveError::ResolveFailed {
+                    message: format!("missing required API key environment variable: {env_name}"),
+                })
             }
-        } else {
-            Ok(None)
+            Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
+                message: format!("API key environment variable is not valid unicode: {env_name}"),
+            }),
         }
     }
 
@@ -238,23 +226,12 @@ impl SessionRuntimeResolver for HostedSessionRuntimeResolver {
                 None,
             )),
             None => {
-                let api_key_env = self.config.api_key_env.clone();
-                let api_key_provider = api_key_env.as_ref().map(|env_name| {
-                    let env_name = env_name.clone();
-                    Arc::new(move || {
-                        crate::gateway::get_decrypted_api_key(&env_name)
-                            .unwrap_or_else(|| std::env::var(&env_name).unwrap_or_default())
-                    }) as ApiKeyProviderFn
-                });
-
                 let api_key = self.resolve_api_key()?;
                 let llm_config = LlmProviderConfig {
                     provider: self.config.provider.clone(),
                     api_key,
                     api_base: self.config.api_base.clone(),
                     model: self.config.model.clone(),
-                    api_key_env,
-                    api_key_provider,
                 };
                 Arc::new(
                     create_llm_provider(&llm_config, Some(agent_id.0.clone()), None).map_err(

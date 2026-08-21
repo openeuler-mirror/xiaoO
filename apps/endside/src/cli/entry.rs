@@ -227,7 +227,7 @@ where
         }) => {
             let prompt = prompt.join(" ");
             if let Some(path) = config_path.as_ref() {
-                if let Err(error) = xiaoo_shared::llm_secrets::init_on_demand_secret_provider(path)
+                if let Err(error) = xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(path)
                 {
                     eprintln!(
                         "Failed to initialize LLM secrets from {}: {}",
@@ -249,12 +249,7 @@ where
             let model = model
                 .or_else(|| llm.and_then(|l| l.model.clone()))
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-            let api_key = api_key.or_else(|| {
-                llm.and_then(|l| l.api_key_env.clone())
-                    .and_then(|env_name| {
-                        xiaoo_shared::gateway::get_decrypted_api_key(env_name.as_str())
-                    })
-            });
+            let api_key = api_key.or_else(|| file_cfg.resolve_api_key());
             let api_key_env = llm.and_then(|l| l.api_key_env.clone());
             let api_base = api_base.or_else(|| llm.and_then(|l| l.api_base.clone()));
             let reasoning_effort = reasoning_effort.unwrap_or_default();
