@@ -30,3 +30,10 @@ pub use agent_contracts::{CompressionPipeline, LlmProvider, ProviderCapabilities
 
 #[doc(inline)]
 pub use compact::{build_context_manager, CompactOverrides};
+
+// ---- token 预算与压缩策略 ----
+#[doc(inline)]
+pub use agent_contracts::TokenBudgetPolicy;
+
+#[doc(inline)]
+pub use compact::CompactionPolicy;

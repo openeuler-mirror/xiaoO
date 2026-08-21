@@ -8,6 +8,9 @@
 pub use agent_contracts::SkillRegistry;
 
 #[doc(inline)]
+pub use xiaoo_core::EmptySkillRegistry;
+
+#[doc(inline)]
 pub use skill::{
     audit::{audit_skill_directory, SkillAuditOptions},
     FileSkillRegistry,

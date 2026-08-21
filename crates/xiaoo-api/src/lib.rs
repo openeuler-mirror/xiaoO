@@ -14,5 +14,6 @@ pub mod interaction;
 pub mod llm;
 pub mod runtime;
 pub mod skills;
+pub mod tools;
 
 pub mod prelude;

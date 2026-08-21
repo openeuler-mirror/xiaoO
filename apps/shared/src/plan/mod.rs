@@ -1,20 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-/// Display status of a single todo item in the TUI's plan panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TodoDisplayStatus {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-/// One row in the TUI plan panel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TodoSnapshotItem {
-    pub status: TodoDisplayStatus,
-    pub content: String,
-}
+// The wire-facing plan types live in the protocol crate; re-export here to
+// preserve existing `xiaoo_shared::plan::` import paths.
+pub use xiaoo_protocol::plan::{TodoDisplayStatus, TodoSnapshotItem};
 
 /// Full plan snapshot, forwarded by the daemon in remote mode so the TUI
 /// doesn't need to re-parse the `todo_write` tool's args.

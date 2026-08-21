@@ -2,6 +2,5 @@
 
 pub use crate::backend::{OperationBackend, OperationBackendCapabilities, OperationError};
 pub use crate::runtime::{
-    NoopRuntimeExtension, Runtime, RuntimeBuilder, RuntimeExtension, RuntimeInput, RuntimeOutput,
-    RuntimeState,
+    Runtime, RuntimeBuildError, RuntimeBuilder, RuntimeInput, RuntimeOutput, RuntimeState,
 };
