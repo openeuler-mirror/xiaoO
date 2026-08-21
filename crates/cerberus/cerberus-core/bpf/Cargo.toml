@@ -1,0 +1,16 @@
+[package]
+name = "audit-bpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1"
+aya-log-ebpf = "0.1"
+
+[[bin]]
+name = "audit"
+path = "src/main.rs"
+required-features = ["eBPF"]  # Require feature to build, preventing auto-build
+
+[features]
+eBPF = []  # Feature that must be enabled to build

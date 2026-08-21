@@ -172,6 +172,19 @@ impl SessionSupervisor {
         snapshot
     }
 
+    pub async fn hibernate_idle(&self) -> SessionRecord {
+        let mut session = self.session.lock().await;
+        session.status = SessionLifecycleStatus::Paused;
+        session.backend_instance = None;
+        session.paused_backend_checkpoint = None;
+        session.last_error = None;
+        session.updated_at_ms = current_time_ms();
+        let snapshot = session.clone();
+        drop(session);
+        self.session_store.save(snapshot.clone()).await;
+        snapshot
+    }
+
     pub async fn request_interaction(
         self: &Arc<Self>,
         request_id: String,

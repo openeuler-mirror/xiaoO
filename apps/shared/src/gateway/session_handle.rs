@@ -1,6 +1,6 @@
 use crate::gateway::{
-    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionLeaseTable,
-    SessionLifecycleStatus, SessionRecord, SessionServiceError,
+    AppTurnRequest, AppTurnResult, ResolvedSessionRuntime, SessionInputKind, SessionLeaseTable,
+    SessionLifecycleStatus, SessionRecord, SessionServiceError, SessionSubmitReceipt,
 };
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use std::collections::VecDeque;
@@ -43,6 +43,7 @@ pub(crate) struct SessionHandleStatus {
 pub(crate) enum SessionPhase {
     Idle,
     Running,
+    Paused,
     Closing,
     Closed,
 }
@@ -59,8 +60,15 @@ pub(crate) enum SessionCommand {
     Snapshot {
         reply: oneshot::Sender<Result<SessionRecord, SessionServiceError>>,
     },
+    CancelActiveTurn {
+        reply: oneshot::Sender<Result<SessionSubmitReceipt, SessionServiceError>>,
+    },
     ForceClose {
         reply: oneshot::Sender<Result<SessionRecord, SessionServiceError>>,
+    },
+    HibernateIdle {
+        idle_before_ms: u64,
+        reply: oneshot::Sender<Result<Option<SessionRecord>, SessionServiceError>>,
     },
     /// No-op wakeup sent by `clear_closing` after the reaper's TOCTOU
     /// re-check undid `mark_closing`. The actor's `run` loop processes it
@@ -210,10 +218,44 @@ impl SessionHandle {
         })?
     }
 
+    pub(crate) async fn cancel_active_turn(
+        &self,
+    ) -> Result<SessionSubmitReceipt, SessionServiceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::CancelActiveTurn { reply })
+            .await
+            .map_err(|_| SessionServiceError::SessionClosed {
+                session_id: self.session_id.clone(),
+            })?;
+        rx.await.map_err(|_| SessionServiceError::SessionClosed {
+            session_id: self.session_id.clone(),
+        })?
+    }
+
     pub(crate) async fn force_close(&self) -> Result<SessionRecord, SessionServiceError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(SessionCommand::ForceClose { reply })
+            .await
+            .map_err(|_| SessionServiceError::SessionClosed {
+                session_id: self.session_id.clone(),
+            })?;
+        rx.await.map_err(|_| SessionServiceError::SessionClosed {
+            session_id: self.session_id.clone(),
+        })?
+    }
+
+    pub(crate) async fn hibernate_idle(
+        &self,
+        idle_before_ms: u64,
+    ) -> Result<Option<SessionRecord>, SessionServiceError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(SessionCommand::HibernateIdle {
+                idle_before_ms,
+                reply,
+            })
             .await
             .map_err(|_| SessionServiceError::SessionClosed {
                 session_id: self.session_id.clone(),
@@ -359,7 +401,7 @@ impl SessionActor {
             } => {
                 if matches!(
                     self.phase,
-                    SessionPhase::Closing | SessionPhase::Closed
+                    SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
                 ) {
                     self.queue_depth.fetch_sub(1, Ordering::SeqCst);
                     let _ = reply.send(Err(SessionServiceError::SessionClosed {
@@ -383,8 +425,39 @@ impl SessionActor {
             SessionCommand::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.supervisor.snapshot().await));
             }
+            SessionCommand::CancelActiveTurn { reply } => {
+                if let Some(active) = self.active_turn.as_ref() {
+                    active.cancel.cancel();
+                }
+                let _ = reply.send(Ok(SessionSubmitReceipt {
+                    session_id: self.session_id.clone(),
+                    accepted_kind: SessionInputKind::CancelActiveTurn,
+                }));
+            }
             SessionCommand::ForceClose { reply } => {
                 self.begin_force_close(reply).await;
+            }
+            SessionCommand::HibernateIdle {
+                idle_before_ms,
+                reply,
+            } => {
+                if self.phase != SessionPhase::Idle
+                    || self.active_turn.is_some()
+                    || !self.pending_turns.is_empty()
+                    || self.queue_depth.load(Ordering::SeqCst) > 0
+                {
+                    let _ = reply.send(Ok(None));
+                    return;
+                }
+                let snapshot = self.supervisor.snapshot().await;
+                if snapshot.updated_at_ms > idle_before_ms {
+                    let _ = reply.send(Ok(None));
+                    return;
+                }
+                let paused = self.supervisor.hibernate_idle().await;
+                self.phase = SessionPhase::Paused;
+                self.publish_status(None).await;
+                let _ = reply.send(Ok(Some(paused)));
             }
             SessionCommand::Nop => {
                 // No-op wakeup: the command itself is the signal. The `run`
@@ -420,7 +493,7 @@ impl SessionActor {
             if self.active_turn.is_some()
                 || matches!(
                     self.phase,
-                    SessionPhase::Closing | SessionPhase::Closed
+                    SessionPhase::Paused | SessionPhase::Closing | SessionPhase::Closed
                 )
             {
                 return None;
@@ -595,6 +668,7 @@ impl SessionActor {
         let lifecycle = match self.phase {
             SessionPhase::Idle => snapshot.status.clone(),
             SessionPhase::Running | SessionPhase::Closing => SessionLifecycleStatus::Running,
+            SessionPhase::Paused => SessionLifecycleStatus::Paused,
             SessionPhase::Closed => SessionLifecycleStatus::Closed,
         };
         let _ = self.status_tx.send(SessionHandleStatus {

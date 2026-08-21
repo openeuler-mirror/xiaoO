@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+mod daemon_sinks;
+pub use daemon_sinks::{
+    PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
+};
+
 // The wire-facing plan types live in the protocol crate; re-export here to
 // preserve existing `xiaoo_shared::plan::` import paths.
 pub use xiaoo_protocol::plan::{TodoDisplayStatus, TodoSnapshotItem};
