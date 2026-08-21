@@ -4,20 +4,37 @@
 //! gateway bootstrap, or other service-lifecycle machinery.  The caller owns
 //! [`RuntimeState`] and injects an operation backend instance when tools need
 //! filesystem or process access.
+//!
+//! # Default dependencies
+//!
+//! Only [`RuntimeBuilder::llm_provider`] and
+//! [`RuntimeBuilder::token_budget_config`] are required; every other runtime
+//! dependency falls back to a standard implementation when unset (empty
+//! registries, [`prompt::PromptBuilderImpl`], a context manager built from the
+//! provider).  The standard implementations are re-exported below so callers
+//! can also inject them explicitly.
 
 use std::sync::Arc;
 
 use agent_contracts::{
-    CompressionPipeline, PromptBuilder, RuntimeView, SkillRegistry, TokenBudgetPolicy, ToolRegistry,
+    CompressionPipeline, RuntimeView, SkillRegistry, TokenBudgetPolicy, ToolRegistry,
 };
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::BuildError;
+use compact::{build_context_manager, CompactionPolicy};
 use llm_client::LlmProviderWrapper;
+use tool::{EmptyToolRegistry, ToolSpecSnapshot};
 
-use xiaoo_core::{
-    run_agent_loop, AgentLoopInput, AgentRuntime, AgentRuntimeBuilder, LoopRunResult, LoopState,
-    NoopRuntimeView,
-};
+use xiaoo_core::{AgentLoopInput, AgentRuntime, LoopRunResult, LoopState, NoopRuntimeView};
+
+// ---- 签名可达 re-export（builder/run 签名出现的词汇） ----
+#[doc(inline)]
+pub use agent_contracts::{PromptBuilder, ToolSpecView};
+#[doc(inline)]
+pub use agent_types::outcome::AgentError;
+#[doc(inline)]
+pub use prompt::PromptBuilderImpl;
+#[doc(inline)]
+pub use xiaoo_core::{spawn_prefetch, LoopStateSnapshot, LoopStopRule, PendingUserMessageSource};
 
 use crate::backend::OperationBackend;
 
@@ -30,19 +47,37 @@ pub type RuntimeInput = AgentLoopInput;
 /// Result of one runtime turn.
 pub type RuntimeOutput = LoopRunResult;
 
-/// A narrow extension point for integrations that need to decorate the
-/// runtime view.  It intentionally cannot access gateway/session services.
-pub trait RuntimeExtension: Send + Sync {
-    /// Wrap the runtime view used by a turn.
-    fn wrap_runtime_view(&self, view: Arc<dyn RuntimeView>) -> Arc<dyn RuntimeView>;
+/// Runtime build error.
+///
+/// The SDK builder keeps [`RuntimeBuilder::llm_provider`] and
+/// [`RuntimeBuilder::token_budget_config`] required (neither has a safe
+/// default); every other missing field is filled with a standard
+/// implementation at [`RuntimeBuilder::build`] time.  This enum surfaces the
+/// two required-field omissions plus the core and compaction failures that can
+/// occur while assembling the defaults.
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeBuildError {
+    /// Missing the required LLM provider — the only runtime dependency with no
+    /// safe default.
+    #[error("missing required llm_provider")]
+    MissingLlmProvider,
+    /// Missing the required token budget configuration — guessing a budget
+    /// risks context overflow or broken compaction, so it stays required.
+    #[error("missing required token_budget_config")]
+    MissingTokenBudget,
+    /// A missing/invalid field reported by the core builder.
+    #[error("core runtime build failed: {0}")]
+    Core(#[from] agent_types::BuildError),
+    /// The default compression pipeline failed to build.
+    #[error("default compression pipeline build failed: {0}")]
+    Compact(#[from] compact::CompactError),
 }
 
 /// Reusable agent decision loop configuration.
 pub struct Runtime {
     inner: AgentRuntime,
     operation_backend: Option<Arc<dyn OperationBackend>>,
-    extensions: Vec<Arc<dyn RuntimeExtension>>,
-    default_visible_tools: Vec<Arc<dyn agent_contracts::ToolSpecView>>,
+    default_visible_tools: Vec<Arc<dyn ToolSpecView>>,
 }
 
 impl Runtime {
@@ -57,16 +92,19 @@ impl Runtime {
     }
 
     /// Run one turn using the supplied state.
+    ///
+    /// The tool visibility set is decided entirely by `input.visible_tools`:
+    /// an empty set means "no tools this turn" (a legal, intentionally-used
+    /// semantic in the core loop).  The runtime no longer rewrites an empty
+    /// list back to the full registry.  Callers that want the registry's full
+    /// tool set must inject it explicitly via [`Runtime::visible_tools`].
     pub async fn run(
         &self,
         state: &mut RuntimeState,
         mut input: RuntimeInput,
-    ) -> Result<RuntimeOutput, agent_types::outcome::AgentError> {
-        if input.visible_tools.is_empty() {
-            input.visible_tools = self.default_visible_tools.clone();
-        }
+    ) -> Result<RuntimeOutput, AgentError> {
         if input.runtime_view.is_none() {
-            let mut view: Arc<dyn RuntimeView> = match input.interaction.clone() {
+            let view: Arc<dyn RuntimeView> = match input.interaction.clone() {
                 Some(interaction) => Arc::new(NoopRuntimeView::with_backend_and_interaction(
                     self.operation_backend.clone(),
                     interaction,
@@ -83,12 +121,9 @@ impl Runtime {
             {
                 backend.attach_interaction(interaction);
             }
-            for extension in &self.extensions {
-                view = extension.wrap_runtime_view(view);
-            }
             input.runtime_view = Some(view);
         }
-        run_agent_loop(&self.inner, state, input).await
+        xiaoo_core::run_agent_loop(&self.inner, state, input).await
     }
 
     /// The injected operation backend, if any.
@@ -97,85 +132,125 @@ impl Runtime {
     }
 
     /// Return the tool specifications exposed by the configured registry.
-    pub fn visible_tools(&self) -> Vec<Arc<dyn agent_contracts::ToolSpecView>> {
+    ///
+    /// Convenience accessor for callers that want the full registry tool set
+    /// as `input.visible_tools` (e.g. via
+    /// `RuntimeInput::new(..).with_visible_tools(runtime.visible_tools())`).
+    pub fn visible_tools(&self) -> Vec<Arc<dyn ToolSpecView>> {
         self.default_visible_tools.clone()
     }
 }
 
 /// Builder for [`Runtime`].
+///
+/// Holds each field as an `Option`; [`RuntimeBuilder::build`] fills the
+/// standard defaults for every unset runtime dependency, then assembles the
+/// inner core builder.  Only [`llm_provider`](RuntimeBuilder::llm_provider)
+/// and [`token_budget_config`](RuntimeBuilder::token_budget_config) are
+/// required.
 pub struct RuntimeBuilder {
-    inner: AgentRuntimeBuilder,
+    llm_provider: Option<Arc<LlmProviderWrapper>>,
+    compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
+    prompt_builder: Option<Arc<dyn PromptBuilder>>,
+    system_prompt: Option<Arc<str>>,
+    tool_registry: Option<Arc<dyn ToolRegistry>>,
+    skill_registry: Option<Arc<dyn SkillRegistry>>,
+    feature_flags: Option<FeatureFlags>,
+    max_turns: Option<u32>,
+    token_budget_config: Option<TokenBudgetConfig>,
+    token_budget_policy: Option<Arc<dyn TokenBudgetPolicy>>,
     operation_backend: Option<Arc<dyn OperationBackend>>,
-    extensions: Vec<Arc<dyn RuntimeExtension>>,
 }
 
 impl RuntimeBuilder {
     /// Create an empty builder.
     pub fn new() -> Self {
         Self {
-            inner: AgentRuntime::builder(),
+            llm_provider: None,
+            compression_pipeline: None,
+            prompt_builder: None,
+            system_prompt: None,
+            tool_registry: None,
+            skill_registry: None,
+            feature_flags: None,
+            max_turns: None,
+            token_budget_config: None,
+            token_budget_policy: None,
             operation_backend: None,
-            extensions: Vec::new(),
         }
     }
 
-    /// Inject the caller-owned LLM provider.
+    /// Inject the caller-owned LLM provider (required).
     pub fn llm_provider(mut self, provider: Arc<LlmProviderWrapper>) -> Self {
-        self.inner = self.inner.llm_provider(provider);
+        self.llm_provider = Some(provider);
         self
     }
 
     /// Inject the compression pipeline.
+    ///
+    /// Unset: a context manager built from the provider via
+    /// [`compact::build_context_manager`].
     pub fn compression_pipeline(mut self, pipeline: Arc<dyn CompressionPipeline>) -> Self {
-        self.inner = self.inner.compression_pipeline(pipeline);
+        self.compression_pipeline = Some(pipeline);
         self
     }
 
     /// Inject the prompt builder.
+    ///
+    /// Unset: [`PromptBuilderImpl::new`].
     pub fn prompt_builder(mut self, builder: Arc<dyn PromptBuilder>) -> Self {
-        self.inner = self.inner.prompt_builder(builder);
+        self.prompt_builder = Some(builder);
         self
     }
 
     /// Set the system prompt.
+    ///
+    /// Unset: an empty string.
     pub fn system_prompt(mut self, prompt: impl Into<Arc<str>>) -> Self {
-        self.inner = self.inner.system_prompt(prompt);
+        self.system_prompt = Some(prompt.into());
         self
     }
 
     /// Inject the tool registry.
+    ///
+    /// Unset: [`EmptyToolRegistry::new`].
     pub fn tool_registry(mut self, registry: Arc<dyn ToolRegistry>) -> Self {
-        self.inner = self.inner.tool_registry(registry);
+        self.tool_registry = Some(registry);
         self
     }
 
     /// Inject the skill registry.
+    ///
+    /// Unset: [`xiaoo_core::EmptySkillRegistry::new`].
     pub fn skill_registry(mut self, registry: Arc<dyn SkillRegistry>) -> Self {
-        self.inner = self.inner.skill_registry(registry);
+        self.skill_registry = Some(registry);
         self
     }
 
     /// Set feature flags.
     pub fn feature_flags(mut self, flags: FeatureFlags) -> Self {
-        self.inner = self.inner.feature_flags(flags);
+        self.feature_flags = Some(flags);
         self
     }
 
     /// Set the maximum number of turns.
     pub fn max_turns(mut self, max_turns: u32) -> Self {
-        self.inner = self.inner.max_turns(max_turns);
+        self.max_turns = Some(max_turns);
         self
     }
 
-    /// Set the token budget configuration.
+    /// Set the token budget configuration (required).
     pub fn token_budget_config(mut self, config: TokenBudgetConfig) -> Self {
-        self.inner = self.inner.token_budget_config(config);
+        self.token_budget_config = Some(config);
         self
     }
 
     /// Inject the token budget policy.
+    ///
+    /// Unset: [`CompactionPolicy::from_budget`] applied to the configured
+    /// token budget.
     pub fn token_budget_policy(mut self, policy: Arc<dyn TokenBudgetPolicy>) -> Self {
-        self.inner = self.inner.token_budget_policy(policy);
+        self.token_budget_policy = Some(policy);
         self
     }
 
@@ -185,29 +260,63 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Install a narrow runtime extension.
-    pub fn extension(mut self, extension: Arc<dyn RuntimeExtension>) -> Self {
-        self.extensions.push(extension);
-        self
-    }
+    /// Build the runtime.
+    ///
+    /// Required fields (`llm_provider`, `token_budget_config`) must be set;
+    /// every other unset dependency is filled with its standard default.
+    pub fn build(self) -> Result<Runtime, RuntimeBuildError> {
+        let llm_provider = self.llm_provider.ok_or(RuntimeBuildError::MissingLlmProvider)?;
+        let token_budget_config = self
+            .token_budget_config
+            .ok_or(RuntimeBuildError::MissingTokenBudget)?;
 
-    /// Build the runtime.  Missing fields are reported by the core builder.
-    pub fn build(self) -> Result<Runtime, BuildError> {
-        let default_visible_tools = self.inner.build().map(|inner| {
-            let tools = inner
-                .tool_registry()
-                .list_specs()
-                .into_iter()
-                .map(|spec| tool::ToolSpecSnapshot::from(spec))
-                .map(|spec| Arc::new(spec) as Arc<dyn agent_contracts::ToolSpecView>)
-                .collect();
-            (inner, tools)
-        })?;
+        let compression_pipeline = match self.compression_pipeline {
+            Some(p) => p,
+            None => build_context_manager(None, Arc::clone(&llm_provider))?,
+        };
+        let token_budget_policy = self.token_budget_policy.unwrap_or_else(|| {
+            Arc::new(CompactionPolicy::from_budget(&token_budget_config))
+        });
+        let prompt_builder = self
+            .prompt_builder
+            .unwrap_or_else(|| Arc::new(PromptBuilderImpl::new()));
+        let tool_registry = self
+            .tool_registry
+            .unwrap_or_else(|| Arc::new(EmptyToolRegistry::new()));
+        let skill_registry = self
+            .skill_registry
+            .unwrap_or_else(|| Arc::new(xiaoo_core::EmptySkillRegistry::new()));
+        let system_prompt = self.system_prompt.unwrap_or_else(|| Arc::from(""));
+
+        let mut inner = AgentRuntime::builder()
+            .llm_provider(llm_provider)
+            .compression_pipeline(compression_pipeline)
+            .prompt_builder(prompt_builder)
+            .system_prompt(system_prompt)
+            .tool_registry(tool_registry)
+            .skill_registry(skill_registry)
+            .token_budget_config(token_budget_config)
+            .token_budget_policy(token_budget_policy);
+        if let Some(flags) = self.feature_flags {
+            inner = inner.feature_flags(flags);
+        }
+        if let Some(max_turns) = self.max_turns {
+            inner = inner.max_turns(max_turns);
+        }
+        let inner = inner.build()?;
+
+        let default_visible_tools = inner
+            .tool_registry()
+            .list_specs()
+            .into_iter()
+            .map(|spec| ToolSpecSnapshot::from(spec))
+            .map(|spec| Arc::new(spec) as Arc<dyn ToolSpecView>)
+            .collect();
+
         Ok(Runtime {
-            inner: default_visible_tools.0,
+            inner,
             operation_backend: self.operation_backend,
-            extensions: self.extensions,
-            default_visible_tools: default_visible_tools.1,
+            default_visible_tools,
         })
     }
 }
@@ -218,22 +327,108 @@ impl Default for RuntimeBuilder {
     }
 }
 
-/// A no-op extension useful for feature-gated integrations.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NoopRuntimeExtension;
-
-impl RuntimeExtension for NoopRuntimeExtension {
-    fn wrap_runtime_view(&self, view: Arc<dyn RuntimeView>) -> Arc<dyn RuntimeView> {
-        view
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use agent_contracts::{LlmProvider, ProviderCapabilities};
+    use agent_types::llm::{LlmError, LlmRequest, LlmResponse, StreamChunk};
+    use async_trait::async_trait;
+
     #[test]
     fn runtime_state_is_caller_owned() {
         let state = xiaoo_core::LoopState::new("conversation-1".to_string());
         assert_eq!(state.session_id, "conversation-1");
         assert!(state.messages.read().is_empty());
+    }
+
+    #[test]
+    fn build_requires_llm_provider() {
+        // No provider and no budget -> provider is the first required field
+        // resolved in build().  Use `match` (not unwrap_err/expect_err) since
+        // Runtime does not implement Debug.
+        let err = match Runtime::builder().build() {
+            Ok(_) => panic!("build without llm_provider must fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, RuntimeBuildError::MissingLlmProvider));
+        // Setting budget alone does not satisfy the provider requirement.
+        let err = match Runtime::builder()
+            .token_budget_config(TokenBudgetConfig {
+                total_budget: 8_192,
+                reserved_for_output: 1_024,
+                reserved_for_system: 512,
+                hard_limit_ratio: 0.9,
+            })
+            .build()
+        {
+            Ok(_) => panic!("build with budget but no provider must fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, RuntimeBuildError::MissingLlmProvider));
+    }
+
+    #[test]
+    fn build_requires_token_budget() {
+        // Provider is set, budget is not — `build()` resolves the provider
+        // first, then fails on the missing budget.  The provider here is a
+        // stub: `build()` does not invoke `complete`, it only stores the
+        // wrapper, so the stub's responses are irrelevant.
+        let wrapper = LlmProviderWrapper::new(
+            Arc::new(StubLlmProvider::new()) as Arc<dyn LlmProvider>,
+            None,
+            None,
+        );
+        let err = match Runtime::builder()
+            .llm_provider(Arc::new(wrapper))
+            .build()
+        {
+            Ok(_) => panic!("build with provider but no budget must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, RuntimeBuildError::MissingTokenBudget),
+            "expected MissingTokenBudget, got {err:?}"
+        );
+    }
+
+    /// Minimal `LlmProvider` impl whose responses are irrelevant — the build()
+    /// path only stores the wrapper, it never calls `complete`.
+    struct StubLlmProvider {
+        caps: ProviderCapabilities,
+    }
+
+    impl StubLlmProvider {
+        fn new() -> Self {
+            Self {
+                caps: ProviderCapabilities {
+                    supports_streaming: false,
+                    supports_tool_calls: false,
+                    supports_json_mode: false,
+                    max_context_window: 0,
+                    model_name: String::new(),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StubLlmProvider {
+        async fn complete(&self, _: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::ApiError("stub provider".into()))
+        }
+
+        async fn complete_stream(
+            &self,
+            _: &LlmRequest,
+            _: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            Err(LlmError::ApiError("stub provider".into()))
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.caps
+        }
     }
 }

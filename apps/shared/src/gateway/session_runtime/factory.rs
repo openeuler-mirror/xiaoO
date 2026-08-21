@@ -23,9 +23,10 @@ use tool::{
     ToolStateStoreBuilderImpl,
 };
 use trace::TraceRecorderBuilderImpl;
+use xiaoo_api::runtime::{Runtime, RuntimeBuildError};
 use xiaoo_core::{
-    AgentRuntime, AgentRuntimeBuilder, BasicAgentContext, BasicRuntimeView, EmptySkillRegistry,
-    NoopInteractionHandle, NoopToolEventSink,
+    BasicAgentContext, BasicRuntimeView, EmptySkillRegistry, NoopInteractionHandle,
+    NoopToolEventSink,
 };
 
 use parking_lot::RwLock;
@@ -35,7 +36,7 @@ use crate::gateway::permission_backend::PermissionAwareOperationBackend;
 use crate::gateway::{GatewayEntryKind, SessionRecord};
 
 pub struct AppRuntimeAssembly {
-    pub runtime: AgentRuntime,
+    pub runtime: Runtime,
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
@@ -63,6 +64,8 @@ pub struct AppRuntimeFactory;
 pub enum AppRuntimeFactoryError {
     #[error("core runtime build failed: {0}")]
     CoreBuild(#[from] BuildError),
+    #[error("runtime build failed: {0}")]
+    ApiBuild(#[from] RuntimeBuildError),
     #[error("trace config serialization failed: {0}")]
     TraceConfigSerialization(#[from] serde_json::Error),
     #[error("compression pipeline build failed: {0}")]
@@ -188,7 +191,7 @@ impl AppRuntimeFactory {
             Some(runtime_view)
         };
 
-        let mut builder = AgentRuntimeBuilder::new()
+        let mut builder = Runtime::builder()
             .llm_provider(Arc::clone(&resolved.llm_provider))
             .compression_pipeline(compression_pipeline)
             .prompt_builder(prompt_builder)

@@ -4452,10 +4452,12 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "anyhow",
+ "async-trait",
  "compact",
  "llm-client",
  "prompt",
  "skill",
+ "thiserror 1.0.69",
  "tokio",
  "tool",
  "xiaoo-core",
@@ -4526,6 +4528,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xiaoo-protocol"
+version = "0.1.0"
+dependencies = [
+ "agent-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "xiaoo-shared"
 version = "0.1.0"
 dependencies = [
@@ -4572,7 +4583,9 @@ dependencies = [
  "tracing",
  "uuid",
  "vault",
+ "xiaoo-api",
  "xiaoo-core",
+ "xiaoo-protocol",
 ]
 
 [[package]]

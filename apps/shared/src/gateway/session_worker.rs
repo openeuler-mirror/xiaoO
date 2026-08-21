@@ -12,8 +12,8 @@ use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::{
-    run_agent_loop, AgentLoopInput, LoopRunResult, LoopState, LoopStateSnapshot, LoopStopRule,
+use xiaoo_api::runtime::{
+    LoopStateSnapshot, LoopStopRule, RuntimeInput, RuntimeOutput, RuntimeState,
 };
 
 pub struct SessionWorkerInput {
@@ -36,7 +36,7 @@ pub struct SessionWorkerInput {
 }
 
 pub struct SessionWorkerResult {
-    pub loop_result: LoopRunResult,
+    pub loop_result: RuntimeOutput,
     pub loop_state: LoopStateSnapshot,
     pub memory_snapshot: MemorySnapshot,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
@@ -95,8 +95,8 @@ impl SessionWorker {
         let mut loop_state = input
             .loop_state
             .clone()
-            .map(|snapshot| LoopState::from_snapshot(snapshot, cancel.clone()))
-            .unwrap_or_else(|| LoopState::new_with_cancel(loop_session_id, cancel));
+            .map(|snapshot| RuntimeState::from_snapshot(snapshot, cancel.clone()))
+            .unwrap_or_else(|| RuntimeState::new_with_cancel(loop_session_id, cancel));
 
         // Share message storage with runtime_view
         let messages = loop_state.messages_arc();
@@ -126,7 +126,7 @@ impl SessionWorker {
             }
         };
 
-        let mut loop_input = AgentLoopInput::new(input.user_message)
+        let mut loop_input = RuntimeInput::new(input.user_message)
             .with_agent_id(input.agent_id.clone())
             .with_visible_tools(assembly.visible_tools.clone())
             .with_reasoning_effort(input.reasoning_effort);
@@ -149,7 +149,7 @@ impl SessionWorker {
             loop_input = loop_input.with_pending_user_messages(pending_user_messages);
         }
 
-        let loop_result = run_agent_loop(&assembly.runtime, &mut loop_state, loop_input).await;
+        let loop_result = assembly.runtime.run(&mut loop_state, loop_input).await;
         let shutdown_result = assembly.shutdown().await;
 
         let loop_result = match loop_result {

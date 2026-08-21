@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 
 xiaoo-core = { path = "../core" }
@@ -16,3 +17,6 @@ compact = { path = "../compact" }
 tool = { path = "../tool" }
 skill = { path = "../skill" }
 prompt = { path = "../prompt" }
+
+[dev-dependencies]
+async-trait.workspace = true

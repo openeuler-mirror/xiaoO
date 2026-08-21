@@ -1,15 +1,15 @@
 //! Minimal pure-runtime example.
 //!
-//! The caller owns runtime state and injects runtime dependencies directly;
-//! there is no host, session service, lease, or backend manager involved.
+//! Only `xiaoo_api` is imported — no host, session service, lease, backend
+//! manager, or lower-crate direct references.  The caller owns runtime state
+//! and injects the two required dependencies (`llm_provider` +
+//! `token_budget_config`); every other runtime dependency falls back to the
+//! SDK standard defaults.
 
 use std::sync::Arc;
 
-use agent_types::context::TokenBudgetConfig;
-use compact::{build_context_manager, CompactionPolicy};
-use llm_client::{create_llm_provider, LlmProviderConfig};
-use prompt::PromptBuilderImpl;
-use tool::EmptyToolRegistry;
+use xiaoo_api::chat::TokenBudgetConfig;
+use xiaoo_api::llm::{create_llm_provider, LlmProviderConfig};
 use xiaoo_api::prelude::*;
 
 #[tokio::main(flavor = "current_thread")]
@@ -23,23 +23,16 @@ async fn main() -> anyhow::Result<()> {
         hard_limit_ratio: 0.9,
     };
 
-    let provider = create_llm_provider(
+    let provider = Arc::new(create_llm_provider(
         &LlmProviderConfig::new(provider_name, model),
         Some("example".to_string()),
         None,
-    )?;
-    let provider = Arc::new(provider);
-    let compression = build_context_manager(None, provider.clone())?;
+    )?);
     let runtime = Runtime::builder()
         .llm_provider(provider)
-        .compression_pipeline(compression)
-        .prompt_builder(Arc::new(PromptBuilderImpl::new()))
         .system_prompt("You are a concise coding assistant.")
-        .tool_registry(Arc::new(EmptyToolRegistry::new()))
-        .skill_registry(Arc::new(xiaoo_core::EmptySkillRegistry::new()))
-        .token_budget_config(budget.clone())
-        .token_budget_policy(Arc::new(CompactionPolicy::from_budget(&budget)))
-        .build()?;
+        .token_budget_config(budget)
+        .build()?; // 其余 6 项全走缺省
 
     let mut state = runtime.new_state("example-conversation");
     let result = runtime
