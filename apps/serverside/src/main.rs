@@ -1,4 +1,5 @@
 mod channels;
+mod config_schema;
 mod cron;
 mod daemon_config;
 mod daemon_runtime;
@@ -42,8 +43,13 @@ async fn main() -> Result<()> {
         print_usage();
         return Ok(());
     }
-    if cli.action == CliAction::ValidateConfig {
-        return validate_config(cli.config);
+    match cli.action {
+        CliAction::ValidateConfig => return validate_config(cli.config),
+        CliAction::ConfigSchema => {
+            println!("{}", config_schema::config_schema());
+            return Ok(());
+        }
+        CliAction::Serve => {}
     }
     run_daemon(
         cli.config,
@@ -536,6 +542,7 @@ fn init_tracing() {
 enum CliAction {
     Serve,
     ValidateConfig,
+    ConfigSchema,
 }
 
 #[derive(Debug)]
@@ -570,11 +577,13 @@ impl Cli {
         let mut remaining = args.into_iter().collect::<Vec<_>>();
         let action = match remaining.first().map(String::as_str) {
             Some("config") => {
-                if remaining.get(1).map(String::as_str) != Some("validate") {
-                    bail!("unknown config command; expected `config validate`");
-                }
+                let action = match remaining.get(1).map(String::as_str) {
+                    Some("validate") => CliAction::ValidateConfig,
+                    Some("schema") => CliAction::ConfigSchema,
+                    _ => bail!("unknown config command; expected `config validate` or `config schema`"),
+                };
                 remaining.drain(0..2);
-                CliAction::ValidateConfig
+                action
             }
             _ => CliAction::Serve,
         };
@@ -680,6 +689,7 @@ fn print_usage() {
          \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\
          \x20                  [--no-dashboard] [--ready-stdio] [--bearer-token-env <name>]\n\n\
          \x20     xiaoo-daemon config validate [--config <path>]\n\n\
+         \x20     xiaoo-daemon config schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -738,6 +748,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_schema_command() {
+        let cli = Cli::parse(
+            ["config", "schema"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config schema should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigSchema);
+    }
+
+    #[test]
     fn rejects_unknown_config_command() {
         let error = Cli::parse(
             ["config", "unknown"]
@@ -745,7 +767,7 @@ mod tests {
                 .map(str::to_string),
         )
         .expect_err("unknown config command should fail");
-        assert!(error.to_string().contains("expected `config validate`"));
+        assert!(error.to_string().contains("expected `config validate` or `config schema`"));
     }
 
     #[test]

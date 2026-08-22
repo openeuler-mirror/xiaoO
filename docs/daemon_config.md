@@ -22,6 +22,17 @@ The command writes a JSON result to stdout. Invalid configurations return
 `valid: false`, the resolved configuration path, and an error list, then exit
 with a non-zero status.
 
+The versioned visual-configuration schema is available without loading a
+configuration file:
+
+```bash
+xiaoo-daemon config schema
+```
+
+Its section and field metadata is the authoritative contract for graphical
+clients. It includes defaults, enum choices, secret references and whether a
+change currently requires a daemon restart.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
