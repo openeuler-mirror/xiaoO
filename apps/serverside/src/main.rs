@@ -42,6 +42,9 @@ async fn main() -> Result<()> {
         print_usage();
         return Ok(());
     }
+    if cli.action == CliAction::ValidateConfig {
+        return validate_config(cli.config);
+    }
     run_daemon(
         cli.config,
         cli.mcp_config,
@@ -54,6 +57,37 @@ async fn main() -> Result<()> {
         cli.bearer_token_env,
     )
     .await
+}
+
+fn validate_config(config_path: Option<PathBuf>) -> Result<()> {
+    let config_path = resolve_config_path(config_path)?;
+    match DaemonConfig::load_from(&config_path) {
+        Ok(config) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "valid": true,
+                    "config_path": config_path,
+                    "active_profile": config.app.llm.active_profile,
+                })
+            );
+            Ok(())
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "valid": false,
+                    "config_path": config_path,
+                    "errors": [{
+                        "path": "config",
+                        "message": format!("{error:#}"),
+                    }],
+                })
+            );
+            Err(error)
+        }
+    }
 }
 
 async fn run_daemon(
@@ -498,7 +532,15 @@ fn init_tracing() {
         .try_init();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliAction {
+    Serve,
+    ValidateConfig,
+}
+
+#[derive(Debug)]
 struct Cli {
+    action: CliAction,
     config: Option<PathBuf>,
     mcp_config: Option<PathBuf>,
     host: String,
@@ -525,12 +567,23 @@ impl Cli {
         let mut no_dashboard = false;
         let mut ready_stdio = false;
         let mut bearer_token_env = None;
-        let remaining = args.into_iter().collect::<Vec<_>>();
+        let mut remaining = args.into_iter().collect::<Vec<_>>();
+        let action = match remaining.first().map(String::as_str) {
+            Some("config") => {
+                if remaining.get(1).map(String::as_str) != Some("validate") {
+                    bail!("unknown config command; expected `config validate`");
+                }
+                remaining.drain(0..2);
+                CliAction::ValidateConfig
+            }
+            _ => CliAction::Serve,
+        };
         let mut index = 0;
         while index < remaining.len() {
             match remaining[index].as_str() {
                 "--help" | "-h" => {
                     return Ok(Self {
+                        action,
                         config,
                         mcp_config,
                         host,
@@ -606,6 +659,7 @@ impl Cli {
             index += 1;
         }
         Ok(Self {
+            action,
             config,
             mcp_config,
             host,
@@ -625,6 +679,7 @@ fn print_usage() {
         "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
          \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\
          \x20                  [--no-dashboard] [--ready-stdio] [--bearer-token-env <name>]\n\n\
+         \x20     xiaoo-daemon config validate [--config <path>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -633,7 +688,7 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, CliAction};
     use std::path::PathBuf;
 
     #[test]
@@ -666,6 +721,31 @@ mod tests {
             Some("XIAOO_CLIENT_DAEMON_TOKEN")
         );
         assert!(!cli.help);
+        assert_eq!(cli.action, CliAction::Serve);
+    }
+
+    #[test]
+    fn parses_config_validate_command() {
+        let cli = Cli::parse(
+            ["config", "validate", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config validate should parse");
+
+        assert_eq!(cli.action, CliAction::ValidateConfig);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn rejects_unknown_config_command() {
+        let error = Cli::parse(
+            ["config", "unknown"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect_err("unknown config command should fail");
+        assert!(error.to_string().contains("expected `config validate`"));
     }
 
     #[test]

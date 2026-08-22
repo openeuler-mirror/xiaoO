@@ -11,6 +11,17 @@
 
 ## Daemon Startup Parameters
 
+Before starting the daemon, configuration can be parsed and structurally
+validated without opening ports or resolving API keys:
+
+```bash
+xiaoo-daemon config validate --config ~/.config/xiaoo/config.toml
+```
+
+The command writes a JSON result to stdout. Invalid configurations return
+`valid: false`, the resolved configuration path, and an error list, then exit
+with a non-zero status.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
