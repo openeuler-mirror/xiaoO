@@ -1,8 +1,23 @@
-use crate::gateway::{AppTurnRequest, GatewayEntryContext, LlmRuntimeConfig};
-use agent_types::interaction::InteractionResponse;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+//! Session-open / close / cancel / heartbeat / detach / interaction wire
+//! request types.
+//!
+//! The request struct definitions live in [`xiaoo_protocol::wire`]; this
+//! module re-exports them under the `xiaoo_shared::gateway` path so existing
+//! import paths keep working. Only [`channel_session_id`] is defined here —
+//! it is a pure helper with no wire-contract surface.
 
+pub use xiaoo_protocol::wire::{
+    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
+    RuntimeInteractionRequest, RuntimeOpenRequest, SessionCancelRequest, SessionCloseRequest,
+    SessionDetachRequest, SessionHeartbeatRequest, SessionInteractionRequest,
+    SessionOpenRequest,
+};
+
+/// Derive the session id used for a channel-scoped conversation.
+///
+/// Falls back to the channel name when no instance id is given, so each
+/// channel defaults to a single conversation scope unless the caller
+/// distinguishes instances.
 pub fn channel_session_id(
     channel: &str,
     channel_instance_id: Option<&str>,
@@ -10,183 +25,4 @@ pub fn channel_session_id(
 ) -> String {
     let scope = channel_instance_id.unwrap_or(channel);
     format!("{scope}:{conversation_id}")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionOpenRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    pub conversation_id: String,
-    pub sender_id: String,
-    #[serde(default)]
-    pub entry: GatewayEntryContext,
-    #[serde(default)]
-    pub channel: Option<String>,
-    #[serde(default)]
-    pub channel_instance_id: Option<String>,
-    #[serde(default)]
-    pub llm: Option<LlmRuntimeConfig>,
-    /// Absolute path on the daemon host to snapshot into an E2B runtime.
-    /// Other backends ignore this field and retain their configured workspace.
-    #[serde(default)]
-    pub workspace: Option<PathBuf>,
-    /// Ordered daemon-host search roots whose immediate child directories are skills.
-    #[serde(default)]
-    pub skills: Option<Vec<PathBuf>>,
-    /// Process identifier used by the daemon's attach-lease table to enforce
-    /// single-writer per session. `None` for legacy / anonymous callers
-    /// (bypass during rollout).
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// Display-only client PID / hostname, surfaced to the TUI on "who holds
-    /// the lease?" queries. Not authoritative.
-    #[serde(default)]
-    pub client_pid: Option<u32>,
-    #[serde(default)]
-    pub client_hostname: Option<String>,
-}
-
-impl SessionOpenRequest {
-    pub fn into_turn_request(self, text: String) -> AppTurnRequest {
-        AppTurnRequest {
-            session_id: self.session_id,
-            entry: self.entry,
-            channel: self.channel,
-            message_id: None,
-            conversation_id: self.conversation_id,
-            sender_id: self.sender_id,
-            text,
-            channel_instance_id: self.channel_instance_id,
-            channel_identity_prompt: None,
-            reply_to_message_id: None,
-            root_message_id: None,
-            mentions: Vec::new(),
-            reasoning_effort: Default::default(),
-            llm: self.llm,
-            workspace: self.workspace,
-            skills: self.skills,
-            command_context: None,
-            chain_depth: 0,
-            client_id: self.client_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionCloseRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionCancelRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionHeartbeatRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// Display-only client PID / hostname, stamped onto the lease on
-    /// auto-re-acquire (daemon restart wiped the table) so holder identity
-    /// survives.
-    #[serde(default)]
-    pub client_pid: Option<u32>,
-    #[serde(default)]
-    pub client_hostname: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionDetachRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInteractionRequest {
-    #[serde(rename = "runtime_id", alias = "session_id")]
-    pub session_id: String,
-    pub response: InteractionResponse,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-pub type RuntimeOpenRequest = SessionOpenRequest;
-pub type RuntimeCloseRequest = SessionCloseRequest;
-pub type RuntimeCancelRequest = SessionCancelRequest;
-pub type RuntimeInteractionRequest = SessionInteractionRequest;
-pub type RuntimeHeartbeatRequest = SessionHeartbeatRequest;
-pub type RuntimeDetachRequest = SessionDetachRequest;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn runtime_open_request_serializes_runtime_id_and_accepts_legacy_session_id() {
-        let request = RuntimeOpenRequest {
-            session_id: "runtime-1".to_string(),
-            conversation_id: "conv-1".to_string(),
-            sender_id: "user-1".to_string(),
-            entry: GatewayEntryContext::default(),
-            channel: None,
-            channel_instance_id: None,
-            llm: None,
-            workspace: None,
-            skills: None,
-            client_id: None,
-            client_pid: None,
-            client_hostname: None,
-        };
-
-        let value = serde_json::to_value(&request).expect("request should serialize");
-        assert_eq!(value["runtime_id"], "runtime-1");
-        assert!(value.get("session_id").is_none());
-        assert!(value["workspace"].is_null());
-        assert!(value["skills"].is_null());
-
-        let old: RuntimeOpenRequest =
-            serde_json::from_str(r#"{"runtime_id":"old","conversation_id":"c","sender_id":"u"}"#)
-                .expect("old request without bootstrap fields should deserialize");
-        assert!(old.workspace.is_none());
-        assert!(old.skills.is_none());
-
-        let legacy: RuntimeCloseRequest =
-            serde_json::from_str(r#"{"session_id":"legacy-runtime"}"#)
-                .expect("legacy session_id should deserialize");
-        assert_eq!(legacy.session_id, "legacy-runtime");
-    }
-
-    #[test]
-    fn open_bootstrap_paths_are_carried_into_direct_turn_conversion() {
-        let request: RuntimeOpenRequest = serde_json::from_str(
-            r#"{
-                "runtime_id":"runtime-1",
-                "conversation_id":"conversation",
-                "sender_id":"user",
-                "workspace":"/home/cz",
-                "skills":["/home/cz/.xiaoo/skills","/opt/company/skills"]
-            }"#,
-        )
-        .expect("bootstrap request");
-        let turn = request.into_turn_request("hello".to_string());
-
-        assert_eq!(turn.workspace, Some(PathBuf::from("/home/cz")));
-        assert_eq!(
-            turn.skills,
-            Some(vec![
-                PathBuf::from("/home/cz/.xiaoo/skills"),
-                PathBuf::from("/opt/company/skills")
-            ])
-        );
-    }
 }

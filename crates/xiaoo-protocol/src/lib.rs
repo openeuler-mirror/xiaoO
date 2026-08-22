@@ -1,22 +1,25 @@
 //! xiaoo wire protocol assets.
 //!
-//! This crate owns the wire-facing types that clients use to consume the
-//! daemon's SSE stream: the strongly-typed [`sse::RuntimeSseEvent`] model and
-//! the [`plan::TodoSnapshotItem`] payload it references.  It depends only on
-//! `serde` and `agent-types`; it has no dependency on any `apps/*` crate.
+//! This crate owns the wire-facing types that flow across the xiaoo ↔ daemon
+//! boundary: the strongly-typed [`sse::RuntimeSseEvent`] model (with the
+//! [`plan::TodoSnapshotItem`] payload it references) and the [`wire`] request
+//! types that clients send over the `/api/v1/runtimes/*` HTTP surface.  It
+//! depends only on `serde`/`serde_json` and `agent-types`; it has no
+//! dependency on any `apps/*` crate.
 //!
-//! # Scope
+//! # Protocol discipline
 //!
-//! v1 covers the SSE event surface recovered from the pre-refactor SDK.  The
-//! wire request aliases (`RuntimeOpenRequest` / `RuntimeTurnRequest` /
-//! `RuntimeCancelRequest` / `RuntimeCloseRequest` / `RuntimeDetachRequest` /
-//! `RuntimeHeartbeatRequest` / `RuntimeInteractionRequest`) currently remain
-//! in `xiaoo_shared::gateway` (endside's remote client already depends on
-//! shared, and moving them would sink the whole session DTO family).  They
-//! are registered as a second-stage "contract sinking" item to migrate into
-//! this crate.
+//! Every serde representation in this crate is a wire contract.  Any field
+//! change (rename, type change, added/removed field, default flip) must stay
+//! byte-for-byte compatible with the daemon's serialization and is treated as
+//! a protocol change coordinated with the daemon repository.  The frozen JSON
+//! baselines under `sse/tests.rs` and `wire/tests.rs` are the regression
+//! guardrail: they pin the exact serialized shape and must stay green.  When
+//! the daemon legitimately evolves the protocol, update the samples through a
+//! dedicated protocol-change review, never as a drive-by.
 
 #![deny(missing_docs)]
 
 pub mod plan;
 pub mod sse;
+pub mod wire;
