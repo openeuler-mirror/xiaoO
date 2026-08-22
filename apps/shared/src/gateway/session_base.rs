@@ -3,8 +3,14 @@
 //!
 //! The request struct definitions live in [`xiaoo_protocol::wire`]; this
 //! module re-exports them under the `xiaoo_shared::gateway` path so existing
-//! import paths keep working. Only [`channel_session_id`] is defined here —
-//! it is a pure helper with no wire-contract surface.
+//! import paths keep working. The fork / input / submit-receipt types below
+//! are not part of the wire contract and stay defined here, alongside the
+//! [`channel_session_id`] helper.
+
+use crate::backend::BackendForkResult;
+use crate::gateway::{AppTurnRequest, SessionRecord};
+use agent_types::interaction::InteractionResponse;
+use serde::{Deserialize, Serialize};
 
 pub use xiaoo_protocol::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
@@ -25,4 +31,55 @@ pub fn channel_session_id(
 ) -> String {
     let scope = channel_instance_id.unwrap_or(channel);
     format!("{scope}:{conversation_id}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionForkRequest {
+    pub parent_session_id: String,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    #[serde(default)]
+    pub snapshot_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionForkResult {
+    pub parent: SessionRecord,
+    pub child: SessionRecord,
+    pub backend_fork: BackendForkResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionInput {
+    Turn {
+        request: AppTurnRequest,
+    },
+    Interaction {
+        response: InteractionResponse,
+    },
+    InputChunk {
+        stream_id: String,
+        seq: u32,
+        content: String,
+        is_final: bool,
+    },
+    CancelActiveTurn,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionInputKind {
+    Turn,
+    Interaction,
+    InputChunk,
+    CancelActiveTurn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionSubmitReceipt {
+    pub session_id: String,
+    pub accepted_kind: SessionInputKind,
 }

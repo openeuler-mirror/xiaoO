@@ -5,9 +5,22 @@ use std::path::Path;
 use sysinfo::System;
 
 fn main() {
+    compile_conch_proto();
     if is_cargo_install() {
         install_builtin_skills();
     }
+}
+
+fn compile_conch_proto() {
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("find vendored protoc");
+    std::env::set_var("PROTOC", protoc);
+    tonic_build::configure()
+        .build_server(false)
+        .compile_protos(
+            &["src/backend/conch/proto/agent.proto"],
+            &["src/backend/conch/proto"],
+        )
+        .expect("compile conch agent proto");
 }
 
 fn is_cargo_install() -> bool {
