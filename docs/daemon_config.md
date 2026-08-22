@@ -33,6 +33,16 @@ Its section and field metadata is the authoritative contract for graphical
 clients. It includes defaults, enum choices, secret references and whether a
 change currently requires a daemon restart.
 
+Provider metadata comes directly from the LLM Provider Registry:
+
+```bash
+xiaoo-daemon config providers
+```
+
+The JSON result groups aliases under canonical Provider names and includes the
+protocol family, default API Base, suggested API Key environment variable,
+whether a key is required, and model-catalog support.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |

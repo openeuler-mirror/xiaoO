@@ -30,8 +30,8 @@ pub use models::{
     ModelCatalog, ModelSummary,
 };
 pub use provider_registry::{
-    normalize_api_base, resolve_protocol_family, resolve_provider_profile, supported_providers,
-    ProtocolFamily, ProviderProfile,
+    normalize_api_base, provider_catalog, resolve_protocol_family, resolve_provider_profile,
+    supported_providers, ProtocolFamily, ProviderMetadata, ProviderProfile,
 };
 pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};

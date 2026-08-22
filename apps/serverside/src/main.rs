@@ -49,6 +49,16 @@ async fn main() -> Result<()> {
             println!("{}", config_schema::config_schema());
             return Ok(());
         }
+        CliAction::ConfigProviders => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "providers": llm_client::provider_catalog(),
+                })
+            );
+            return Ok(());
+        }
         CliAction::Serve => {}
     }
     run_daemon(
@@ -543,6 +553,7 @@ enum CliAction {
     Serve,
     ValidateConfig,
     ConfigSchema,
+    ConfigProviders,
 }
 
 #[derive(Debug)]
@@ -580,7 +591,8 @@ impl Cli {
                 let action = match remaining.get(1).map(String::as_str) {
                     Some("validate") => CliAction::ValidateConfig,
                     Some("schema") => CliAction::ConfigSchema,
-                    _ => bail!("unknown config command; expected `config validate` or `config schema`"),
+                    Some("providers") => CliAction::ConfigProviders,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, or `config providers`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -690,6 +702,7 @@ fn print_usage() {
          \x20                  [--no-dashboard] [--ready-stdio] [--bearer-token-env <name>]\n\n\
          \x20     xiaoo-daemon config validate [--config <path>]\n\n\
          \x20     xiaoo-daemon config schema\n\n\
+         \x20     xiaoo-daemon config providers\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -760,6 +773,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_providers_command() {
+        let cli = Cli::parse(
+            ["config", "providers"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config providers should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigProviders);
+    }
+
+    #[test]
     fn rejects_unknown_config_command() {
         let error = Cli::parse(
             ["config", "unknown"]
@@ -767,7 +792,7 @@ mod tests {
                 .map(str::to_string),
         )
         .expect_err("unknown config command should fail");
-        assert!(error.to_string().contains("expected `config validate` or `config schema`"));
+        assert!(error.to_string().contains("expected `config validate`, `config schema`, or `config providers`"));
     }
 
     #[test]

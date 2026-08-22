@@ -1,3 +1,6 @@
+use serde::Serialize;
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolFamily {
     OpenAiCompatible,
@@ -55,6 +58,53 @@ impl ProviderProfile {
     pub fn requires_api_key(&self) -> bool {
         self.api_key_required
     }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ProviderMetadata {
+    pub name: String,
+    pub display_name: String,
+    pub protocol_family: String,
+    pub default_base_url: Option<String>,
+    pub default_api_key_env: Option<String>,
+    pub api_key_required: bool,
+    pub supports_model_catalog: bool,
+    pub aliases: Vec<String>,
+}
+
+pub fn provider_catalog() -> Vec<ProviderMetadata> {
+    let mut catalog = Vec::<ProviderMetadata>::new();
+    let mut indexes = HashMap::<String, usize>::new();
+
+    for candidate in supported_providers() {
+        let Some(profile) = resolve_provider_profile(candidate) else {
+            continue;
+        };
+        let name = profile.provider_name.to_string();
+        if let Some(index) = indexes.get(&name).copied() {
+            if *candidate != profile.provider_name {
+                catalog[index].aliases.push((*candidate).to_string());
+            }
+            continue;
+        }
+
+        let aliases = (*candidate != profile.provider_name)
+            .then(|| vec![(*candidate).to_string()])
+            .unwrap_or_default();
+        indexes.insert(name.clone(), catalog.len());
+        catalog.push(ProviderMetadata {
+            name,
+            display_name: profile.display_name.to_string(),
+            protocol_family: profile.protocol_family.as_str().to_string(),
+            default_base_url: profile.default_base_url.map(str::to_string),
+            default_api_key_env: profile.default_api_key_env.map(str::to_string),
+            api_key_required: profile.api_key_required,
+            supports_model_catalog: profile.supports_model_catalog,
+            aliases,
+        });
+    }
+
+    catalog
 }
 
 pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
@@ -372,6 +422,28 @@ mod tests {
         assert_eq!(profile.protocol_family, ProtocolFamily::OpenAiCompatible);
 
         assert!(resolve_provider_profile("unknown").is_none());
+    }
+
+    #[test]
+    fn provider_catalog_groups_aliases_by_canonical_name() {
+        let catalog = provider_catalog();
+        let anthropic = catalog
+            .iter()
+            .find(|provider| provider.name == "anthropic")
+            .expect("anthropic metadata");
+        assert!(anthropic.aliases.contains(&"claude".to_string()));
+        assert_eq!(
+            anthropic.default_api_key_env.as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
+
+        let zhipu = catalog
+            .iter()
+            .find(|provider| provider.name == "zhipu")
+            .expect("zhipu metadata");
+        assert!(zhipu.aliases.contains(&"zai".to_string()));
+        assert!(catalog.iter().any(|provider| provider.name == "openrouter"));
+        assert!(catalog.iter().any(|provider| provider.name == "local"));
     }
 
     #[test]
