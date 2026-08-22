@@ -43,6 +43,17 @@ Provider metadata comes directly from the LLM Provider Registry:
 xiaoo-daemon config providers
 ```
 
+Inspect effective values, their source, Profile/key status, and command-line overrides without
+starting network listeners:
+
+```bash
+xiaoo-daemon config inspect --config ~/.config/xiaoo/config.toml --no-dashboard
+```
+
+The JSON output is safe for management clients: literal tokens, secrets, API keys, authorization
+headers, and arbitrary header values are redacted. Environment-variable names and key availability
+are retained so clients can present actionable setup state without receiving secret values.
+
 The JSON result groups aliases under canonical Provider names and includes the
 protocol family, default API Base, suggested API Key environment variable,
 whether a key is required, and model-catalog support.

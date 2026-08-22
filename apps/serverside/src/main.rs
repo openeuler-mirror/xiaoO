@@ -1,4 +1,5 @@
 mod channels;
+mod config_inspect;
 mod config_schema;
 mod config_validation;
 mod cron;
@@ -13,6 +14,7 @@ use crate::channels::{
     TelegramPollingMessageHandler, TelegramPollingService,
 };
 use crate::cron::scheduler::CronScheduler;
+use crate::config_inspect::ConfigInspectOverrides;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
@@ -59,6 +61,26 @@ async fn main() -> Result<()> {
                 })
             );
             return Ok(());
+        }
+        CliAction::ConfigInspect => {
+            let config_path = resolve_config_path(cli.config)?;
+            let report = config_inspect::inspect_config_file(
+                &config_path,
+                &ConfigInspectOverrides {
+                    daemon_host: cli.host,
+                    daemon_port: cli.port,
+                    no_dashboard: cli.no_dashboard,
+                    dashboard_host: cli.dashboard_host,
+                    dashboard_port: cli.dashboard_port,
+                    bearer_token_env: cli.bearer_token_env,
+                },
+            );
+            println!("{}", serde_json::to_string(&report)?);
+            return if report.valid {
+                Ok(())
+            } else {
+                bail!("configuration inspection found validation errors")
+            };
         }
         CliAction::Serve => {}
     }
@@ -535,6 +557,7 @@ enum CliAction {
     ValidateConfig,
     ConfigSchema,
     ConfigProviders,
+    ConfigInspect,
 }
 
 #[derive(Debug)]
@@ -573,7 +596,8 @@ impl Cli {
                     Some("validate") => CliAction::ValidateConfig,
                     Some("schema") => CliAction::ConfigSchema,
                     Some("providers") => CliAction::ConfigProviders,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, or `config providers`"),
+                    Some("inspect") => CliAction::ConfigInspect,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, or `config inspect`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -684,6 +708,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config validate [--config <path>]\n\n\
          \x20     xiaoo-daemon config schema\n\n\
          \x20     xiaoo-daemon config providers\n\n\
+         \x20     xiaoo-daemon config inspect [--config <path>] [daemon overrides]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -758,12 +783,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_inspect_with_startup_overrides() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "inspect",
+                "--config",
+                "/tmp/demo.toml",
+                "--no-dashboard",
+                "--host",
+                "127.0.0.1",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config inspect should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigInspect);
+        assert!(cli.no_dashboard);
+        assert_eq!(cli.host, "127.0.0.1");
+    }
+
+    #[test]
     fn rejects_unknown_config_command() {
         let error = Cli::parse(["config", "unknown"].into_iter().map(str::to_string))
             .expect_err("unknown config command should fail");
         assert!(error
             .to_string()
-            .contains("expected `config validate`, `config schema`, or `config providers`"));
+            .contains("expected `config validate`, `config schema`, `config providers`, or `config inspect`"));
     }
 
     #[test]
