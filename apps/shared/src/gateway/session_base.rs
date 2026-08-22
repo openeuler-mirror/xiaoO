@@ -57,7 +57,6 @@ pub enum SessionInputKind {
     InputChunk,
     CancelActiveTurn,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSubmitReceipt {
     pub session_id: String,

@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
-use xiaoo_api::chat::{AgentId, FeatureFlags, HookerRegistryConfig, TokenBudgetConfig, ToolName};
+use xiaoo_api::chat::{
+    AgentId, FeatureFlags, HookerRegistryConfig, ReasoningEffort, TokenBudgetConfig, ToolName,
+};
 use xiaoo_api::llm::LlmProviderWrapper;
 use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
 use xiaoo_api::skills::FileSkillRegistry;
@@ -76,6 +78,7 @@ struct EffectiveLlmConfig {
     max_output_tokens: usize,
     kvcache_enabled: bool,
     kvcache_debug_enabled: bool,
+    reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -101,6 +104,7 @@ impl EffectiveLlmConfig {
             api_base: self.api_base.clone(),
             api_key_env: self.api_key_env.clone(),
             api_key: None,
+            reasoning_effort: Some(self.reasoning_effort),
         }
     }
 
@@ -187,6 +191,14 @@ impl ConfiguredRuntimeResolver {
             max_output_tokens: config.max_output_tokens(),
             kvcache_enabled: config.app.llm.kvcache_enabled.unwrap_or(false),
             kvcache_debug_enabled: config.app.llm.kvcache_debug_enabled.unwrap_or(false),
+            reasoning_effort: config
+                .app
+                .llm
+                .active_profile
+                .as_deref()
+                .and_then(|id| config.app.llm.profiles.get(id))
+                .map(|profile| profile.reasoning_effort)
+                .unwrap_or_default(),
         };
         let (llm_provider, context_window) = build_llm_provider(startup_llm.to_assembly_input(
             config.app.llm.context_window,
@@ -401,6 +413,15 @@ impl ConfiguredRuntimeResolver {
                 .and_then(|item| item.kvcache_debug_enabled)
                 .or(self.llm.kvcache_debug_enabled)
                 .unwrap_or(false),
+            reasoning_effort: override_llm
+                .and_then(|llm| llm.reasoning_effort)
+                .or_else(|| {
+                    keep_existing_values
+                        .then(|| existing_llm.and_then(|llm| llm.reasoning_effort))
+                        .flatten()
+                })
+                .or_else(|| profile.map(|item| item.reasoning_effort))
+                .unwrap_or_default(),
         })
     }
 
@@ -1122,7 +1143,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::{tempdir, TempDir};
-    use xiaoo_api::chat::{AgentId, ToolName};
+    use xiaoo_api::chat::{AgentId, ReasoningEffort, ToolName};
     use xiaoo_shared::backend::GatewayBackendConfig;
     use xiaoo_shared::gateway::{
         GatewayEntryContext, LlmRuntimeConfig, SessionRuntimeBuildInput,
@@ -1546,6 +1567,7 @@ model = "qwen2.5-coder"
 api_base = "http://127.0.0.1:1"
 max_tokens = 4096
 kvcache_enabled = true
+reasoning_effort = "high"
 
 [[agents.list]]
 id = "main"
@@ -1577,6 +1599,7 @@ workspace = "{workspace_str}"
                 api_base: None,
                 api_key_env: None,
                 api_key: None,
+                reasoning_effort: None,
             }),
             workspace: None,
             skills: None,
@@ -1597,6 +1620,14 @@ workspace = "{workspace_str}"
         );
         assert_eq!(resolved.descriptor.token_budget.reserved_for_output, 4096);
         assert!(resolved.descriptor.feature_flags.kvcache_enabled);
+        assert_eq!(
+            resolved
+                .descriptor
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.reasoning_effort),
+            Some(ReasoningEffort::High)
+        );
     }
 
     /// Minimal `DaemonConfig` for resolver tests. Uses the `ollama`

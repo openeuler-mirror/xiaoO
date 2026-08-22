@@ -117,6 +117,9 @@ pub struct LlmRuntimeConfig {
     /// Inline api key (rarely used; prefer `api_key_env`).
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Profile default or runtime-level reasoning override.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// A user/channel mention carried on a turn request.
@@ -168,9 +171,9 @@ pub struct AppTurnRequest {
     pub root_message_id: Option<String>,
     /// Mentions carried by the turn text.
     pub mentions: Vec<TurnMention>,
-    /// Reasoning effort hint for the model.
+    /// Explicit reasoning override. `None` inherits the selected profile.
     #[serde(default)]
-    pub reasoning_effort: ReasoningEffort,
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Runtime-scoped LLM config override.
     #[serde(default)]
     pub llm: Option<LlmRuntimeConfig>,
@@ -268,7 +271,7 @@ impl SessionOpenRequest {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
-            reasoning_effort: Default::default(),
+            reasoning_effort: None,
             llm: self.llm,
             workspace: self.workspace,
             skills: self.skills,

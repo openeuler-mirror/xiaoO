@@ -365,7 +365,7 @@ impl GatewayRuntime {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
-            reasoning_effort: state.reasoning_effort,
+            reasoning_effort: Some(state.reasoning_effort),
             llm: None,
             workspace: None,
             skills: None,
@@ -412,6 +412,7 @@ pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfi
             .then(|| state.agent_config.llm.api_base.clone()),
         api_key_env: state.agent_config.llm.api_key_env.clone(),
         api_key: None,
+        reasoning_effort: Some(state.reasoning_effort),
     }
 }
 

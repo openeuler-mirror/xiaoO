@@ -133,6 +133,9 @@ model = "deepseek-chat"
 api_key_env = "DEEPSEEK_API_KEY"
 ```
 
+`reasoning_effort` 是 Profile 的默认推理强度。HTTP/daemon 客户端省略单轮请求的
+`reasoning_effort` 时使用此值；显式传入 `off`、`high` 或 `max` 时只覆盖当前请求。
+
 Profile IDs are the keys below `llm.profiles`. When profiles exist,
 `active_profile` is required and must reference an enabled profile.
 Daemon clients can select an enabled profile for a session by sending

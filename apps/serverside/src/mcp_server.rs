@@ -894,7 +894,7 @@ async fn prepare_mcp_turn(
         reply_to_message_id: None,
         root_message_id: None,
         mentions: Vec::new(),
-        reasoning_effort: Default::default(),
+        reasoning_effort: None,
         llm: None,
         workspace: Some(workspace.clone()),
         skills: None,
