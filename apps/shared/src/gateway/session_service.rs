@@ -17,7 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::LoopStateSnapshot;
+use xiaoo_api::runtime::LoopStateSnapshot;
 
 #[derive(Debug, Error)]
 pub enum SessionServiceError {

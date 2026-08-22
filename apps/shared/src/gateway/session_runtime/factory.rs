@@ -1,6 +1,5 @@
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::context::budget::TokenBudgetPolicy;
-use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolSpecView, ToolStateStoreBuilder};
 use agent_contracts::trace::TraceRecorderBuilder;
 use agent_contracts::{
@@ -23,11 +22,10 @@ use tool::{
     ToolStateStoreBuilderImpl,
 };
 use trace::TraceRecorderBuilderImpl;
-use xiaoo_api::runtime::{Runtime, RuntimeBuildError};
-use xiaoo_core::{
-    BasicAgentContext, BasicRuntimeView, EmptySkillRegistry, NoopInteractionHandle,
-    NoopToolEventSink,
-};
+use xiaoo_api::interaction::NoopInteractionHandle;
+use xiaoo_api::runtime::{BasicAgentContext, BasicRuntimeView, Runtime, RuntimeBuildError, RuntimeView};
+use xiaoo_api::skills::EmptySkillRegistry;
+use xiaoo_api::events::NoopToolEventSink;
 
 use parking_lot::RwLock;
 

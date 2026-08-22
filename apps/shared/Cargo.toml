@@ -36,7 +36,6 @@ uuid.workspace = true
 agent-contracts = { path = "../../crates/agent-contracts" }
 agent-types = { path = "../../crates/agent-types" }
 compact = { path = "../../crates/compact" }
-xiaoo-core = { path = "../../crates/core" }
 hook = { path = "../../crates/hook", features = ["plugin_hook"] }
 llm-client = { path = "../../crates/llm-client" }
 mcp = { path = "../../crates/mcp" }

@@ -35,7 +35,7 @@ use subagent::{
     SubagentControl, SubagentControlError,
 };
 use tokio::sync::Mutex;
-use xiaoo_core::NoopRuntimeView;
+use xiaoo_api::runtime::NoopRuntimeView;
 
 use super::memory_automation::{
     render_memory_context, CompletedTurnIngest, TurnMemoryAutomation, TurnMemoryContext,
@@ -2345,7 +2345,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
-    use xiaoo_core::LoopStateSnapshot;
+    use xiaoo_api::runtime::LoopStateSnapshot;
 
     use agent_contracts::{Hooker, RuntimeView};
     use agent_types::hook::{HookInvokeError, HookInvokeOutput};
