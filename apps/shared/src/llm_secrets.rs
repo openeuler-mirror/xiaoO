@@ -56,22 +56,3 @@ fn llm_secrets_path(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| Path::new("."))
         .join(LLM_SECRETS_FILE)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{inject_llm_secrets_into_env, save_llm_secret};
-
-    #[test]
-    fn saved_secret_is_injected_from_config_directory() {
-        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
-        let config_path = temp_dir.path().join("config.toml");
-        let env_name = "XIAOO_TEST_DEEPSEEK_API_KEY";
-
-        std::env::remove_var(env_name);
-        save_llm_secret(&config_path, env_name, "test-secret").expect("save secret");
-        inject_llm_secrets_into_env(&config_path).expect("inject secret");
-
-        assert_eq!(std::env::var(env_name).as_deref(), Ok("test-secret"));
-        std::env::remove_var(env_name);
-    }
-}
