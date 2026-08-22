@@ -11,7 +11,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xiaoo_api::chat::HookerRegistryConfig;
+use xiaoo_api::chat::{HookerRegistryConfig, ReasoningEffort};
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::cron::{CronExpression, CronJobConfig};
@@ -64,6 +64,32 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmConfig {
+    #[serde(default)]
+    pub active_profile: Option<String>,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, LlmProfileConfig>,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub context_window: Option<usize>,
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    #[serde(default)]
+    pub kvcache_enabled: Option<bool>,
+    #[serde(default)]
+    pub kvcache_debug_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmProfileConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub provider: String,
     #[serde(default)]
     pub api_base: Option<String>,
@@ -75,9 +101,55 @@ pub struct LlmConfig {
     #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
+    #[serde(default)]
     pub kvcache_enabled: Option<bool>,
     #[serde(default)]
     pub kvcache_debug_enabled: Option<bool>,
+}
+
+impl LlmConfig {
+    pub fn activate_profile(&mut self, requested: Option<&str>) -> Result<Option<String>> {
+        if self.profiles.is_empty() {
+            if self.provider.trim().is_empty() {
+                bail!("llm.provider is required when llm.profiles is empty");
+            }
+            if self.model.trim().is_empty() {
+                bail!("llm.model is required when llm.profiles is empty");
+            }
+            return Ok(None);
+        }
+
+        let profile_id = requested
+            .or(self.active_profile.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("llm.active_profile is required when profiles exist"))?
+            .to_string();
+        let profile = self.profiles.get(&profile_id).ok_or_else(|| {
+            anyhow::anyhow!("llm profile `{profile_id}` referenced by active_profile does not exist")
+        })?;
+        if !profile.enabled {
+            bail!("llm profile `{profile_id}` is disabled");
+        }
+        if profile.provider.trim().is_empty() {
+            bail!("llm profile `{profile_id}` provider is required");
+        }
+        if profile.model.trim().is_empty() {
+            bail!("llm profile `{profile_id}` model is required");
+        }
+
+        self.provider = profile.provider.clone();
+        self.api_base = profile.api_base.clone();
+        self.api_key_env = profile.api_key_env.clone();
+        self.model = profile.model.clone();
+        self.context_window = profile.context_window;
+        self.max_tokens = profile.max_tokens;
+        self.kvcache_enabled = profile.kvcache_enabled;
+        self.kvcache_debug_enabled = profile.kvcache_debug_enabled;
+        self.active_profile = Some(profile_id.clone());
+        Ok(Some(profile_id))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -385,6 +457,9 @@ impl DaemonConfig {
             .with_context(|| format!("failed to read config {}", config_path.display()))?;
         let mut app: AppConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config {}", config_path.display()))?;
+        app.llm
+            .activate_profile(None)
+            .with_context(|| format!("invalid llm config {}", config_path.display()))?;
         install_builtin_agent_roles(&mut app.agent)
             .with_context(|| format!("invalid config {}", config_path.display()))?;
         Ok(Self { app, config_path })
@@ -1054,6 +1129,62 @@ fn default_retry_delay() -> u64 {
 mod tests {
     use super::{resolve_config_path, AppConfig, DaemonConfig};
     use tempfile::TempDir;
+
+    #[test]
+    fn loads_native_active_llm_profile() {
+        let temp = TempDir::new().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[llm]
+active_profile = "qwen"
+
+[llm.profiles.qwen]
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/v1"
+api_key_env = "QWEN_API_KEY"
+max_tokens = 8192
+reasoning_effort = "high"
+"#,
+        )
+        .expect("write config");
+
+        let config = DaemonConfig::load_from(&config_path).expect("load profile config");
+        assert_eq!(config.app.llm.active_profile.as_deref(), Some("qwen"));
+        assert_eq!(config.app.llm.provider, "openai-compatible");
+        assert_eq!(config.app.llm.model, "qwen3.7-plus");
+        assert_eq!(config.app.llm.api_key_env.as_deref(), Some("QWEN_API_KEY"));
+        assert_eq!(config.max_output_tokens(), 8192);
+        assert_eq!(
+            config.app.llm.profiles["qwen"].reasoning_effort,
+            xiaoo_api::chat::ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn rejects_disabled_active_llm_profile() {
+        let temp = TempDir::new().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[llm]
+active_profile = "disabled"
+
+[llm.profiles.disabled]
+enabled = false
+provider = "openai"
+model = "gpt-4o"
+"#,
+        )
+        .expect("write config");
+
+        let error = DaemonConfig::load_from(&config_path).expect_err("profile must be rejected");
+        assert!(error.to_string().contains("invalid llm config"));
+        assert!(format!("{error:#}").contains("llm profile `disabled` is disabled"));
+    }
 
     #[test]
     fn parses_memory_automation_config() {
