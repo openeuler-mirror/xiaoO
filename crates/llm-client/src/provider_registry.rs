@@ -111,7 +111,7 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
             provider_name: "deepseek",
             display_name: "DeepSeek",
             protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.deepseek.com"),
+            default_base_url: Some("https://api.deepseek.com/v1"),
             default_api_key_env: Some("DEEPSEEK_API_KEY"),
             api_key_required: true,
             supports_model_catalog: true,
