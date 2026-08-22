@@ -99,6 +99,9 @@ impl GatewayEntryContext {
 /// daemon's resolved provider/model/api-key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct LlmRuntimeConfig {
+    /// Native LLM profile id selected for this runtime.
+    #[serde(default)]
+    pub profile_id: Option<String>,
     /// Provider id (e.g. `ollama`, `openai`), overriding the daemon default.
     #[serde(default)]
     pub provider: Option<String>,

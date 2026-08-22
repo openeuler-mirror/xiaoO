@@ -109,6 +109,21 @@ pub struct LlmProfileConfig {
 }
 
 impl LlmConfig {
+    pub fn profile(&self, profile_id: &str) -> Result<&LlmProfileConfig> {
+        let profile_id = profile_id.trim();
+        if profile_id.is_empty() {
+            bail!("llm profile id must not be empty");
+        }
+        let profile = self
+            .profiles
+            .get(profile_id)
+            .ok_or_else(|| anyhow::anyhow!("llm profile `{profile_id}` does not exist"))?;
+        if !profile.enabled {
+            bail!("llm profile `{profile_id}` is disabled");
+        }
+        Ok(profile)
+    }
+
     pub fn activate_profile(&mut self, requested: Option<&str>) -> Result<Option<String>> {
         if self.profiles.is_empty() {
             if self.provider.trim().is_empty() {
@@ -126,12 +141,7 @@ impl LlmConfig {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("llm.active_profile is required when profiles exist"))?
             .to_string();
-        let profile = self.profiles.get(&profile_id).ok_or_else(|| {
-            anyhow::anyhow!("llm profile `{profile_id}` referenced by active_profile does not exist")
-        })?;
-        if !profile.enabled {
-            bail!("llm profile `{profile_id}` is disabled");
-        }
+        let profile = self.profile(&profile_id)?.clone();
         if profile.provider.trim().is_empty() {
             bail!("llm profile `{profile_id}` provider is required");
         }

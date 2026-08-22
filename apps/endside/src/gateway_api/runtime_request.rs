@@ -405,6 +405,7 @@ fn trim_non_empty(value: String) -> Option<String> {
 
 pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {
     LlmRuntimeConfig {
+        profile_id: None,
         provider: Some(state.agent_config.llm.provider.clone()),
         model: Some(state.agent_config.llm.model.clone()),
         api_base: (!state.agent_config.llm.api_base.trim().is_empty())

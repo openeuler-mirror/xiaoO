@@ -135,6 +135,10 @@ api_key_env = "DEEPSEEK_API_KEY"
 
 Profile IDs are the keys below `llm.profiles`. When profiles exist,
 `active_profile` is required and must reference an enabled profile.
+Daemon clients can select an enabled profile for a session by sending
+`llm.profile_id` in the runtime open request. The resolved profile ID is stored
+with the session, so subsequent turns keep using it until a client explicitly
+selects another profile.
 
 ### Basic Configuration
 

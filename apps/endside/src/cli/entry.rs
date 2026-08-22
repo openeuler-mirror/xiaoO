@@ -958,6 +958,7 @@ async fn run_once(
             ),
             model: config.model.clone(),
             llm: Some(LlmRuntimeConfig {
+                profile_id: None,
                 provider: Some(config.provider.clone()),
                 model: Some(config.model.clone()),
                 api_base: config.api_base.clone(),

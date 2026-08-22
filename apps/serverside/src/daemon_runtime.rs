@@ -66,11 +66,16 @@ impl RuntimeCapabilityProfile {
 }
 
 struct EffectiveLlmConfig {
+    profile_id: Option<String>,
     provider: String,
     model: String,
     api_base: Option<String>,
     api_key_env: Option<String>,
     api_key: Option<String>,
+    context_window: Option<usize>,
+    max_output_tokens: usize,
+    kvcache_enabled: bool,
+    kvcache_debug_enabled: bool,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -90,6 +95,7 @@ struct CachedProvider {
 impl EffectiveLlmConfig {
     fn session_config(&self) -> xiaoo_shared::gateway::LlmRuntimeConfig {
         xiaoo_shared::gateway::LlmRuntimeConfig {
+            profile_id: self.profile_id.clone(),
             provider: Some(self.provider.clone()),
             model: Some(self.model.clone()),
             api_base: self.api_base.clone(),
@@ -133,6 +139,7 @@ struct ResolvedLlmRuntime {
     llm_config: xiaoo_shared::gateway::LlmRuntimeConfig,
     llm_provider: Arc<LlmProviderWrapper>,
     token_budget: TokenBudgetConfig,
+    feature_flags: FeatureFlags,
     compression_pipeline: Option<Arc<dyn CompressionPipeline>>,
 }
 
@@ -140,14 +147,12 @@ pub struct ConfiguredRuntimeResolver {
     agent: ResolvedAgentConfig,
     llm: LlmConfig,
     config_path: PathBuf,
-    max_output_tokens: usize,
     effective_context_window: usize,
     llm_provider: Arc<LlmProviderWrapper>,
     provider_pool: Arc<RwLock<HashMap<ProviderConfigSig, CachedProvider>>>,
     compact: Option<CompactConfig>,
     agent_roles: BTreeMap<String, AgentRoleConfig>,
     subagent_roles: BTreeMap<String, ConfigSubagentRole>,
-    feature_flags: FeatureFlags,
     trace: Value,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
@@ -172,11 +177,16 @@ impl ConfiguredRuntimeResolver {
         ensure_workspace_exists(&agent.workspace_root)?;
 
         let startup_llm = EffectiveLlmConfig {
+            profile_id: config.app.llm.active_profile.clone(),
             provider: config.app.llm.provider.clone(),
             model: agent.model.clone(),
             api_base: config.app.llm.api_base.clone(),
             api_key_env: config.app.llm.api_key_env.clone(),
             api_key: None,
+            context_window: config.app.llm.context_window,
+            max_output_tokens: config.max_output_tokens(),
+            kvcache_enabled: config.app.llm.kvcache_enabled.unwrap_or(false),
+            kvcache_debug_enabled: config.app.llm.kvcache_debug_enabled.unwrap_or(false),
         };
         let (llm_provider, context_window) = build_llm_provider(startup_llm.to_assembly_input(
             config.app.llm.context_window,
@@ -206,19 +216,12 @@ impl ConfiguredRuntimeResolver {
             agent,
             llm: config.app.llm.clone(),
             config_path: config.config_path().to_path_buf(),
-            max_output_tokens: config.max_output_tokens(),
             effective_context_window,
             llm_provider,
             provider_pool: Arc::new(RwLock::new(HashMap::new())),
             compact: config.resolve_compact_config().cloned(),
             agent_roles: config.app.agent.clone(),
             subagent_roles: config.app.subagent.clone(),
-            feature_flags: {
-                let mut flags = FeatureFlags::default();
-                flags.kvcache_enabled = config.app.llm.kvcache_enabled.unwrap_or(false);
-                flags.kvcache_debug_enabled = config.app.llm.kvcache_debug_enabled.unwrap_or(false);
-                flags
-            },
             trace,
             hooker: config.app.hooker.clone(),
             skill_registry,
@@ -237,7 +240,7 @@ impl ConfiguredRuntimeResolver {
         request: &SessionRuntimeBuildInput,
         existing: Option<&SessionRecord>,
     ) -> Result<ResolvedLlmRuntime, SessionRuntimeResolveError> {
-        let effective = self.effective_llm_config(request, existing);
+        let effective = self.effective_llm_config(request, existing)?;
 
         let (llm_provider, effective_context_window) =
             if self.effective_config_matches_startup(&effective) {
@@ -248,11 +251,12 @@ impl ConfiguredRuntimeResolver {
             } else {
                 self.resolve_override_provider(&effective).await?
             };
-        let token_budget = build_token_budget(effective_context_window, self.max_output_tokens);
+        let token_budget =
+            build_token_budget(effective_context_window, effective.max_output_tokens);
 
         validate_token_budget_config(
             &token_budget,
-            self.max_output_tokens,
+            effective.max_output_tokens,
             &effective.model,
             &self.config_path,
         );
@@ -268,6 +272,12 @@ impl ConfiguredRuntimeResolver {
             llm_config,
             llm_provider,
             token_budget,
+            feature_flags: {
+                let mut flags = FeatureFlags::default();
+                flags.kvcache_enabled = effective.kvcache_enabled;
+                flags.kvcache_debug_enabled = effective.kvcache_debug_enabled;
+                flags
+            },
             compression_pipeline: Some(compression_pipeline),
         })
     }
@@ -277,6 +287,7 @@ impl ConfiguredRuntimeResolver {
             && effective.model == self.agent.model
             && effective.api_base == self.llm.api_base
             && effective.api_key_env == self.llm.api_key_env
+            && effective.context_window == self.llm.context_window
             && effective.api_key.is_none()
     }
 
@@ -298,7 +309,7 @@ impl ConfiguredRuntimeResolver {
         }
 
         let (created, context_window) = build_llm_provider(effective.to_assembly_input(
-            self.llm.context_window,
+            effective.context_window,
             Some(AgentId(self.agent.id.clone())),
         ))
         .await
@@ -329,26 +340,68 @@ impl ConfiguredRuntimeResolver {
         &self,
         request: &SessionRuntimeBuildInput,
         existing: Option<&SessionRecord>,
-    ) -> EffectiveLlmConfig {
+    ) -> Result<EffectiveLlmConfig, SessionRuntimeResolveError> {
         let override_llm = request.llm.as_ref();
         let existing_llm = existing.and_then(|session| session.runtime.llm.as_ref());
-        EffectiveLlmConfig {
+        let requested_profile_id =
+            optional_non_empty(override_llm.and_then(|llm| llm.profile_id.as_ref()));
+        let existing_profile_id =
+            optional_non_empty(existing_llm.and_then(|llm| llm.profile_id.as_ref()));
+        let profile_id = requested_profile_id
+            .clone()
+            .or(existing_profile_id)
+            .or_else(|| self.llm.active_profile.clone());
+        let profile = profile_id
+            .as_deref()
+            .map(|id| {
+                self.llm
+                    .profile(id)
+                    .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+                        message: error.to_string(),
+                    })
+            })
+            .transpose()?;
+        let keep_existing_values = requested_profile_id.is_none();
+        let existing_value = |value: Option<&String>| {
+            keep_existing_values
+                .then(|| optional_non_empty(value))
+                .flatten()
+        };
+        Ok(EffectiveLlmConfig {
+            profile_id,
             provider: optional_non_empty(override_llm.and_then(|llm| llm.provider.as_ref()))
-                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.provider.as_ref())))
+                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.provider.as_ref())))
+                .or_else(|| profile.map(|item| item.provider.clone()))
                 .unwrap_or_else(|| self.llm.provider.clone()),
             model: optional_non_empty(override_llm.and_then(|llm| llm.model.as_ref()))
-                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.model.as_ref())))
+                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.model.as_ref())))
+                .or_else(|| profile.map(|item| item.model.clone()))
                 .unwrap_or_else(|| self.agent.model.clone()),
             api_base: optional_non_empty(override_llm.and_then(|llm| llm.api_base.as_ref()))
-                .or_else(|| optional_non_empty(existing_llm.and_then(|llm| llm.api_base.as_ref())))
+                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.api_base.as_ref())))
+                .or_else(|| profile.and_then(|item| item.api_base.clone()))
                 .or_else(|| self.llm.api_base.clone()),
             api_key_env: optional_non_empty(override_llm.and_then(|llm| llm.api_key_env.as_ref()))
-                .or_else(|| {
-                    optional_non_empty(existing_llm.and_then(|llm| llm.api_key_env.as_ref()))
-                })
+                .or_else(|| existing_value(existing_llm.and_then(|llm| llm.api_key_env.as_ref())))
+                .or_else(|| profile.and_then(|item| item.api_key_env.clone()))
                 .or_else(|| self.llm.api_key_env.clone()),
             api_key: optional_non_empty(override_llm.and_then(|llm| llm.api_key.as_ref())),
-        }
+            context_window: profile
+                .and_then(|item| item.context_window)
+                .or(self.llm.context_window),
+            max_output_tokens: profile
+                .and_then(|item| item.max_tokens)
+                .or(self.llm.max_tokens)
+                .unwrap_or(16_384),
+            kvcache_enabled: profile
+                .and_then(|item| item.kvcache_enabled)
+                .or(self.llm.kvcache_enabled)
+                .unwrap_or(false),
+            kvcache_debug_enabled: profile
+                .and_then(|item| item.kvcache_debug_enabled)
+                .or(self.llm.kvcache_debug_enabled)
+                .unwrap_or(false),
+        })
     }
 
     async fn resolve_e2b_bootstrap(
@@ -765,7 +818,7 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
                         &effective_skill_roots,
                     )
                 },
-                feature_flags: self.feature_flags.clone(),
+                feature_flags: llm_runtime.feature_flags.clone(),
 
                 token_budget: llm_runtime.token_budget.clone(),
                 workspace_root: effective_workspace_root.clone(),
@@ -1072,8 +1125,8 @@ mod tests {
     use xiaoo_api::chat::{AgentId, ToolName};
     use xiaoo_shared::backend::GatewayBackendConfig;
     use xiaoo_shared::gateway::{
-        GatewayEntryContext, SessionRuntimeBuildInput, SessionRuntimeResolveError,
-        SessionRuntimeResolver,
+        GatewayEntryContext, LlmRuntimeConfig, SessionRuntimeBuildInput,
+        SessionRuntimeResolveError, SessionRuntimeResolver,
     };
 
     #[test]
@@ -1467,6 +1520,83 @@ mod tests {
             !visible.is_empty(),
             "subagent lane must have visible tools after the build_tool_registry fix"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_selects_requested_llm_profile() {
+        let temp = tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        let config_path = temp.path().join("config.toml");
+        let workspace_str = workspace.to_string_lossy().replace('\\', "\\\\");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[llm]
+active_profile = "primary"
+
+[llm.profiles.primary]
+provider = "ollama"
+model = "llama3"
+api_base = "http://127.0.0.1:1"
+
+[llm.profiles.alternate]
+provider = "ollama"
+model = "qwen2.5-coder"
+api_base = "http://127.0.0.1:1"
+max_tokens = 4096
+kvcache_enabled = true
+
+[[agents.list]]
+id = "main"
+default = true
+workspace = "{workspace_str}"
+"#
+            ),
+        )
+        .expect("write profile config");
+        let config = DaemonConfig::load_from(&config_path).expect("load profile config");
+        let resolver = ConfiguredRuntimeResolver::from_config(&config)
+            .await
+            .expect("construct resolver");
+        let request = SessionRuntimeBuildInput {
+            session_id: "profile-session".to_string(),
+            conversation_id: "profile-session".to_string(),
+            sender_id: "test-user".to_string(),
+            channel: None,
+            channel_instance_id: None,
+            channel_identity_prompt: None,
+            entry: GatewayEntryContext::default(),
+            agent_id_override: None,
+            max_turns_override: None,
+            subagent_role_id: None,
+            llm: Some(LlmRuntimeConfig {
+                profile_id: Some("alternate".to_string()),
+                provider: None,
+                model: None,
+                api_base: None,
+                api_key_env: None,
+                api_key: None,
+            }),
+            workspace: None,
+            skills: None,
+        };
+
+        let resolved = resolver
+            .resolve(&request, None)
+            .await
+            .expect("resolve selected profile");
+        assert_eq!(resolved.descriptor.model, "qwen2.5-coder");
+        assert_eq!(
+            resolved
+                .descriptor
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.profile_id.as_deref()),
+            Some("alternate")
+        );
+        assert_eq!(resolved.descriptor.token_budget.reserved_for_output, 4096);
+        assert!(resolved.descriptor.feature_flags.kvcache_enabled);
     }
 
     /// Minimal `DaemonConfig` for resolver tests. Uses the `ollama`
