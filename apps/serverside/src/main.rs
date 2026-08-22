@@ -1,5 +1,6 @@
 mod channels;
 mod config_schema;
+mod config_validation;
 mod cron;
 mod daemon_config;
 mod daemon_runtime;
@@ -77,32 +78,12 @@ async fn main() -> Result<()> {
 
 fn validate_config(config_path: Option<PathBuf>) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
-    match DaemonConfig::load_from(&config_path) {
-        Ok(config) => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "valid": true,
-                    "config_path": config_path,
-                    "active_profile": config.app.llm.active_profile,
-                })
-            );
-            Ok(())
-        }
-        Err(error) => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "valid": false,
-                    "config_path": config_path,
-                    "errors": [{
-                        "path": "config",
-                        "message": format!("{error:#}"),
-                    }],
-                })
-            );
-            Err(error)
-        }
+    let report = config_validation::validate_config_file(&config_path);
+    println!("{}", serde_json::to_string(&report)?);
+    if report.valid {
+        Ok(())
+    } else {
+        bail!("configuration validation failed")
     }
 }
 
@@ -762,37 +743,27 @@ mod tests {
 
     #[test]
     fn parses_config_schema_command() {
-        let cli = Cli::parse(
-            ["config", "schema"]
-                .into_iter()
-                .map(str::to_string),
-        )
-        .expect("config schema should parse");
+        let cli = Cli::parse(["config", "schema"].into_iter().map(str::to_string))
+            .expect("config schema should parse");
 
         assert_eq!(cli.action, CliAction::ConfigSchema);
     }
 
     #[test]
     fn parses_config_providers_command() {
-        let cli = Cli::parse(
-            ["config", "providers"]
-                .into_iter()
-                .map(str::to_string),
-        )
-        .expect("config providers should parse");
+        let cli = Cli::parse(["config", "providers"].into_iter().map(str::to_string))
+            .expect("config providers should parse");
 
         assert_eq!(cli.action, CliAction::ConfigProviders);
     }
 
     #[test]
     fn rejects_unknown_config_command() {
-        let error = Cli::parse(
-            ["config", "unknown"]
-                .into_iter()
-                .map(str::to_string),
-        )
-        .expect_err("unknown config command should fail");
-        assert!(error.to_string().contains("expected `config validate`, `config schema`, or `config providers`"));
+        let error = Cli::parse(["config", "unknown"].into_iter().map(str::to_string))
+            .expect_err("unknown config command should fail");
+        assert!(error
+            .to_string()
+            .contains("expected `config validate`, `config schema`, or `config providers`"));
     }
 
     #[test]

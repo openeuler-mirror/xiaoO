@@ -18,6 +18,10 @@ validated without opening ports or resolving API keys:
 xiaoo-daemon config validate --config ~/.config/xiaoo/config.toml
 ```
 
+校验覆盖所有已启用的 LLM Profile，并检查 Provider、模型、API Base、API Key
+引用、数值范围和配置跨字段约束。命令始终向标准输出打印结构化 JSON；配置无效时
+`valid` 为 `false`，`errors` 包含字段路径和稳定错误码，同时进程返回非零状态。
+
 The command writes a JSON result to stdout. Invalid configurations return
 `valid: false`, the resolved configuration path, and an error list, then exit
 with a non-zero status.
