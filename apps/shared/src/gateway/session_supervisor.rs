@@ -25,8 +25,8 @@ use subagent::{
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::agent_loop::build_tool_result_message;
-use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};
+use xiaoo_api::runtime::build_tool_result_message;
+use xiaoo_api::runtime::{LoopSuspendReason, RuntimeOutput, LoopStateSnapshot, SuspendedToolCall};
 
 use super::session_worker::{SessionWorker, SessionWorkerInput};
 
@@ -607,7 +607,7 @@ impl SessionSupervisor {
             .await?;
 
             match worker_result.loop_result {
-                LoopRunResult::Complete(outcome) => {
+                RuntimeOutput::Complete(outcome) => {
                     let terminal = terminal_from_outcome(
                         outcome,
                         worker_result.loop_state,
@@ -623,7 +623,7 @@ impl SessionSupervisor {
                     .await?;
                     return Ok(terminal);
                 }
-                LoopRunResult::Suspended(suspended_calls) => {
+                RuntimeOutput::Suspended(suspended_calls) => {
                     let mut resumed_loop_state =
                         loop_state
                             .clone()

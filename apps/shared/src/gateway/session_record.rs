@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use subagent::SubagentSessionState;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::LoopStateSnapshot;
+use xiaoo_api::runtime::LoopStateSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

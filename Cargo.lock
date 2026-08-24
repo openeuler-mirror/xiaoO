@@ -5202,7 +5202,6 @@ dependencies = [
  "uuid",
  "vault",
  "xiaoo-api",
- "xiaoo-core",
  "xiaoo-protocol",
 ]
 

@@ -16,15 +16,13 @@
 
 use std::sync::Arc;
 
-use agent_contracts::{
-    CompressionPipeline, RuntimeView, SkillRegistry, TokenBudgetPolicy, ToolRegistry,
-};
+use agent_contracts::{CompressionPipeline, SkillRegistry, TokenBudgetPolicy, ToolRegistry};
 use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use compact::{build_context_manager, CompactionPolicy};
 use llm_client::LlmProviderWrapper;
 use tool::{EmptyToolRegistry, ToolSpecSnapshot};
 
-use xiaoo_core::{AgentLoopInput, AgentRuntime, LoopRunResult, LoopState, NoopRuntimeView};
+use xiaoo_core::{AgentLoopInput, AgentRuntime, LoopRunResult, LoopState};
 
 // ---- 签名可达 re-export（builder/run 签名出现的词汇） ----
 #[doc(inline)]
@@ -35,6 +33,41 @@ pub use agent_types::outcome::AgentError;
 pub use prompt::PromptBuilderImpl;
 #[doc(inline)]
 pub use xiaoo_core::{spawn_prefetch, LoopStateSnapshot, LoopStopRule, PendingUserMessageSource};
+
+// ---- 挂起/恢复（RuntimeOutput::Suspended 的签名可达词汇） ----
+
+/// Reason a tool call suspended the loop; carried by [`SuspendedToolCall`]
+/// inside [`RuntimeOutput`]'s `Suspended` variant.
+#[doc(inline)]
+pub use xiaoo_core::LoopSuspendReason;
+/// One suspended tool call inside [`RuntimeOutput`]'s `Suspended` variant;
+/// pairs a `final_call` with the [`LoopSuspendReason`] that paused the loop.
+#[doc(inline)]
+pub use xiaoo_core::SuspendedToolCall;
+/// Build the tool-result [`crate::chat::ChatMessage`] that resumes a
+/// suspended loop from a [`agent_types::tool::ToolExecutionResult`].
+#[doc(inline)]
+pub use xiaoo_core::agent_loop::build_tool_result_message;
+
+// ---- 构建默认件（RuntimeInput.runtime_view 的标准实现） ----
+
+/// Runtime view contract referenced by
+/// `RuntimeInput.runtime_view: Option<Arc<dyn RuntimeView>>`; both
+/// [`NoopRuntimeView`] and [`BasicRuntimeView`] implement it.
+#[doc(inline)]
+pub use agent_contracts::runtime::RuntimeView;
+/// Default no-op view used when the caller supplies none; the SDK's own
+/// [`Runtime::run`] falls back to it.
+#[doc(inline)]
+pub use xiaoo_core::NoopRuntimeView;
+/// Standard runtime view implementation for callers that compose their own
+/// view (e.g. wrap it with skill awareness).
+#[doc(inline)]
+pub use xiaoo_core::BasicRuntimeView;
+/// Standard agent context backing [`BasicRuntimeView`]; a building block for
+/// callers assembling a custom view.
+#[doc(inline)]
+pub use xiaoo_core::BasicAgentContext;
 
 use crate::backend::OperationBackend;
 
