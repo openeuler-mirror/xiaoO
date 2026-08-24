@@ -1,8 +1,5 @@
 use crate::backend::GatewayBackendConfig;
-use agent_types::hook::HookerRegistryConfig;
-use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
-use llm_client::ProtocolFamily;
 use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 use mcp::McpSection;
 use serde::{Deserialize, Serialize};
@@ -12,6 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_api::chat::HookerRegistryConfig;
+use xiaoo_api::chat::ReasoningEffort;
+use xiaoo_api::llm::ProtocolFamily;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 
@@ -558,11 +558,11 @@ fn default_llm_max_tokens() -> u32 {
 }
 
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
-    if let Some(known) = llm_client::get_known_model_context_length(&config.llm.model) {
+    if let Some(known) = xiaoo_api::llm::get_known_model_context_length(&config.llm.model) {
         return usize::try_from(known).ok();
     }
 
-    match llm_client::resolve_protocol_family(&config.llm.provider)? {
+    match xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)? {
         ProtocolFamily::OpenAiCompatible | ProtocolFamily::Ollama | ProtocolFamily::Zhipu => {
             Some(128_000)
         }

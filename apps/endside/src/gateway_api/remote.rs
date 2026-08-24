@@ -3,8 +3,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use agent_types::common::ids::AgentId;
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
+use xiaoo_api::chat::AgentId;
+use xiaoo_api::interaction::{InteractionRequest, InteractionResponse};
 use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUpdate};
 
 use crate::app_state::{sandbox_display_name, AppState};
@@ -149,11 +149,11 @@ enum RemoteSseEvent {
         prompt_tokens: u64,
         completion_tokens: u64,
         estimated_input_tokens: u64,
-        messages: Vec<llm_client::ChatMessage>,
+        messages: Vec<xiaoo_api::chat::ChatMessage>,
         #[allow(dead_code)]
         stop_reason: String,
         #[serde(default)]
-        actions: Vec<agent_types::hook::HookAction>,
+        actions: Vec<xiaoo_api::chat::HookAction>,
     },
     Error {
         error: String,
@@ -296,7 +296,7 @@ impl GatewayRuntime {
         state: &mut AppState,
         prompt: String,
         append_user_message: bool,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<(), String> {
         let remote = self
@@ -628,7 +628,7 @@ impl GatewayRuntime {
         &self,
         state: &AppState,
         text: String,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<RuntimeTurnRequest, String> {
         let sender_id = super::runtime_request::resolve_agent_id(None, None, &state.agent_config)?;
@@ -880,7 +880,7 @@ async fn handle_remote_event(
             // `is_running` on the matching lane.
             let _ = updates_tx.send(SessionTurnUpdate::LoopEnd {
                 agent_id: AgentId(agent_id),
-                summary: agent_types::events::LoopEndSummary {
+                summary: xiaoo_api::events::LoopEndSummary {
                     turn_count,
                     total_tokens,
                     stop_reason,

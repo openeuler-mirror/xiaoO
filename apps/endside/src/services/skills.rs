@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
-use agent_contracts::SkillRegistry;
-use skill::{FileSkillRegistry, SkillsConfig};
+use skill::SkillsConfig;
+use xiaoo_api::skills::{FileSkillRegistry, SkillRegistry};
 
 use crate::config::Config;
 

@@ -3,16 +3,15 @@ pub mod entry;
 
 use std::sync::{Arc, Mutex};
 
-use agent_contracts::CompressionPipeline;
-use agent_types::events::{LoopEndSummary, ToolResultEvent};
-use agent_types::hook::HookerRegistryConfig;
-use agent_types::ReasoningEffort;
-use compact::{build_context_manager, CompactOverrides};
-use llm_client::{
-    create_llm_provider, resolve_config, resolve_model_context_length, LlmProviderConfig,
-    LlmProviderWrapper, ResolveInput,
-};
 use serde_json::Value;
+use xiaoo_api::chat::HookerRegistryConfig;
+use xiaoo_api::chat::ReasoningEffort;
+use xiaoo_api::events::{LoopEndSummary, ToolResultEvent};
+use xiaoo_api::llm::CompressionPipeline;
+use xiaoo_api::llm::{
+    build_context_manager, create_llm_provider, resolve_config, resolve_model_context_length,
+    CompactOverrides, LlmProviderConfig, LlmProviderWrapper, ResolveInput,
+};
 // ---------------------------------------------------------------------------
 // CliEventSink
 // ---------------------------------------------------------------------------
@@ -47,13 +46,13 @@ impl CliEventSink {
     }
 }
 
-impl agent_contracts::events::LoopEventSink for CliEventSink {
-    fn on_turn_start(&self, agent_id: &agent_types::common::ids::AgentId, turn: u32) {
+impl xiaoo_api::events::LoopEventSink for CliEventSink {
+    fn on_turn_start(&self, agent_id: &xiaoo_api::chat::AgentId, turn: u32) {
         self.finish_assistant_line();
         eprintln!("--- turn {} [{}] ---", turn, agent_id.0);
     }
 
-    fn on_assistant_message(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
+    fn on_assistant_message(&self, agent_id: &xiaoo_api::chat::AgentId, text: &str) {
         let mut state = self
             .state
             .lock()
@@ -84,11 +83,7 @@ impl agent_contracts::events::LoopEventSink for CliEventSink {
         state.last_assistant_snapshot_len = text.len();
     }
 
-    fn on_tool_result(
-        &self,
-        agent_id: &agent_types::common::ids::AgentId,
-        event: &ToolResultEvent,
-    ) {
+    fn on_tool_result(&self, agent_id: &xiaoo_api::chat::AgentId, event: &ToolResultEvent) {
         self.finish_assistant_line();
         let status = if event.is_error { "ERR" } else { "OK" };
         eprintln!(
@@ -97,7 +92,7 @@ impl agent_contracts::events::LoopEventSink for CliEventSink {
         );
     }
 
-    fn on_loop_end(&self, agent_id: &agent_types::common::ids::AgentId, summary: &LoopEndSummary) {
+    fn on_loop_end(&self, agent_id: &xiaoo_api::chat::AgentId, summary: &LoopEndSummary) {
         self.finish_assistant_line();
         eprintln!(
             "--- end [{}] (turns={}, tokens={}, reason={}) ---",
@@ -158,7 +153,7 @@ pub fn build_compression_pipeline(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> Result<Arc<dyn CompressionPipeline>, Box<dyn std::error::Error>> {
-    // Route through the shared `compact::build_context_manager` so the local
+    // Route through the shared `xiaoo_api::llm::build_context_manager` so the local
     // CLI and the daemon use the *same* defaults and estimator tuning. A
     // missing `[compact]` section yields all-`None` overrides, which the
     // helper layers onto its built-in defaults — identical to the daemon.
@@ -231,11 +226,11 @@ pub async fn resolve_effective_context_window(
 #[cfg(test)]
 mod tests {
     use super::{resolve_effective_context_window, CliConfig};
-    use agent_contracts::{LlmProvider, ProviderCapabilities};
     use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
     use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::Arc;
+    use xiaoo_api::llm::{LlmProvider, ProviderCapabilities};
 
     struct DummyProvider {
         capabilities: ProviderCapabilities,
