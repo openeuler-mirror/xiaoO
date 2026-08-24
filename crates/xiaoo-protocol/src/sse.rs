@@ -112,9 +112,7 @@ pub enum RuntimeSseEvent {
         stop_reason: String,
     },
     /// 交互请求（审批/提问），需要客户端 POST /runtimes/interaction 应答。
-    InteractionRequested {
-        request: InteractionRequest,
-    },
+    InteractionRequested { request: InteractionRequest },
     /// 终止事件：本轮完整消息 + token 统计 + hook 动作。
     Done {
         reply: String,

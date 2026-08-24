@@ -23,7 +23,9 @@ use tool::{
 };
 use xiaoo_api::chat::{AgentId, FeatureFlags, HookerRegistryConfig, TokenBudgetConfig, ToolName};
 use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
-use xiaoo_api::llm::{resolve_config, resolve_model_context_length, LlmProviderWrapper, ResolveInput};
+use xiaoo_api::llm::{
+    resolve_config, resolve_model_context_length, LlmProviderWrapper, ResolveInput,
+};
 use xiaoo_api::skills::FileSkillRegistry;
 use xiaoo_api::skills::SkillRegistry;
 use xiaoo_api::tools::ToolRegistry;
@@ -1183,7 +1185,6 @@ mod tests {
         RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::{AgentRoleConfig, DaemonConfig};
-    use xiaoo_api::chat::{AgentId, ToolName};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -1193,6 +1194,7 @@ mod tests {
         SubagentControl, SubagentControlError,
     };
     use tempfile::{tempdir, TempDir};
+    use xiaoo_api::chat::{AgentId, ToolName};
     use xiaoo_shared::backend::GatewayBackendConfig;
     use xiaoo_shared::gateway::{
         GatewayEntryContext, SessionRuntimeBuildInput, SessionRuntimeResolveError,

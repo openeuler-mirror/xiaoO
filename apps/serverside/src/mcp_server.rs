@@ -1,7 +1,5 @@
 use crate::daemon_config::ResolvedMcpServerConfig;
 use crate::httpserver::rate_limit::RateLimitConfig;
-use xiaoo_api::chat::AgentId;
-use xiaoo_api::events::{LoopEndSummary, LoopEventSink, ToolResultEvent};
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
@@ -31,6 +29,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use xiaoo_api::chat::AgentId;
+use xiaoo_api::events::{LoopEndSummary, LoopEventSink, ToolResultEvent};
 use xiaoo_shared::gateway::{
     AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, SessionControlPlane,
     SessionLifecycleStatus, SessionRecord, SessionService, SessionStore,
@@ -1286,7 +1286,6 @@ async fn authorize_mcp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xiaoo_api::chat::{FeatureFlags, TokenBudgetConfig};
     use async_trait::async_trait;
     use axum::body::{to_bytes, Body};
     use axum::http::Request as HttpRequest;
@@ -1294,6 +1293,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
     use tower::ServiceExt;
+    use xiaoo_api::chat::{FeatureFlags, TokenBudgetConfig};
     use xiaoo_shared::gateway::{
         InMemorySessionStore, SessionControlPlane, SessionRuntimeSnapshot, SessionServiceError,
     };

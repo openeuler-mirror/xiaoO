@@ -15,8 +15,7 @@ use serde::{Deserialize, Serialize};
 pub use xiaoo_protocol::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, SessionCancelRequest, SessionCloseRequest,
-    SessionDetachRequest, SessionHeartbeatRequest, SessionInteractionRequest,
-    SessionOpenRequest,
+    SessionDetachRequest, SessionHeartbeatRequest, SessionInteractionRequest, SessionOpenRequest,
 };
 
 /// Derive the session id used for a channel-scoped conversation.

@@ -284,9 +284,9 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use agent_contracts::backend::BackendLifecycleState;
-    use xiaoo_api::chat::{AgentId, FeatureFlags, TokenBudgetConfig};
     use std::path::PathBuf;
     use std::sync::Arc;
+    use xiaoo_api::chat::{AgentId, FeatureFlags, TokenBudgetConfig};
     use xiaoo_shared::gateway::{InMemorySessionStore, SessionLifecycleStatus};
 
     fn fake_record(session_id: &str, status: SessionLifecycleStatus) -> SessionRecord {

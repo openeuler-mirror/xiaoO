@@ -8,7 +8,9 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use xiaoo_api::chat::{AgentId, ChatMessage, HookAction};
-use xiaoo_api::events::{LoopEndSummary, LoopEventSink, ToolEventSink, ToolLifecycleEvent, ToolResultEvent};
+use xiaoo_api::events::{
+    LoopEndSummary, LoopEventSink, ToolEventSink, ToolLifecycleEvent, ToolResultEvent,
+};
 use xiaoo_api::interaction::InteractionRequest;
 use xiaoo_shared::plan::{
     PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotItem,

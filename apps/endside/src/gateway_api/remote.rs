@@ -9,13 +9,13 @@ use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUp
 
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
+use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
+use crate::remote_sessions_service::record_remote_session;
+use crate::session_gateway::SessionTurnUpdate;
 use xiaoo_protocol::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
 };
-use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
-use crate::remote_sessions_service::record_remote_session;
-use crate::session_gateway::SessionTurnUpdate;
 
 // TUI-side HTTP timeouts live in `crate::gateway_api::http_timeouts` so the
 // shared crate does not carry TUI-only configuration.

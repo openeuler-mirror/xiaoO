@@ -7,7 +7,6 @@ use crate::httpserver::sse_sink::{
 };
 use crate::httpserver::GatewayServiceError;
 use async_trait::async_trait;
-use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -28,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::warn;
+use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
     PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
@@ -1452,7 +1452,6 @@ mod tests {
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
         ChannelMessage, ChannelMeta, ChannelResult, ChannelRuntime, ChannelTextFormat,
     };
-    use xiaoo_api::events::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
         body::{to_bytes, Body, Bytes},
@@ -1463,6 +1462,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
+    use xiaoo_api::events::LoopEventSink;
     use xiaoo_shared::gateway::{
         AppTurnRequest, AppTurnResult, SessionControlPlane, SessionService, SessionServiceError,
         TurnOutcome,
@@ -2223,7 +2223,9 @@ fn filter_messages_for_display(
     messages.iter().map(filter_message_for_display).collect()
 }
 
-fn filter_message_for_display(message: &xiaoo_api::chat::ChatMessage) -> xiaoo_api::chat::ChatMessage {
+fn filter_message_for_display(
+    message: &xiaoo_api::chat::ChatMessage,
+) -> xiaoo_api::chat::ChatMessage {
     use xiaoo_api::chat::ContentBlock;
     let filtered_blocks: Vec<ContentBlock> = message
         .blocks
