@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use agent_contracts::HookActionSink;
-use agent_types::hook::HookAction;
 use async_trait::async_trait;
+use xiaoo_api::chat::HookAction;
 use xiaoo_shared::gateway::{
     daemon_hook_principal, GatewayEntryContext, SessionControlPlane, SessionOpenRequest,
 };

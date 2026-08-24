@@ -291,7 +291,7 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         reply_to_message_id: None,
         root_message_id: None,
         mentions: vec![],
-        reasoning_effort: agent_types::ReasoningEffort::Off,
+        reasoning_effort: xiaoo_api::chat::ReasoningEffort::Off,
         llm: None,
         workspace: None,
         skills: None,

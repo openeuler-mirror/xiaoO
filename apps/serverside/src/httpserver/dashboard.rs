@@ -284,8 +284,7 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use agent_contracts::backend::BackendLifecycleState;
-    use agent_types::common::ids::AgentId;
-    use agent_types::context::{FeatureFlags, TokenBudgetConfig};
+    use xiaoo_api::chat::{AgentId, FeatureFlags, TokenBudgetConfig};
     use std::path::PathBuf;
     use std::sync::Arc;
     use xiaoo_shared::gateway::{InMemorySessionStore, SessionLifecycleStatus};

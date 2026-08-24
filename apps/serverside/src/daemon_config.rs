@@ -4,7 +4,6 @@ use crate::channels::{
 };
 use crate::httpserver::rate_limit::RateLimitConfig;
 use agent_types::cron::{CronExpression, CronJobConfig};
-use agent_types::hook::HookerRegistryConfig;
 use anyhow::{bail, Context, Result};
 use lsp::LspServiceRegistry;
 use mcp::McpSection;
@@ -16,6 +15,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::gateway::MemoryAutomationConfig;

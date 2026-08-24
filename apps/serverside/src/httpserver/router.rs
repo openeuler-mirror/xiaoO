@@ -6,9 +6,8 @@ use crate::httpserver::sse_sink::{
     sse_stream_from_receiver, SseLoopEventSink, SseStreamEvent, SseToolEventSink,
 };
 use crate::httpserver::GatewayServiceError;
-use agent_contracts::InteractionHandle;
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
+use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -762,25 +761,25 @@ async fn stream_session_input(
     // to the inner sink. Tool-lifecycle events (Running) go through the
     // separately-injected `DiffComputingToolSink` baked into the runtime's
     // `bindings.tool_event_sink`.
-    let diff_loop_sink: Arc<dyn agent_contracts::LoopEventSink> =
+    let diff_loop_sink: Arc<dyn xiaoo_api::events::LoopEventSink> =
         Arc::new(DiffComputingLoopSink::new(
-            Arc::clone(&sink) as Arc<dyn agent_contracts::LoopEventSink>,
+            Arc::clone(&sink) as Arc<dyn xiaoo_api::events::LoopEventSink>,
             Arc::clone(&diff_tracker),
             diff_forwarder as Arc<dyn SessionDiffForwarder>,
         ));
-    let plan_loop_sink: Arc<dyn agent_contracts::LoopEventSink> = Arc::new(
+    let plan_loop_sink: Arc<dyn xiaoo_api::events::LoopEventSink> = Arc::new(
         PlanComputingLoopSink::new(diff_loop_sink, plan_forwarder as Arc<dyn PlanForwarder>),
     );
-    let composed_loop_sink: Arc<dyn agent_contracts::LoopEventSink> =
+    let composed_loop_sink: Arc<dyn xiaoo_api::events::LoopEventSink> =
         Arc::new(SubagentMetaComputingLoopSink::new(
             plan_loop_sink,
             subagent_forwarder as Arc<dyn SubagentMetaForwarder>,
         ));
-    let diff_tool_sink: Arc<dyn agent_contracts::ToolEventSink> =
+    let diff_tool_sink: Arc<dyn xiaoo_api::events::ToolEventSink> =
         Arc::new(SseToolEventSink::with_inner(
             tx.clone(),
             Arc::new(DiffComputingToolSink::new(Arc::clone(&diff_tracker)))
-                as Arc<dyn agent_contracts::ToolEventSink>,
+                as Arc<dyn xiaoo_api::events::ToolEventSink>,
         ));
     let interaction_handle = Arc::new(RemoteSseInteractionHandle {
         session_id: session_id.clone(),
@@ -1197,7 +1196,7 @@ async fn handle_runtime_exec(
                 execution_state: execution_state.to_string(),
                 stdout_base64,
                 stderr_base64,
-                retryable: execution_state == agent_contracts::backend::ExecutionState::NotStarted,
+                retryable: execution_state == xiaoo_api::backend::ExecutionState::NotStarted,
             }),
         )
             .into_response(),
@@ -1453,7 +1452,7 @@ mod tests {
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
         ChannelMessage, ChannelMeta, ChannelResult, ChannelRuntime, ChannelTextFormat,
     };
-    use agent_contracts::LoopEventSink;
+    use xiaoo_api::events::LoopEventSink;
     use async_trait::async_trait;
     use axum::{
         body::{to_bytes, Body, Bytes},
@@ -1482,7 +1481,7 @@ mod tests {
                 message: "stream reset".to_string(),
                 stdout_base64: "cGFydGlhbA==".to_string(),
                 stderr_base64: String::new(),
-                execution_state: agent_contracts::backend::ExecutionState::RunningOrCompleted,
+                execution_state: xiaoo_api::backend::ExecutionState::RunningOrCompleted,
             })
         }
     }
@@ -2219,13 +2218,13 @@ mod tests {
 }
 
 fn filter_messages_for_display(
-    messages: &[llm_client::ChatMessage],
-) -> Vec<llm_client::ChatMessage> {
+    messages: &[xiaoo_api::chat::ChatMessage],
+) -> Vec<xiaoo_api::chat::ChatMessage> {
     messages.iter().map(filter_message_for_display).collect()
 }
 
-fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::ChatMessage {
-    use agent_types::llm::ContentBlock;
+fn filter_message_for_display(message: &xiaoo_api::chat::ChatMessage) -> xiaoo_api::chat::ChatMessage {
+    use xiaoo_api::chat::ContentBlock;
     let filtered_blocks: Vec<ContentBlock> = message
         .blocks
         .iter()
@@ -2252,7 +2251,7 @@ fn filter_message_for_display(message: &llm_client::ChatMessage) -> llm_client::
         })
         .collect();
 
-    llm_client::ChatMessage {
+    xiaoo_api::chat::ChatMessage {
         role: message.role.clone(),
         blocks: filtered_blocks,
         message_id: message.message_id.clone(),
