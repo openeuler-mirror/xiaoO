@@ -1,11 +1,11 @@
 use crate::backend::GatewayBackendConfig;
-use agent_types::hook::HookerRegistryConfig;
 use mcp::McpSection;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";

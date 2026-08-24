@@ -10,12 +10,12 @@ use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig, LlmRuntimeConfig,
     SessionOpenRequest, SessionRuntimeDescriptor,
 };
-use agent_types::common::ids::AgentId;
-use agent_types::context::{FeatureFlags, TokenBudgetConfig};
 use tool::{load_tool_sources_with_services, ToolRuntimeServices};
+use xiaoo_api::chat::AgentId;
+use xiaoo_api::chat::{FeatureFlags, TokenBudgetConfig};
 
 use super::runtime::GatewayRuntime;
-use xiaoo_core::spawn_prefetch;
+use xiaoo_api::runtime::spawn_prefetch;
 
 /// User-facing system message (with glyph) shown when the daemon reports the
 /// session has been taken over by another TUI process.
@@ -46,7 +46,7 @@ impl GatewayRuntime {
         &mut self,
         state: &mut AppState,
         prompt: String,
-        command_context: agent_types::chat::CommandContext,
+        command_context: xiaoo_api::chat::CommandContext,
     ) -> Result<(), String> {
         self.start_turn_internal(state, prompt, true, Some(command_context), 0)
             .await
@@ -101,7 +101,7 @@ impl GatewayRuntime {
         state: &mut AppState,
         prompt: String,
         append_user_message: bool,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<(), String> {
         // Refuse the submission locally when the heartbeat has already
@@ -348,7 +348,7 @@ impl GatewayRuntime {
         &self,
         state: &AppState,
         text: String,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<AppTurnRequest, String> {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;

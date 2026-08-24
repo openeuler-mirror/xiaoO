@@ -22,32 +22,31 @@ clap = { version = "4", features = ["derive"] }
 crossterm.workspace = true
 dirs = "6"
 futures-util.workspace = true
-llm-client = { path = "../../crates/llm-client" }
-lsp = { path = "../../crates/lsp" }
-mcp = { path = "../../crates/mcp" }
-operation_backend = { path = "../../crates/operation_backend" }
+# 白名单直依赖（见 plan.md §5，已裁定不进 xiaoo-api）：
+lsp = { path = "../../crates/lsp" }                        # 仅限配置解析（AutoInstall/LspServiceRegistry/ServerConfig）
+mcp = { path = "../../crates/mcp" }                       # 仅限配置解析（McpSection/McpServerConfig/Transport/json config 等）
+operation_backend = { path = "../../crates/operation_backend" }  # 仅限进程组清理（ProcessGroupCleanupGuard）
 ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shellexpand.workspace = true
-skill = { path = "../../crates/skill" }
+skill = { path = "../../crates/skill" }                  # 仅限 SkillsConfig 配置类型
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
-tool = { path = "../../crates/tool" }
+tool = { path = "../../crates/tool" }                    # 仅限工具源装载（load_tool_sources_with_services/ToolRuntimeServices）
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "0.1.14"
 uuid.workspace = true
 textwrap = "0.16"
 
-agent-contracts = { path = "../../crates/agent-contracts" }
-agent-types = { path = "../../crates/agent-types" }
-compact = { path = "../../crates/compact" }
-xiaoo-core = { path = "../../crates/core" }
-xiaoo-shared = { path = "../shared" }
-xiaoo-protocol = { path = "../../crates/xiaoo-protocol" }
+agent-types = { path = "../../crates/agent-types" }       # 仅限 cron 模块 + 测试 LLM 词汇（见 plan.md §5）
+# runtime SDK 面 / 应用装配面 / wire 协议面：
+xiaoo-shared = { path = "../shared" }                      # 应用装配面
+xiaoo-protocol = { path = "../../crates/xiaoo-protocol" }  # wire 协议面
+xiaoo-api = { path = "../../crates/xiaoo-api" }            # runtime SDK 门面
 
 [dev-dependencies]
 tempfile.workspace = true

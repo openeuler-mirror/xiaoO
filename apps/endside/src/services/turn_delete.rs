@@ -116,10 +116,10 @@ fn group_into_turns(messages: &[crate::chat::Message]) -> Vec<TurnSummary> {
 /// Removes the `turn_index`-th User message and all messages until the next
 /// User message (exclusive).
 pub fn remove_turn_from_session_messages(
-    session_messages: &mut Vec<llm_client::ChatMessage>,
+    session_messages: &mut Vec<xiaoo_api::chat::ChatMessage>,
     turn_index: usize,
 ) {
-    use agent_types::llm::message::MessageRole;
+    use xiaoo_api::chat::MessageRole;
 
     let mut user_count = 0;
     let mut start = None;

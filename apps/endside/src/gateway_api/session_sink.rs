@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use agent_contracts::{LoopEventSink, ToolEventSink};
-use agent_types::events::{LoopEndSummary, ToolLifecycleEvent, ToolResultEvent};
+use xiaoo_api::events::{LoopEndSummary, ToolLifecycleEvent, ToolResultEvent};
+use xiaoo_api::events::{LoopEventSink, ToolEventSink};
 
 use crate::chat::{ToolExecutionStatus, ToolExecutionUpdate};
 
@@ -20,14 +20,14 @@ impl ChannelLoopEventSink {
 }
 
 impl LoopEventSink for ChannelLoopEventSink {
-    fn on_turn_start(&self, agent_id: &agent_types::common::ids::AgentId, turn: u32) {
+    fn on_turn_start(&self, agent_id: &xiaoo_api::chat::AgentId, turn: u32) {
         let _ = self.updates_tx.send(SessionTurnUpdate::TurnStart {
             agent_id: agent_id.clone(),
             turn,
         });
     }
 
-    fn on_assistant_message(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
+    fn on_assistant_message(&self, agent_id: &xiaoo_api::chat::AgentId, text: &str) {
         let _ = self
             .updates_tx
             .send(SessionTurnUpdate::SetAssistantContent {
@@ -36,7 +36,7 @@ impl LoopEventSink for ChannelLoopEventSink {
             });
     }
 
-    fn on_assistant_reasoning(&self, agent_id: &agent_types::common::ids::AgentId, text: &str) {
+    fn on_assistant_reasoning(&self, agent_id: &xiaoo_api::chat::AgentId, text: &str) {
         let _ = self
             .updates_tx
             .send(SessionTurnUpdate::SetAssistantThinking {
@@ -45,11 +45,7 @@ impl LoopEventSink for ChannelLoopEventSink {
             });
     }
 
-    fn on_tool_result(
-        &self,
-        agent_id: &agent_types::common::ids::AgentId,
-        event: &ToolResultEvent,
-    ) {
+    fn on_tool_result(&self, agent_id: &xiaoo_api::chat::AgentId, event: &ToolResultEvent) {
         let status = if event.is_error {
             ToolExecutionStatus::Failed
         } else {
@@ -73,7 +69,7 @@ impl LoopEventSink for ChannelLoopEventSink {
         });
     }
 
-    fn on_loop_end(&self, agent_id: &agent_types::common::ids::AgentId, summary: &LoopEndSummary) {
+    fn on_loop_end(&self, agent_id: &xiaoo_api::chat::AgentId, summary: &LoopEndSummary) {
         if let Ok(mut stored) = self.loop_summary.lock() {
             *stored = Some(summary.clone());
         }
@@ -92,10 +88,8 @@ impl ChannelToolEventSink {
 
 impl ToolEventSink for ChannelToolEventSink {
     fn emit(&self, event: ToolLifecycleEvent) {
-        let (agent_id, update) = tool_lifecycle_update_from_event(
-            event,
-            agent_types::common::ids::AgentId(String::new()),
-        );
+        let (agent_id, update) =
+            tool_lifecycle_update_from_event(event, xiaoo_api::chat::AgentId(String::new()));
         let _ = self
             .updates_tx
             .send(SessionTurnUpdate::Tool { agent_id, update });
@@ -104,8 +98,8 @@ impl ToolEventSink for ChannelToolEventSink {
 
 fn tool_lifecycle_update_from_event(
     event: ToolLifecycleEvent,
-    fallback_agent_id: agent_types::common::ids::AgentId,
-) -> (agent_types::common::ids::AgentId, ToolExecutionUpdate) {
+    fallback_agent_id: xiaoo_api::chat::AgentId,
+) -> (xiaoo_api::chat::AgentId, ToolExecutionUpdate) {
     match event {
         ToolLifecycleEvent::AgentScoped { agent_id, event } => {
             tool_lifecycle_update_from_event(*event, agent_id)
@@ -198,10 +192,10 @@ fn tool_lifecycle_update_from_event(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use agent_contracts::{LoopEventSink, ToolEventSink};
-    use agent_types::common::ids::AgentId;
-    use agent_types::events::{ToolLifecycleEvent, ToolResultEvent};
     use tokio::sync::mpsc::unbounded_channel;
+    use xiaoo_api::chat::AgentId;
+    use xiaoo_api::events::{LoopEventSink, ToolEventSink};
+    use xiaoo_api::events::{ToolLifecycleEvent, ToolResultEvent};
 
     use super::{ChannelLoopEventSink, ChannelToolEventSink, SessionTurnUpdate};
 

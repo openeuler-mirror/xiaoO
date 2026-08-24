@@ -790,7 +790,7 @@ impl App {
     fn external_command_body(
         &self,
         trimmed: &str,
-    ) -> Option<(String, agent_types::chat::CommandContext)> {
+    ) -> Option<(String, xiaoo_api::chat::CommandContext)> {
         expand_external_command(trimmed, &self.state.external_commands)
     }
 
@@ -1710,7 +1710,7 @@ fn normalize_remote_url_input(value: &str) -> String {
 fn expand_external_command(
     trimmed: &str,
     external: &[crate::services::command_loader::ExternalCommand],
-) -> Option<(String, agent_types::chat::CommandContext)> {
+) -> Option<(String, xiaoo_api::chat::CommandContext)> {
     let (cmd_name, user_args) = external_command_parts(trimmed)?;
     external
         .iter()
@@ -1719,7 +1719,7 @@ fn expand_external_command(
             let body = append_external_command_args(&cmd.body, user_args);
             (
                 body,
-                agent_types::chat::CommandContext {
+                xiaoo_api::chat::CommandContext {
                     command: cmd.name.clone(),
                     arguments: user_args.to_string(),
                 },
@@ -1858,7 +1858,7 @@ mod tests {
             expand_external_command("/review", &external_commands()),
             Some((
                 "Review this carefully.".to_string(),
-                agent_types::chat::CommandContext {
+                xiaoo_api::chat::CommandContext {
                     command: "review".to_string(),
                     arguments: "".to_string()
                 }
@@ -1872,7 +1872,7 @@ mod tests {
             expand_external_command("/review src/main.rs 看一下边界条件", &external_commands()),
             Some((
                 "Review this carefully.\n\nsrc/main.rs 看一下边界条件".to_string(),
-                agent_types::chat::CommandContext {
+                xiaoo_api::chat::CommandContext {
                     command: "review".to_string(),
                     arguments: "src/main.rs 看一下边界条件".to_string()
                 }
@@ -1903,7 +1903,7 @@ mod tests {
             expand_external_command("/ask hello", &commands),
             Some((
                 "hello".to_string(),
-                agent_types::chat::CommandContext {
+                xiaoo_api::chat::CommandContext {
                     command: "ask".to_string(),
                     arguments: "hello".to_string()
                 }

@@ -1,6 +1,6 @@
-use agent_contracts::InteractionHandle;
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
+use xiaoo_api::interaction::InteractionHandle;
+use xiaoo_api::interaction::{InteractionRequest, InteractionResponse};
 
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 

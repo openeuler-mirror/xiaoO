@@ -5055,7 +5055,6 @@ dependencies = [
 name = "xiaoo-endside"
 version = "0.1.0"
 dependencies = [
- "agent-contracts",
  "agent-types",
  "anyhow",
  "arboard",
@@ -5063,11 +5062,9 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
- "compact",
  "crossterm",
  "dirs 6.0.0",
  "futures-util",
- "llm-client",
  "lsp",
  "mcp",
  "operation_backend",
@@ -5087,7 +5084,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.1.14",
  "uuid",
- "xiaoo-core",
+ "xiaoo-api",
  "xiaoo-protocol",
  "xiaoo-shared",
 ]
