@@ -12,7 +12,7 @@ use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
 use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
-use xiaoo_protocol::wire::{
+use xiaoo_shared::gateway::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
 };

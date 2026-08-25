@@ -122,9 +122,9 @@ pub struct CliConfig {
     pub compact: config::CompactSection,
     pub hooker: HookerRegistryConfig,
     pub operation_backend: Option<crate::backend::GatewayBackendConfig>,
-    pub skills_config: skill::SkillsConfig,
+    pub skills_config: xiaoo_shared::skills_support::SkillsConfig,
     pub subagent: std::collections::BTreeMap<String, config::SubagentRoleConfig>,
-    pub mcp_servers: Vec<mcp::McpServerConfig>,
+    pub mcp_servers: Vec<xiaoo_shared::mcp_support::McpServerConfig>,
     pub memory_automation: xiaoo_shared::gateway::MemoryAutomationConfig,
 }
 
@@ -226,38 +226,15 @@ pub async fn resolve_effective_context_window(
 #[cfg(test)]
 mod tests {
     use super::{resolve_effective_context_window, CliConfig};
-    use agent_types::{LlmError, LlmRequest, LlmResponse, StreamChunk};
-    use async_trait::async_trait;
     use serde_json::Value;
     use std::sync::Arc;
-    use xiaoo_api::llm::{LlmProvider, ProviderCapabilities};
-
-    struct DummyProvider {
-        capabilities: ProviderCapabilities,
-    }
-
-    #[async_trait]
-    impl LlmProvider for DummyProvider {
-        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-            unimplemented!("not needed for cli context window tests")
-        }
-
-        async fn complete_stream(
-            &self,
-            _request: &LlmRequest,
-            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
-        ) -> Result<LlmResponse, LlmError> {
-            unimplemented!("not needed for cli context window tests")
-        }
-
-        fn capabilities(&self) -> &ProviderCapabilities {
-            &self.capabilities
-        }
-    }
+    use xiaoo_api::llm::LlmProviderWrapper;
+    use xiaoo_shared::skills_support::SkillsConfig;
+    use xiaoo_shared::testing::stub_llm_provider;
 
     fn test_config() -> CliConfig {
         CliConfig {
-            skills_config: skill::SkillsConfig::default(),
+            skills_config: SkillsConfig::default(),
             kvcache_debug_enabled: false,
             provider: "openai".to_string(),
             model: "gpt-4.1".to_string(),
@@ -280,20 +257,8 @@ mod tests {
         }
     }
 
-    fn test_provider(max_context_window: usize) -> Arc<super::LlmProviderWrapper> {
-        Arc::new(super::LlmProviderWrapper::new(
-            Arc::new(DummyProvider {
-                capabilities: ProviderCapabilities {
-                    supports_streaming: true,
-                    supports_tool_calls: false,
-                    supports_json_mode: false,
-                    max_context_window,
-                    model_name: "dummy".to_string(),
-                },
-            }),
-            None,
-            None,
-        ))
+    fn test_provider(max_context_window: usize) -> Arc<LlmProviderWrapper> {
+        stub_llm_provider("dummy", max_context_window as u32)
     }
 
     #[tokio::test]

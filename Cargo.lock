@@ -5055,7 +5055,6 @@ dependencies = [
 name = "xiaoo-endside"
 version = "0.1.0"
 dependencies = [
- "agent-types",
  "anyhow",
  "arboard",
  "async-trait",
@@ -5065,27 +5064,21 @@ dependencies = [
  "crossterm",
  "dirs 6.0.0",
  "futures-util",
- "lsp",
- "mcp",
- "operation_backend",
  "ratatui",
  "reqwest",
  "serde",
  "serde_json",
  "shellexpand",
- "skill",
  "tempfile",
  "textwrap",
  "tokio",
  "tokio-util",
  "toml",
- "tool",
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.1.14",
  "uuid",
  "xiaoo-api",
- "xiaoo-protocol",
  "xiaoo-shared",
 ]
 

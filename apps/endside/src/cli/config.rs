@@ -1,5 +1,4 @@
 use crate::backend::GatewayBackendConfig;
-use mcp::McpSection;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
@@ -7,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_shared::gateway::MemoryAutomationConfig;
+use xiaoo_shared::mcp_support::{self, McpSection};
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 
@@ -142,7 +142,7 @@ impl FileConfig {
         workspace: &Path,
         home: Option<&Path>,
         toml_source: &Path,
-    ) -> Result<Vec<mcp::McpServerConfig>, mcp::McpConfigError> {
+    ) -> Result<Vec<mcp_support::McpServerConfig>, mcp_support::McpConfigError> {
         crate::support::config::load_merged_mcp_servers(
             &self.mcp.servers,
             explicit_path,
