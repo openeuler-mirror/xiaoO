@@ -5,9 +5,11 @@ pub mod cron;
 pub mod gateway;
 pub mod llm_secrets;
 pub mod lsp_support;
+pub mod mcp_support;
 pub mod plan;
 pub mod runtime_checkpoint;
 pub mod session_diff;
+pub mod skills_support;
 
 #[cfg(feature = "test-support")]
 pub mod testing;
