@@ -18,7 +18,9 @@ use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use xiaoo_shared::backend::{BackendInfo, BackendListFilter, BackendManager};
+use xiaoo_shared::backend::{
+    backend_endpoint_str, backend_state_label, BackendInfo, BackendListFilter, BackendManager,
+};
 use xiaoo_shared::gateway::{SessionLifecycleStatus, SessionRecord, SessionStore};
 
 #[derive(RustEmbed)]
@@ -244,35 +246,6 @@ fn session_status_label(status: SessionLifecycleStatus) -> String {
     }
 }
 
-fn backend_state_label(state: agent_contracts::backend::BackendLifecycleState) -> &'static str {
-    use agent_contracts::backend::BackendLifecycleState;
-    match state {
-        BackendLifecycleState::Unknown => "unknown",
-        BackendLifecycleState::Creating => "creating",
-        BackendLifecycleState::Active => "active",
-        BackendLifecycleState::Pausing => "pausing",
-        BackendLifecycleState::Paused => "paused",
-        BackendLifecycleState::Loading => "loading",
-        BackendLifecycleState::Deleting => "deleting",
-        BackendLifecycleState::Deleted => "deleted",
-        BackendLifecycleState::Failed => "failed",
-    }
-}
-
-fn backend_endpoint_str(
-    endpoint: Option<agent_contracts::backend::BackendEndpoint>,
-) -> Option<String> {
-    use agent_contracts::backend::BackendEndpoint;
-    endpoint.map(|e| match e {
-        BackendEndpoint::Local => "local".to_string(),
-        BackendEndpoint::Tcp { host, port } => format!("tcp://{host}:{port}"),
-        BackendEndpoint::UnixSocket { path } => format!("unix:{path}"),
-        BackendEndpoint::ProviderHandle { value } => {
-            format!("provider:{}", value)
-        }
-    })
-}
-
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -283,7 +256,6 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_contracts::backend::BackendLifecycleState;
     use std::path::PathBuf;
     use std::sync::Arc;
     use xiaoo_api::chat::{AgentId, FeatureFlags, TokenBudgetConfig};
@@ -404,23 +376,5 @@ mod tests {
 
         let Json(sandboxes) = handle_sandboxes(State(Arc::new(state))).await;
         assert!(sandboxes.is_empty());
-    }
-
-    #[test]
-    fn backend_state_label_covers_all_variants() {
-        let all = [
-            BackendLifecycleState::Unknown,
-            BackendLifecycleState::Creating,
-            BackendLifecycleState::Active,
-            BackendLifecycleState::Pausing,
-            BackendLifecycleState::Paused,
-            BackendLifecycleState::Loading,
-            BackendLifecycleState::Deleting,
-            BackendLifecycleState::Deleted,
-            BackendLifecycleState::Failed,
-        ];
-        for state in all {
-            assert!(!backend_state_label(state).is_empty());
-        }
     }
 }

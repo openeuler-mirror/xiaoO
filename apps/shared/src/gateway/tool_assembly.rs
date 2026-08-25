@@ -46,17 +46,95 @@ pub struct SubagentRoleSpec {
     pub tools: BTreeMap<String, bool>,
 }
 
+/// 不透明的已绑定控制句柄存储：跨多次工具装配复用同一份控制绑定
+/// （由 `AppBootstrap` 在启动期注入一次）。底层控制 trait 只出现在本结构体
+/// 内部方法签名里，不向应用导出——应用持有 [`BoundControlStore`] 并经它
+/// 传值，无需 `use` 任何底层 trait 名。
+#[derive(Clone, Default)]
+pub struct BoundControlStore {
+    inner: Arc<std::sync::RwLock<Option<Arc<dyn SubagentControl>>>>,
+}
+
+impl BoundControlStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 注入一份控制句柄（启动期由 `AppBootstrap` 调一次）。
+    pub fn set(&self, control: Arc<dyn SubagentControl>) {
+        *self
+            .inner
+            .write()
+            .expect("bound control store lock should not be poisoned") = Some(control);
+    }
+
+    /// 取当前绑定的控制句柄（未绑定返回 `None`）。
+    pub fn snapshot(&self) -> Option<Arc<dyn SubagentControl>> {
+        self.inner
+            .read()
+            .expect("bound control store lock should not be poisoned")
+            .clone()
+    }
+}
+
+/// 不透明的 MCP 工具缓存：持有已初始化（connect + initialize + list_tools）
+/// 的 MCP 服务器连接，使多次工具装配共用同一次初始化结果。
+///
+/// `McpServerWithTools` 是底层句柄类型，只出现在本结构体内部字段里，不向应用
+/// 导出——应用持有 [`McpToolCache`] 即可，无需 `use` 任何底层 crate。
+#[derive(Clone, Default)]
+pub struct McpToolCache {
+    inner: Arc<tokio::sync::Mutex<Option<Vec<mcp::McpServerWithTools>>>>,
+}
+
+impl McpToolCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 取已初始化的工具（未初始化返回 `None`）。仅做读，不触发网络。
+    pub async fn snapshot(&self) -> Option<Vec<mcp::McpServerWithTools>> {
+        self.inner.lock().await.clone()
+    }
+
+    /// 若尚未初始化则用 `configs` 初始化并缓存；返回克隆的工具列表。
+    /// 与 [`hosted_runtime_resolver`](super::hosted_runtime_resolver) 的
+    /// 双重检查 lazy init 语义一致：配置为空 → 直接缓存空列表（避免误判未初始化）。
+    async fn get_or_init(
+        &self,
+        configs: &[McpServerConfig],
+    ) -> Result<Vec<mcp::McpServerWithTools>, ToolAssemblyError> {
+        if let Some(existing) = self.inner.lock().await.clone() {
+            return Ok(existing);
+        }
+        let mut guard = self.inner.lock().await;
+        if let Some(existing) = guard.clone() {
+            return Ok(existing);
+        }
+        let initialised = if configs.is_empty() {
+            Vec::new()
+        } else {
+            mcp::init_mcp_tools(configs).await
+        };
+        *guard = Some(initialised.clone());
+        Ok(initialised)
+    }
+}
+
 /// 工具装配输入。字段只用基本类型和 shared 已导出的句柄。
 ///
-/// `lsp_registry` / `mcp_servers` 是配置类型（serverside 配置解析后持有）；
+/// `lsp_registry` 是配置类型（serverside 配置解析后持有）；
 /// `subagent_control` 是不透明句柄（serverside 从 shared `CoreBackedSessionService`
-/// 拿到后传值，无需 `use` trait 名）。
+/// 拿到后传值，无需 `use` trait 名）；
+/// `mcp_servers` 是 MCP 配置，`mcp_cache` 是跨装配复用的初始化缓存
+/// （两者同时给时优先用缓存；缓存未命中则按 `mcp_servers` 初始化并写回缓存）。
 #[derive(Clone, Default)]
 pub struct ToolAssemblyInput {
     pub workspace_root: Option<PathBuf>,
     pub disable_plugin_tools: bool,
     pub lsp_registry: Option<Arc<LspServiceRegistry>>,
     pub mcp_servers: Option<Vec<McpServerConfig>>,
+    pub mcp_cache: Option<McpToolCache>,
     pub subagent_roles: BTreeMap<String, SubagentRoleSpec>,
     pub subagent_control: Option<Arc<dyn SubagentControl>>,
 }
@@ -101,21 +179,23 @@ fn to_runtime_services(
     }
 }
 
-/// 懒初始化 MCP 服务器（连接 + initialize + list_tools），返回底层
-/// `McpServerWithTools` 列表。`None` 表示"未初始化"语义。
+/// 解析本装配所需的 MCP 工具：优先用 `input.mcp_cache`（跨装配复用初始化），
+/// 否则按 `input.mcp_servers` 直接初始化（一次性，不缓存）。
 ///
-/// 与 `hosted_runtime_resolver` 的 lazy init 语义一致：传入的配置为空 → 直接
-/// 返回 `Some(vec![])`（init 已完成，即便结果为空），避免调用方误判未初始化。
-async fn init_mcp_servers(
-    mcp_servers: &Option<Vec<McpServerConfig>>,
+/// `None` 表示"未提供 MCP 配置"语义（对应底层 `ToolRuntimeServices.mcp_servers`
+/// 为 `None`，即不接入 MCP 工具源）；`Some(vec)` 表示已初始化（即便为空，
+/// 表示配置为空或所有服务器不可达，避免调用方误判未初始化）。
+async fn resolve_mcp_tools(
+    input: &ToolAssemblyInput,
 ) -> Result<Option<Vec<mcp::McpServerWithTools>>, ToolAssemblyError> {
-    match mcp_servers {
-        None => Ok(None),
-        Some(configs) if configs.is_empty() => Ok(Some(Vec::new())),
-        Some(configs) => {
+    match (&input.mcp_cache, &input.mcp_servers) {
+        (Some(cache), Some(configs)) => Ok(Some(cache.get_or_init(configs).await?)),
+        (None, Some(configs)) if configs.is_empty() => Ok(Some(Vec::new())),
+        (None, Some(configs)) => {
             let initialised = mcp::init_mcp_tools(configs).await;
             Ok(Some(initialised))
         }
+        _ => Ok(None),
     }
 }
 
@@ -129,7 +209,7 @@ async fn init_mcp_servers(
 pub async fn discover_tool_names(
     input: &ToolAssemblyInput,
 ) -> Result<Vec<ToolName>, ToolAssemblyError> {
-    let mcp_servers = init_mcp_servers(&input.mcp_servers).await?;
+    let mcp_servers = resolve_mcp_tools(input).await?;
     let services = to_runtime_services(input, mcp_servers);
     let tool_sources = load_tool_sources_with_services(services);
     let names = tool_sources
@@ -147,7 +227,7 @@ pub async fn build_tool_registry(
     input: ToolAssemblyInput,
     per_agent_allowed_tools: HashMap<AgentId, Vec<ToolName>>,
 ) -> Result<Arc<dyn ToolRegistry>, ToolAssemblyError> {
-    let mcp_servers = init_mcp_servers(&input.mcp_servers).await?;
+    let mcp_servers = resolve_mcp_tools(&input).await?;
     let services = to_runtime_services(&input, mcp_servers);
     let tool_sources = load_tool_sources_with_services(services);
 

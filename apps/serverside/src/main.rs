@@ -21,13 +21,12 @@ use crate::httpserver::{
 use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
-use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
-use xiaoo_shared::backend::BackendManager;
+use xiaoo_shared::backend::{BackendManager, ProcessGroupCleanupGuard};
 use xiaoo_shared::gateway::{
     AppBootstrap, InMemorySessionStore, McpMemoryAutomation, SessionStore,
 };

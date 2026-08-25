@@ -1,9 +1,9 @@
 use crate::httpserver::channel_ingress::{build_channel_turn_request, GatewayChannelMessage};
-use agent_contracts::ChannelFileSender;
 use std::sync::Arc;
 use thiserror::Error;
 use xiaoo_api::events::LoopEventSink;
 use xiaoo_api::interaction::InteractionHandle;
+use xiaoo_shared::channels::ChannelFileSender;
 use xiaoo_shared::gateway::{SessionService, SessionServiceError};
 
 #[derive(Debug, Clone)]

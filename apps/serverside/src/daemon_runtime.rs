@@ -2,38 +2,29 @@ use crate::daemon_config::SubagentRoleConfig as ConfigSubagentRole;
 use crate::daemon_config::{
     AgentRoleConfig, CompactConfig, DaemonConfig, LlmConfig, ResolvedAgentConfig,
 };
-use agent_contracts::ToolRegistryBuilder;
-use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use llm_client::{create_llm_provider_from_resolved, resolve_provider_profile};
-use lsp::LspServiceRegistry;
-use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
-use skill::SkillsConfig;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::env;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::{fs, path::Path};
-use subagent::SubagentControl;
-use tool::{
-    load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
-    ToolRuntimeServices,
-};
 use xiaoo_api::chat::{AgentId, FeatureFlags, HookerRegistryConfig, TokenBudgetConfig, ToolName};
+use xiaoo_api::llm::LlmProviderWrapper;
 use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
-use xiaoo_api::llm::{
-    resolve_config, resolve_model_context_length, LlmProviderWrapper, ResolveInput,
-};
 use xiaoo_api::skills::FileSkillRegistry;
 use xiaoo_api::skills::SkillRegistry;
 use xiaoo_api::tools::ToolRegistry;
 use xiaoo_shared::backend::GatewayBackendConfig;
+use xiaoo_shared::gateway::llm_assembly::{build_llm_provider, LlmAssemblyInput};
 use xiaoo_shared::gateway::prompt_utils::{
-    compose_subagent_delegation_rules, generate_skills_dirs_table,
+    compose_channel_system_prompt, compose_subagent_delegation_rules, generate_skills_dirs_table,
+    ChannelPromptSections,
 };
 use xiaoo_shared::gateway::session_record::SubagentRoleRecord;
+use xiaoo_shared::gateway::tool_assembly::{
+    build_tool_registry, discover_tool_names, SubagentRoleSpec, ToolAssemblyInput,
+};
 use xiaoo_shared::gateway::{
     compose_workspace_system_prompt, ResolvedSessionRuntime, SessionRecord, SessionRuntimeBindings,
     SessionRuntimeBuildInput, SessionRuntimeDescriptor, SessionRuntimeResolveError,
@@ -116,6 +107,25 @@ impl EffectiveLlmConfig {
             api_key: self.api_key.clone(),
         }
     }
+
+    /// Build the shared coarse-grained LLM assembly input from this config.
+    /// `context_window_override` is `usize` in the local config but the shared
+    /// facade speaks `u32` (model context windows are far below `u32::MAX`).
+    fn to_assembly_input(
+        &self,
+        context_window_override: Option<usize>,
+        agent_id: Option<AgentId>,
+    ) -> LlmAssemblyInput {
+        LlmAssemblyInput {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            api_base: self.api_base.clone(),
+            api_key: self.api_key.clone(),
+            api_key_env: self.api_key_env.clone(),
+            context_window_override: context_window_override.and_then(|w| u32::try_from(w).ok()),
+            agent_id,
+        }
+    }
 }
 
 struct ResolvedLlmRuntime {
@@ -141,17 +151,19 @@ pub struct ConfiguredRuntimeResolver {
     trace: Value,
     hooker: HookerRegistryConfig,
     skill_registry: Arc<dyn SkillRegistry>,
-    skills_config: SkillsConfig,
+    skills_config: xiaoo_shared::skills_support::SkillsConfig,
     skills_dirs: Vec<PathBuf>,
-    lsp_registry: Option<Arc<LspServiceRegistry>>,
+    lsp_registry: Option<Arc<xiaoo_shared::lsp_support::LspServiceRegistry>>,
     operation_backend: Option<GatewayBackendConfig>,
-    mcp_servers: Vec<mcp::McpServerConfig>,
-    mcp_tools: Arc<RwLock<Option<Vec<mcp::McpServerWithTools>>>>,
-    mcp_init: tokio::sync::Mutex<()>,
-    /// Bound by `AppBootstrap` after construction; injected into
-    /// `ToolRuntimeServices` so daemon-side `spawn_subagent` /
-    /// `join_subagent` see the same control plane as the local TUI.
-    subagent_control: Arc<RwLock<Option<Arc<dyn SubagentControl>>>>,
+    mcp_servers: Vec<xiaoo_shared::mcp_support::McpServerConfig>,
+    /// Lazily initialised MCP server connections; shared across all resolves
+    /// so the (expensive) connect + initialize + list_tools runs at most once.
+    mcp_tools: xiaoo_shared::gateway::McpToolCache,
+    /// Opaque bound-control handle store; populated once at bootstrap by
+    /// `AppBootstrap` (via `bound_control_store`) so tool assembly can
+    /// inject the bound control into every `ToolRuntimeServices` it builds
+    /// without this resolver naming the control trait.
+    bound_control: xiaoo_shared::gateway::BoundControlStore,
 }
 
 impl ConfiguredRuntimeResolver {
@@ -166,25 +178,14 @@ impl ConfiguredRuntimeResolver {
             api_key_env: config.app.llm.api_key_env.clone(),
             api_key: None,
         };
-        let resolved_provider = resolve_effective_provider_config(&startup_llm)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-            .context("failed to resolve llm provider config")?;
-        let llm_provider = Arc::new(
-            create_llm_provider_from_resolved(
-                &resolved_provider,
-                agent.model.clone(),
-                Some(agent.id.clone()),
-                None,
-            )
-            .context("failed to create llm provider")?,
-        );
-        let effective_context_window = resolve_effective_context_window(
-            &resolved_provider,
-            &agent.model,
+        let (llm_provider, context_window) = build_llm_provider(startup_llm.to_assembly_input(
             config.app.llm.context_window,
-            llm_provider.capabilities().max_context_window,
-        )
-        .await;
+            Some(AgentId(agent.id.clone())),
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+        .context("failed to resolve llm provider config")?;
+        let effective_context_window = context_window as usize;
         let token_budget = build_token_budget(effective_context_window, config.max_output_tokens());
 
         validate_token_budget_config(
@@ -226,9 +227,8 @@ impl ConfiguredRuntimeResolver {
             operation_backend: config.server_operation_backend(),
             lsp_registry,
             mcp_servers: config.app.mcp.servers.clone(),
-            mcp_tools: Arc::new(RwLock::new(None)),
-            mcp_init: tokio::sync::Mutex::new(()),
-            subagent_control: Arc::new(RwLock::new(None)),
+            mcp_tools: xiaoo_shared::gateway::McpToolCache::new(),
+            bound_control: xiaoo_shared::gateway::BoundControlStore::new(),
         })
     }
 
@@ -297,27 +297,15 @@ impl ConfiguredRuntimeResolver {
             }
         }
 
-        let resolved_provider = resolve_effective_provider_config(effective)?;
-
-        let created = Arc::new(
-            create_llm_provider_from_resolved(
-                &resolved_provider,
-                effective.model.clone(),
-                Some(self.agent.id.clone()),
-                None,
-            )
-            .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-                message: format!("failed to create llm provider: {error}"),
-            })?,
-        );
-
-        let context_window = resolve_effective_context_window(
-            &resolved_provider,
-            &effective.model,
+        let (created, context_window) = build_llm_provider(effective.to_assembly_input(
             self.llm.context_window,
-            created.capabilities().max_context_window,
-        )
-        .await;
+            Some(AgentId(self.agent.id.clone())),
+        ))
+        .await
+        .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
+            message: format!("failed to create llm provider: {error}"),
+        })?;
+        let context_window = context_window as usize;
 
         if let Ok(mut guard) = self.provider_pool.write() {
             use std::collections::hash_map::Entry;
@@ -419,7 +407,13 @@ impl ConfiguredRuntimeResolver {
         Ok((Some(binding), Some(Arc::new(archive))))
     }
 
-    fn build_tool_registry(
+    /// Build the per-session tool registry via the shared coarse-grained
+    /// assembly facade. The facade owns the underlying `ToolRuntimeServices`
+    /// / source-loading / builder plumbing, so this resolver only supplies
+    /// coarse-grained input (workspace, registry handles, role specs, the
+    /// bound opaque subagent control, the lazily-cached MCP connections) and
+    /// the per-agent allowed-tool allowlist derived from the profile + role.
+    async fn build_tool_registry(
         &self,
         profile: RuntimeCapabilityProfile,
         agent_role: Option<&AgentRoleConfig>,
@@ -427,14 +421,23 @@ impl ConfiguredRuntimeResolver {
         disable_plugin_tools: bool,
         resolved_agent_id: &AgentId,
     ) -> Result<Option<Arc<dyn ToolRegistry>>, SessionRuntimeResolveError> {
-        let services =
-            self.build_tool_runtime_services(profile, workspace_root, disable_plugin_tools);
-        let tool_sources = load_tool_sources_with_services(services);
-        let all_tool_names: Vec<ToolName> = tool_sources
-            .iter()
-            .flat_map(|source| source.discover())
-            .map(|tool| tool.spec.name().clone())
-            .collect();
+        let input = self.tool_assembly_input(profile, workspace_root, disable_plugin_tools);
+        // MCP chatbot sessions are scoped to a fixed, minimal tool allowlist
+        // and never expose the full toolset, so short-circuit discovery and
+        // build the registry straight from the known set (also avoids any
+        // MCP initialisation for the chatbot profile).
+        let all_tool_names = if profile == RuntimeCapabilityProfile::McpChatbot {
+            MCP_CHATBOT_TOOLS
+                .iter()
+                .map(|name| ToolName(name.to_string()))
+                .collect()
+        } else {
+            discover_tool_names(&input).await.map_err(|error| {
+                SessionRuntimeResolveError::ResolveFailed {
+                    message: format!("failed to discover tool names: {error}"),
+                }
+            })?
+        };
         let allowed_tool_names =
             resolve_profile_allowed_tool_names(&all_tool_names, profile, agent_role);
         // Insert the resolved agent_id (root or subagent override) so
@@ -443,74 +446,64 @@ impl ConfiguredRuntimeResolver {
         let mut per_agent_allowed_tools = HashMap::new();
         per_agent_allowed_tools.insert(resolved_agent_id.clone(), allowed_tool_names);
 
-        let registry = ToolRegistryBuilderImpl::new()
-            .with_sources(tool_sources)
-            .with_config(ToolRegistryConfig {
-                visibility: ToolVisibilityConfig {
-                    per_agent_allowed_tools,
-                },
-            })
-            .build()
+        let registry = build_tool_registry(input, per_agent_allowed_tools)
+            .await
             .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
                 message: format!("failed to build tool registry: {error}"),
             })?;
-
         Ok(Some(Arc::from(registry)))
     }
 
-    /// Construct the `ToolRuntimeServices` that `build_tool_registry`
-    /// injects into tool sources. Extracted so tests can verify the
-    /// bound `SubagentControl` actually propagates into the services
-    /// struct, not just the resolver's internal field.
-    fn build_tool_runtime_services(
+    /// Translate this resolver's per-session inputs into the shared
+    /// coarse-grained [`ToolAssemblyInput`]. The chatbot profile drops the
+    /// LSP registry, subagent roles, and MCP sources to enforce its strict
+    /// tool boundary; the agent/default profiles carry the full set.
+    fn tool_assembly_input(
         &self,
         profile: RuntimeCapabilityProfile,
         workspace_root: PathBuf,
         disable_plugin_tools: bool,
-    ) -> ToolRuntimeServices {
-        let subagent_roles: BTreeMap<String, SubagentRoleConfig> =
-            if profile == RuntimeCapabilityProfile::McpChatbot {
-                BTreeMap::new()
-            } else {
-                self.subagent_roles
-                    .iter()
-                    .map(|(role_id, config)| {
-                        (
-                            role_id.clone(),
-                            SubagentRoleConfig {
-                                description: config.description.clone(),
-                                prompt: config.prompt.clone(),
-                                max_turns: config.max_turns,
-                                tools: config.tools.clone(),
-                            },
-                        )
-                    })
-                    .collect()
-            };
-        // Inject the bound control (see field docstring).
-        let subagent_control = self
-            .subagent_control
-            .read()
-            .expect("subagent_control lock should not be poisoned")
-            .clone();
-        ToolRuntimeServices {
-            disable_plugin_tools: disable_plugin_tools
-                || profile == RuntimeCapabilityProfile::McpChatbot,
-            lsp_registry: (profile != RuntimeCapabilityProfile::McpChatbot)
-                .then(|| self.lsp_registry.clone())
-                .flatten(),
+    ) -> ToolAssemblyInput {
+        let is_chatbot = profile == RuntimeCapabilityProfile::McpChatbot;
+        let subagent_roles: BTreeMap<String, SubagentRoleSpec> = if is_chatbot {
+            BTreeMap::new()
+        } else {
+            self.subagent_roles
+                .iter()
+                .map(|(role_id, config)| {
+                    (
+                        role_id.clone(),
+                        SubagentRoleSpec {
+                            description: config.description.clone(),
+                            prompt: config.prompt.clone(),
+                            max_turns: config.max_turns,
+                            tools: config.tools.clone(),
+                        },
+                    )
+                })
+                .collect()
+        };
+        ToolAssemblyInput {
             workspace_root: Some(workspace_root),
-            subagent_roles,
-            subagent_control,
-            mcp_servers: if profile == RuntimeCapabilityProfile::McpChatbot {
+            disable_plugin_tools: disable_plugin_tools || is_chatbot,
+            lsp_registry: (!is_chatbot).then(|| self.lsp_registry.clone()).flatten(),
+            // The chatbot profile never wires MCP sources; the agent/default
+            // profiles share the lazily-cached, already-initialised set so
+            // the (expensive) connect + list_tools runs at most once.
+            mcp_servers: if is_chatbot {
+                None
+            } else if self.mcp_servers.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(self.mcp_servers.clone())
+            },
+            mcp_cache: if is_chatbot {
                 None
             } else {
-                self.mcp_tools
-                    .read()
-                    .expect("mcp tools lock should not be poisoned")
-                    .clone()
+                Some(self.mcp_tools.clone())
             },
-            ..ToolRuntimeServices::default()
+            subagent_roles,
+            subagent_control: self.bound_control.snapshot(),
         }
     }
 }
@@ -625,95 +618,6 @@ fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, SessionRuntimeReso
     Ok(canonical)
 }
 
-async fn resolve_effective_context_window(
-    resolved_provider: &llm_client::ResolvedConfig,
-    model: &str,
-    configured: Option<usize>,
-    static_fallback: usize,
-) -> usize {
-    if let Some(context_window) = configured.filter(|value| *value > 0) {
-        return context_window;
-    }
-
-    match resolve_model_context_length(resolved_provider, model).await {
-        Ok(Some(context_window)) => match usize::try_from(context_window) {
-            Ok(value) if value > 0 => return value,
-            Ok(_) => {}
-            Err(_) => {}
-        },
-        Ok(None) => {}
-        Err(error) => {
-            tracing::warn!(
-                model = %model,
-                error = %error,
-                "failed to dynamically resolve model context window; falling back"
-            );
-        }
-    }
-
-    static_fallback.max(1)
-}
-
-fn resolve_llm_api_key(
-    config: &EffectiveLlmConfig,
-) -> Result<Option<String>, SessionRuntimeResolveError> {
-    if let Some(api_key) = config.api_key.as_ref() {
-        return Ok(Some(api_key.clone()));
-    }
-
-    if let Some(env_name) = config.api_key_env.as_deref() {
-        return resolve_api_key_env(env_name, true);
-    }
-
-    if let Some(env_name) = resolve_provider_profile(&config.provider)
-        .and_then(|profile| profile.default_api_key_env.map(str::to_string))
-    {
-        return resolve_api_key_env(&env_name, false);
-    }
-
-    Ok(None)
-}
-
-fn resolve_effective_provider_config(
-    config: &EffectiveLlmConfig,
-) -> Result<llm_client::ResolvedConfig, SessionRuntimeResolveError> {
-    let api_key = resolve_llm_api_key(config)?;
-    resolve_config(ResolveInput {
-        provider: Some(config.provider.clone()),
-        protocol: None,
-        api_key,
-        api_key_env: None,
-        base_url: config.api_base.clone(),
-    })
-    .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
-        message: format!("failed to resolve llm provider config: {error}"),
-    })
-}
-
-fn resolve_api_key_env(
-    env_name: &str,
-    fail_when_missing: bool,
-) -> Result<Option<String>, SessionRuntimeResolveError> {
-    if let Some(api_key) = xiaoo_shared::gateway::get_decrypted_api_key(env_name) {
-        if !api_key.trim().is_empty() {
-            return Ok(Some(api_key));
-        }
-    }
-
-    match env::var(env_name) {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value)),
-        Ok(_) | Err(env::VarError::NotPresent) if fail_when_missing => {
-            Err(SessionRuntimeResolveError::ResolveFailed {
-                message: format!("missing required API key environment variable: {env_name}"),
-            })
-        }
-        Ok(_) | Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(SessionRuntimeResolveError::ResolveFailed {
-            message: format!("API key environment variable is not valid unicode: {env_name}"),
-        }),
-    }
-}
-
 fn optional_non_empty(value: Option<&String>) -> Option<String> {
     value
         .map(|value| value.trim())
@@ -723,13 +627,13 @@ fn optional_non_empty(value: Option<&String>) -> Option<String> {
 
 #[async_trait]
 impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
-    fn bind_subagent_control(&self, control: Arc<dyn SubagentControl>) {
-        // Store the bound control so `build_tool_registry` can inject
-        // it into every `ToolRuntimeServices` it constructs.
-        self.subagent_control
-            .write()
-            .expect("subagent_control lock should not be poisoned")
-            .replace(control);
+    // The bound control arrives via `bound_control_store()` below (the
+    // bootstrap writes into the opaque store); the trait's default
+    // `bind_subagent_control` no-op is retained so this resolver never
+    // names the control trait.
+
+    fn bound_control_store(&self) -> Option<&xiaoo_shared::gateway::BoundControlStore> {
+        Some(&self.bound_control)
     }
 
     async fn resolve(
@@ -824,35 +728,10 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .map(|binding| binding.remote_skill_roots.clone())
             .unwrap_or_else(|| self.skills_dirs.clone());
 
-        // Lazily initialise MCP servers (connect + initialize + list_tools)
-        // once, then cache the live connections for all subsequent resolves.
-        // `None` = not yet initialised; `Some(vec)` = init completed (even if
-        // the vec is empty, e.g. all servers were unreachable). Using `None`
-        // as the sentinel prevents re-running the expensive init on every
-        // resolve() when no servers are reachable.
-        let needs_init = profile != RuntimeCapabilityProfile::McpChatbot
-            && !self.mcp_servers.is_empty()
-            && self
-                .mcp_tools
-                .read()
-                .expect("mcp tools lock should not be poisoned")
-                .is_none();
-        if needs_init {
-            let _init_guard = self.mcp_init.lock().await;
-            let still_uninit = self
-                .mcp_tools
-                .read()
-                .expect("mcp tools lock should not be poisoned")
-                .is_none();
-            if still_uninit {
-                let tools = mcp::init_mcp_tools(&self.mcp_servers).await;
-                let mut cache = self
-                    .mcp_tools
-                    .write()
-                    .expect("mcp tools lock should not be poisoned");
-                *cache = Some(tools);
-            }
-        }
+        // MCP servers are lazily initialised (connect + initialize +
+        // list_tools) at most once inside the shared `McpToolCache`, which
+        // `build_tool_registry` consults below. No eager init here keeps
+        // resolve() synchronous up to the tool-assembly call.
 
         // Honor `agent_id_override` so a subagent lane's tool-lifecycle
         // events are scoped with the subagent's id, not the root's.
@@ -860,13 +739,15 @@ impl SessionRuntimeResolver for ConfiguredRuntimeResolver {
             .agent_id_override
             .clone()
             .unwrap_or_else(|| AgentId(self.agent.id.clone()));
-        let tool_registry = self.build_tool_registry(
-            profile,
-            agent_role,
-            effective_workspace_root.clone(),
-            is_e2b,
-            &resolved_agent_id,
-        )?;
+        let tool_registry = self
+            .build_tool_registry(
+                profile,
+                agent_role,
+                effective_workspace_root.clone(),
+                is_e2b,
+                &resolved_agent_id,
+            )
+            .await?;
         Ok(ResolvedSessionRuntime {
             descriptor: SessionRuntimeDescriptor {
                 agent_id: resolved_agent_id,
@@ -1179,20 +1060,14 @@ fn build_compression_pipeline(
 mod tests {
     use super::{
         build_system_prompt, build_token_budget, force_e2b_remote_roots, resolve_agent_role,
-        resolve_allowed_tool_names, resolve_effective_provider_config, resolve_local_workspace,
-        resolve_profile_agent_role, resolve_profile_allowed_tool_names,
-        validate_existing_e2b_binding, ConfiguredRuntimeResolver, EffectiveLlmConfig,
-        RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
+        resolve_allowed_tool_names, resolve_local_workspace, resolve_profile_agent_role,
+        resolve_profile_allowed_tool_names, validate_existing_e2b_binding,
+        ConfiguredRuntimeResolver, RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::{AgentRoleConfig, DaemonConfig};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use subagent::{
-        JoinSubagentRequest, JoinSubagentResult, SpawnSubagentRequest, SpawnSubagentResult,
-        SubagentControl, SubagentControlError,
-    };
     use tempfile::{tempdir, TempDir};
     use xiaoo_api::chat::{AgentId, ToolName};
     use xiaoo_shared::backend::GatewayBackendConfig;
@@ -1214,30 +1089,6 @@ mod tests {
         assert_eq!(budget.total_budget, 65536);
         assert_eq!(budget.reserved_for_output, 8192);
         assert_eq!(budget.reserved_for_system, 2048);
-    }
-
-    #[test]
-    fn startup_provider_resolves_api_key_from_encrypted_secrets() {
-        let temp = tempdir().expect("create temp dir");
-        let config_path = temp.path().join("config.toml");
-        let env_name = "XIAOO_DAEMON_TEST_OPENROUTER_API_KEY";
-        std::env::remove_var(env_name);
-
-        xiaoo_shared::llm_secrets::save_llm_secret(&config_path, env_name, "secret-key")
-            .expect("save encrypted LLM secret");
-        xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path)
-            .expect("initialize secret provider");
-
-        let resolved = resolve_effective_provider_config(&EffectiveLlmConfig {
-            provider: "openrouter".to_string(),
-            model: "test-model".to_string(),
-            api_base: None,
-            api_key_env: Some(env_name.to_string()),
-            api_key: None,
-        })
-        .expect("resolve provider with encrypted secret");
-
-        assert_eq!(resolved.api_key.as_deref(), Some("secret-key"));
     }
 
     #[test]
@@ -1560,82 +1411,6 @@ mod tests {
         assert!(backend.options.get("workspaceRoot").is_none());
         assert!(backend.options.get("homeDir").is_none());
         assert_eq!(backend.options["api_key_env"], "E2B_API_KEY");
-    }
-
-    /// Pins that `bind_subagent_control` propagates to the
-    /// `ToolRuntimeServices` constructed by `build_tool_runtime_services`
-    /// (the method `build_tool_registry` calls internally). Verifying
-    /// the services struct — not just the resolver's internal field —
-    /// ensures the bound control actually reaches tool sources.
-    #[tokio::test]
-    async fn bind_subagent_control_propagates_to_tool_runtime_services() {
-        struct StubControl;
-        #[async_trait::async_trait]
-        impl SubagentControl for StubControl {
-            async fn spawn(
-                &self,
-                _request: SpawnSubagentRequest,
-            ) -> Result<SpawnSubagentResult, SubagentControlError> {
-                Err(SubagentControlError::Unavailable {
-                    message: "stub".to_string(),
-                })
-            }
-            async fn join(
-                &self,
-                _request: JoinSubagentRequest,
-            ) -> Result<JoinSubagentResult, SubagentControlError> {
-                Err(SubagentControlError::Unavailable {
-                    message: "stub".to_string(),
-                })
-            }
-        }
-
-        let (config, _workspace_temp) = minimal_test_config().await;
-        let resolver = ConfiguredRuntimeResolver::from_config(&config)
-            .await
-            .expect("construct resolver from minimal config");
-
-        // Initially no control is bound, matching the
-        // `HostedSessionRuntimeResolver::new` initial state.
-        assert!(
-            resolver
-                .subagent_control
-                .read()
-                .expect("subagent_control lock should not be poisoned")
-                .is_none(),
-            "resolver should start with subagent_control = None"
-        );
-
-        // Before binding, `build_tool_runtime_services` must NOT
-        // inject any control.
-        let services_before = resolver.build_tool_runtime_services(
-            RuntimeCapabilityProfile::Default,
-            PathBuf::from("/tmp"),
-            false,
-        );
-        assert!(
-            services_before.subagent_control.is_none(),
-            "build_tool_runtime_services must not inject a control before bind_subagent_control"
-        );
-
-        // Bind a stub control, mirroring the daemon startup path.
-        let stub: Arc<dyn SubagentControl> = Arc::new(StubControl);
-        resolver.bind_subagent_control(stub.clone());
-
-        // After binding, `build_tool_runtime_services` MUST inject the
-        // same control instance into `ToolRuntimeServices`.
-        let services_after = resolver.build_tool_runtime_services(
-            RuntimeCapabilityProfile::Default,
-            PathBuf::from("/tmp"),
-            false,
-        );
-        let bound = services_after
-            .subagent_control
-            .expect("build_tool_runtime_services must inject the bound control");
-        assert!(
-            Arc::ptr_eq(&bound, &stub),
-            "build_tool_runtime_services must inject the same SubagentControl instance that was bound"
-        );
     }
 
     /// Pins that when `agent_id_override` is set, the resolved

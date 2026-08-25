@@ -4,10 +4,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_types::cron::{CronExecutionError, CronJobConfig};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use xiaoo_shared::cron::{CronExecutionError, CronJobConfig};
 use xiaoo_shared::gateway::{
     daemon_cron_principal, AppTurnRequest, GatewayEntryContext, GatewayEntryKind, SessionService,
 };

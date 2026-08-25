@@ -44,20 +44,11 @@ uuid.workspace = true
 cron.workspace = true
 shellexpand.workspace = true
 
-# 白名单直依赖（已裁定不进 xiaoo-api）：
-agent-contracts = { path = "../../crates/agent-contracts" }  # 仅限 ChannelFileSender/HookActionSink/MAX_ACTION_DEPTH/ToolRegistryBuilder/backend::{BackendLifecycleState,BackendEndpoint}
-agent-types = { path = "../../crates/agent-types" }          # 仅限 cron 域与 tool 配置词汇（ToolRegistryConfig/ToolVisibilityConfig/ToolExecutionStatus）
-llm-client = { path = "../../crates/llm-client" }            # 仅限 resolved-profile 两段式 provider 装配（create_llm_provider_from_resolved/resolve_provider_profile/ResolvedConfig）
-skill = { path = "../../crates/skill" }                     # 仅限 SkillsConfig 配置类型
-subagent = { path = "../../crates/subagent" }               # 仅限 SubagentControl 及 Spawn/Join 请求响应类型
-prompt = { path = "../../crates/prompt" }                   # 仅限 compose_channel_system_prompt/ChannelPromptSections
-tool = { path = "../../crates/tool" }                       # 仅限工具装配面（load_tool_sources_with_services/ToolRuntimeServices/ToolRegistryBuilderImpl/SubagentRoleConfig/ToolRouter）
-mcp = { path = "../../crates/mcp" }                         # 仅限配置解析全族 + MCP server 宿主实现
-lsp = { path = "../../crates/lsp" }                         # 仅限配置解析（LspServiceRegistry）
-operation_backend = { path = "../../crates/operation_backend" }  # 仅限进程组清理（ProcessGroupCleanupGuard）
-# runtime SDK 面 / 应用装配面：
-xiaoo-shared = { path = "../shared" }                       # 应用装配面
-xiaoo-api = { path = "../../crates/xiaoo-api" }             # runtime SDK 门面
+# 应用只直依赖两个门面：runtime SDK 门面 + 应用装配门面。
+# 底层 crates（agent-types/llm-client/tool/mcp/...）一律经 xiaoo-shared 装配门面访问，不在本处直依赖。
+
+xiaoo-shared = { path = "../shared" }                       # 应用装配门面（粗粒度装配入口 + 最小词汇）
+xiaoo-api = { path = "../../crates/xiaoo-api" }             # runtime SDK 门面（冻结面）
 
 [dev-dependencies]
 tempfile.workspace = true
