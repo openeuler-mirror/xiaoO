@@ -62,7 +62,7 @@ async fn run_daemon(
     dashboard_cli_port: Option<u16>,
 ) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
-    xiaoo_shared::llm_secrets::init_on_demand_secret_provider(&config_path).with_context(|| {
+    xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path).with_context(|| {
         format!(
             "failed to initialize LLM secrets from {}",
             config_path.display()

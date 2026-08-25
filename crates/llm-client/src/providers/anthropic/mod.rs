@@ -21,19 +21,13 @@ use convert::{
 
 pub(crate) struct AnthropicProvider {
     client: reqwest::Client,
-    api_key: Option<String>,
+    api_key: String,
     base_url: String,
     capabilities: ProviderCapabilities,
-    api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
 }
 
 impl AnthropicProvider {
-    pub(crate) fn new(
-        api_key: Option<String>,
-        base_url: String,
-        model: String,
-        api_key_provider: Option<crate::factory::ApiKeyProviderFn>,
-    ) -> Self {
+    pub(crate) fn new(api_key: String, base_url: String, model: String) -> Self {
         let max_context_window = crate::models::get_known_model_context_length(&model)
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(200000);
@@ -51,15 +45,6 @@ impl AnthropicProvider {
                 max_context_window,
                 model_name: model,
             },
-            api_key_provider,
-        }
-    }
-
-    fn get_api_key(&self) -> String {
-        if let Some(provider) = &self.api_key_provider {
-            provider()
-        } else {
-            self.api_key.clone().unwrap_or_default()
         }
     }
 
@@ -267,7 +252,7 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", self.get_api_key())
+            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&body)
@@ -354,7 +339,7 @@ impl LlmProvider for AnthropicProvider {
         let response = self
             .client
             .post(&url)
-            .header("x-api-key", self.get_api_key())
+            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json")
             .json(&body)
@@ -624,10 +609,9 @@ mod tests {
 
     fn make_provider_for_model(model: &str) -> AnthropicProvider {
         AnthropicProvider::new(
-            Some("test-key".to_string()),
+            "test-key".to_string(),
             "https://api.anthropic.com/v1".to_string(),
             model.to_string(),
-            None,
         )
     }
 

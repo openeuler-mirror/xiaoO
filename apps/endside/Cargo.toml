@@ -6,7 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-tee_sdf = ["xiaoo-shared/tee_sdf"]
 
 [[bin]]
 name = "xiaoo"

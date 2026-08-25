@@ -151,6 +151,14 @@ impl FileConfig {
             toml_source,
         )
     }
+
+    pub fn resolve_api_key(&self) -> Option<String> {
+        self.llm
+            .as_ref()
+            .and_then(|l| l.api_key_env.as_ref())
+            .and_then(|env_name| std::env::var(env_name).ok())
+            .filter(|key| !key.trim().is_empty())
+    }
 }
 
 fn parse_optional_section<T>(
