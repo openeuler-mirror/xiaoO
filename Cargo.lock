@@ -5108,7 +5108,6 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "compact",
  "cron",
  "dirs 6.0.0",
  "futures-util",
@@ -5144,6 +5143,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "xiaoo-api",
  "xiaoo-shared",
 ]
 

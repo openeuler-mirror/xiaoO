@@ -10,10 +10,10 @@ use serde_json::Value;
 /// 断言一个 JSON 字符串能反序列化为 `RuntimeSseEvent`，且重新序列化后
 /// 与原 JSON 字符串语义相等（按 `serde_json::Value` 比较，避免字段顺序问题）。
 fn assert_round_trip(json: &str, expected_variant_name: &str) {
-    let event: RuntimeSseEvent = serde_json::from_str(json)
-        .unwrap_or_else(|e| panic!("should deserialize {json}: {e}"));
-    let reserialized = serde_json::to_string(&event)
-        .unwrap_or_else(|e| panic!("should re-serialize: {e}"));
+    let event: RuntimeSseEvent =
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("should deserialize {json}: {e}"));
+    let reserialized =
+        serde_json::to_string(&event).unwrap_or_else(|e| panic!("should re-serialize: {e}"));
     let original: Value = serde_json::from_str(json).expect("original should be valid JSON");
     let roundtrip: Value =
         serde_json::from_str(&reserialized).expect("re-serialized should be valid JSON");
@@ -175,10 +175,7 @@ fn done_round_trip() {
 
 #[test]
 fn error_round_trip() {
-    assert_round_trip(
-        r#"{"type":"error","error":"boom"}"#,
-        "Error",
-    );
+    assert_round_trip(r#"{"type":"error","error":"boom"}"#, "Error");
 }
 
 #[test]
@@ -309,6 +306,7 @@ fn parse_sse_data_errors_on_malformed_json() {
 #[test]
 fn parse_sse_data_errors_on_wrong_field_type() {
     // 字段类型不匹配仍报错（强类型化）
-    assert!(parse_sse_data(r#"{"type":"turn_start","agent_id":"root","turn":"not-a-number"}"#).is_err());
+    assert!(
+        parse_sse_data(r#"{"type":"turn_start","agent_id":"root","turn":"not-a-number"}"#).is_err()
+    );
 }
-

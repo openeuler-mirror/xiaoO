@@ -26,7 +26,7 @@ use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
 use xiaoo_api::runtime::build_tool_result_message;
-use xiaoo_api::runtime::{LoopSuspendReason, RuntimeOutput, LoopStateSnapshot, SuspendedToolCall};
+use xiaoo_api::runtime::{LoopStateSnapshot, LoopSuspendReason, RuntimeOutput, SuspendedToolCall};
 
 use super::session_worker::{SessionWorker, SessionWorkerInput};
 

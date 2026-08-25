@@ -50,8 +50,12 @@ impl OperationExec for LocalExec {
             None
         };
 
-        let mut command =
-            command_from_spec(&request, command_spec, &self._state.policy, command_cwd.as_deref());
+        let mut command = command_from_spec(
+            &request,
+            command_spec,
+            &self._state.policy,
+            command_cwd.as_deref(),
+        );
 
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {
@@ -96,7 +100,8 @@ impl OperationExec for LocalExec {
         if stream_auth {
             tracing::info!(
                 "dyn-sandbox streaming exec start: pgid={} timeout_ms={:?}",
-                pgid, request.timeout_ms
+                pgid,
+                request.timeout_ms
             );
             let stdin = child
                 .stdin
@@ -282,7 +287,8 @@ impl LocalExec {
                             };
                             tracing::info!(
                                 "dyn-sandbox AUTH_REQ received: filename={} path={}",
-                                filename, path
+                                filename,
+                                path
                             );
                             if auth_tx.send(event).await.is_err() {
                                 break;
@@ -336,7 +342,8 @@ impl LocalExec {
                     timed_out = true;
                     tracing::warn!(
                         "dyn-sandbox exec timed out (timeout_ms={:?}), killing process group {}",
-                        timeout_ms, pgid
+                        timeout_ms,
+                        pgid
                     );
                     Self::kill_process_group(&mut child, pgid).await;
                     break;
@@ -420,7 +427,8 @@ impl LocalExec {
         let Some(interaction) = interaction else {
             tracing::warn!(
                 "dyn-sandbox auto-deny (no auth interaction attached): filename={} path={}",
-                filename, path
+                filename,
+                path
             );
             return b"DENY\n".to_vec();
         };
@@ -435,9 +443,9 @@ impl LocalExec {
             })
             .await;
         match response {
-            InteractionResponse::Choice {
-                value: Some(value),
-            } if value == "Allow" => b"ALLOW\n".to_vec(),
+            InteractionResponse::Choice { value: Some(value) } if value == "Allow" => {
+                b"ALLOW\n".to_vec()
+            }
             _ => b"DENY\n".to_vec(),
         }
     }
@@ -954,7 +962,11 @@ mod linux_dynsandbox_tests {
             .enable_all()
             .build()
             .unwrap();
-        let result = runtime.block_on(linux_dynsandbox_exec_bash(backend.as_ref(), workspace, command));
+        let result = runtime.block_on(linux_dynsandbox_exec_bash(
+            backend.as_ref(),
+            workspace,
+            command,
+        ));
         let prompts = prompts.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let _ = std::fs::remove_dir_all(root.as_path());
         (result, prompts)
@@ -964,7 +976,8 @@ mod linux_dynsandbox_tests {
     fn linux_dynsandbox_streaming_allows_blocked_path() {
         let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "allow");
         let workspace = root.join("workspace");
-        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
+        let (result, prompts) =
+            linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", true);
 
         assert_eq!(result.exit_code, Some(0));
         assert!(
@@ -985,7 +998,8 @@ mod linux_dynsandbox_tests {
     fn linux_dynsandbox_streaming_denies_on_user_choice() {
         let root = super::test_workspace_root("xiaoo-dyn-sandbox-", "deny");
         let workspace = root.join("workspace");
-        let (result, prompts) = linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
+        let (result, prompts) =
+            linux_dynsandbox_exec_with_auth(&workspace, "cat /etc/shadow", false);
 
         assert_eq!(result.exit_code, Some(0));
         assert!(
@@ -1026,28 +1040,27 @@ mod linux_dynsandbox_tests {
             .build()
             .expect("runtime");
         let start = std::time::Instant::now();
-        let result = runtime
-            .block_on(async {
-                let mut child = Command::new("sh")
-                    .arg("-c")
-                    .arg("exec 2>&-; sleep 5")
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .process_group(0)
-                    .spawn()
-                    .expect("spawn child");
-                let pgid = child.id().unwrap_or(0) as i32;
-                if pgid > 0 {
-                    crate::process_group::register_pgid(pgid);
-                }
-                let stdin = child.stdin.take().expect("stdin");
-                let stdout = child.stdout.take().expect("stdout");
-                let stderr = child.stderr.take().expect("stderr");
-                exec.exec_linux_dynsandbox(Some(500), child, stdin, stdout, stderr, pgid)
-                    .await
-                    .expect("exec_linux_dynsandbox")
-            });
+        let result = runtime.block_on(async {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("exec 2>&-; sleep 5")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("spawn child");
+            let pgid = child.id().unwrap_or(0) as i32;
+            if pgid > 0 {
+                crate::process_group::register_pgid(pgid);
+            }
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            exec.exec_linux_dynsandbox(Some(500), child, stdin, stdout, stderr, pgid)
+                .await
+                .expect("exec_linux_dynsandbox")
+        });
         let elapsed = start.elapsed();
 
         assert!(
@@ -1090,32 +1103,31 @@ mod linux_dynsandbox_tests {
             .enable_all()
             .build()
             .expect("runtime");
-        let result = runtime
-            .block_on(async {
-                let mut child = Command::new("sh")
-                    .arg("-c")
-                    .arg(
-                        "printf '\\377\\376\\377\\n' >&2; printf 'ok-line\\n' >&2; \
+        let result = runtime.block_on(async {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(
+                    "printf '\\377\\376\\377\\n' >&2; printf 'ok-line\\n' >&2; \
                          echo 'AUTH_REQ:shadow:/etc/shadow' >&2; IFS= read -r resp; \
                          echo \"verdict:$resp\"",
-                    )
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .process_group(0)
-                    .spawn()
-                    .expect("spawn child");
-                let pgid = child.id().unwrap_or(0) as i32;
-                if pgid > 0 {
-                    crate::process_group::register_pgid(pgid);
-                }
-                let stdin = child.stdin.take().expect("stdin");
-                let stdout = child.stdout.take().expect("stdout");
-                let stderr = child.stderr.take().expect("stderr");
-                exec.exec_linux_dynsandbox(Some(5_000), child, stdin, stdout, stderr, pgid)
-                    .await
-                    .expect("exec_linux_dynsandbox")
-            });
+                )
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .expect("spawn child");
+            let pgid = child.id().unwrap_or(0) as i32;
+            if pgid > 0 {
+                crate::process_group::register_pgid(pgid);
+            }
+            let stdin = child.stdin.take().expect("stdin");
+            let stdout = child.stdout.take().expect("stdout");
+            let stderr = child.stderr.take().expect("stderr");
+            exec.exec_linux_dynsandbox(Some(5_000), child, stdin, stdout, stderr, pgid)
+                .await
+                .expect("exec_linux_dynsandbox")
+        });
 
         assert_eq!(result.exit_code, Some(0), "stderr={:?}", result.stderr);
         assert_eq!(

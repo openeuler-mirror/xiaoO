@@ -22,10 +22,12 @@ use tool::{
     ToolStateStoreBuilderImpl,
 };
 use trace::TraceRecorderBuilderImpl;
-use xiaoo_api::interaction::NoopInteractionHandle;
-use xiaoo_api::runtime::{BasicAgentContext, BasicRuntimeView, Runtime, RuntimeBuildError, RuntimeView};
-use xiaoo_api::skills::EmptySkillRegistry;
 use xiaoo_api::events::NoopToolEventSink;
+use xiaoo_api::interaction::NoopInteractionHandle;
+use xiaoo_api::runtime::{
+    BasicAgentContext, BasicRuntimeView, Runtime, RuntimeBuildError, RuntimeView,
+};
+use xiaoo_api::skills::EmptySkillRegistry;
 
 use parking_lot::RwLock;
 
