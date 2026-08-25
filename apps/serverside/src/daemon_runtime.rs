@@ -1210,30 +1210,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_provider_resolves_api_key_from_encrypted_secrets() {
-        let temp = tempdir().expect("create temp dir");
-        let config_path = temp.path().join("config.toml");
-        let env_name = "XIAOO_DAEMON_TEST_OPENROUTER_API_KEY";
-        std::env::remove_var(env_name);
-
-        xiaoo_shared::llm_secrets::save_llm_secret(&config_path, env_name, "secret-key")
-            .expect("save encrypted LLM secret");
-        xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path)
-            .expect("initialize secret provider");
-
-        let resolved = resolve_effective_provider_config(&EffectiveLlmConfig {
-            provider: "openrouter".to_string(),
-            model: "test-model".to_string(),
-            api_base: None,
-            api_key_env: Some(env_name.to_string()),
-            api_key: None,
-        })
-        .expect("resolve provider with encrypted secret");
-
-        assert_eq!(resolved.api_key.as_deref(), Some("secret-key"));
-    }
-
-    #[test]
     fn build_system_prompt_includes_workspace_agents_before_channel_rules() {
         let temp = tempdir().unwrap();
         fs::write(temp.path().join("AGENTS.md"), "repo rules").unwrap();

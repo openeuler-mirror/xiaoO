@@ -445,8 +445,8 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     xiaoo_shared::llm_secrets::save_llm_secret(config_path, env_name, secret)
 }
 
-pub fn inject_llm_secrets_into_env(_config_path: &Path) -> Result<()> {
-    Ok(())
+pub fn inject_llm_secrets_into_env(config_path: &Path) -> Result<()> {
+    xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(config_path)
 }
 
 fn build_extra_server_configs(extra_servers: &[ExtraServerConfig]) -> Vec<ServerConfig> {
