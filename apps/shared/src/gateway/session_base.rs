@@ -1,7 +1,7 @@
 //! Session-open / close / cancel / heartbeat / detach / interaction wire
 //! request types.
 //!
-//! The request struct definitions live in [`xiaoo_protocol::wire`]; this
+//! The request struct definitions live in [`protocol::wire`]; this
 //! module re-exports them under the `xiaoo_shared::gateway` path so existing
 //! import paths keep working. The fork / input / submit-receipt types below
 //! are not part of the wire contract and stay defined here, alongside the
@@ -12,7 +12,7 @@ use crate::gateway::{AppTurnRequest, SessionRecord};
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
 
-pub use xiaoo_protocol::wire::{
+pub use protocol::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
     RuntimeInteractionRequest, RuntimeOpenRequest, SessionCancelRequest, SessionCloseRequest,
     SessionDetachRequest, SessionHeartbeatRequest, SessionInteractionRequest, SessionOpenRequest,

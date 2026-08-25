@@ -7,7 +7,7 @@ pub use daemon_sinks::{
 
 // The wire-facing plan types live in the protocol crate; re-export here to
 // preserve existing `xiaoo_shared::plan::` import paths.
-pub use xiaoo_protocol::plan::{TodoDisplayStatus, TodoSnapshotItem};
+pub use protocol::plan::{TodoDisplayStatus, TodoSnapshotItem};
 
 /// Full plan snapshot, forwarded by the daemon in remote mode so the TUI
 /// doesn't need to re-parse the `todo_write` tool's args.

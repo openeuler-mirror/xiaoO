@@ -2656,6 +2656,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "agent-types",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5083,15 +5092,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xiaoo-protocol"
-version = "0.1.0"
-dependencies = [
- "agent-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "xiaoo-serverside"
 version = "0.1.0"
 dependencies = [
@@ -5159,6 +5159,7 @@ dependencies = [
  "prompt",
  "prost",
  "protoc-bin-vendored",
+ "protocol",
  "rand 0.8.7",
  "reqwest",
  "serde",
@@ -5182,7 +5183,6 @@ dependencies = [
  "uuid",
  "vault",
  "xiaoo-api",
- "xiaoo-protocol",
 ]
 
 [[package]]

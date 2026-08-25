@@ -2,13 +2,13 @@
 //!
 //! The wire-facing request types ([`AppTurnRequest`] and its supporting
 //! [`GatewayEntryContext`] / [`GatewayEntryKind`] / [`LlmRuntimeConfig`] /
-//! [`TurnMention`]) live in [`xiaoo_protocol::wire`] and are re-exported here
+//! [`TurnMention`]) live in [`protocol::wire`] and are re-exported here
 //! to preserve existing import paths. The service-layer result type
 //! [`AppTurnResult`] and its [`TurnOutcome`] tag stay defined here — they are
 //! in-process turn outcomes, not wire-contract payloads, so they belong in
 //! the service layer.
 
-pub use xiaoo_protocol::wire::{
+pub use protocol::wire::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig, RuntimeTurnRequest,
     TurnMention,
 };

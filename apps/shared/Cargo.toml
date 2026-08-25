@@ -52,7 +52,7 @@ lsp = { path = "../../crates/lsp" }
 trace = { path = "../../crates/trace" }
 operation_backend = { path = "../../crates/operation_backend" }
 xiaoo-api = { path = "../../crates/xiaoo-api" }
-xiaoo-protocol = { path = "../../crates/xiaoo-protocol" }
+protocol = { path = "../../crates/protocol" }
 vault = { path = "../vault" }
 aes-gcm.workspace = true
 rand.workspace = true
