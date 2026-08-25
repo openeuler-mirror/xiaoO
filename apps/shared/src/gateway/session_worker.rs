@@ -16,7 +16,7 @@ use xiaoo_api::runtime::{
     LoopStateSnapshot, LoopStopRule, RuntimeInput, RuntimeOutput, RuntimeState,
 };
 
-pub struct SessionWorkerInput {
+pub(crate) struct SessionWorkerInput {
     pub runtime_input: SessionRuntimeBuildInput,
     pub resolved_runtime: ResolvedSessionRuntime,
     pub session: SessionRecord,
@@ -35,14 +35,14 @@ pub struct SessionWorkerInput {
     pub command_context: Option<agent_types::chat::CommandContext>,
 }
 
-pub struct SessionWorkerResult {
+pub(crate) struct SessionWorkerResult {
     pub loop_result: RuntimeOutput,
     pub loop_state: LoopStateSnapshot,
     pub memory_snapshot: MemorySnapshot,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
 }
 
-pub struct SessionWorker;
+pub(crate) struct SessionWorker;
 
 impl SessionWorker {
     pub async fn run(

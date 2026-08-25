@@ -276,7 +276,7 @@ pub(crate) fn render_repo_map(mut entries: Vec<RepoMapEntry>) -> Option<String> 
     Some(out.trim_end().to_string())
 }
 
-pub fn compose_repo_map(workspace_root: &Path) -> Option<String> {
+pub(crate) fn compose_repo_map(workspace_root: &Path) -> Option<String> {
     let root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());

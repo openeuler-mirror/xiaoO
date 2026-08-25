@@ -35,7 +35,7 @@ use super::ResolvedSessionRuntime;
 use crate::gateway::permission_backend::PermissionAwareOperationBackend;
 use crate::gateway::{GatewayEntryKind, SessionRecord};
 
-pub struct AppRuntimeAssembly {
+pub(crate) struct AppRuntimeAssembly {
     pub runtime: Runtime,
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
@@ -61,7 +61,7 @@ impl AppRuntimeAssembly {
 pub struct AppRuntimeFactory;
 
 #[derive(Debug, thiserror::Error)]
-pub enum AppRuntimeFactoryError {
+pub(crate) enum AppRuntimeFactoryError {
     #[error("core runtime build failed: {0}")]
     CoreBuild(#[from] BuildError),
     #[error("runtime build failed: {0}")]
@@ -73,7 +73,7 @@ pub enum AppRuntimeFactoryError {
 }
 
 impl AppRuntimeFactory {
-    pub async fn build(
+    pub(crate) async fn build(
         resolved: &ResolvedSessionRuntime,
         session: &SessionRecord,
         messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,

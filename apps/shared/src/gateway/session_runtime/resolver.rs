@@ -79,7 +79,7 @@ pub struct SessionRuntimeBuildInput {
 }
 
 impl SessionRuntimeBuildInput {
-    pub fn from_turn_request(request: &AppTurnRequest) -> Self {
+    pub(crate) fn from_turn_request(request: &AppTurnRequest) -> Self {
         Self {
             session_id: request.session_id.clone(),
             conversation_id: request.conversation_id.clone(),
@@ -97,7 +97,7 @@ impl SessionRuntimeBuildInput {
         }
     }
 
-    pub fn from_open_request(request: &SessionOpenRequest) -> Self {
+    pub(crate) fn from_open_request(request: &SessionOpenRequest) -> Self {
         Self {
             session_id: request.session_id.clone(),
             conversation_id: request.conversation_id.clone(),

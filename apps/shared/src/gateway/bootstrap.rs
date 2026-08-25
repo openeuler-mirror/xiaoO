@@ -66,7 +66,8 @@ impl AppBootstrap {
         )
     }
 
-    pub fn from_session_components(
+    #[allow(dead_code)]
+    pub(crate) fn from_session_components(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     ) -> Result<AppDependencies, AppBootstrapError> {
@@ -77,7 +78,8 @@ impl AppBootstrap {
         )
     }
 
-    pub fn from_session_components_with_hooks(
+    #[allow(dead_code)]
+    pub(crate) fn from_session_components_with_hooks(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_config: HookerRegistryConfig,

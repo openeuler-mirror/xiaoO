@@ -22,16 +22,22 @@ mod sandbox_counter;
 pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
 use backend_registry::{BackendRegistry, BackendRegistryEntry, BackendRegistryError};
+pub(crate) use base::{
+    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRequest,
+    BackendCheckpointResult, BackendCreateRequest, BackendEnsureSessionRequest, BackendForkResult,
+    BackendLease, BackendTreeNode,
+};
 pub use base::{
-    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest, BackendCreateRequest,
-    BackendEnsureSessionRequest, BackendError, BackendForkResult, BackendInfo, BackendLease,
-    BackendListFilter, BackendTreeNode, GatewayBackendConfig,
+    BackendCheckpointRef, BackendError, BackendInfo, BackendLineageInfo, BackendListFilter,
+    GatewayBackendConfig,
 };
-use base::{
-    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendForkRequest,
-    BackendLineageInfo, BackendManagerLimits, STALE_OWNER_THRESHOLD_MS,
+// Constructed by name in serverside tests; delete_checkpoint_snapshot takes it
+// as a parameter, so it must stay nameable for the app.
+pub use base::{
+    BackendCheckpointSnapshotDeleteRequest, BackendCheckpointSnapshotDeleteResult,
+    BackendManagerLimits,
 };
+use base::{BackendConnectRequest, BackendForkRequest, STALE_OWNER_THRESHOLD_MS};
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
 pub use e2b::{
     build_e2b_bootstrap_archive, canonicalize_bootstrap_dir, E2bBootstrapArchive,
@@ -129,6 +135,7 @@ fn default_local_provider_options() -> Value {
     Value::Object(options)
 }
 
+#[allow(dead_code)]
 fn resolve_backend_config(
     provider: Option<String>,
     options: Option<Value>,
@@ -278,6 +285,7 @@ fn detach_from_parent(
     }
 }
 
+#[allow(dead_code)]
 fn backend_tree_node(
     state: &BackendManagerState,
     backend_id: &BackendId,

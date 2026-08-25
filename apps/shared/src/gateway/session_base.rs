@@ -33,7 +33,8 @@ pub fn channel_session_id(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionForkRequest {
+#[allow(dead_code)]
+pub(crate) struct SessionForkRequest {
     pub parent_session_id: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -44,7 +45,8 @@ pub struct SessionForkRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionForkResult {
+#[allow(dead_code)]
+pub(crate) struct SessionForkResult {
     pub parent: SessionRecord,
     pub child: SessionRecord,
     pub backend_fork: BackendForkResult,

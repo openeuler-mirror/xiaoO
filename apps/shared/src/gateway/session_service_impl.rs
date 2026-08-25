@@ -130,7 +130,8 @@ impl CoreBackedSessionService {
 
     /// Public accessor so the daemon-side GC reaper can inspect the lease
     /// table. Returns a clone (Arc-interned, cheap).
-    pub fn lease_table(&self) -> SessionLeaseTable {
+    #[allow(dead_code)]
+    pub(crate) fn lease_table(&self) -> SessionLeaseTable {
         self.sessions_lease.clone()
     }
 
@@ -138,14 +139,14 @@ impl CoreBackedSessionService {
     /// `assert_lease_holder` returns
     /// [`SessionServiceError::LeaseRequired`] for any RPC whose body omits
     /// `client_id`. Idempotent; safe to call at any time (atomic store).
-    pub fn set_enforce_anonymous_lease(&self, enabled: bool) {
+    pub(crate) fn set_enforce_anonymous_lease(&self, enabled: bool) {
         self.enforce_anonymous_lease
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Read-side helper for `assert_lease_holder` and the bootstrap startup
     /// log. Pure for testability.
-    pub fn anonymous_lease_enforced(&self) -> bool {
+    pub(crate) fn anonymous_lease_enforced(&self) -> bool {
         self.enforce_anonymous_lease
             .load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -155,7 +156,7 @@ impl CoreBackedSessionService {
     /// handles (existing supervisors keep their creation-time value).
     /// `None` (the default) disables the outer cap; the supervisor then
     /// relies on the handle's own timeout or blocks until the user replies.
-    pub fn set_interaction_timeout(&self, timeout: Option<std::time::Duration>) {
+    pub(crate) fn set_interaction_timeout(&self, timeout: Option<std::time::Duration>) {
         let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
         self.interaction_timeout
             .store(secs, std::sync::atomic::Ordering::Release);
@@ -176,7 +177,7 @@ impl CoreBackedSessionService {
     /// Returns a `JoinHandle` (currently only the daemon's `main.rs`) so
     /// callers can `.abort()` it on shutdown. Errors are logged and never
     /// propagated (best-effort).
-    pub fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         const ORPHAN_THRESHOLD_MS: u64 = crate::gateway::ORPHAN_SESSION_THRESHOLD_MS;
         const STALE_LEASE_MS: u64 = crate::gateway::STALE_LEASE_THRESHOLD_MS;
 

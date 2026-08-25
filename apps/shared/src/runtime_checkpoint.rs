@@ -183,7 +183,8 @@ pub struct RuntimeWriteFileResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct RuntimeCheckpoint {
+#[allow(dead_code)]
+pub(crate) struct RuntimeCheckpoint {
     pub checkpoint_id: String,
     pub runtime_id: String,
     pub parent_checkpoint_id: Option<String>,
@@ -195,7 +196,7 @@ pub struct RuntimeCheckpoint {
 }
 
 #[derive(Clone, Default)]
-pub struct InMemoryRuntimeCheckpointStore {
+pub(crate) struct InMemoryRuntimeCheckpointStore {
     state: Arc<RwLock<RuntimeCheckpointStoreState>>,
 }
 
@@ -207,7 +208,7 @@ struct RuntimeCheckpointStoreState {
 }
 
 impl InMemoryRuntimeCheckpointStore {
-    pub async fn latest_for_runtime(&self, runtime_id: &str) -> Option<String> {
+    pub(crate) async fn latest_for_runtime(&self, runtime_id: &str) -> Option<String> {
         self.state
             .read()
             .await
@@ -236,7 +237,7 @@ impl InMemoryRuntimeCheckpointStore {
             .cloned()
     }
 
-    pub async fn register_runtime_head(&self, runtime_id: String, checkpoint_id: String) {
+    pub(crate) async fn register_runtime_head(&self, runtime_id: String, checkpoint_id: String) {
         self.state
             .write()
             .await
@@ -244,7 +245,7 @@ impl InMemoryRuntimeCheckpointStore {
             .insert(runtime_id, checkpoint_id);
     }
 
-    pub async fn register_paused_runtime(&self, runtime_id: String, checkpoint_id: String) {
+    pub(crate) async fn register_paused_runtime(&self, runtime_id: String, checkpoint_id: String) {
         self.state
             .write()
             .await
@@ -252,7 +253,7 @@ impl InMemoryRuntimeCheckpointStore {
             .insert(runtime_id, checkpoint_id);
     }
 
-    pub async fn paused_checkpoint_for_runtime(&self, runtime_id: &str) -> Option<String> {
+    pub(crate) async fn paused_checkpoint_for_runtime(&self, runtime_id: &str) -> Option<String> {
         self.state
             .read()
             .await
@@ -261,7 +262,7 @@ impl InMemoryRuntimeCheckpointStore {
             .cloned()
     }
 
-    pub async fn clear_paused_runtime(&self, runtime_id: &str) {
+    pub(crate) async fn clear_paused_runtime(&self, runtime_id: &str) {
         self.state
             .write()
             .await
@@ -269,7 +270,10 @@ impl InMemoryRuntimeCheckpointStore {
             .remove(runtime_id);
     }
 
-    pub async fn clear_backend_snapshot(&self, checkpoint_id: &str) -> Option<RuntimeCheckpoint> {
+    pub(crate) async fn clear_backend_snapshot(
+        &self,
+        checkpoint_id: &str,
+    ) -> Option<RuntimeCheckpoint> {
         let mut state = self.state.write().await;
         let checkpoint = state.checkpoints.get_mut(checkpoint_id)?;
         if let Some(backend_checkpoint) = checkpoint.backend_checkpoint.as_mut() {
@@ -283,7 +287,10 @@ impl InMemoryRuntimeCheckpointStore {
     /// `runtime_id` field equals `runtime_id`). Used by `force_close_session`
     /// to delete provider snapshots and clean up checkpoint records when a
     /// runtime is closed.
-    pub async fn list_checkpoints_for_runtime(&self, runtime_id: &str) -> Vec<RuntimeCheckpoint> {
+    pub(crate) async fn list_checkpoints_for_runtime(
+        &self,
+        runtime_id: &str,
+    ) -> Vec<RuntimeCheckpoint> {
         self.state
             .read()
             .await
@@ -299,7 +306,7 @@ impl InMemoryRuntimeCheckpointStore {
     /// whose `runtime_id` equals `runtime_id`. Provider snapshots must be
     /// deleted separately via `delete_checkpoint_snapshot` before calling
     /// this if remote cleanup is desired.
-    pub async fn remove_runtime(&self, runtime_id: &str) {
+    pub(crate) async fn remove_runtime(&self, runtime_id: &str) {
         let mut state = self.state.write().await;
         state.runtime_heads.remove(runtime_id);
         state.paused_runtime_heads.remove(runtime_id);

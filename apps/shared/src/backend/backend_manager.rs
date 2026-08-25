@@ -138,12 +138,13 @@ fn resolve_checkpoint_backend_id(
     }
 }
 
+#[allow(dead_code)]
 impl BackendManager {
     pub fn new() -> Self {
         Self::new_with_limits(BackendManagerLimits::default())
     }
 
-    pub fn new_with_limits(limits: BackendManagerLimits) -> Self {
+    pub(crate) fn new_with_limits(limits: BackendManagerLimits) -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self::new_with_storage_dir(limits, home.join(".xiaoo"))
     }
@@ -175,25 +176,27 @@ impl BackendManager {
         format!("{}_{}", pid, timestamp)
     }
 
-    pub fn limits(&self) -> BackendManagerLimits {
+    pub(crate) fn limits(&self) -> BackendManagerLimits {
         self.limits
     }
 
-    pub fn registry(&self) -> &BackendRegistry {
+    pub(crate) fn registry(&self) -> &BackendRegistry {
         &self.registry
     }
 
-    pub fn sandbox_counter(&self) -> &SandboxCounter {
+    pub(crate) fn sandbox_counter(&self) -> &SandboxCounter {
         &self.sandbox_counter
     }
 
     /// Whether a backend of this `kind` participates in the shared sandbox
     /// counter / registry. Local backends are never counted.
-    pub fn is_counted_kind(kind: &str) -> bool {
+    pub(crate) fn is_counted_kind(kind: &str) -> bool {
         kind == "e2b" || kind == "conch"
     }
 
-    pub fn sandbox_key_from_config(config: &super::GatewayBackendConfig) -> SandboxCounterKey {
+    pub(crate) fn sandbox_key_from_config(
+        config: &super::GatewayBackendConfig,
+    ) -> SandboxCounterKey {
         if config.kind == "e2b" {
             // Use the same resolution path as the e2b provider so the
             // counter key matches the actual key used to authorise sandbox
@@ -210,7 +213,7 @@ impl BackendManager {
         }
     }
 
-    pub async fn create_backend(
+    pub(crate) async fn create_backend(
         &self,
         request: BackendCreateRequest,
     ) -> Result<BackendInfo, BackendError> {
@@ -310,7 +313,7 @@ impl BackendManager {
         Ok(info)
     }
 
-    pub async fn connect_backend(
+    pub(crate) async fn connect_backend(
         &self,
         backend_id: &str,
         request: BackendConnectRequest,
@@ -351,7 +354,7 @@ impl BackendManager {
         Ok(info)
     }
 
-    pub async fn get_backend(&self, backend_id: &str) -> Result<BackendInfo, BackendError> {
+    pub(crate) async fn get_backend(&self, backend_id: &str) -> Result<BackendInfo, BackendError> {
         let state = self.state.lock().await;
         state
             .backends
@@ -372,7 +375,7 @@ impl BackendManager {
             .collect()
     }
 
-    pub async fn list_backend_trees(&self) -> Vec<BackendTreeNode> {
+    pub(crate) async fn list_backend_trees(&self) -> Vec<BackendTreeNode> {
         let state = self.state.lock().await;
         let mut roots = state
             .backends
@@ -414,7 +417,7 @@ impl BackendManager {
         delete_backend_instance(instance, reason).await
     }
 
-    pub async fn delete_backend(&self, backend_id: &str) -> Result<(), BackendError> {
+    pub(crate) async fn delete_backend(&self, backend_id: &str) -> Result<(), BackendError> {
         let removed = {
             let mut state = self.state.lock().await;
             let backend_id = BackendId(backend_id.to_string());
@@ -437,7 +440,7 @@ impl BackendManager {
             .map_err(BackendError::from_operation_error)
     }
 
-    pub async fn checkpoint_backend(
+    pub(crate) async fn checkpoint_backend(
         &self,
         request: BackendCheckpointRequest,
     ) -> Result<BackendCheckpointResult, BackendError> {
@@ -566,7 +569,7 @@ impl BackendManager {
         })
     }
 
-    pub async fn checkout_backend(
+    pub(crate) async fn checkout_backend(
         &self,
         request: BackendCheckoutRequest,
     ) -> Result<BackendCheckoutResult, BackendError> {
@@ -754,7 +757,7 @@ impl BackendManager {
         })
     }
 
-    pub async fn fork_backend(
+    pub(crate) async fn fork_backend(
         &self,
         request: BackendForkRequest,
     ) -> Result<BackendForkResult, BackendError> {
@@ -792,7 +795,7 @@ impl BackendManager {
         })
     }
 
-    pub async fn ensure_session_backend(
+    pub(crate) async fn ensure_session_backend(
         &self,
         request: BackendEnsureSessionRequest,
         session_store: Arc<dyn SessionStore>,
@@ -1100,7 +1103,7 @@ impl BackendManager {
     ///   single pending mark is enough to free one slot, and marking more
     ///   would cause every signalled owner to evict its sandbox in parallel,
     ///   freeing multiple slots when only one is needed.
-    pub async fn try_evict_if_needed(
+    pub(crate) async fn try_evict_if_needed(
         &self,
         sandbox_key: &SandboxCounterKey,
         provider_options: &serde_json::Value,
@@ -1269,7 +1272,7 @@ impl BackendManager {
         }
     }
 
-    pub async fn evict_backend_by_id(&self, backend_id: &str) -> Result<(), BackendError> {
+    pub(crate) async fn evict_backend_by_id(&self, backend_id: &str) -> Result<(), BackendError> {
         let removed =
             {
                 let mut state = self.state.lock().await;
@@ -1305,7 +1308,7 @@ impl BackendManager {
     ///
     /// This is best-effort: if the backend was already evicted (or never
     /// existed) the call silently does nothing.
-    pub async fn clear_pending_eviction(&self, backend_id: &str) {
+    pub(crate) async fn clear_pending_eviction(&self, backend_id: &str) {
         self.registry
             .set_pending_eviction(backend_id, false)
             .await
@@ -1314,7 +1317,7 @@ impl BackendManager {
 
     /// Evict this process's own backends that another process has marked for
     /// eviction (and are idle according to the shared registry snapshot).
-    pub async fn check_and_evict_marked_backends(
+    pub(crate) async fn check_and_evict_marked_backends(
         &self,
         session_store: Arc<dyn SessionStore>,
     ) -> Result<(), BackendError> {
@@ -1384,7 +1387,7 @@ impl BackendManager {
     /// limit truly bites.
     ///
     /// Should be called once on startup before any new sandbox is created.
-    pub async fn reconcile_counts_with_registry(&self) -> Result<(), BackendError> {
+    pub(crate) async fn reconcile_counts_with_registry(&self) -> Result<(), BackendError> {
         let entries = self.registry.get_all_entries().await?;
         let mut live_counts: HashMap<String, usize> = HashMap::new();
         for entry in entries {
@@ -1474,7 +1477,7 @@ impl BackendManager {
         })
     }
 
-    pub async fn lease_bound_session(
+    pub(crate) async fn lease_bound_session(
         &self,
         session_id: &str,
     ) -> Result<BackendLease, BackendError> {

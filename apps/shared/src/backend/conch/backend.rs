@@ -69,7 +69,7 @@ pub(crate) struct ConchUploadFile {
     pub(crate) content: Vec<u8>,
 }
 
-pub struct ConchOperationBackend {
+pub(crate) struct ConchOperationBackend {
     backend_id: String,
     capabilities: OperationBackendCapabilities,
     paths: ConchPathResolver,

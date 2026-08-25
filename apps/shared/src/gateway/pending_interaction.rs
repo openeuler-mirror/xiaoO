@@ -41,7 +41,8 @@ impl PendingInteractionStore {
     }
 
     /// Check whether a pending interaction exists for the given session.
-    pub async fn has_pending(&self, session_id: &str) -> bool {
+    #[allow(dead_code)]
+    pub(crate) async fn has_pending(&self, session_id: &str) -> bool {
         self.pending.read().await.contains_key(session_id)
     }
 }

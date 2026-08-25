@@ -76,7 +76,7 @@ struct LaneTerminal {
     memory_snapshot: MemorySnapshot,
 }
 
-pub struct SessionSupervisor {
+pub(crate) struct SessionSupervisor {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     backend_manager: Arc<BackendManager>,
@@ -128,7 +128,7 @@ impl SessionSupervisor {
         self.session.lock().await.clone()
     }
 
-    pub async fn prepare_root_turn(
+    pub(crate) async fn prepare_root_turn(
         &self,
         request: &AppTurnRequest,
         resolved: &ResolvedSessionRuntime,
@@ -153,7 +153,7 @@ impl SessionSupervisor {
         self.session_store.save(snapshot).await;
     }
 
-    pub async fn force_close(&self) -> SessionRecord {
+    pub(crate) async fn force_close(&self) -> SessionRecord {
         let session_id;
         let snapshot = {
             let mut session = self.session.lock().await;
@@ -172,7 +172,7 @@ impl SessionSupervisor {
         snapshot
     }
 
-    pub async fn hibernate_idle(&self) -> SessionRecord {
+    pub(crate) async fn hibernate_idle(&self) -> SessionRecord {
         let mut session = self.session.lock().await;
         session.status = SessionLifecycleStatus::Paused;
         session.backend_instance = None;
@@ -185,7 +185,7 @@ impl SessionSupervisor {
         snapshot
     }
 
-    pub async fn request_interaction(
+    pub(crate) async fn request_interaction(
         self: &Arc<Self>,
         request_id: String,
         agent_id: AgentId,
@@ -310,7 +310,7 @@ impl SessionSupervisor {
         resolved.bindings.interaction_handle.clone()
     }
 
-    pub async fn deliver_interaction_response_from_user(
+    pub(crate) async fn deliver_interaction_response_from_user(
         self: &Arc<Self>,
         request_id: String,
         response: InteractionResponse,
@@ -415,7 +415,7 @@ impl SessionSupervisor {
         }
     }
 
-    pub async fn run_root_turn(
+    pub(crate) async fn run_root_turn(
         self: &Arc<Self>,
         request: AppTurnRequest,
         resolved_runtime: ResolvedSessionRuntime,
