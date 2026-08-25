@@ -2,22 +2,15 @@ use crate::daemon_config::SubagentRoleConfig as ConfigSubagentRole;
 use crate::daemon_config::{
     AgentRoleConfig, CompactConfig, DaemonConfig, LlmConfig, ResolvedAgentConfig,
 };
-use agent_contracts::{CompressionPipeline, SkillRegistry, ToolRegistry, ToolRegistryBuilder};
-use agent_types::common::ids::{AgentId, ToolName};
-use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use agent_types::hook::HookerRegistryConfig;
+use agent_contracts::ToolRegistryBuilder;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use compact::{build_context_manager, CompactOverrides};
-use llm_client::{
-    create_llm_provider_from_resolved, resolve_config, resolve_model_context_length,
-    resolve_provider_profile, LlmProviderWrapper, ResolveInput,
-};
+use llm_client::{create_llm_provider_from_resolved, resolve_provider_profile};
 use lsp::LspServiceRegistry;
 use prompt::{compose_channel_system_prompt, ChannelPromptSections};
 use serde_json::Value;
-use skill::{FileSkillRegistry, SkillsConfig};
+use skill::SkillsConfig;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::path::PathBuf;
@@ -28,6 +21,12 @@ use tool::{
     load_tool_sources_with_services, SubagentRoleConfig, ToolRegistryBuilderImpl,
     ToolRuntimeServices,
 };
+use xiaoo_api::chat::{AgentId, FeatureFlags, HookerRegistryConfig, TokenBudgetConfig, ToolName};
+use xiaoo_api::llm::{build_context_manager, CompactOverrides, CompressionPipeline};
+use xiaoo_api::llm::{resolve_config, resolve_model_context_length, LlmProviderWrapper, ResolveInput};
+use xiaoo_api::skills::FileSkillRegistry;
+use xiaoo_api::skills::SkillRegistry;
+use xiaoo_api::tools::ToolRegistry;
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::gateway::prompt_utils::{
     compose_subagent_delegation_rules, generate_skills_dirs_table,
@@ -1184,7 +1183,7 @@ mod tests {
         RuntimeCapabilityProfile, MCP_CHATBOT_TOOLS,
     };
     use crate::daemon_config::{AgentRoleConfig, DaemonConfig};
-    use agent_types::common::ids::{AgentId, ToolName};
+    use xiaoo_api::chat::{AgentId, ToolName};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
