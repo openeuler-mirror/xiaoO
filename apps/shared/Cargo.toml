@@ -7,6 +7,10 @@ license.workspace = true
 [features]
 default = []
 tee_sdf = ["vault/tee_sdf"]
+# 面向应用测试的现成桩。开启后导出 `testing` 模块，
+# 提供 LlmProvider 测试桩等，避免应用自行 impl trait（也就无需
+# LlmRequest/LlmResponse 等底层词汇进入应用测试）。
+test-support = []
 
 [build-dependencies]
 protoc-bin-vendored = "3"

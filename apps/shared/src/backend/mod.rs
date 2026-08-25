@@ -16,6 +16,7 @@ mod backend_registry;
 mod base;
 mod dirty_write;
 mod e2b;
+mod labels;
 mod sandbox_counter;
 
 pub use backend_manager::BackendManager;
@@ -36,6 +37,7 @@ pub use e2b::{
     build_e2b_bootstrap_archive, canonicalize_bootstrap_dir, E2bBootstrapArchive,
     E2bBootstrapBuildError,
 };
+pub use labels::{backend_endpoint_str, backend_state_label};
 use sandbox_counter::{
     load_global_max_sandbox_cnt, SandboxCounter, SandboxCounterError, SandboxCounterKey,
     MAX_ACTIVE_SANDBOXES_PER_KEY,
