@@ -74,35 +74,6 @@ pub(crate) struct BackendEnsureSessionRequest {
     pub initial_session_status: Option<(String, usize)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BackendCreateRequest {
-    pub workspace_root: PathBuf,
-    #[serde(default)]
-    pub backend_id: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub timeout: Option<u64>,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub resource_limits: BackendResourceLimits,
-    #[serde(default)]
-    pub options: Option<Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BackendConnectRequest {
-    #[serde(default)]
-    pub timeout: Option<u64>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct BackendListFilter {
     pub metadata: BTreeMap<String, String>,
@@ -138,29 +109,6 @@ pub struct BackendInfo {
     pub expires_at_ms: Option<u64>,
     #[serde(default)]
     pub lineage: BackendLineageInfo,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BackendForkRequest {
-    #[serde(default)]
-    pub parent_backend_id: Option<String>,
-    #[serde(default)]
-    pub parent_session_id: Option<String>,
-    #[serde(default)]
-    pub backend_id: Option<String>,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub timeout: Option<u64>,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub resource_limits: BackendResourceLimits,
-    #[serde(default)]
-    pub options: Option<Value>,
-    #[serde(default)]
-    pub snapshot_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,19 +151,19 @@ pub(crate) struct BackendCheckpointResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCheckpointSnapshotDeleteRequest {
-    pub checkpoint: BackendCheckpointRef,
+pub(crate) struct BackendCheckpointSnapshotDeleteRequest {
+    pub(crate) checkpoint: BackendCheckpointRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCheckpointSnapshotDeleteResult {
-    pub checkpoint_id: String,
-    pub provider: String,
+pub(crate) struct BackendCheckpointSnapshotDeleteResult {
+    pub(crate) checkpoint_id: String,
+    pub(crate) provider: String,
     #[serde(default)]
-    pub provider_snapshot_id: Option<String>,
+    pub(crate) provider_snapshot_id: Option<String>,
     #[serde(default)]
-    pub provider_snapshot_names: Vec<String>,
-    pub deleted: bool,
+    pub(crate) provider_snapshot_names: Vec<String>,
+    pub(crate) deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,26 +195,8 @@ pub(crate) struct BackendCheckoutResult {
     pub checkpoint: BackendCheckpointRef,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BackendForkResult {
-    pub parent: BackendInfo,
-    pub child: BackendInfo,
-    pub snapshot_id: String,
-    #[serde(default)]
-    pub snapshot_names: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BackendTreeNode {
-    pub backend: BackendInfo,
-    #[serde(default)]
-    pub children: Vec<BackendTreeNode>,
-}
-
 #[derive(Debug, thiserror::Error)]
-pub enum BackendError {
+pub(crate) enum BackendError {
     #[error("invalid managed backend request: {message}")]
     InvalidRequest { message: String },
     #[error("managed backend conflict: {message}")]
@@ -286,23 +216,6 @@ pub enum BackendError {
 }
 
 impl BackendError {
-    #[allow(dead_code)]
-    pub(super) fn from_build_error(error: OperationBackendBuildError) -> Self {
-        match error {
-            OperationBackendBuildError::InvalidConfig { message } => {
-                Self::InvalidRequest { message }
-            }
-            OperationBackendBuildError::UnsupportedBackend { kind } => {
-                Self::UnsupportedBackend { kind }
-            }
-            OperationBackendBuildError::ResourceLimitExceeded { message } => {
-                Self::ResourceLimitExceeded { message }
-            }
-            OperationBackendBuildError::Unsupported { message }
-            | OperationBackendBuildError::BuildFailed { message } => Self::BuildFailed { message },
-        }
-    }
-
     pub(super) fn from_control_error(error: BackendControlError) -> Self {
         match error {
             BackendControlError::InvalidRequest { message } => Self::InvalidRequest { message },
@@ -388,11 +301,14 @@ impl BackendLease {
         Self { backend, instance }
     }
 
-    pub fn backend(&self) -> Arc<dyn OperationBackend> {
+    // `BackendLease` is `pub(crate)`; its accessors are only read by the
+    // backend tests (which assert pool reuse / instance identity), never by
+    // app code — keep them crate-private to match the enclosing type.
+    pub(crate) fn backend(&self) -> Arc<dyn OperationBackend> {
         Arc::clone(&self.backend)
     }
 
-    pub fn instance(&self) -> BackendInstance {
+    pub(crate) fn instance(&self) -> BackendInstance {
         self.instance.clone()
     }
 }

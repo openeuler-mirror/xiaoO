@@ -102,7 +102,7 @@ pub(crate) struct SessionSupervisor {
 }
 
 impl SessionSupervisor {
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         backend_manager: Arc<BackendManager>,
@@ -806,7 +806,7 @@ impl SessionSupervisor {
         // leased one), but now that the binding is in place the call will
         // succeed and update the registry entry's session status. This closes
         // the race where another process evicts the freshly-bound sandbox
-        // before the turn re-reports Running. Only e2b/conch backends are
+        // before the turn re-reports Running. Only e2b backends are
         // tracked in the shared registry; local backends skip the registry
         // write (avoiding needless `IN_PROCESS_LOCK` + flock contention on
         // the local-backend hot path).

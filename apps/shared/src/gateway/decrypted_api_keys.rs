@@ -4,20 +4,20 @@ use std::sync::OnceLock;
 
 static SECRET_PROVIDER: OnceLock<SecretProvider> = OnceLock::new();
 
-pub struct SecretProvider {
+pub(crate) struct SecretProvider {
     secrets_path: PathBuf,
     use_sdf: bool,
 }
 
 impl SecretProvider {
-    pub fn new(secrets_path: PathBuf, use_sdf: bool) -> Self {
+    pub(crate) fn new(secrets_path: PathBuf, use_sdf: bool) -> Self {
         Self {
             secrets_path,
             use_sdf,
         }
     }
 
-    pub fn init(secrets_path: PathBuf, use_sdf: bool) {
+    pub(crate) fn init(secrets_path: PathBuf, use_sdf: bool) {
         let provider = SecretProvider::new(secrets_path, use_sdf);
         SECRET_PROVIDER.set(provider).ok();
     }
@@ -63,16 +63,6 @@ impl SecretProvider {
     fn load_from_env(&self, env_name: &str) -> Result<String> {
         std::env::var(env_name)
             .map_err(|_| anyhow::anyhow!("API key environment variable {} not found", env_name))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn get_secrets_path(&self) -> &PathBuf {
-        &self.secrets_path
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn is_use_sdf(&self) -> bool {
-        self.use_sdf
     }
 }
 

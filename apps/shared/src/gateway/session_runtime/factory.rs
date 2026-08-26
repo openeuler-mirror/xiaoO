@@ -43,7 +43,7 @@ pub(crate) struct AppRuntimeAssembly {
 }
 
 impl AppRuntimeAssembly {
-    pub async fn shutdown(self) -> Result<(), agent_contracts::backend::OperationError> {
+    pub(crate) async fn shutdown(self) -> Result<(), agent_contracts::backend::OperationError> {
         let AppRuntimeAssembly {
             runtime,
             runtime_view,
@@ -58,7 +58,7 @@ impl AppRuntimeAssembly {
     }
 }
 
-pub struct AppRuntimeFactory;
+pub(crate) struct AppRuntimeFactory;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AppRuntimeFactoryError {

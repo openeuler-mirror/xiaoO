@@ -25,7 +25,7 @@ impl SessionLifecycleStatus {
     /// Snake-case wire tag for `*.Session.lifecycle.state` payloads
     /// (matches the serde renaming). Use this instead of hardcoded
     /// literals so the wire contract stays in sync with the enum.
-    pub fn as_tag(&self) -> &'static str {
+    pub(crate) fn as_tag(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Running => "running",
@@ -46,7 +46,7 @@ pub(crate) enum SessionStateOutcome {
 }
 
 impl SessionStateOutcome {
-    pub fn as_tag(&self) -> &'static str {
+    pub(crate) fn as_tag(&self) -> &'static str {
         match self {
             Self::Error => "error",
         }

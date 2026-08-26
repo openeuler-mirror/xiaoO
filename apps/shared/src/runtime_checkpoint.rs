@@ -183,16 +183,11 @@ pub struct RuntimeWriteFileResult {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct RuntimeCheckpoint {
     pub checkpoint_id: String,
     pub runtime_id: String,
-    pub parent_checkpoint_id: Option<String>,
     pub session: SessionRecord,
     pub backend_checkpoint: Option<BackendCheckpointRef>,
-    pub created_at_ms: u64,
-    pub metadata: Value,
-    pub name: Option<String>,
 }
 
 #[derive(Clone, Default)]

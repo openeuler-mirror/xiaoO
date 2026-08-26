@@ -68,7 +68,7 @@ fn resolve_runtime_exec_shell(requested: Option<String>, backend_default: Option
         .unwrap_or_else(|| RUNTIME_EXEC_FALLBACK_SHELL.to_string())
 }
 
-pub struct CoreBackedSessionService {
+pub(crate) struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     sessions_handler: Mutex<HashMap<String, SessionHandle>>,
@@ -104,7 +104,7 @@ pub struct CoreBackedSessionService {
 }
 
 impl CoreBackedSessionService {
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
@@ -126,13 +126,6 @@ impl CoreBackedSessionService {
             interaction_timeout: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             memory_automation,
         }
-    }
-
-    /// Public accessor so the daemon-side GC reaper can inspect the lease
-    /// table. Returns a clone (Arc-interned, cheap).
-    #[allow(dead_code)]
-    pub(crate) fn lease_table(&self) -> SessionLeaseTable {
-        self.sessions_lease.clone()
     }
 
     /// Toggle strict lease enforcement for anonymous callers. When `true`,
@@ -167,7 +160,7 @@ impl CoreBackedSessionService {
     /// sessions whose lease has been gone for longer than
     /// [`ORPHAN_SESSION_THRESHOLD_MS`](crate::gateway::ORPHAN_SESSION_THRESHOLD_MS)
     /// and whose last activity is older than the same threshold, reclaiming
-    /// leaked backends (e2b sandboxes, conch processes) when a TUI crashes
+    /// leaked backends (e2b sandboxes) when a TUI crashes
     /// and nobody comes back.
     ///
     /// The reaper must NOT close sessions whose in-memory handle is currently
@@ -435,7 +428,7 @@ impl CoreBackedSessionService {
     /// `JoinError` here (rather than unwinding into `run_turn_inner` and
     /// tearing down the SSE connection); `JoinError` yields an empty action
     /// set so the turn result is still delivered.
-    pub async fn fire_session_state_hook_and_collect_actions(
+    pub(crate) async fn fire_session_state_hook_and_collect_actions(
         &self,
         session_id: String,
         sender_id: String,
@@ -770,14 +763,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
-            parent_checkpoint_id: parent_checkpoint_id.clone(),
             session: session.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
                 .map(|result| result.checkpoint.clone()),
-            created_at_ms,
-            metadata: request.metadata.clone(),
-            name: request.name.clone(),
         };
         self.runtime_checkpoints.save(checkpoint).await;
 
@@ -922,10 +911,6 @@ impl CoreBackedSessionService {
                 message: format!("failed to release runtime backend during pause: {error}"),
             })?;
 
-        let parent_checkpoint_id = self
-            .runtime_checkpoints
-            .latest_for_runtime(&request.runtime_id)
-            .await;
         let checkpoint_id = format!("rtcp_{}", uuid::Uuid::new_v4().simple());
         let created_at_ms = current_time_ms();
         let mut paused = session.clone();
@@ -937,14 +922,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
-            parent_checkpoint_id,
             session: paused.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
                 .map(|result| result.checkpoint.clone()),
-            created_at_ms,
-            metadata: request.metadata.clone(),
-            name: request.name.clone(),
         };
         self.runtime_checkpoints.save(checkpoint).await;
         self.runtime_checkpoints

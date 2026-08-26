@@ -66,32 +66,6 @@ impl AppBootstrap {
         )
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn from_session_components(
-        session_store: Arc<dyn SessionStore>,
-        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-    ) -> Result<AppDependencies, AppBootstrapError> {
-        Self::from_session_components_with_hooks(
-            session_store,
-            runtime_resolver,
-            HookerRegistryConfig::default(),
-        )
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn from_session_components_with_hooks(
-        session_store: Arc<dyn SessionStore>,
-        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-        hooker_config: HookerRegistryConfig,
-    ) -> Result<AppDependencies, AppBootstrapError> {
-        Self::from_session_components_with_hooks_and_backend_manager(
-            session_store,
-            runtime_resolver,
-            hooker_config,
-            Arc::new(BackendManager::new()),
-        )
-    }
-
     pub fn from_session_components_with_hooks_and_backend_manager(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
