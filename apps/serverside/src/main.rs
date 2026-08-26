@@ -6,6 +6,7 @@ mod cron;
 mod daemon_config;
 mod daemon_runtime;
 mod httpserver;
+mod management_capabilities;
 mod mcp_server;
 
 use crate::channels::{
@@ -13,8 +14,8 @@ use crate::channels::{
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramConfig,
     TelegramPollingMessageHandler, TelegramPollingService,
 };
-use crate::cron::scheduler::CronScheduler;
 use crate::config_inspect::ConfigInspectOverrides;
+use crate::cron::scheduler::CronScheduler;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
@@ -808,9 +809,9 @@ mod tests {
     fn rejects_unknown_config_command() {
         let error = Cli::parse(["config", "unknown"].into_iter().map(str::to_string))
             .expect_err("unknown config command should fail");
-        assert!(error
-            .to_string()
-            .contains("expected `config validate`, `config schema`, `config providers`, or `config inspect`"));
+        assert!(error.to_string().contains(
+            "expected `config validate`, `config schema`, `config providers`, or `config inspect`"
+        ));
     }
 
     #[test]

@@ -389,6 +389,7 @@ pub struct GatewayCapabilitiesResponse {
     pub sse_events: Vec<&'static str>,
     pub interaction_kinds: Vec<&'static str>,
     pub features: GatewayFeatureCapabilities,
+    pub management: crate::management_capabilities::ManagementCapabilities,
 }
 
 #[derive(Debug, Serialize)]
@@ -657,6 +658,7 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
             file_change_patch: false,
             sse_resume: false,
         },
+        management: crate::management_capabilities::management_capabilities(),
     })
 }
 
@@ -1850,6 +1852,19 @@ mod tests {
             .expect("capabilities response should be JSON");
         assert_eq!(capabilities["protocol_version"], 1);
         assert_eq!(capabilities["features"]["runtime_leases"], true);
+        assert_eq!(capabilities["management"]["api_version"], 1);
+        assert_eq!(
+            capabilities["management"]["config_schema_version"],
+            crate::config_schema::CONFIG_SCHEMA_VERSION
+        );
+        assert!(capabilities["management"]["domains"]
+            .as_array()
+            .expect("management domains")
+            .iter()
+            .any(|domain| domain["id"] == "models"
+                && domain["actions"].as_array().is_some_and(|actions| actions
+                    .iter()
+                    .any(|action| action == "session_select"))));
 
         let feishu_response = router
             .oneshot(
