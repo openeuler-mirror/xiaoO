@@ -11,8 +11,8 @@
 
 ## Daemon Startup Parameters
 
-Before starting the daemon, configuration can be parsed and structurally
-validated without opening ports or resolving API keys:
+Before starting the daemon, configuration and referenced credentials can be
+validated without opening ports:
 
 ```bash
 xiaoo-daemon config validate --config ~/.config/xiaoo/config.toml

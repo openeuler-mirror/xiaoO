@@ -50,10 +50,6 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
             };
         }
     }
-    if let Err(error) = xiaoo_shared::llm_secrets::init_on_demand_secret_provider(config_path) {
-        return ConfigValidationReport::from_error(config_path, error);
-    }
-
     let config = match DaemonConfig::load_from(config_path) {
         Ok(config) => config,
         Err(error) => return ConfigValidationReport::from_error(config_path, error),
@@ -74,12 +70,18 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                 kvcache_enabled: config.app.llm.kvcache_enabled,
                 kvcache_debug_enabled: config.app.llm.kvcache_debug_enabled,
             },
+            config_path,
             &mut errors,
         );
     } else {
         for (profile_id, profile) in &config.app.llm.profiles {
             if profile.enabled {
-                validate_profile(&format!("llm.profiles.{profile_id}"), profile, &mut errors);
+                validate_profile(
+                    &format!("llm.profiles.{profile_id}"),
+                    profile,
+                    config_path,
+                    &mut errors,
+                );
             }
         }
     }
@@ -95,6 +97,7 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
 fn validate_profile(
     path: &str,
     profile: &LlmProfileConfig,
+    config_path: &Path,
     errors: &mut Vec<ConfigValidationIssue>,
 ) {
     if profile.provider.trim().is_empty() {
@@ -187,7 +190,9 @@ fn validate_profile(
     let key_required = explicit_env.is_some() || provider.requires_api_key();
     if key_required {
         let available = required_env
-            .and_then(xiaoo_shared::gateway::get_decrypted_api_key)
+            .and_then(|env_name| {
+                xiaoo_shared::llm_secrets::get_llm_secret(config_path, env_name).ok()
+            })
             .is_some_and(|value| !value.trim().is_empty());
         if !available {
             let message = required_env
@@ -298,6 +303,34 @@ model = "qwen"
 "#,
         )
         .expect("write config");
+
+        let report = validate_config_file(&path);
+        assert!(report.valid, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn accepts_api_key_from_the_selected_config_secret_store() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let env_name = "XIAOO_VALIDATION_ENCRYPTED_KEY_42";
+        std::env::remove_var(env_name);
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[llm]
+active_profile = "remote"
+
+[llm.profiles.remote]
+provider = "openrouter"
+model = "test-model"
+api_key_env = "{env_name}"
+"#,
+            ),
+        )
+        .expect("write config");
+        xiaoo_shared::llm_secrets::save_llm_secret(&path, env_name, "secret-key")
+            .expect("save secret");
 
         let report = validate_config_file(&path);
         assert!(report.valid, "{:?}", report.errors);
