@@ -6,7 +6,6 @@ use crate::httpserver::channel_ingress::{
     build_gateway_channel_message, GatewayChannelIngressError, GatewayChannelMention,
 };
 use crate::httpserver::{GatewayService, GatewayServiceError};
-use agent_contracts::ChannelFileSender;
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,6 +13,7 @@ use thiserror::Error;
 use tracing::warn;
 use xiaoo_api::events::LoopEventSink;
 use xiaoo_api::interaction::InteractionHandle;
+use xiaoo_shared::channels::ChannelFileSender;
 use xiaoo_shared::gateway::channel_interaction::{
     resolve_interaction_from_text, ChannelInteractionHandle,
 };

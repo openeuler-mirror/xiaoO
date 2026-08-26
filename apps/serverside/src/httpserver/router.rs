@@ -43,7 +43,7 @@ pub struct GatewayAppState {
     channel_runtimes: Arc<HashMap<String, ChannelRuntime>>,
     channel_processor: ChannelRuntimeProcessor,
     remote_interactions: Arc<RemoteInteractionStore>,
-    action_sink: Option<Arc<dyn agent_contracts::HookActionSink>>,
+    action_sink: Option<Arc<xiaoo_shared::gateway::DaemonHookActionSink>>,
     session_diff_trackers: SessionDiffTrackerMap,
 }
 
@@ -81,7 +81,7 @@ impl GatewayAppState {
     ) -> Self {
         let mut state = Self::new(session_service);
         state.session_control_plane = Some(session_control_plane.clone());
-        state.action_sink = Some(Arc::new(crate::httpserver::DaemonHookActionSink::new(
+        state.action_sink = Some(Arc::new(xiaoo_shared::gateway::DaemonHookActionSink::new(
             session_control_plane,
         )));
         state
@@ -137,7 +137,7 @@ impl GatewayAppState {
         runtimes: Vec<ChannelRuntime>,
     ) -> ChannelResult<Self> {
         let mut state = Self::with_channel_runtimes(session_service, runtimes)?;
-        state.action_sink = Some(Arc::new(crate::httpserver::DaemonHookActionSink::new(
+        state.action_sink = Some(Arc::new(xiaoo_shared::gateway::DaemonHookActionSink::new(
             session_control_plane.clone(),
         )));
         state.session_control_plane = Some(session_control_plane);

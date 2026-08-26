@@ -3,7 +3,10 @@ pub mod bootstrap;
 pub mod channel_interaction;
 pub mod decrypted_api_keys;
 mod e2b_runtime;
+pub mod hook_action_sink;
+pub use hook_action_sink::DaemonHookActionSink;
 pub mod hosted_runtime_resolver;
+pub mod llm_assembly;
 pub mod memory_automation;
 #[cfg(test)]
 mod memory_automation_test;
@@ -29,6 +32,8 @@ pub mod session_store;
 pub mod session_supervisor;
 pub mod session_worker;
 pub mod subagent_interaction;
+pub mod tool_assembly;
+pub use tool_assembly::{BoundControlStore, McpToolCache, ToolAssemblyError};
 pub mod turns;
 pub mod workspace_prompt;
 

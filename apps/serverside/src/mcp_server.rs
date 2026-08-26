@@ -1349,7 +1349,7 @@ mod tests {
             _request: AppTurnRequest,
             event_sink: Option<Arc<dyn LoopEventSink>>,
             _interaction_handle: Option<Arc<dyn xiaoo_api::interaction::InteractionHandle>>,
-            _channel_file_sender: Option<Arc<dyn agent_contracts::ChannelFileSender>>,
+            _channel_file_sender: Option<Arc<dyn xiaoo_shared::channels::ChannelFileSender>>,
             _cancellation_token: Option<CancellationToken>,
             _tool_event_sink: Option<Arc<dyn xiaoo_api::events::ToolEventSink>>,
         ) -> Result<AppTurnResult, SessionServiceError> {

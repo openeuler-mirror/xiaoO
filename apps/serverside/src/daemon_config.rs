@@ -3,13 +3,9 @@ use crate::channels::{
     FeishuEventTransport, TelegramConfig, TelegramEventTransport,
 };
 use crate::httpserver::rate_limit::RateLimitConfig;
-use agent_types::cron::{CronExpression, CronJobConfig};
 use anyhow::{bail, Context, Result};
-use lsp::LspServiceRegistry;
-use mcp::McpSection;
 use serde::Deserialize;
 use serde_json;
-use skill::SkillsConfig;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
@@ -18,7 +14,13 @@ use std::sync::Arc;
 use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_shared::backend::GatewayBackendConfig;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
+use xiaoo_shared::cron::{CronExpression, CronJobConfig};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
+use xiaoo_shared::lsp_support::LspServiceRegistry;
+use xiaoo_shared::mcp_support::{
+    load_json_servers, merge_server_configs, resolve_json_config_path, McpSection,
+};
+use xiaoo_shared::skills_support::SkillsConfig;
 
 const DEFAULT_OUTPUT_TOKENS: usize = 16384;
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.txt");
@@ -395,11 +397,11 @@ impl DaemonConfig {
         home: Option<&Path>,
     ) -> Result<Self> {
         let mut config = Self::load_from(path)?;
-        let json_source = mcp::resolve_json_config_path(explicit_path, workspace, home);
-        let json_servers = mcp::load_json_servers(explicit_path, workspace, home)
+        let json_source = resolve_json_config_path(explicit_path, workspace, home);
+        let json_servers = load_json_servers(explicit_path, workspace, home)
             .context("failed to load MCP JSON config")?;
         let fallback_json_source = workspace.join(".mcp.json");
-        config.app.mcp.servers = mcp::merge_server_configs(
+        config.app.mcp.servers = merge_server_configs(
             std::mem::take(&mut config.app.mcp.servers),
             json_servers,
             &config.config_path,
