@@ -165,27 +165,36 @@ struct AgentRunningSnapshot {
 }
 
 fn optional_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    // Use the standard JSON Schema 2020-12 way to express nullability
+    // (`type: ["string", "null"]`). The previous `x-nullable: true` was an
+    // OpenAPI 3.0 vendor extension that strict JSON Schema validators
+    // (e.g. Python `jsonschema`, ajv in strict mode) ignore, causing them
+    // to reject actual `null` values produced by `Option<T>` fields.
     schemars::json_schema!({
-        "type": "string",
-        "x-nullable": true
+        "type": ["string", "null"]
     })
 }
 
 fn optional_nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    // See `optional_string_schema` for why we use the array form of `type`
+    // instead of the non-standard `x-nullable` extension.
     schemars::json_schema!({
-        "type": "integer",
-        "minimum": 0,
-        "x-nullable": true
+        "type": ["integer", "null"],
+        "minimum": 0
     })
 }
 
 fn optional_mcp_usage_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    let schema = gen.subschema_for::<McpUsage>();
-    let mut value = serde_json::Value::from(schema);
-    if let serde_json::Value::Object(ref mut obj) = value {
-        obj.insert("x-nullable".to_owned(), serde_json::json!(true));
-    }
-    schemars::Schema::try_from(value).expect("subschema is an object or bool")
+    // Combine the McpUsage subschema with `null` via `anyOf` rather than the
+    // non-standard `x-nullable` keyword, so strict JSON Schema 2020-12
+    // validators accept `usage: null` (the success-without-usage case).
+    let usage_schema = gen.subschema_for::<McpUsage>();
+    schemars::json_schema!({
+        "anyOf": [
+            usage_schema,
+            { "type": "null" }
+        ]
+    })
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1721,6 +1730,74 @@ mod tests {
         let schema_text = schema.to_string();
         assert!(!schema_text.contains("uint64"), "{schema_text}");
         assert!(!schema_text.contains("uint32"), "{schema_text}");
+    }
+
+    #[test]
+    fn agent_operation_schema_uses_standard_json_schema_nullability() {
+        // Strict JSON Schema 2020-12 validators (e.g. Python `jsonschema`,
+        // ajv in strict mode) do not recognize the OpenAPI `x-nullable`
+        // vendor extension. They must see `type: ["<type>", "null"]` or
+        // `anyOf: [<schema>, { "type": "null" }]` to accept `null` values.
+        // The actual structuredContent legitimately uses `null` for
+        // `current_turn` / `last_text` (when phase == queued) and for
+        // `error` (on success) / `usage` (on failure), so the schema
+        // must use the standard form.
+        let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
+            .expect("agent operation schema should serialize");
+        let schema_text = schema.to_string();
+        assert!(
+            !schema_text.contains("x-nullable"),
+            "schema still uses non-standard x-nullable: {schema_text}"
+        );
+
+        let snapshot = schema
+            .pointer("/$defs/AgentRunningSnapshot/properties")
+            .expect("snapshot properties present");
+        for (field, expected_type) in [
+            ("current_turn", "integer"),
+            ("last_text", "string"),
+        ] {
+            let field_schema = snapshot
+                .get(field)
+                .unwrap_or_else(|| panic!("missing {field} schema: {schema_text}"));
+            let type_value = field_schema
+                .get("type")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{field} type must be an array: {field_schema}"));
+            let types: Vec<&str> = type_value
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+            assert!(
+                types.contains(&expected_type) && types.contains(&"null"),
+                "{field} type must allow null, got {types:?}: {field_schema}"
+            );
+        }
+
+        let done_branch = schema
+            .pointer("/oneOf/1/properties")
+            .expect("done branch properties present");
+        let usage_schema = done_branch
+            .get("usage")
+            .unwrap_or_else(|| panic!("missing usage schema: {schema_text}"));
+        assert!(
+            usage_schema.get("anyOf").is_some(),
+            "usage must use anyOf for nullability: {usage_schema}"
+        );
+        let error_schema = done_branch
+            .get("error")
+            .unwrap_or_else(|| panic!("missing error schema: {schema_text}"));
+        let error_types: Vec<&str> = error_schema
+            .get("type")
+            .and_then(|v| v.as_array())
+            .unwrap_or_else(|| panic!("error type must be an array: {error_schema}"))
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            error_types.contains(&"string") && error_types.contains(&"null"),
+            "error type must allow null, got {error_types:?}: {error_schema}"
+        );
     }
 
     #[test]
