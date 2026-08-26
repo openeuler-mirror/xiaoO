@@ -49,7 +49,8 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     save_encrypted_store(&secrets_path, &store, use_sdf)
 }
 
-pub fn save_token(config_path: &Path, token_name: &str, token: &str) -> Result<()> {
+#[allow(dead_code)]
+pub(crate) fn save_token(config_path: &Path, token_name: &str, token: &str) -> Result<()> {
     let secrets_path = llm_secrets_path(config_path);
     if let Some(parent) = secrets_path.parent() {
         fs::create_dir_all(parent)

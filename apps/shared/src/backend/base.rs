@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// A backend whose owner heartbeat is older than this threshold is considered
 /// orphaned (the owner process is presumed dead) and may be reclaimed by any
 /// process to free a sandbox slot.
-pub const STALE_OWNER_THRESHOLD_MS: u64 = 30_000;
+pub(crate) const STALE_OWNER_THRESHOLD_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayBackendConfig {
@@ -60,7 +60,7 @@ impl Default for BackendManagerLimits {
 }
 
 #[derive(Debug, Clone)]
-pub struct BackendEnsureSessionRequest {
+pub(crate) struct BackendEnsureSessionRequest {
     pub config: Option<GatewayBackendConfig>,
     pub workspace_root: PathBuf,
     pub session_id: String,
@@ -75,7 +75,8 @@ pub struct BackendEnsureSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCreateRequest {
+#[allow(dead_code)]
+pub(crate) struct BackendCreateRequest {
     pub workspace_root: PathBuf,
     #[serde(default)]
     pub backend_id: Option<String>,
@@ -94,7 +95,8 @@ pub struct BackendCreateRequest {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BackendConnectRequest {
+#[allow(dead_code)]
+pub(crate) struct BackendConnectRequest {
     #[serde(default)]
     pub timeout: Option<u64>,
     #[serde(default)]
@@ -139,7 +141,8 @@ pub struct BackendInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BackendForkRequest {
+#[allow(dead_code)]
+pub(crate) struct BackendForkRequest {
     #[serde(default)]
     pub parent_backend_id: Option<String>,
     #[serde(default)]
@@ -181,7 +184,7 @@ pub struct BackendCheckpointRef {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BackendCheckpointRequest {
+pub(crate) struct BackendCheckpointRequest {
     #[serde(default)]
     pub backend_id: Option<String>,
     #[serde(default)]
@@ -193,7 +196,7 @@ pub struct BackendCheckpointRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCheckpointResult {
+pub(crate) struct BackendCheckpointResult {
     pub backend: BackendInfo,
     pub checkpoint: BackendCheckpointRef,
     pub reused: bool,
@@ -216,7 +219,7 @@ pub struct BackendCheckpointSnapshotDeleteResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCheckoutRequest {
+pub(crate) struct BackendCheckoutRequest {
     pub checkpoint: BackendCheckpointRef,
     #[serde(default)]
     pub backend_id: Option<String>,
@@ -239,13 +242,14 @@ pub struct BackendCheckoutRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendCheckoutResult {
+pub(crate) struct BackendCheckoutResult {
     pub backend: BackendInfo,
     pub checkpoint: BackendCheckpointRef,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendForkResult {
+#[allow(dead_code)]
+pub(crate) struct BackendForkResult {
     pub parent: BackendInfo,
     pub child: BackendInfo,
     pub snapshot_id: String,
@@ -254,7 +258,8 @@ pub struct BackendForkResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendTreeNode {
+#[allow(dead_code)]
+pub(crate) struct BackendTreeNode {
     pub backend: BackendInfo,
     #[serde(default)]
     pub children: Vec<BackendTreeNode>,
@@ -281,6 +286,7 @@ pub enum BackendError {
 }
 
 impl BackendError {
+    #[allow(dead_code)]
     pub(super) fn from_build_error(error: OperationBackendBuildError) -> Self {
         match error {
             OperationBackendBuildError::InvalidConfig { message } => {
@@ -372,7 +378,7 @@ impl From<super::BackendRegistryError> for BackendError {
 }
 
 #[derive(Clone)]
-pub struct BackendLease {
+pub(crate) struct BackendLease {
     backend: Arc<dyn OperationBackend>,
     instance: BackendInstance,
 }

@@ -41,7 +41,7 @@ impl SessionLifecycleStatus {
 /// tag (today: only `state="failed"` → `Error`). `idle` uses
 /// `TurnOutcome::as_tag()` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStateOutcome {
+pub(crate) enum SessionStateOutcome {
     Error,
 }
 
@@ -64,7 +64,7 @@ pub struct SubagentRoleRecord {
 
 pub const E2B_BOOTSTRAP_MANIFEST_VERSION: u32 = 1;
 pub const E2B_REMOTE_WORKSPACE_ROOT: &str = "/home/user/workspace";
-pub const E2B_REMOTE_SKILLS_ROOT: &str = "/home/user/.xiaoo/skills";
+pub(crate) const E2B_REMOTE_SKILLS_ROOT: &str = "/home/user/.xiaoo/skills";
 
 /// Immutable host-to-E2B bootstrap identity persisted with the runtime.
 /// Host paths are only consulted while the first sandbox is being created.

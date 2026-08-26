@@ -41,7 +41,7 @@ struct ValidatedConchConfig {
     create_options: ConchCreateOptions,
 }
 
-pub async fn build_backend(
+pub(crate) async fn build_backend(
     config: &OperationBackendConfig,
 ) -> Result<Arc<dyn OperationBackend>, OperationBackendBuildError> {
     let validated = validate_conch_config(config)?;

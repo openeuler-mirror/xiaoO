@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub const MAX_ACTIVE_SANDBOXES_PER_KEY: usize = 20;
+pub(crate) const MAX_ACTIVE_SANDBOXES_PER_KEY: usize = 20;
 
 /// How long a pending reservation is considered valid. Reservations older
 /// than this are garbage-collected on load, reclaiming slots leaked by
 /// processes that crashed between `check_and_reserve` and
 /// `confirm_creation`/`cancel_reservation`.
-pub const PENDING_RESERVATION_TTL_MS: u64 = 300_000;
+pub(crate) const PENDING_RESERVATION_TTL_MS: u64 = 300_000;
 
 /// Number of PBKDF2-HMAC-SHA256 iterations used to derive the stored form
 /// of `key_identifier`. The `key_identifier` for e2b sandboxes is the
@@ -60,7 +60,7 @@ fn hash_key_identifier(key_identifier: &str) -> String {
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SandboxCounterKey {
+pub(crate) struct SandboxCounterKey {
     pub sandbox_type: String,
     /// Derived (PBKDF2-hashed) form of the original key identifier. For
     /// e2b sandboxes the raw identifier is the provider API key, so it is
@@ -85,7 +85,7 @@ impl SandboxCounterKey {
         }
     }
 
-    pub fn to_string_key(&self) -> String {
+    pub(crate) fn to_string_key(&self) -> String {
         format!("{}:{}", self.sandbox_type, self.key_identifier)
     }
 }
@@ -95,12 +95,12 @@ impl SandboxCounterKey {
 /// processes) can be garbage-collected individually without losing the
 /// remaining valid reservations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingReservation {
+pub(crate) struct PendingReservation {
     pub reserved_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SandboxCounterData {
+pub(crate) struct SandboxCounterData {
     pub counts: HashMap<String, usize>,
     #[serde(default)]
     pub pending_reservations: HashMap<String, Vec<PendingReservation>>,
@@ -136,7 +136,7 @@ impl SandboxCounterData {
 }
 
 #[derive(Debug, Clone)]
-pub enum SandboxCounterError {
+pub(crate) enum SandboxCounterError {
     LimitExceeded {
         current: usize,
         max: usize,
@@ -175,12 +175,12 @@ struct SandboxGlobalConfig {
     max_sandbox_cnt: Option<usize>,
 }
 
-pub fn global_sandbox_config_path() -> PathBuf {
+pub(crate) fn global_sandbox_config_path() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".config").join("xiaoo").join("sandbox.toml")
 }
 
-pub fn load_max_sandbox_cnt_from_path(path: &Path) -> Option<usize> {
+pub(crate) fn load_max_sandbox_cnt_from_path(path: &Path) -> Option<usize> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
@@ -206,11 +206,11 @@ pub fn load_max_sandbox_cnt_from_path(path: &Path) -> Option<usize> {
     }
 }
 
-pub fn load_global_max_sandbox_cnt() -> Option<usize> {
+pub(crate) fn load_global_max_sandbox_cnt() -> Option<usize> {
     load_max_sandbox_cnt_from_path(&global_sandbox_config_path())
 }
 
-pub struct SandboxCounter {
+pub(crate) struct SandboxCounter {
     storage_path: PathBuf,
     lock_path: PathBuf,
     max_per_key: usize,
@@ -230,11 +230,11 @@ impl SandboxCounter {
         }
     }
 
-    pub fn max_per_key(&self) -> usize {
+    pub(crate) fn max_per_key(&self) -> usize {
         self.max_per_key
     }
 
-    pub async fn check_and_reserve(
+    pub(crate) async fn check_and_reserve(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<(), SandboxCounterError> {
@@ -269,7 +269,7 @@ impl SandboxCounter {
         Ok(())
     }
 
-    pub async fn confirm_creation(
+    pub(crate) async fn confirm_creation(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<(), SandboxCounterError> {
@@ -305,7 +305,7 @@ impl SandboxCounter {
         Ok(())
     }
 
-    pub async fn cancel_reservation(
+    pub(crate) async fn cancel_reservation(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<(), SandboxCounterError> {
@@ -363,7 +363,7 @@ impl SandboxCounter {
     /// persisted file by previous processes that exited or crashed without
     /// releasing their sandboxes. Pending reservations are left untouched
     /// (the TTL-based GC already reclaims stale ones).
-    pub async fn reconcile_counts(
+    pub(crate) async fn reconcile_counts(
         &self,
         live_counts: HashMap<String, usize>,
     ) -> Result<(), SandboxCounterError> {
@@ -403,7 +403,10 @@ impl SandboxCounter {
     }
 
     #[cfg(test)]
-    pub async fn get_count(&self, key: &SandboxCounterKey) -> Result<usize, SandboxCounterError> {
+    pub(crate) async fn get_count(
+        &self,
+        key: &SandboxCounterKey,
+    ) -> Result<usize, SandboxCounterError> {
         let _in_process = IN_PROCESS_LOCK.lock().await;
         let _file_lock = self.acquire_lock()?;
         let data = self.load_data()?;
@@ -411,7 +414,7 @@ impl SandboxCounter {
     }
 
     #[cfg(test)]
-    pub async fn get_pending_count(
+    pub(crate) async fn get_pending_count(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<usize, SandboxCounterError> {
@@ -425,7 +428,7 @@ impl SandboxCounter {
             .unwrap_or(0))
     }
 
-    pub async fn get_total_count(
+    pub(crate) async fn get_total_count(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<usize, SandboxCounterError> {

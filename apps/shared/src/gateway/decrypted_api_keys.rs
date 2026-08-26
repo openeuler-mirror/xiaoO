@@ -22,7 +22,7 @@ impl SecretProvider {
         SECRET_PROVIDER.set(provider).ok();
     }
 
-    pub fn get_secret(&self, env_name: &str) -> Result<String> {
+    pub(crate) fn get_secret(&self, env_name: &str) -> Result<String> {
         if !self.secrets_path.exists() {
             return Ok(self.load_from_env(env_name)?);
         }
@@ -65,11 +65,13 @@ impl SecretProvider {
             .map_err(|_| anyhow::anyhow!("API key environment variable {} not found", env_name))
     }
 
-    pub fn get_secrets_path(&self) -> &PathBuf {
+    #[allow(dead_code)]
+    pub(crate) fn get_secrets_path(&self) -> &PathBuf {
         &self.secrets_path
     }
 
-    pub fn is_use_sdf(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_use_sdf(&self) -> bool {
         self.use_sdf
     }
 }
