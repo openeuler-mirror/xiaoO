@@ -137,10 +137,7 @@ impl ToolCallImpl {
                     state.final_call.input = modified_input;
                     if let Some(mut entry) = extra {
                         if let Value::Object(map) = &mut entry {
-                            map.insert(
-                                "hooker_id".to_string(),
-                                json!(hooker.id().to_string()),
-                            );
+                            map.insert("hooker_id".to_string(), json!(hooker.id().to_string()));
                         }
                         match &mut state.final_call.extra {
                             Some(Value::Array(entries)) => entries.push(entry),
@@ -518,7 +515,10 @@ mod tests {
         let visible = hooker_visible_call(&final_call);
         let serialized = serde_json::to_value(&visible).unwrap();
 
-        assert!(serialized.get("extra").is_none(), "plugin input must not carry an extra key");
+        assert!(
+            serialized.get("extra").is_none(),
+            "plugin input must not carry an extra key"
+        );
         assert_eq!(serialized["call_id"], "call-1");
         assert_eq!(serialized["tool_name"], "bash");
 

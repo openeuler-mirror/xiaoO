@@ -9,7 +9,9 @@ pub struct PreToolHookInput {
 #[derive(Clone, Debug)]
 pub enum PreHookResult {
     Allow,
-    Deny { reason: String },
+    Deny {
+        reason: String,
+    },
     Transform {
         modified_input: serde_json::Value,
         /// Plugin-produced per-invocation payload; the framework injects the

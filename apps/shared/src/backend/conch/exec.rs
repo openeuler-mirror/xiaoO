@@ -164,6 +164,7 @@ impl OperationExec for ConchExec {
             stderr: output.stderr,
             exit_code: output.exit_code,
             timed_out: output.timed_out || timed_out,
+            ..Default::default()
         })
     }
 }

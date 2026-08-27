@@ -2596,10 +2596,17 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Primary truncation threshold on the *byte count* of tool output.
 const MAX_TOOL_OUTPUT_BYTES: usize = 50 * 1024;
+/// Secondary truncation threshold on the *line count* of tool output.
+/// Whichever triggers first drives the in-context preview. Mirrors
+/// opencode's `MAX_LINES = 2000` and the grep tool's `ABSOLUTE_HARD_CAP`.
+const MAX_TOOL_OUTPUT_LINES: usize = 2_000;
 const TRUNCATED_TOOL_OUTPUT_DIR: &str = "truncated_tool_output";
 const TRUNCATED_RETENTION_DAYS: u64 = 7;
 
+/// Lazy-cleanup day-counter — guards `maybe_cleanup_truncated_dir` to run
+/// at most once per day so truncation calls stay cheap.
 static LAST_CLEANUP_DAY: AtomicU64 = AtomicU64::new(0);
 
 /// Returns the largest byte index `<= index` that falls on a UTF-8 character
@@ -2618,21 +2625,63 @@ fn char_boundary_before(s: &str, index: usize) -> usize {
     i
 }
 
-/// Truncates tool output to [`MAX_TOOL_OUTPUT_BYTES`] bytes.  Full content
-/// is saved to `~/.xiaoo/truncated_tool_output/` so the model can access it
-/// via `file_read` or `grep`.  This mirrors the opencode tool-output design
-/// (see opencode/specs/tool_design.md).
+/// Truncates tool output to fit within [`MAX_TOOL_OUTPUT_BYTES`] bytes
+/// AND [`MAX_TOOL_OUTPUT_LINES`] lines (whichever triggers first), then
+/// saves the full content to `~/.xiaoo/truncated_tool_output/`.
 fn truncate_tool_output(tool_name: &str, call_id: &str, output: &str) -> String {
-    if output.len() <= MAX_TOOL_OUTPUT_BYTES {
-        return output.to_string();
+    let total_bytes = output.len();
+
+    // Fast path: fits both thresholds.
+    if total_bytes <= MAX_TOOL_OUTPUT_BYTES {
+        let n = output.lines().count();
+        if n <= MAX_TOOL_OUTPUT_LINES {
+            return output.to_string();
+        }
     }
 
-    // Char-safe truncation boundary
-    let safe_boundary = char_boundary_before(output, MAX_TOOL_OUTPUT_BYTES);
-    let truncated = &output[..safe_boundary];
-    let omitted = output.len() - safe_boundary;
+    // Slow path: single pass that counts total lines AND builds the preview.
+    // Once a limit fires, stop pushing but keep counting for the hint.
+    let mut total_lines = 0usize;
+    let mut kept_bytes = 0usize;
+    let mut kept_lines = 0usize;
+    let mut hit_byte_limit = false;
+    let mut preview_done = false;
+    let mut preview = String::new();
+    for line in output.lines() {
+        total_lines += 1;
+        if preview_done {
+            continue;
+        }
+        let line_size = line.len() + if preview.is_empty() { 0 } else { 1 };
+        if kept_lines + 1 > MAX_TOOL_OUTPUT_LINES {
+            preview_done = true;
+            continue;
+        }
+        if kept_bytes + line_size > MAX_TOOL_OUTPUT_BYTES {
+            hit_byte_limit = true;
+            preview_done = true;
+            continue;
+        }
+        if !preview.is_empty() {
+            preview.push('\n');
+        }
+        preview.push_str(line);
+        kept_bytes += line_size;
+        kept_lines += 1;
+    }
 
-    // Save full output to ~/.xiaoo/truncated_tool_output/
+    // Byte-level fallback for single long lines.
+    if preview.is_empty() && total_bytes > 0 {
+        let boundary = char_boundary_before(output, MAX_TOOL_OUTPUT_BYTES);
+        preview.push_str(&output[..boundary]);
+        kept_bytes = boundary;
+        kept_lines = 0;
+        hit_byte_limit = true;
+    }
+
+    let omitted_bytes = total_bytes.saturating_sub(kept_bytes);
+    let omitted_lines = total_lines.saturating_sub(kept_lines);
+
     let saved_path = std::env::var("HOME").ok().and_then(|home| {
         let dir = std::path::PathBuf::from(home)
             .join(".xiaoo")
@@ -2646,28 +2695,31 @@ fn truncate_tool_output(tool_name: &str, call_id: &str, output: &str) -> String 
         })
     });
 
+    let trigger = if hit_byte_limit {
+        "byte limit"
+    } else {
+        "line limit"
+    };
+
     let hint = match saved_path {
         Some(path) => format!(
-            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+            "\n[Tool output truncated ({}): omitted {} bytes ({} lines), showing first {} bytes ({} lines)]\n\
              Full output saved to: {}\n\
-             Use `file_read` with offset/limit to view specific sections, or \
-             `grep` to search the full content.",
-            omitted,
-            MAX_TOOL_OUTPUT_BYTES,
-            path.display(),
+             Use `file_read` with offset/limit to view specific sections, or `grep` to search the full content.",
+            trigger, omitted_bytes, omitted_lines, kept_bytes, kept_lines, path.display(),
         ),
         None => format!(
-            "\n[Tool output truncated: omitted {} bytes, showing first {} bytes]\n\
+            "\n[Tool output truncated ({}): omitted {} bytes ({} lines), showing first {} bytes ({} lines)]\n\
              Use `file_read` with offset/limit or `grep` to search the full content.",
-            omitted, MAX_TOOL_OUTPUT_BYTES,
+            trigger, omitted_bytes, omitted_lines, kept_bytes, kept_lines,
         ),
     };
 
-    format!("{}{}", truncated, hint)
+    format!("{}{}", preview, hint)
 }
 
 /// Lazy cleanup of truncated tool output files older than
-/// [`TRUNCATED_RETENTION_DAYS`].  Runs at most once per day to avoid
+/// [`TRUNCATED_RETENTION_DAYS`]. Runs at most once per day to avoid
 /// unnecessary filesystem scans on every truncated tool call.
 fn maybe_cleanup_truncated_dir() {
     let now = std::time::SystemTime::now()
@@ -4117,5 +4169,201 @@ mod tests {
             "every executed tool_use must keep its paired tool_result even when an \
              earlier call in the batch triggered the stop rule"
         );
+    }
+
+    /// Tests for the truncation layer:
+    /// - Byte + line double threshold (whichever triggers first)
+    /// - byte-level fallback for single long lines
+    /// - short-circuit avoiding O(n) line scan on oversized outputs
+    mod truncate_tool_tests {
+        use super::*;
+
+        /// Output under both the byte and line thresholds is returned
+        /// as-is, no hint appended, no disk write attempted.
+        #[test]
+        fn small_output_passes_through_unchanged() {
+            let out = truncate_tool_output("test_tool", "call_1", "hello world\n");
+            assert_eq!(out, "hello world\n");
+            assert!(
+                !out.contains("[Tool output truncated"),
+                "no truncation marker should appear for small output"
+            );
+        }
+
+        /// Output that fits in bytes but exceeds the line threshold
+        /// triggers truncation with a "line limit" trigger label, and
+        /// the hint reports both byte and line counts.
+        #[test]
+        fn many_short_lines_triggers_line_limit_truncation() {
+            // 3000 short lines × ~3 bytes = ~9 KiB total — under the
+            // 50 KiB byte threshold but over the 2000-line threshold.
+            let mut input = String::new();
+            for i in 0..3_000 {
+                input.push_str(&format!("l{i}\n"));
+            }
+            assert!(input.len() < MAX_TOOL_OUTPUT_BYTES);
+            assert!(input.lines().count() > MAX_TOOL_OUTPUT_LINES);
+
+            let out = truncate_tool_output("test_tool", "call_2", &input);
+            assert!(
+                out.contains("[Tool output truncated (line limit):"),
+                "should report line-limit as the trigger; got: {out}"
+            );
+            assert!(
+                out.contains("showing first"),
+                "should report what was kept; got: {out}"
+            );
+            // The preview should contain the first 2000 lines, not all
+            // 3000.
+            let preview_line_count = out
+                .split("\n[Tool output truncated")
+                .next()
+                .unwrap_or("")
+                .lines()
+                .count();
+            assert_eq!(
+                preview_line_count, MAX_TOOL_OUTPUT_LINES,
+                "preview should contain exactly MAX_TOOL_OUTPUT_LINES lines"
+            );
+        }
+
+        /// Output that fits in lines but exceeds the byte threshold
+        /// triggers truncation with a "byte limit" trigger label.
+        #[test]
+        fn few_long_lines_triggers_byte_limit_truncation() {
+            // 10 lines × 10 KiB each = 100 KiB total — over the 50 KiB
+            // byte threshold but well under the 2000-line threshold.
+            let long_line = "x".repeat(10 * 1024);
+            let mut input = String::new();
+            for _ in 0..10 {
+                input.push_str(&long_line);
+                input.push('\n');
+            }
+            assert!(input.lines().count() < MAX_TOOL_OUTPUT_LINES);
+            assert!(input.len() > MAX_TOOL_OUTPUT_BYTES);
+
+            let out = truncate_tool_output("test_tool", "call_3", &input);
+            assert!(
+                out.contains("[Tool output truncated (byte limit):"),
+                "should report byte-limit as the trigger; got: {out}"
+            );
+        }
+
+        /// `char_boundary_before` walks back to a UTF-8 char start,
+        /// so truncating a string with multibyte chars doesn't split
+        /// a codepoint in half. Sanity check on a small example.
+        #[test]
+        fn char_boundary_before_handles_multibyte_chars() {
+            // "héllo" — 'é' is 2 bytes (0xC3 0xA9).
+            let s = "héllo";
+            // Index 2 lands inside 'é' (between byte 1 = 'h' and byte 2
+            // = first byte of 'é'). The function should walk back to
+            // 1 (the end of 'h').
+            assert_eq!(char_boundary_before(s, 2), 1);
+            // Index 3 is past 'é', so it stays at 3 (start of 'l').
+            assert_eq!(char_boundary_before(s, 3), 3);
+            // Past-the-end clamps to len.
+            assert_eq!(char_boundary_before(s, 100), s.len());
+        }
+
+        /// A single line longer than `MAX_TOOL_OUTPUT_BYTES` (e.g. a
+        /// minified bundle) must still produce a non-empty preview via
+        /// the byte-level fallback. Without the fallback, the line-based
+        /// loop would break on the first line (it exceeds the byte
+        /// threshold) and leave `preview` empty — a regression from the
+        /// old char-boundary truncation that always showed up to 50 KiB.
+        #[test]
+        fn single_long_line_produces_byte_level_preview() {
+            // One line, 100 KiB — well over the 50 KiB byte threshold.
+            let input = "x".repeat(100 * 1024);
+            assert_eq!(input.lines().count(), 1);
+
+            let out = truncate_tool_output("test_tool", "call_single", &input);
+            // Must contain a truncation marker with "byte limit" trigger.
+            assert!(
+                out.contains("[Tool output truncated (byte limit):"),
+                "should report byte-limit; got: {out}"
+            );
+            // The preview must NOT be empty — the byte-level fallback
+            // should have produced a prefix.
+            let preview = out.split("\n[Tool output truncated").next().unwrap_or("");
+            assert!(
+                !preview.is_empty(),
+                "byte-level fallback must produce a non-empty preview; got empty"
+            );
+            // Preview should be <= MAX_TOOL_OUTPUT_BYTES (char-safe).
+            assert!(
+                preview.len() <= MAX_TOOL_OUTPUT_BYTES,
+                "preview must be <= MAX_TOOL_OUTPUT_BYTES ({}), got {}",
+                MAX_TOOL_OUTPUT_BYTES,
+                preview.len()
+            );
+            // Preview should be > 0 — the whole point of the fallback.
+            assert!(
+                preview.len() > 0,
+                "preview must have content, not just the hint"
+            );
+        }
+
+        /// Verify the short-circuit: when `total_bytes > MAX_TOOL_OUTPUT_BYTES`,
+        /// the fast path must NOT scan all lines (O(n)). We can't directly
+        /// measure line-scan cost in a unit test, but we can verify the
+        /// output is correct — a large byte-exceeding input is truncated
+        /// with the right trigger and counts.
+        #[test]
+        fn oversized_bytes_truncates_without_full_line_scan() {
+            // 10_000 lines × 100 bytes = ~1 MB — over the 50 KiB byte
+            // threshold. Line count (10_000) also exceeds the 2000-line
+            // threshold, but the byte threshold triggers first.
+            let mut input = String::new();
+            for i in 0..10_000 {
+                input.push_str(&format!("{i:094}\n")); // ~95 bytes per line
+            }
+            assert!(input.len() > MAX_TOOL_OUTPUT_BYTES);
+
+            let out = truncate_tool_output("test_tool", "call_oversized", &input);
+            // Should be truncated — either byte or line limit triggers.
+            assert!(
+                out.contains("[Tool output truncated"),
+                "should be truncated; got: {out}"
+            );
+            // Preview should be bounded.
+            let preview = out.split("\n[Tool output truncated").next().unwrap_or("");
+            assert!(
+                preview.len() <= MAX_TOOL_OUTPUT_BYTES,
+                "preview must be <= MAX_TOOL_OUTPUT_BYTES, got {}",
+                preview.len()
+            );
+        }
+
+        /// Multibyte char safety in the byte-level fallback: a single
+        /// line whose byte-level cut point lands inside a multibyte
+        /// sequence must not split a codepoint.
+        #[test]
+        fn byte_level_fallback_respects_utf8_boundary() {
+            // Build a single line: ASCII prefix + multibyte chars that
+            // straddle the MAX_TOOL_OUTPUT_BYTES boundary.
+            // 'é' is 2 bytes (0xC3 0xA9). Fill up to just under the
+            // threshold, then add multibyte chars so the boundary cut
+            // lands inside one.
+            let prefix = "a".repeat(MAX_TOOL_OUTPUT_BYTES - 1);
+            // Append enough 'é' to push past the threshold.
+            let input = format!("{prefix}ééééé");
+            assert_eq!(input.lines().count(), 1);
+
+            let out = truncate_tool_output("test_tool", "call_mb", &input);
+            let preview = out.split("\n[Tool output truncated").next().unwrap_or("");
+            // Must be valid UTF-8 (no panic, no broken codepoint).
+            assert!(
+                std::str::from_utf8(preview.as_bytes()).is_ok(),
+                "preview must be valid UTF-8; got broken bytes"
+            );
+            // Must be <= MAX_TOOL_OUTPUT_BYTES.
+            assert!(
+                preview.len() <= MAX_TOOL_OUTPUT_BYTES,
+                "preview must be <= MAX_TOOL_OUTPUT_BYTES, got {}",
+                preview.len()
+            );
+        }
     }
 }

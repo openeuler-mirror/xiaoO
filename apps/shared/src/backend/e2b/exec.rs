@@ -246,6 +246,7 @@ impl OperationExec for E2bExec {
             stderr: output.stderr,
             exit_code: output.exit_code,
             timed_out: output.timed_out || timed_out,
+            ..Default::default()
         })
     }
 }
