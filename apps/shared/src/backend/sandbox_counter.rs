@@ -71,7 +71,7 @@ pub(crate) struct SandboxCounterKey {
 }
 
 impl SandboxCounterKey {
-    pub fn new(sandbox_type: impl Into<String>, key_identifier: impl Into<String>) -> Self {
+    pub(crate) fn new(sandbox_type: impl Into<String>, key_identifier: impl Into<String>) -> Self {
         // Always one-way hash the raw identifier here. serde Deserialize
         // bypasses `new` and sets the field directly from the on-disk value
         // (which is already the derived form), so deserialised keys are NOT
@@ -221,7 +221,7 @@ impl SandboxCounter {
     /// files are derived from `dir`, so callers (notably tests) can isolate
     /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
     /// directory.
-    pub fn new_with_storage_dir(max_per_key: usize, dir: PathBuf) -> Self {
+    pub(crate) fn new_with_storage_dir(max_per_key: usize, dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
         Self {
             storage_path: dir.join("sandbox_counts.json"),

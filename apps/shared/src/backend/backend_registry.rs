@@ -59,7 +59,7 @@ pub(crate) struct BackendRegistryEntry {
 }
 
 impl BackendRegistryEntry {
-    pub fn new(
+    pub(crate) fn new(
         backend_id: String,
         sandbox_key: SandboxCounterKey,
         session_ids: Vec<String>,
@@ -189,7 +189,7 @@ impl BackendRegistry {
     /// files are derived from `dir`, so callers (notably tests) can isolate
     /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
     /// directory.
-    pub fn new_with_storage_dir(dir: PathBuf) -> Self {
+    pub(crate) fn new_with_storage_dir(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
         Self {
             storage_path: dir.join("backend_registry.json"),

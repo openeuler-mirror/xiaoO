@@ -9,18 +9,15 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{
-    backend_tree_node, build_backend, current_time_ms, delete_backend_instance, detach_from_parent,
-    e2b, expires_at_ms_from_timeout, forked_provider_options, hash_config,
-    load_global_max_sandbox_cnt, metadata_matches_filter, new_backend_id, requested_backend_id,
-    resolve_backend_config, resolve_session_backend_config, workspace_root_string,
-    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
-    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendCreateRequest,
-    BackendEnsureSessionRequest, BackendError, BackendForkRequest, BackendForkResult, BackendInfo,
+    build_backend, current_time_ms, delete_backend_instance, detach_from_parent, e2b,
+    expires_at_ms_from_timeout, forked_provider_options, hash_config, load_global_max_sandbox_cnt,
+    metadata_matches_filter, new_backend_id, requested_backend_id, resolve_session_backend_config,
+    workspace_root_string, BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef,
+    BackendCheckpointRequest, BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest,
+    BackendCheckpointSnapshotDeleteResult, BackendEnsureSessionRequest, BackendError, BackendInfo,
     BackendInstanceEntry, BackendLease, BackendLineageEntry, BackendListFilter,
-    BackendManagerLimits, BackendRegistry, BackendRegistryEntry, BackendTreeNode,
-    BuildBackendInput, SandboxCounter, SandboxCounterKey, MAX_ACTIVE_SANDBOXES_PER_KEY,
-    STALE_OWNER_THRESHOLD_MS,
+    BackendManagerLimits, BackendRegistry, BackendRegistryEntry, BuildBackendInput, SandboxCounter,
+    SandboxCounterKey, MAX_ACTIVE_SANDBOXES_PER_KEY, STALE_OWNER_THRESHOLD_MS,
 };
 use crate::gateway::SessionStore;
 
@@ -138,7 +135,6 @@ fn resolve_checkpoint_backend_id(
     }
 }
 
-#[allow(dead_code)]
 impl BackendManager {
     pub fn new() -> Self {
         Self::new_with_limits(BackendManagerLimits::default())
@@ -184,6 +180,10 @@ impl BackendManager {
         &self.registry
     }
 
+    /// Introspection handle for the sandbox pool counter, used by the limit /
+    /// reconciliation tests to seed and assert pool state directly (real
+    /// e2b sandboxes need provider credentials unavailable in CI).
+    #[cfg(test)]
     pub(crate) fn sandbox_counter(&self) -> &SandboxCounter {
         &self.sandbox_counter
     }
@@ -191,7 +191,7 @@ impl BackendManager {
     /// Whether a backend of this `kind` participates in the shared sandbox
     /// counter / registry. Local backends are never counted.
     pub(crate) fn is_counted_kind(kind: &str) -> bool {
-        kind == "e2b" || kind == "conch"
+        kind == "e2b"
     }
 
     pub(crate) fn sandbox_key_from_config(
@@ -206,163 +206,9 @@ impl BackendManager {
             let key_identifier = e2b::resolve_api_key_from_options(&config.options)
                 .unwrap_or_else(|| "e2b_default".to_string());
             SandboxCounterKey::new("e2b", key_identifier)
-        } else if config.kind == "conch" {
-            SandboxCounterKey::new("conch", "conch_default")
         } else {
             SandboxCounterKey::new("local", "local_default")
         }
-    }
-
-    pub(crate) async fn create_backend(
-        &self,
-        request: BackendCreateRequest,
-    ) -> Result<BackendInfo, BackendError> {
-        let config = resolve_backend_config(request.provider.clone(), request.options)?;
-        let backend_id = requested_backend_id(request.backend_id)?;
-        let workspace_root = workspace_root_string(&request.workspace_root)
-            .map_err(BackendError::from_build_error)?;
-        let config_hash = hash_config(&config);
-        let expires_at_ms = request.timeout.map(expires_at_ms_from_timeout);
-        let sandbox_key = Self::sandbox_key_from_config(&config);
-
-        let mut state = self.state.lock().await;
-        if state.backends.contains_key(&backend_id) {
-            return Err(BackendError::Conflict {
-                message: format!("backend_id {backend_id} already exists"),
-            });
-        }
-        if let Some(session_id) = request.session_id.as_ref() {
-            if let Some(existing_backend_id) = state.session_index.get(session_id) {
-                return Err(BackendError::Conflict {
-                    message: format!(
-                        "session_id {session_id} is already bound to backend_id {existing_backend_id}"
-                    ),
-                });
-            }
-        }
-
-        let reserved_slot = if Self::is_counted_kind(&config.kind) {
-            match self.sandbox_counter.check_and_reserve(&sandbox_key).await {
-                Ok(_) => true,
-                Err(super::SandboxCounterError::LimitExceeded { .. }) => {
-                    return Err(BackendError::NeedsEviction);
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else {
-            false
-        };
-
-        let entry = match build_backend(BuildBackendInput {
-            backend_id: backend_id.clone(),
-            config: config.clone(),
-            workspace_root_text: workspace_root,
-            config_hash,
-            session_id_for_instance: request
-                .session_id
-                .clone()
-                .unwrap_or_else(|| backend_id.0.clone()),
-            session_id: request.session_id,
-            resource_limits: request.resource_limits,
-            metadata: request.metadata,
-            expires_at_ms,
-            lineage: BackendLineageEntry::default(),
-            backend_checkpoint: None,
-            e2b_bootstrap: None,
-        })
-        .await
-        {
-            Ok(entry) => entry,
-            Err(error) => {
-                if reserved_slot {
-                    self.sandbox_counter
-                        .cancel_reservation(&sandbox_key)
-                        .await
-                        .ok();
-                }
-                return Err(error);
-            }
-        };
-        let info = entry.info();
-        let session_ids = entry.session_ids.keys().cloned().collect::<Vec<_>>();
-        for session_id in &session_ids {
-            state
-                .session_index
-                .insert(session_id.clone(), backend_id.clone());
-        }
-        state.backends.insert(backend_id.clone(), entry);
-
-        if Self::is_counted_kind(&config.kind) {
-            if reserved_slot {
-                self.sandbox_counter
-                    .confirm_creation(&sandbox_key)
-                    .await
-                    .ok();
-            }
-            let registry_entry = BackendRegistryEntry::new(
-                backend_id.0.clone(),
-                sandbox_key,
-                session_ids.clone(),
-                self.process_id.clone(),
-                info.instance_id.clone(),
-                None,
-            );
-            self.registry.register(registry_entry).await.ok();
-        }
-
-        Ok(info)
-    }
-
-    pub(crate) async fn connect_backend(
-        &self,
-        backend_id: &str,
-        request: BackendConnectRequest,
-    ) -> Result<BackendInfo, BackendError> {
-        let mut state = self.state.lock().await;
-        let backend_id = BackendId(backend_id.to_string());
-        if let Some(session_id) = request.session_id.as_ref() {
-            if let Some(existing_backend_id) = state.session_index.get(session_id) {
-                if existing_backend_id != &backend_id {
-                    return Err(BackendError::Conflict {
-                        message: format!(
-                            "session_id {session_id} is already bound to backend_id {existing_backend_id}"
-                        ),
-                    });
-                }
-            }
-        }
-        let session_id = request.session_id;
-        let info = {
-            let entry =
-                state
-                    .backends
-                    .get_mut(&backend_id)
-                    .ok_or_else(|| BackendError::NotFound {
-                        backend_id: backend_id.0.clone(),
-                    })?;
-            if let Some(timeout) = request.timeout {
-                entry.expires_at_ms = Some(expires_at_ms_from_timeout(timeout));
-            }
-            if let Some(session_id) = session_id.as_ref() {
-                entry.session_ids.insert(session_id.clone(), ());
-            }
-            entry.info()
-        };
-        if let Some(session_id) = session_id {
-            state.session_index.insert(session_id, backend_id);
-        }
-        Ok(info)
-    }
-
-    pub(crate) async fn get_backend(&self, backend_id: &str) -> Result<BackendInfo, BackendError> {
-        let state = self.state.lock().await;
-        state
-            .backends
-            .get(&BackendId(backend_id.to_string()))
-            .map(BackendInstanceEntry::info)
-            .ok_or_else(|| BackendError::NotFound {
-                backend_id: backend_id.to_string(),
-            })
     }
 
     pub async fn list_backends(&self, filter: BackendListFilter) -> Vec<BackendInfo> {
@@ -372,27 +218,6 @@ impl BackendManager {
             .values()
             .filter(|entry| metadata_matches_filter(&entry.instance.metadata, &filter.metadata))
             .map(BackendInstanceEntry::info)
-            .collect()
-    }
-
-    pub(crate) async fn list_backend_trees(&self) -> Vec<BackendTreeNode> {
-        let state = self.state.lock().await;
-        let mut roots = state
-            .backends
-            .iter()
-            .filter_map(|(backend_id, entry)| {
-                let parent_is_live = entry
-                    .lineage
-                    .parent_backend_id
-                    .as_ref()
-                    .is_some_and(|parent| state.backends.contains_key(parent));
-                (!parent_is_live).then(|| backend_id.clone())
-            })
-            .collect::<Vec<_>>();
-        roots.sort_by(|a, b| a.0.cmp(&b.0));
-        roots
-            .into_iter()
-            .filter_map(|backend_id| backend_tree_node(&state, &backend_id))
             .collect()
     }
 
@@ -415,29 +240,6 @@ impl BackendManager {
                 .ok();
         }
         delete_backend_instance(instance, reason).await
-    }
-
-    pub(crate) async fn delete_backend(&self, backend_id: &str) -> Result<(), BackendError> {
-        let removed = {
-            let mut state = self.state.lock().await;
-            let backend_id = BackendId(backend_id.to_string());
-            let entry =
-                state
-                    .backends
-                    .remove(&backend_id)
-                    .ok_or_else(|| BackendError::NotFound {
-                        backend_id: backend_id.0.clone(),
-                    })?;
-            for session_id in entry.session_ids.keys() {
-                state.session_index.remove(session_id);
-            }
-            detach_from_parent(&mut state, &backend_id, &entry);
-            entry
-        };
-
-        self.finalize_removal(removed, BackendLifecycleReason::UserRequested)
-            .await
-            .map_err(BackendError::from_operation_error)
     }
 
     pub(crate) async fn checkpoint_backend(
@@ -520,7 +322,7 @@ impl BackendManager {
         })
     }
 
-    pub async fn delete_checkpoint_snapshot(
+    pub(crate) async fn delete_checkpoint_snapshot(
         &self,
         request: BackendCheckpointSnapshotDeleteRequest,
     ) -> Result<BackendCheckpointSnapshotDeleteResult, BackendError> {
@@ -754,44 +556,6 @@ impl BackendManager {
         Ok(BackendCheckoutResult {
             backend: child_info,
             checkpoint: request.checkpoint,
-        })
-    }
-
-    pub(crate) async fn fork_backend(
-        &self,
-        request: BackendForkRequest,
-    ) -> Result<BackendForkResult, BackendError> {
-        let checkpoint = self
-            .checkpoint_backend(BackendCheckpointRequest {
-                backend_id: request.parent_backend_id,
-                session_id: request.parent_session_id,
-                name: request.snapshot_name,
-                metadata: Value::Null,
-            })
-            .await?;
-        let checkout = self
-            .checkout_backend(BackendCheckoutRequest {
-                checkpoint: checkpoint.checkpoint.clone(),
-                backend_id: request.backend_id,
-                session_id: request.session_id,
-                timeout: request.timeout,
-                metadata: request.metadata,
-                resource_limits: request.resource_limits,
-                options: request.options,
-                initial_session_status: None,
-            })
-            .await?;
-        let snapshot_id = checkpoint
-            .checkpoint
-            .provider_snapshot_id
-            .clone()
-            .unwrap_or_else(|| checkpoint.checkpoint.checkpoint_id.clone());
-
-        Ok(BackendForkResult {
-            parent: checkpoint.backend,
-            child: checkout.backend,
-            snapshot_id,
-            snapshot_names: checkpoint.checkpoint.provider_snapshot_names,
         })
     }
 

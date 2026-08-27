@@ -23,7 +23,7 @@ const LEASE_TABLE_SHARD_COUNT: usize = 16;
 /// Heartbeat staleness threshold (45 s = 3x the 15 s heartbeat interval, the
 /// safety margin against transient network blips). A lease older than this is
 /// orphaned and may be taken over.
-pub const STALE_LEASE_THRESHOLD_MS: u64 = 45_000;
+pub(crate) const STALE_LEASE_THRESHOLD_MS: u64 = 45_000;
 
 /// Reaper threshold (2 h): a session with no live lease for longer than this
 /// (and no in-flight turn) is force-closed to reclaim leaked backends.
@@ -123,7 +123,7 @@ pub(crate) struct SessionLeaseTable {
 }
 
 impl SessionLeaseTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 

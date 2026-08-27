@@ -37,7 +37,10 @@ impl std::fmt::Debug for E2bBootstrapArchive {
 }
 
 impl E2bBootstrapArchive {
-    pub fn path(&self) -> &Path {
+    // `path()` is read only inside the crate (e2b provider + bootstrap
+    // tests); app code consumes `binding()` only, so keep the filesystem
+    // path accessor crate-private.
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 

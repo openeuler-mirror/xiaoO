@@ -141,23 +141,6 @@ pub struct CompletedTurnIngest {
     #[serde(default)]
     pub next_attempt_ms: u64,
 }
-impl CompletedTurnIngest {
-    #[cfg(test)]
-    pub(crate) fn for_test(id: &str, user: &str, assistant: &str) -> Self {
-        Self {
-            message_id: id.into(),
-            conversation_id: "conversation".into(),
-            sender_id: "sender".into(),
-            agent_role: "main".into(),
-            timestamp_ms: 0,
-            user_text: user.into(),
-            assistant_text: assistant.into(),
-            recent_messages: Vec::new(),
-            retries: 0,
-            next_attempt_ms: 0,
-        }
-    }
-}
 
 #[async_trait]
 pub trait TurnMemoryAutomation: Send + Sync {
@@ -214,34 +197,6 @@ impl DurableIngestQueue {
                 .any(|existing| existing.message_id == entry.message_id)
             {
                 entries.push(entry);
-            }
-            Ok(())
-        })
-        .await
-    }
-    #[allow(dead_code)]
-    pub async fn pending(&self) -> Result<Vec<CompletedTurnIngest>, MemoryAutomationError> {
-        Ok(self.entries.lock().await.clone())
-    }
-    #[allow(dead_code)]
-    pub async fn complete(&self, id: &str) -> Result<(), MemoryAutomationError> {
-        self.update_entries(|entries| {
-            entries.retain(|entry| entry.message_id != id);
-            Ok(())
-        })
-        .await
-    }
-    #[allow(dead_code)]
-    pub async fn retry(
-        &self,
-        id: &str,
-        retries: u32,
-        next_attempt_ms: u64,
-    ) -> Result<(), MemoryAutomationError> {
-        self.update_entries(|entries| {
-            if let Some(entry) = entries.iter_mut().find(|entry| entry.message_id == id) {
-                entry.retries = retries;
-                entry.next_attempt_ms = next_attempt_ms;
             }
             Ok(())
         })
@@ -432,24 +387,7 @@ pub(crate) struct DurableIngestWorker {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl DurableIngestWorker {
-    #[allow(dead_code)]
-    pub async fn shutdown(mut self) -> Result<(), MemoryAutomationError> {
-        self.shutdown.cancel();
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-            if let Err(error) = handle.await {
-                if error.is_cancelled() {
-                    return Ok(());
-                }
-                return Err(MemoryAutomationError::Config(format!(
-                    "memory ingest worker join failed: {error}"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
+impl DurableIngestWorker {}
 
 impl Drop for DurableIngestWorker {
     fn drop(&mut self) {

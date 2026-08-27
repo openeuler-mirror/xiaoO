@@ -20,9 +20,10 @@ mod session_handle;
 pub mod session_lease;
 pub use session_lease::{
     daemon_channel_principal, daemon_cron_principal, daemon_hook_principal, is_daemon_principal,
-    STALE_LEASE_THRESHOLD_MS,
 };
-pub(crate) use session_lease::{SessionLeaseTable, ORPHAN_SESSION_THRESHOLD_MS, REAPER_INTERVAL};
+pub(crate) use session_lease::{
+    SessionLeaseTable, ORPHAN_SESSION_THRESHOLD_MS, REAPER_INTERVAL, STALE_LEASE_THRESHOLD_MS,
+};
 pub mod session_record;
 pub mod session_runtime;
 pub mod session_service;
@@ -36,7 +37,7 @@ pub use tool_assembly::{BoundControlStore, McpToolCache, ToolAssemblyError};
 pub mod turns;
 pub mod workspace_prompt;
 
-pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider, SecretProvider};
+pub use decrypted_api_keys::{get_decrypted_api_key, init_secret_provider};
 pub(crate) use e2b_runtime::finalize_e2b_runtime;
 
 pub use bootstrap::{AppBootstrap, AppBootstrapError, AppDependencies};
@@ -59,13 +60,13 @@ pub use session_record::{
     E2B_REMOTE_WORKSPACE_ROOT,
 };
 pub(crate) use session_record::{SessionStateOutcome, E2B_REMOTE_SKILLS_ROOT};
-pub(crate) use session_runtime::AppRuntimeFactoryError;
+pub(crate) use session_runtime::{AppRuntimeFactory, AppRuntimeFactoryError};
 pub use session_runtime::{
-    AppRuntimeFactory, ResolvedSessionRuntime, SessionRuntimeBindings, SessionRuntimeBuildInput,
+    ResolvedSessionRuntime, SessionRuntimeBindings, SessionRuntimeBuildInput,
     SessionRuntimeDescriptor, SessionRuntimeResolveError, SessionRuntimeResolver,
 };
 pub use session_service::{SessionControlPlane, SessionService, SessionServiceError};
-pub use session_service_impl::CoreBackedSessionService;
+pub(crate) use session_service_impl::CoreBackedSessionService;
 pub use session_store::{InMemorySessionStore, SessionStore, SessionStoreError};
 pub use turns::{
     AppTurnRequest, AppTurnResult, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig,

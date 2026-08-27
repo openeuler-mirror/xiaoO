@@ -3,12 +3,11 @@
 //!
 //! The request struct definitions live in [`protocol::wire`]; this
 //! module re-exports them under the `xiaoo_shared::gateway` path so existing
-//! import paths keep working. The fork / input / submit-receipt types below
-//! are not part of the wire contract and stay defined here, alongside the
+//! import paths keep working. The input / submit-receipt types below are not
+//! part of the wire contract and stay defined here, alongside the
 //! [`channel_session_id`] helper.
 
-use crate::backend::BackendForkResult;
-use crate::gateway::{AppTurnRequest, SessionRecord};
+use crate::gateway::AppTurnRequest;
 use agent_types::interaction::InteractionResponse;
 use serde::{Deserialize, Serialize};
 
@@ -30,26 +29,6 @@ pub fn channel_session_id(
 ) -> String {
     let scope = channel_instance_id.unwrap_or(channel);
     format!("{scope}:{conversation_id}")
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct SessionForkRequest {
-    pub parent_session_id: String,
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
-    pub sender_id: Option<String>,
-    #[serde(default)]
-    pub snapshot_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct SessionForkResult {
-    pub parent: SessionRecord,
-    pub child: SessionRecord,
-    pub backend_fork: BackendForkResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

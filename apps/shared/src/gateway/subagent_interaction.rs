@@ -44,7 +44,7 @@ pub(crate) struct SubagentInteractionHandle {
 }
 
 impl SubagentInteractionHandle {
-    pub fn new(
+    pub(crate) fn new(
         supervisor: Arc<SessionSupervisor>,
         agent_id: AgentId,
         parent_agent_id: AgentId,
