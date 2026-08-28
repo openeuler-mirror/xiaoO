@@ -128,6 +128,22 @@ fn nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Sc
     })
 }
 
+impl McpUsage {
+    /// All-zero usage, used as the sentinel for `done` results that carry no
+    /// provider usage (e.g. background failures). Keeping a real object
+    /// instead of `null` lets the outputSchema declare a plain `McpUsage`
+    /// object (no nullability), satisfying both strict JSON Schema 2020-12
+    /// validators and clients that only recognize scalar `type` values.
+    fn zeroed() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            estimated_input_tokens: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 struct McpTurnOutput {
     /// xiaoO application session ID. Pass it to the next call to continue.
@@ -153,47 +169,25 @@ enum AgentOperationPhase {
 struct AgentRunningSnapshot {
     /// Whether the operation is waiting to start or actively running.
     phase: AgentOperationPhase,
-    /// Current root-agent model turn, when execution has started.
-    #[schemars(schema_with = "optional_nonnegative_integer_schema")]
-    current_turn: Option<u32>,
-    /// Latest visible text snapshot from the current or previous root-agent turn.
-    #[schemars(schema_with = "optional_string_schema")]
-    last_text: Option<String>,
+    /// Current root-agent model turn; 0 until execution starts (queued).
+    #[schemars(schema_with = "nonnegative_integer_schema")]
+    current_turn: u32,
+    /// Latest visible text snapshot from the current or previous root-agent
+    /// turn; empty string until any text has been produced.
+    last_text: String,
     /// Unix timestamp of the most recent snapshot update.
     #[schemars(schema_with = "nonnegative_integer_schema")]
     updated_at_ms: u64,
 }
 
+// Optional input-string schema: a plain scalar `type: "string"`. The field is
+// `Option<String>` only so the caller may omit it; it is never serialized as a
+// JSON `null`. The schema therefore advertises a single scalar type, which
+// stays compatible with strict JSON Schema 2020-12 validators and with clients
+// that compare the `type` value directly.
 fn optional_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    // Use the standard JSON Schema 2020-12 way to express nullability
-    // (`type: ["string", "null"]`). The previous `x-nullable: true` was an
-    // OpenAPI 3.0 vendor extension that strict JSON Schema validators
-    // (e.g. Python `jsonschema`, ajv in strict mode) ignore, causing them
-    // to reject actual `null` values produced by `Option<T>` fields.
     schemars::json_schema!({
-        "type": ["string", "null"]
-    })
-}
-
-fn optional_nonnegative_integer_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    // See `optional_string_schema` for why we use the array form of `type`
-    // instead of the non-standard `x-nullable` extension.
-    schemars::json_schema!({
-        "type": ["integer", "null"],
-        "minimum": 0
-    })
-}
-
-fn optional_mcp_usage_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    // Combine the McpUsage subschema with `null` via `anyOf` rather than the
-    // non-standard `x-nullable` keyword, so strict JSON Schema 2020-12
-    // validators accept `usage: null` (the success-without-usage case).
-    let usage_schema = gen.subschema_for::<McpUsage>();
-    schemars::json_schema!({
-        "anyOf": [
-            usage_schema,
-            { "type": "null" }
-        ]
+        "type": "string"
     })
 }
 
@@ -217,10 +211,13 @@ enum AgentOperationDetail {
     Done {
         reply: String,
         outcome: String,
-        #[schemars(schema_with = "optional_mcp_usage_schema")]
-        usage: Option<McpUsage>,
-        #[schemars(schema_with = "optional_string_schema")]
-        error: Option<String>,
+        /// Token accounting for this turn. On failure (where no usage was
+        /// reported) this is a zeroed `McpUsage` rather than `null`, so the
+        /// field is always a plain object (see `McpUsage::zeroed`).
+        usage: McpUsage,
+        /// Sanitized error string. Empty on success, non-empty on failure.
+        /// Never `null`, so the schema can declare a plain scalar `string`.
+        error: String,
     },
 }
 
@@ -252,8 +249,8 @@ enum AgentOperationState {
     Done {
         reply: String,
         outcome: String,
-        usage: Option<McpUsage>,
-        error: Option<String>,
+        usage: McpUsage,
+        error: String,
     },
 }
 
@@ -311,8 +308,8 @@ impl AgentOperationRegistry {
         let (completion_tx, _completion_rx) = watch::channel(false);
         let snapshot = AgentRunningSnapshot {
             phase: AgentOperationPhase::Queued,
-            current_turn: None,
-            last_text: None,
+            current_turn: 0,
+            last_text: String::new(),
             updated_at_ms: current_time_ms(),
         };
         let output = AgentOperationOutput {
@@ -392,7 +389,7 @@ impl AgentOperationRegistry {
             return;
         };
         snapshot.phase = AgentOperationPhase::Running;
-        snapshot.current_turn = Some(turn);
+        snapshot.current_turn = turn;
         snapshot.updated_at_ms = current_time_ms();
     }
 
@@ -406,7 +403,7 @@ impl AgentOperationRegistry {
         let AgentOperationState::Running(snapshot) = &mut record.state else {
             return;
         };
-        snapshot.last_text = Some(text.to_string());
+        snapshot.last_text = text.to_string();
         snapshot.updated_at_ms = current_time_ms();
     }
 
@@ -450,8 +447,8 @@ impl AgentOperationRegistry {
             operation_id,
             result.visible_reply,
             result.outcome.as_tag().to_string(),
-            Some(usage),
-            None,
+            usage,
+            String::new(),
         );
     }
 
@@ -463,7 +460,13 @@ impl AgentOperationRegistry {
             .and_then(|inner| inner.operations.get(operation_id).map(last_operation_text))
             .flatten()
             .unwrap_or_default();
-        self.complete(operation_id, reply, "failed".to_string(), None, Some(error));
+        self.complete(
+            operation_id,
+            reply,
+            "failed".to_string(),
+            McpUsage::zeroed(),
+            error,
+        );
     }
 
     fn complete(
@@ -471,8 +474,8 @@ impl AgentOperationRegistry {
         operation_id: &str,
         reply: String,
         outcome: String,
-        usage: Option<McpUsage>,
-        error: Option<String>,
+        usage: McpUsage,
+        error: String,
     ) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
@@ -537,7 +540,7 @@ impl AgentOperationRecord {
 
 fn last_operation_text(record: &AgentOperationRecord) -> Option<String> {
     match &record.state {
-        AgentOperationState::Running(snapshot) => snapshot.last_text.clone(),
+        AgentOperationState::Running(snapshot) => Some(snapshot.last_text.clone()),
         AgentOperationState::Done { reply, .. } => Some(reply.clone()),
     }
 }
@@ -1733,71 +1736,95 @@ mod tests {
     }
 
     #[test]
-    fn agent_operation_schema_uses_standard_json_schema_nullability() {
-        // Strict JSON Schema 2020-12 validators (e.g. Python `jsonschema`,
-        // ajv in strict mode) do not recognize the OpenAPI `x-nullable`
-        // vendor extension. They must see `type: ["<type>", "null"]` or
-        // `anyOf: [<schema>, { "type": "null" }]` to accept `null` values.
-        // The actual structuredContent legitimately uses `null` for
-        // `current_turn` / `last_text` (when phase == queued) and for
-        // `error` (on success) / `usage` (on failure), so the schema
-        // must use the standard form.
+    fn agent_operation_schema_uses_scalar_types_and_never_emits_null() {
+        // The agent operation output never produces JSON `null`: nullable
+        // fields use sentinel values (0 / "" / a zeroed `McpUsage`) instead.
+        // The outputSchema therefore declares plain scalar `type` values,
+        // which keeps it valid under strict JSON Schema 2020-12 validators
+        // and under clients that compare the `type` value directly.
         let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
             .expect("agent operation schema should serialize");
         let schema_text = schema.to_string();
+
+        // No non-standard or array-form type annotations.
         assert!(
             !schema_text.contains("x-nullable"),
-            "schema still uses non-standard x-nullable: {schema_text}"
+            "schema 仍含非标准 x-nullable: {schema_text}"
         );
+        assert!(
+            !schema_text.contains("\"type\":[") && !schema_text.contains("\"type\": ["),
+            "schema 仍含数组形式 type: {schema_text}"
+        );
+        assert!(
+            !schema_text.contains("anyOf"),
+            "schema 仍含 anyOf: {schema_text}"
+        );
+        // The top-level `oneOf` discriminates the running/done states and is expected.
 
-        let snapshot = schema
+        // Field level: current_turn / last_text must be scalar.
+        let snapshot_props = schema
             .pointer("/$defs/AgentRunningSnapshot/properties")
             .expect("snapshot properties present");
-        for (field, expected_type) in [
-            ("current_turn", "integer"),
-            ("last_text", "string"),
-        ] {
-            let field_schema = snapshot
+        for (field, expected) in [("current_turn", "integer"), ("last_text", "string")] {
+            let field_schema = snapshot_props
                 .get(field)
                 .unwrap_or_else(|| panic!("missing {field} schema: {schema_text}"));
-            let type_value = field_schema
-                .get("type")
-                .and_then(|v| v.as_array())
-                .unwrap_or_else(|| panic!("{field} type must be an array: {field_schema}"));
-            let types: Vec<&str> = type_value
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
-            assert!(
-                types.contains(&expected_type) && types.contains(&"null"),
-                "{field} type must allow null, got {types:?}: {field_schema}"
+            assert_eq!(
+                field_schema.get("type").and_then(|v| v.as_str()),
+                Some(expected),
+                "{field} 必须是标量 type `{expected}`: {field_schema}"
             );
         }
-
-        let done_branch = schema
+        // Done branch: error is scalar string; usage is a direct McpUsage object reference.
+        let done_props = schema
             .pointer("/oneOf/1/properties")
             .expect("done branch properties present");
-        let usage_schema = done_branch
+        let error_schema = done_props
+            .get("error")
+            .unwrap_or_else(|| panic!("missing error schema: {schema_text}"));
+        assert_eq!(
+            error_schema.get("type").and_then(|v| v.as_str()),
+            Some("string"),
+            "error 必须是标量 string: {error_schema}"
+        );
+        let usage_schema = done_props
             .get("usage")
             .unwrap_or_else(|| panic!("missing usage schema: {schema_text}"));
         assert!(
-            usage_schema.get("anyOf").is_some(),
-            "usage must use anyOf for nullability: {usage_schema}"
+            usage_schema.get("$ref").is_some(),
+            "usage 必须直接引用 McpUsage 对象: {usage_schema}"
         );
-        let error_schema = done_branch
-            .get("error")
-            .unwrap_or_else(|| panic!("missing error schema: {schema_text}"));
-        let error_types: Vec<&str> = error_schema
-            .get("type")
-            .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("error type must be an array: {error_schema}"))
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert!(
-            error_types.contains(&"string") && error_types.contains(&"null"),
-            "error type must allow null, got {error_types:?}: {error_schema}"
-        );
+
+        // The real structuredContent must contain no `null`, so the scalar
+        // schema is never violated.
+        let operations = AgentOperationRegistry::default();
+        let (op_id, _cancel, initial) = operations
+            .register("mcp_scalar".to_string(), PathBuf::from("/tmp"), true)
+            .expect("register operation");
+        // queued snapshot: current_turn=0, last_text=""
+        let queued = serde_json::to_value(&initial).expect("serialize queued");
+        assert_eq!(queued["snapshot"]["current_turn"], 0);
+        assert_eq!(queued["snapshot"]["last_text"], "");
+        // success: error="", usage is a real object
+        operations.complete_success(&op_id, mock_turn_result());
+        let done_ok = serde_json::to_value(operations.status(&op_id).expect("done"))
+            .expect("serialize done");
+        assert_eq!(done_ok["state"], "done");
+        assert_eq!(done_ok["error"], "");
+        assert_eq!(done_ok["usage"]["total_tokens"], 5);
+        // failure: usage is a zeroed object (not null), error is a non-empty string
+        let (fail_id, _cancel, _) = operations
+            .register("mcp_scalar_fail".to_string(), PathBuf::from("/tmp"), true)
+            .expect("register fail op");
+        operations.complete_failure(&fail_id, "boom".to_string());
+        let done_fail = serde_json::to_value(operations.status(&fail_id).expect("done fail"))
+            .expect("serialize done fail");
+        assert_eq!(done_fail["outcome"], "failed");
+        assert_eq!(done_fail["usage"]["total_tokens"], 0);
+        assert_eq!(done_fail["error"], "boom");
+        // No `null` anywhere across the three states.
+        let all = format!("{queued}{done_ok}{done_fail}");
+        assert!(!all.contains("null"), "structuredContent 仍含 null: {all}");
     }
 
     #[test]
@@ -1995,7 +2022,7 @@ mod tests {
         assert_eq!(done_json["reply"], "mock reply");
         assert_eq!(done_json["outcome"], "complete");
         assert_eq!(done_json["usage"]["total_tokens"], 5);
-        assert!(done_json["error"].is_null());
+        assert_eq!(done_json["error"], "");
     }
 
     #[tokio::test]
@@ -2024,7 +2051,8 @@ mod tests {
             let done_json = serde_json::to_value(done).expect("serialize failed status");
             assert_eq!(done_json["state"], "done");
             assert_eq!(done_json["outcome"], "failed");
-            assert!(done_json["usage"].is_null());
+            assert_eq!(done_json["usage"]["total_tokens"], 0);
+            assert_eq!(done_json["usage"]["prompt_tokens"], 0);
             let error = done_json["error"].as_str().expect("sanitized error");
             assert!(error.contains("inspect daemon logs"), "{error}");
             assert!(!error.contains("private backend failure"), "{error}");
