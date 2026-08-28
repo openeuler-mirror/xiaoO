@@ -23,17 +23,17 @@ const LEASE_TABLE_SHARD_COUNT: usize = 16;
 /// Heartbeat staleness threshold (45 s = 3x the 15 s heartbeat interval, the
 /// safety margin against transient network blips). A lease older than this is
 /// orphaned and may be taken over.
-pub const STALE_LEASE_THRESHOLD_MS: u64 = 45_000;
+pub(crate) const STALE_LEASE_THRESHOLD_MS: u64 = 45_000;
 
 /// Reaper threshold (2 h): a session with no live lease for longer than this
 /// (and no in-flight turn) is force-closed to reclaim leaked backends.
 /// Conservative so a user who detaches and comes back an hour later still
 /// finds the session warm.
-pub const ORPHAN_SESSION_THRESHOLD_MS: u64 = 7_200_000;
+pub(crate) const ORPHAN_SESSION_THRESHOLD_MS: u64 = 7_200_000;
 
 /// Reaper sweep interval. `spawn_orphan_reaper` and any future observability
 /// surface share this single source of truth.
-pub const REAPER_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(600);
+pub(crate) const REAPER_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(600);
 
 // TUI-side HTTP timeouts live in `apps/endside/src/gateway_api/http_timeouts.rs`
 // so this crate does not carry TUI-only configuration.
@@ -44,7 +44,7 @@ pub const REAPER_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_s
 /// `assert_lease_holder` and the actor's pop-time guard recognise them and
 /// bypass the holder check explicitly (rather than the old implicit
 /// `client_id = None` bypass that was unauditable).
-pub const DAEMON_PRINCIPAL_PREFIX: &str = "daemon:";
+pub(crate) const DAEMON_PRINCIPAL_PREFIX: &str = "daemon:";
 
 /// Whether `client_id` is a daemon-internal principal. Daemon principals
 /// bypass the lease-holder check at the router, the close path, and the
@@ -74,7 +74,7 @@ pub fn daemon_channel_principal(channel_id: &str) -> String {
 }
 
 #[derive(Debug, Clone)]
-pub struct SessionLease {
+pub(crate) struct SessionLease {
     pub client_id: String,
     pub client_pid: Option<u32>,
     pub client_hostname: Option<String>,
@@ -83,7 +83,7 @@ pub struct SessionLease {
 
 impl SessionLease {
     /// Whether this lease is older than `threshold_ms` relative to `now`.
-    pub fn is_stale(&self, now: u64, threshold_ms: u64) -> bool {
+    pub(crate) fn is_stale(&self, now: u64, threshold_ms: u64) -> bool {
         if self.last_heartbeat_ms == 0 {
             return true;
         }
@@ -93,7 +93,7 @@ impl SessionLease {
 
 /// Outcome of a lease-acquire attempt.
 #[derive(Debug, Clone)]
-pub enum LeaseAcquireOutcome {
+pub(crate) enum LeaseAcquireOutcome {
     /// This client had no prior lease, held it already (refreshed), or took
     /// over a stale lease. The operation may proceed.
     Acquired,
@@ -117,13 +117,13 @@ pub enum LeaseAcquireOutcome {
 }
 
 #[derive(Clone)]
-pub struct SessionLeaseTable {
+pub(crate) struct SessionLeaseTable {
     /// Per-session lease table, sharded by `session_id` hash.
     shards: Arc<[Mutex<HashMap<String, SessionLease>>]>,
 }
 
 impl SessionLeaseTable {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -257,7 +257,7 @@ impl SessionLeaseTable {
     /// re-check — reads the **current** table state under the mutex so a
     /// heartbeat between sweep-start and `mark_closing` doesn't get missed.
     /// Fails open (`false`) on clock skew.
-    pub async fn has_live_lease(&self, session_id: &str, stale_threshold_ms: u64) -> bool {
+    pub(crate) async fn has_live_lease(&self, session_id: &str, stale_threshold_ms: u64) -> bool {
         let Ok(now) = current_time_ms() else {
             return false;
         };
@@ -278,7 +278,7 @@ impl SessionLeaseTable {
     ///
     /// `None` callers never match the recorded holder (a holder always has a
     /// non-empty `client_id`); they pass through on the stale / no-lease arms.
-    pub async fn check_holder(
+    pub(crate) async fn check_holder(
         &self,
         session_id: &str,
         client_id: Option<&str>,
@@ -318,7 +318,7 @@ impl SessionLeaseTable {
     ///
     /// `None` callers never match the recorded holder (a holder always has a
     /// non-empty `client_id`); they pass through on the stale / no-lease arms.
-    pub async fn check_or_takeover_holder(
+    pub(crate) async fn check_or_takeover_holder(
         &self,
         session_id: &str,
         client_id: Option<&str>,
@@ -409,7 +409,7 @@ impl SessionLeaseTable {
 }
 
 #[derive(Debug, Clone)]
-pub enum LeaseCheckFailure {
+pub(crate) enum LeaseCheckFailure {
     /// The session is held by another live `client_id`.
     Busy {
         holder_client_id: String,
@@ -428,7 +428,7 @@ pub enum LeaseCheckFailure {
 /// `UNIX_EPOCH` (misconfigured RTC, VM clock skew, first boot before NTP).
 /// Lease enforcement fails-closed on this — see [`current_time_ms`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClockSkew;
+pub(crate) struct ClockSkew;
 
 impl std::fmt::Display for ClockSkew {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

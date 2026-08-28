@@ -39,9 +39,4 @@ impl PendingInteractionStore {
     pub async fn take(&self, session_id: &str) -> Option<PendingInteraction> {
         self.pending.write().await.remove(session_id)
     }
-
-    /// Check whether a pending interaction exists for the given session.
-    pub async fn has_pending(&self, session_id: &str) -> bool {
-        self.pending.read().await.contains_key(session_id)
-    }
 }

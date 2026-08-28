@@ -2,7 +2,7 @@ use crate::app_state::{AppState, InputMode};
 use crate::chat::{Message, TodoSnapshotUpdate, ToolExecutionStatus, ToolExecutionUpdate};
 use crate::debug_log;
 use crate::session_gateway::SessionTurnUpdate;
-use agent_types::common::ids::AgentId;
+use xiaoo_api::chat::AgentId;
 use xiaoo_shared::plan::todo_snapshot_from_tool_args;
 
 use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_TICK};
@@ -858,8 +858,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use agent_types::common::ids::AgentId;
     use tokio::sync::{mpsc, watch};
+    use xiaoo_api::chat::AgentId;
 
     use crate::app_state::AppState;
     use crate::chat::{

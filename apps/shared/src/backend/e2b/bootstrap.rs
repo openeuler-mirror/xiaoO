@@ -13,9 +13,9 @@ use thiserror::Error;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
-pub const E2B_BOOTSTRAP_MAX_ENTRIES: u64 = 100_000;
-pub const E2B_BOOTSTRAP_MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
-pub const E2B_BOOTSTRAP_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const E2B_BOOTSTRAP_MAX_ENTRIES: u64 = 100_000;
+pub(crate) const E2B_BOOTSTRAP_MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const E2B_BOOTSTRAP_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// A disk-backed, immutable bootstrap payload. The file is removed when the
 /// last runtime/build reference is dropped.
@@ -37,15 +37,18 @@ impl std::fmt::Debug for E2bBootstrapArchive {
 }
 
 impl E2bBootstrapArchive {
-    pub fn path(&self) -> &Path {
+    // `path()` is read only inside the crate (e2b provider + bootstrap
+    // tests); app code consumes `binding()` only, so keep the filesystem
+    // path accessor crate-private.
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
-    pub fn sha256(&self) -> &str {
+    pub(crate) fn sha256(&self) -> &str {
         &self.sha256
     }
 
-    pub fn size_bytes(&self) -> u64 {
+    pub(crate) fn size_bytes(&self) -> u64 {
         self.size_bytes
     }
 
@@ -53,7 +56,7 @@ impl E2bBootstrapArchive {
         &self.binding
     }
 
-    pub fn manifest_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+    pub(crate) fn manifest_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         #[derive(Serialize)]
         struct Manifest<'a> {
             version: u32,

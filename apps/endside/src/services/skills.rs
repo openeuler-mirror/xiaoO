@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
-use agent_contracts::SkillRegistry;
-use skill::{FileSkillRegistry, SkillsConfig};
+use xiaoo_api::skills::{FileSkillRegistry, SkillRegistry};
+use xiaoo_shared::skills_support::SkillsConfig;
 
 use crate::config::Config;
 
@@ -49,8 +49,8 @@ pub fn render_skills_overview_with_config(skills_config: &SkillsConfig) -> Strin
 #[cfg(test)]
 mod tests {
     use super::render_skills_overview_with_config;
-    use skill::SkillsConfig;
     use tempfile::TempDir;
+    use xiaoo_shared::skills_support::SkillsConfig;
 
     fn skills_config_with_dirs(dirs: Vec<std::path::PathBuf>) -> SkillsConfig {
         SkillsConfig {

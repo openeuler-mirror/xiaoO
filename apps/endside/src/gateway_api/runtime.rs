@@ -17,7 +17,7 @@ pub(super) struct PendingStreamDone {
     pub(super) completion_tokens: u64,
     pub(super) total_tokens: u64,
     pub(super) estimated_input_tokens: u64,
-    pub(super) messages: Vec<llm_client::ChatMessage>,
+    pub(super) messages: Vec<xiaoo_api::chat::ChatMessage>,
 }
 
 pub struct GatewayRuntime {
@@ -40,7 +40,7 @@ pub struct GatewayRuntime {
     /// Hook actions received from the daemon (via SSE `Done` event) that
     /// the TUI needs to execute (switch session, set title). Drained by the
     /// App's event loop after `poll_stream_updates` returns.
-    pub(crate) pending_hook_actions: Vec<agent_types::hook::HookAction>,
+    pub(crate) pending_hook_actions: Vec<xiaoo_api::chat::HookAction>,
     /// Per-TUI-process identifier sent with every remote RPC body so the
     /// daemon can attribute the call to this TUI's attach lease. Mirrors
     /// `AppState.client_id`.
@@ -197,7 +197,7 @@ impl GatewayRuntime {
     /// Drain and return any hook actions collected from the SSE stream.
     /// Called by the App's event loop after `poll_stream_updates`. The App
     /// executes each action (switch session, set title) asynchronously.
-    pub fn take_pending_hook_actions(&mut self) -> Vec<agent_types::hook::HookAction> {
+    pub fn take_pending_hook_actions(&mut self) -> Vec<xiaoo_api::chat::HookAction> {
         std::mem::take(&mut self.pending_hook_actions)
     }
 }

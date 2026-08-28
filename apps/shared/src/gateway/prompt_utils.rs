@@ -2,6 +2,12 @@ use crate::gateway::session_record::SubagentRoleRecord;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+// 参数结构 + 单函数再导出：serverside daemon_runtime 组装 channel 系统提示词
+// 需要命名 [`ChannelPromptSections`]（参数结构，字段须显式构造）与
+// [`compose_channel_system_prompt`]，本就粗粒度，作为已装配的 prompt 工具
+// 再导出，避免应用直接依赖 prompt crate。
+pub use prompt::{compose_channel_system_prompt, ChannelPromptSections};
+
 pub fn compose_subagent_delegation_rules(
     subagent_roles: &BTreeMap<String, SubagentRoleRecord>,
 ) -> Option<String> {

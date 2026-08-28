@@ -1,19 +1,19 @@
 use crate::backend::GatewayBackendConfig;
-use agent_types::hook::HookerRegistryConfig;
-use agent_types::ReasoningEffort;
 use anyhow::{bail, Context, Result};
-use llm_client::ProtocolFamily;
-use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
-use mcp::McpSection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use skill::SkillsConfig as ResolvedSkillsConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use xiaoo_api::chat::HookerRegistryConfig;
+use xiaoo_api::chat::ReasoningEffort;
+use xiaoo_api::llm::ProtocolFamily;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
+use xiaoo_shared::lsp_support::{AutoInstall, LspServiceRegistry, ServerConfig};
+use xiaoo_shared::mcp_support::{self, McpSection};
+use xiaoo_shared::skills_support::SkillsConfig as ResolvedSkillsConfig;
 
 const DEFAULT_AGENT_ID: &str = "main";
 const DEFAULT_LLM_MAX_TOKENS: u32 = 16384;
@@ -71,7 +71,7 @@ pub struct Config {
     /// is runtime-only so TUI config saves never copy imported servers into
     /// `config.toml`.
     #[serde(skip)]
-    runtime_mcp_servers: Option<Vec<mcp::McpServerConfig>>,
+    runtime_mcp_servers: Option<Vec<mcp_support::McpServerConfig>>,
     /// Preserve daemon- or plugin-owned top-level sections when the TUI
     /// rewrites config.toml after changing providers or other UI settings.
     #[serde(default, flatten)]
@@ -238,7 +238,7 @@ impl Config {
         workspace: &Path,
         home: Option<&Path>,
         toml_source: &Path,
-    ) -> Result<(), mcp::McpConfigError> {
+    ) -> Result<(), mcp_support::McpConfigError> {
         self.runtime_mcp_servers = Some(load_merged_mcp_servers(
             &self.mcp.servers,
             explicit_path,
@@ -249,7 +249,7 @@ impl Config {
         Ok(())
     }
 
-    pub fn mcp_servers(&self) -> &[mcp::McpServerConfig] {
+    pub fn mcp_servers(&self) -> &[mcp_support::McpServerConfig] {
         self.runtime_mcp_servers
             .as_deref()
             .unwrap_or(&self.mcp.servers)
@@ -383,16 +383,16 @@ impl Config {
 }
 
 pub(crate) fn load_merged_mcp_servers(
-    toml_servers: &[mcp::McpServerConfig],
+    toml_servers: &[mcp_support::McpServerConfig],
     explicit_path: Option<&Path>,
     workspace: &Path,
     home: Option<&Path>,
     toml_source: &Path,
-) -> Result<Vec<mcp::McpServerConfig>, mcp::McpConfigError> {
-    let json_source = mcp::resolve_json_config_path(explicit_path, workspace, home);
-    let json_servers = mcp::load_json_servers(explicit_path, workspace, home)?;
+) -> Result<Vec<mcp_support::McpServerConfig>, mcp_support::McpConfigError> {
+    let json_source = mcp_support::resolve_json_config_path(explicit_path, workspace, home);
+    let json_servers = mcp_support::load_json_servers(explicit_path, workspace, home)?;
     let fallback_json_source = workspace.join(".mcp.json");
-    mcp::merge_server_configs(
+    mcp_support::merge_server_configs(
         toml_servers.to_vec(),
         json_servers,
         toml_source,
@@ -558,11 +558,11 @@ fn default_llm_max_tokens() -> u32 {
 }
 
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
-    if let Some(known) = llm_client::get_known_model_context_length(&config.llm.model) {
+    if let Some(known) = xiaoo_api::llm::get_known_model_context_length(&config.llm.model) {
         return usize::try_from(known).ok();
     }
 
-    match llm_client::resolve_protocol_family(&config.llm.provider)? {
+    match xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)? {
         ProtocolFamily::OpenAiCompatible | ProtocolFamily::Ollama | ProtocolFamily::Zhipu => {
             Some(128_000)
         }

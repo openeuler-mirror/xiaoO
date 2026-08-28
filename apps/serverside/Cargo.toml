@@ -17,16 +17,10 @@ anyhow.workspace = true
 async-trait.workspace = true
 axum = "0.7"
 chrono.workspace = true
-compact = { path = "../../crates/compact" }
 dirs = "6"
 futures-util.workspace = true
 governor = "0.6"
-llm-client = { path = "../../crates/llm-client" }
-lsp = { path = "../../crates/lsp" }
-mcp = { path = "../../crates/mcp" }
 mime_guess.workspace = true
-operation_backend = { path = "../../crates/operation_backend" }
-prompt = { path = "../../crates/prompt" }
 prost = "0.13"
 regex = "1.11"
 reqwest.workspace = true
@@ -35,7 +29,6 @@ rust-embed.workspace = true
 schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
-skill = { path = "../../crates/skill" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
@@ -51,11 +44,11 @@ uuid.workspace = true
 cron.workspace = true
 shellexpand.workspace = true
 
-agent-contracts = { path = "../../crates/agent-contracts" }
-agent-types = { path = "../../crates/agent-types" }
-subagent = { path = "../../crates/subagent" }
-tool = { path = "../../crates/tool" }
-xiaoo-shared = { path = "../shared" }
+# 应用只直依赖两个门面：runtime SDK 门面 + 应用装配门面。
+# 底层 crates（agent-types/llm-client/tool/mcp/...）一律经 xiaoo-shared 装配门面访问，不在本处直依赖。
+
+xiaoo-shared = { path = "../shared" }                       # 应用装配门面（粗粒度装配入口 + 最小词汇）
+xiaoo-api = { path = "../../crates/xiaoo-api" }             # runtime SDK 门面（冻结面）
 
 [dev-dependencies]
 tempfile.workspace = true

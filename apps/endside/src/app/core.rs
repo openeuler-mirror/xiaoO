@@ -458,16 +458,16 @@ impl App {
     /// finds None, and drops the action with a `tracing::warn!`. This is
     /// intentional — create_session / switch_session are not supported in
     /// local mode. See [`switch_to_remote_session`].
-    async fn execute_hook_action(&mut self, action: agent_types::hook::HookAction) {
+    async fn execute_hook_action(&mut self, action: xiaoo_api::chat::HookAction) {
         match action {
-            agent_types::hook::HookAction::CreateSession { session_id } => {
+            xiaoo_api::chat::HookAction::CreateSession { session_id } => {
                 tracing::info!(
                     session_id = %session_id,
                     "TUI: hook action create_session — switching focus"
                 );
                 self.switch_to_remote_session(session_id).await;
             }
-            agent_types::hook::HookAction::SwitchSession { session_id } => {
+            xiaoo_api::chat::HookAction::SwitchSession { session_id } => {
                 // Skip the switch (and the transcript reload + "Switched to
                 // session" system message it inserts) when the TUI is already
                 // focused on the target. This commonly happens when a plugin
@@ -488,7 +488,7 @@ impl App {
                 );
                 self.switch_to_remote_session(session_id).await;
             }
-            agent_types::hook::HookAction::SendPrompt {
+            xiaoo_api::chat::HookAction::SendPrompt {
                 session_id,
                 text,
                 chain_depth,

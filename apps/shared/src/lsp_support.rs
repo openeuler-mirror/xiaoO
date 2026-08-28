@@ -1,4 +1,10 @@
-use lsp::{AutoInstall, ServerConfig};
+// 配置词汇再导出：应用层（endside support/config、serverside daemon_config）
+// 需要命名这些类型以 serde 反序列化与持有 LSP 注册表句柄，无法下沉为粗粒度
+// 函数，故作为配置词汇再导出。`AutoInstall` / `ServerConfig` 在尚未提供
+// 粗粒度 lsp builder 之前仍需被应用直接构造；builder 落地后可吸收这两个。
+// 本模块内 `build_extra_server_configs` 亦使用 `ServerConfig` / `AutoInstall`，
+// 直接复用此 `pub use`，无需重复私有 import。
+pub use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
 
 pub trait ExtraServerConfigView {
     fn id(&self) -> &str;

@@ -191,9 +191,9 @@ pub struct TuiSessionSnapshot {
     #[serde(default)]
     pub active_agent_role: Option<String>,
     #[serde(default)]
-    pub reasoning_effort: agent_types::ReasoningEffort,
+    pub reasoning_effort: xiaoo_api::chat::ReasoningEffort,
     #[serde(default)]
-    pub session_messages: Vec<llm_client::ChatMessage>,
+    pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     #[serde(default)]
     pub plan_state: Option<SavedTodoMessageState>,
     #[serde(default)]

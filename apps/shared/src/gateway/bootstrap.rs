@@ -66,30 +66,6 @@ impl AppBootstrap {
         )
     }
 
-    pub fn from_session_components(
-        session_store: Arc<dyn SessionStore>,
-        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-    ) -> Result<AppDependencies, AppBootstrapError> {
-        Self::from_session_components_with_hooks(
-            session_store,
-            runtime_resolver,
-            HookerRegistryConfig::default(),
-        )
-    }
-
-    pub fn from_session_components_with_hooks(
-        session_store: Arc<dyn SessionStore>,
-        runtime_resolver: Arc<dyn SessionRuntimeResolver>,
-        hooker_config: HookerRegistryConfig,
-    ) -> Result<AppDependencies, AppBootstrapError> {
-        Self::from_session_components_with_hooks_and_backend_manager(
-            session_store,
-            runtime_resolver,
-            hooker_config,
-            Arc::new(BackendManager::new()),
-        )
-    }
-
     pub fn from_session_components_with_hooks_and_backend_manager(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
@@ -169,9 +145,14 @@ impl AppBootstrap {
         // Best-effort orphan-session reaper: scans `list_all()` every 10 min
         // and force-closes sessions whose lease has been gone for ~2 hours.
         let reaper_handle = Some(session_components.spawn_orphan_reaper());
-        runtime_resolver.bind_subagent_control(
-            session_components.clone() as Arc<dyn subagent::SubagentControl>,
-        );
+        let subagent_control: Arc<dyn subagent::SubagentControl> = session_components.clone();
+        // Prefer the resolver's opaque store when available (so the control is
+        // reused by coarse-grained tool assembly that the resolver delegates to
+        // without the resolver itself naming the control trait).
+        if let Some(store) = runtime_resolver.bound_control_store() {
+            store.set(subagent_control.clone());
+        }
+        runtime_resolver.bind_subagent_control(subagent_control);
         let session_service: Arc<dyn SessionService> = session_components.clone();
         let session_control_plane: Arc<dyn SessionControlPlane> = session_components;
         Ok(AppDependencies {

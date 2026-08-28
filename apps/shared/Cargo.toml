@@ -7,10 +7,12 @@ license.workspace = true
 [features]
 default = []
 tee_sdf = ["vault/tee_sdf"]
+# 面向应用测试的现成桩。开启后导出 `testing` 模块，
+# 提供 LlmProvider 测试桩等，避免应用自行 impl trait（也就无需
+# LlmRequest/LlmResponse 等底层词汇进入应用测试）。
+test-support = []
 
 [build-dependencies]
-protoc-bin-vendored = "3"
-tonic-build = "0.12"
 sysinfo = "0.31"
 
 [dependencies]
@@ -22,8 +24,6 @@ http = "1"
 glob = "0.3"
 reqwest.workspace = true
 base64.workspace = true
-prost = "0.13"
-tonic = { version = "0.12", features = ["transport"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -36,7 +36,6 @@ uuid.workspace = true
 agent-contracts = { path = "../../crates/agent-contracts" }
 agent-types = { path = "../../crates/agent-types" }
 compact = { path = "../../crates/compact" }
-xiaoo-core = { path = "../../crates/core" }
 hook = { path = "../../crates/hook", features = ["plugin_hook"] }
 llm-client = { path = "../../crates/llm-client" }
 mcp = { path = "../../crates/mcp" }
@@ -48,6 +47,8 @@ subagent = { path = "../../crates/subagent" }
 lsp = { path = "../../crates/lsp" }
 trace = { path = "../../crates/trace" }
 operation_backend = { path = "../../crates/operation_backend" }
+xiaoo-api = { path = "../../crates/xiaoo-api" }
+protocol = { path = "../../crates/protocol" }
 vault = { path = "../vault" }
 aes-gcm.workspace = true
 rand.workspace = true

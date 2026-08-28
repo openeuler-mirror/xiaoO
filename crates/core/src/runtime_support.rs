@@ -307,8 +307,9 @@ pub struct NoopRuntimeView {
     tool_events: NoopToolEventSink,
     trace_recorder: NoopTraceRecorder,
     agent_context: BasicAgentContext,
-    interaction: NoopInteractionHandle,
+    interaction: Box<dyn InteractionHandle>,
     hookers: NoopHookerRegistry,
+    operation_backend: Option<Arc<dyn OperationBackend>>,
 }
 
 impl NoopRuntimeView {
@@ -326,9 +327,50 @@ impl NoopRuntimeView {
                     session_id: None,
                 },
             ),
-            interaction: NoopInteractionHandle,
+            interaction: Box::new(NoopInteractionHandle),
             hookers: NoopHookerRegistry,
+            operation_backend: None,
         }
+    }
+
+    /// Create the minimal runtime view while injecting the caller-owned
+    /// operation backend used by tools.  This is intentionally free of any
+    /// session/service lifecycle semantics.
+    pub fn with_operation_backend(operation_backend: Arc<dyn OperationBackend>) -> Self {
+        Self {
+            operation_backend: Some(operation_backend),
+            ..Self::new()
+        }
+    }
+
+    /// Create the minimal runtime view with both a caller-owned operation
+    /// backend and interaction channel.
+    pub fn with_backend_and_interaction(
+        operation_backend: Option<Arc<dyn OperationBackend>>,
+        interaction: Arc<dyn InteractionHandle>,
+    ) -> Self {
+        Self {
+            operation_backend,
+            interaction: Box::new(ArcInteractionHandle(interaction)),
+            ..Self::new()
+        }
+    }
+}
+
+struct ArcInteractionHandle(Arc<dyn InteractionHandle>);
+
+#[async_trait]
+impl InteractionHandle for ArcInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        self.0.ask(request).await
+    }
+
+    fn has_builtin_timeout(&self) -> bool {
+        self.0.has_builtin_timeout()
+    }
+
+    async fn abort_pending(&self, request: &InteractionRequest) {
+        self.0.abort_pending(request).await;
     }
 }
 
@@ -356,10 +398,14 @@ impl RuntimeView for NoopRuntimeView {
     }
 
     fn interaction(&self) -> &dyn InteractionHandle {
-        &self.interaction
+        self.interaction.as_ref()
     }
 
     fn hookers(&self) -> &dyn HookerRegistry {
         &self.hookers
+    }
+
+    fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
+        self.operation_backend.clone()
     }
 }

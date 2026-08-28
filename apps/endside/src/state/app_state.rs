@@ -1,8 +1,8 @@
-use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
@@ -320,7 +320,7 @@ pub struct AppState {
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
-    pub session_messages: Vec<llm_client::ChatMessage>,
+    pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
     /// Per-process ephemeral UUID sent with every remote RPC; used by the
@@ -1096,10 +1096,10 @@ mod tests {
     use crate::config::{AgentRoleConfig, Config};
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
-    use agent_types::ReasoningEffort;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use xiaoo_api::chat::ReasoningEffort;
 
     #[test]
     fn runtime_status_light_is_idle_by_default() {

@@ -1,13 +1,13 @@
 //! Cron job management service for the TUI.
 //!
 //! Reads and writes `jobs.toml` independently of the daemon process,
-//! using the same cron expression parser from `agent_types`.
+//! using the shared cron validation entry point (`xiaoo_shared::cron`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use agent_types::cron::CronExpression;
 use serde::{Deserialize, Serialize};
+use xiaoo_shared::cron::validate_cron_expr as validate_cron_expr_inner;
 
 /// A cron job entry for TUI display and editing.
 #[derive(Debug, Clone)]
@@ -188,9 +188,7 @@ pub fn write_jobs(snapshot: &CronConfigSnapshot, jobs: &[CronJobEntry]) -> anyho
 
 /// Validate a cron expression string. Returns `Ok(())` if valid.
 pub fn validate_cron_expr(raw: &str) -> Result<(), String> {
-    CronExpression::parse(raw)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    validate_cron_expr_inner(raw)
 }
 
 // ── Internal helpers ───────────────────────────────────────────
@@ -202,7 +200,7 @@ fn parse_jobs_toml(content: &str, default_timeout: u64) -> anyhow::Result<Vec<Cr
     jobs.job
         .into_iter()
         .map(|j| {
-            let cron_valid = CronExpression::parse(&j.cron).is_ok();
+            let cron_valid = validate_cron_expr_inner(&j.cron).is_ok();
             Ok(CronJobEntry {
                 name: j.name,
                 description: j.description,

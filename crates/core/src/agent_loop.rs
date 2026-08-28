@@ -1740,6 +1740,7 @@ async fn tool_exec(ctx: &mut LoopContext<'_>) -> Result<Vec<SuspendedToolCall>, 
         .clone();
 
     if ctx.input.agent_id.is_none() {
+        append_assistant_to_history(ctx);
         return Ok(Vec::new());
     }
 

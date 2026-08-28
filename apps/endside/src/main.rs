@@ -7,12 +7,12 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use operation_backend::process_group::ProcessGroupCleanupGuard;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::PathBuf;
 
+use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 pub use xiaoo_shared::{backend, gateway};
 
 mod app;
