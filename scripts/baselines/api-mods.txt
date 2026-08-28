@@ -1,0 +1,14 @@
+# xiaoo-api 冻结的对外 pub mod 名基线。
+# 取自重构完成时 crates/xiaoo-api/src/lib.rs 的 pub mod 列表；扩充即报错。
+# 改基线时改本文件即可，check-facade.sh 自动读取。
+# 再生成（与 check-facade.sh 的提取逻辑同源，便于核对/重置基线）：
+#   sed -nE 's/^(pub[[:space:]]+)?mod[[:space:]]+([a-z0-9_]+)[;{].*/\2/p' crates/xiaoo-api/src/lib.rs | sort -u
+backend
+chat
+events
+interaction
+llm
+runtime
+skills
+tools
+prelude

@@ -1,0 +1,18 @@
+# xiaoo-api 冻结的 path 依赖名基线。
+# 取自重构完成时 crates/xiaoo-api/Cargo.toml 的 path 依赖名；扩充即报错。
+# 改基线时改本文件即可，check-facade.sh 自动读取。
+# 再生成（与 check-facade.sh 的提取逻辑同源，便于核对/重置基线）：
+#   awk '/^\[dependencies\][[:space:]]*$/{in_dep=1;next}/^\[/{in_dep=0;next}in_dep' crates/xiaoo-api/Cargo.toml \
+#     | grep -E '=[[:space:]]*\{' \
+#     | grep -E '[^[:alnum:]_-]path[[:space:]]*=' \
+#     | sed -E 's/^([a-z0-9_-]+)[[:space:]]*=.*/\1/' | sort -u
+# 注：两步 grep 让 path 无论是否为 inline table 首键都能命中（如
+# `foo = { version = "1.0", path = ".." }`，version 在前）。
+xiaoo-core
+agent-types
+agent-contracts
+llm-client
+compact
+tool
+skill
+prompt
