@@ -21,6 +21,42 @@
 
 set -euo pipefail
 
+# ---- 依赖工具预安装 ---------------------------------------------------------
+# 静态门禁依赖 cargo / python3 / bash≥4 / coreutils / grep / sed / gawk。
+# 干净 CI 镜像可能缺失，此处按 openEuler 包名 yum 兜底安装。先逐个探测，
+# 任一缺失才触发 yum（已装齐则零开销、不碰网络）；yum 不可用或无网络时
+# || true 不中断，由 check-facade.sh 的工具预检给出精确失败信息。
+DEPS_RPMS=(cargo)
+need_install=0
+for t in cargo python3 bash mktemp grep sed awk sort paste tr comm; do
+    command -v "$t" >/dev/null 2>&1 || { need_install=1; break; }
+done
+
+# --- 配置参数 ---
+REPO_DIR="/etc/yum.repos.d"
+TARGET_REPO_FILE="${REPO_DIR}/openEuler.repo"
+SEARCH_STRING="openEuler-24.03-LTS-SP3"
+NEW_REPO_CONTENT="[openEuler-24.03LTSSP3]
+name=openEuler-24.03LTSSP3
+baseurl=https://repo.huaweicloud.com/openeuler/openEuler-24.03-LTS-SP3/everything/x86_64/
+enabled=1
+gpgcheck=1
+gpgkey=https://repo.huaweicloud.com/openeuler/openEuler-24.03-LTS-SP3/everything/x86_64/RPM-GPG-KEY-openEuler
+"
+if [ "$need_install" -eq 1 ]; then
+    printf 'CI: 检测到缺失工具，yum 安装: %s\n' "${DEPS_RPMS[*]}" >&2
+    if command -v yum >/dev/null 2>&1; then
+        sudo touch "$TARGET_REPO_FILE"
+        echo "" | sudo tee "$TARGET_REPO_FILE" > /dev/null
+        echo "$NEW_REPO_CONTENT" | sudo tee -a "$TARGET_REPO_FILE" > /dev/null
+        yum clean all
+        yum makecache
+        sudo yum '--disablerepo=*' --enablerepo=openEuler-24.03LTSSP3 install -y "${DEPS_RPMS[@]}" >&2 || true
+    else
+        printf 'CI: 警告：未找到 yum，跳过自动安装；缺失工具将由后续预检查报错\n' >&2
+    fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
