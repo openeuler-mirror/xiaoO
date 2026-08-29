@@ -32,6 +32,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config models",
             "config roles",
             "config tools",
+            "config skills",
         ],
         domains: vec![
             domain(
@@ -54,7 +55,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("roles", true, false, false, false, &["list"]),
             domain("subagents", true, false, false, false, &["list_roles"]),
             domain("tools", true, false, false, false, &["list"]),
-            domain("skills", true, false, false, false, &[]),
+            domain("skills", true, false, false, false, &["list"]),
             domain("hooks", true, false, false, false, &[]),
             domain("mcp_client", true, false, false, false, &[]),
             domain("mcp_server", true, false, false, false, &[]),
@@ -151,5 +152,6 @@ mod tests {
         assert!(!skills.runtime_read);
         assert!(!skills.runtime_write);
         assert!(!skills.test);
+        assert!(skills.actions.contains(&"list"));
     }
 }

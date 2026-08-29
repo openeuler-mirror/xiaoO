@@ -10,6 +10,7 @@ mod management_capabilities;
 mod mcp_server;
 mod model_management;
 mod role_management;
+mod skill_management;
 mod tool_management;
 
 use crate::channels::{
@@ -134,6 +135,16 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&tool_management::tool_catalog(&config, &workspace).await?)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigSkills => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&skill_management::skill_catalog(&config, &workspace))?
             );
             return Ok(());
         }
@@ -617,6 +628,7 @@ enum CliAction {
     ConfigModels,
     ConfigRoles,
     ConfigTools,
+    ConfigSkills,
 }
 
 #[derive(Debug)]
@@ -662,7 +674,8 @@ impl Cli {
                     Some("models") => CliAction::ConfigModels,
                     Some("roles") => CliAction::ConfigRoles,
                     Some("tools") => CliAction::ConfigTools,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, or `config tools`"),
+                    Some("skills") => CliAction::ConfigSkills,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, or `config skills`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -790,6 +803,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -942,6 +956,19 @@ mod tests {
         .expect("config tools should parse");
 
         assert_eq!(cli.action, CliAction::ConfigTools);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_skills_command() {
+        let cli = Cli::parse(
+            ["config", "skills", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config skills should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigSkills);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
