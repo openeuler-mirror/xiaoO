@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::app_state::{
@@ -30,41 +31,72 @@ use crate::session_snapshot_service::{
 use crate::skills_service::render_skills_overview;
 use crate::workspace_service::{first_token_is_dir_command, resolve_dir_command};
 
+/// Window after an ESC event during which stray `Char` events are dropped.
+/// See `App::esc_discard_until`. Split mouse/scroll sequence remnants
+/// arrive within ~1ms of the ESC event; human key presses are >50ms apart.
+const ESC_REMNANT_DISCARD_WINDOW: Duration = Duration::from_millis(5);
+
 impl App {
     pub(crate) async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
         if key.kind != KeyEventKind::Press && key.kind != KeyEventKind::Repeat {
             return Ok(());
         }
 
-        // Ctrl+C: copy selected input text when selection exists, otherwise quit.
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL)
-            || key.code == KeyCode::Char('\x03')
-        {
-            // Check input selection first.
-            if let Some(text) = self
-                .state
-                .chat_state
-                .input
-                .selected_text()
-                .map(str::to_owned)
-            {
-                self.state.chat_state.input.clear_selection();
-                if let Err(e) = copy_to_clipboard(&text) {
-                    tracing::warn!("copy_to_clipboard failed: {}", e);
-                }
+        // Opening the discard window on ANY Esc event (including one that
+        // was itself parsed from a split mouse/scroll sequence) is correct:
+        // if the user pressed a real ESC key, a stale sequence remnant can
+        // follow within ~1ms; if the "Esc" was the swallowed head of a split
+        // mouse sequence, the remnant follows for the same reason.
+        if key.code == KeyCode::Esc {
+            self.esc_discard_until = Some(Instant::now() + ESC_REMNANT_DISCARD_WINDOW);
+        }
+
+        // Copy/quit key split:
+        //   Ctrl+C        → quit unconditionally (SIGINT semantics).
+        //   Ctrl+Shift+C  → copy the active selection (input or transcript);
+        //                   no-op when nothing is selected. Note: most
+        //                   terminals (mate-terminal, alacritty, xterm,
+        //                   gnome-terminal…) intercept Ctrl+Shift+C for
+        //                   their own screen-selection copy, so the reliable
+        //                   in-app copy shortcut is Ctrl+Insert (or the
+        //                   mouse drag-select).
+        //   Ctrl+Insert   → copy the active selection (terminal-independent
+        //                   X11 copy key, unbound by default in common
+        //                   terminals).
+        // Protocol caveat: Ctrl+C and Ctrl+Shift+C are indistinguishable at
+        // the protocol level — both send byte 0x03, which crossterm
+        // normalises to Char('c') + CONTROL with the SHIFT modifier lost
+        // (crossterm-0.28.1/src/event/sys/unix/parse.rs:106). With a
+        // selection active the intent is most likely a copy (Ctrl+Shift+C
+        // collapsed), so copy; without one it quits (Ctrl+C). This applies
+        // to BOTH the raw \x03 branch and the Char('c')+CONTROL branch
+        // below, so behaviour does not differ by terminal class.
+        if key.code == KeyCode::Char('\x03') {
+            if self.copy_active_selection() {
                 return Ok(());
             }
-            // Check transcript selection.
-            if let Some(text) = self.state.transcript_selected_text() {
-                self.state.transcript_selection = None;
-                if let Err(e) = copy_to_clipboard(&text) {
-                    tracing::warn!("copy_to_clipboard failed: {}", e);
-                }
-                return Ok(());
-            }
-            // No selection → quit.
             self.state.should_quit = true;
             self.state.quit_via_interrupt = true;
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+            if self.copy_active_selection() {
+                return Ok(());
+            }
+            self.state.should_quit = true;
+            self.state.quit_via_interrupt = true;
+            return Ok(());
+        }
+        // Ctrl+Insert / Ctrl+Shift+Insert: copy the active selection.
+        // Terminal-independent X11 copy keys; Ctrl+Shift+C is intercepted
+        // by most terminals, and some bind plain Ctrl+Insert as well, so
+        // both variants are accepted.
+        if key.code == KeyCode::Insert
+            && key
+                .modifiers
+                .intersects(event::KeyModifiers::CONTROL)
+        {
+            self.copy_active_selection();
             return Ok(());
         }
 
@@ -73,6 +105,9 @@ impl App {
             if let Some(text) = self.state.chat_state.input.delete_selected() {
                 if let Err(e) = copy_to_clipboard(&text) {
                     tracing::warn!("copy_to_clipboard failed: {}", e);
+                    self.state.set_copy_error_notice();
+                } else {
+                    self.state.set_copy_notice();
                 }
                 self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
@@ -133,6 +168,46 @@ impl App {
             InputMode::TurnDelete => Ok(()),
             InputMode::CronManagement => self.handle_cron_management_key(key).await,
         }
+    }
+
+    /// Copy the active selection (input box first, then transcript) to the
+    /// clipboard. Returns `true` when a selection was copied. The selection
+    /// is cleared only on success; the success/error toast is shown either
+    /// way so the user always gets feedback.
+    pub(crate) fn copy_active_selection(&mut self) -> bool {
+        if let Some(text) = self
+            .state
+            .chat_state
+            .input
+            .selected_text()
+            .map(str::to_owned)
+        {
+            match copy_to_clipboard(&text) {
+                Ok(()) => {
+                    self.state.chat_state.input.clear_selection();
+                    self.state.set_copy_notice();
+                }
+                Err(e) => {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                    self.state.set_copy_error_notice();
+                }
+            }
+            return true;
+        }
+        if let Some(text) = self.state.transcript_selected_text() {
+            match copy_to_clipboard(&text) {
+                Ok(()) => {
+                    self.state.transcript_selection = None;
+                    self.state.set_copy_notice();
+                }
+                Err(e) => {
+                    tracing::warn!("copy_to_clipboard failed: {}", e);
+                    self.state.set_copy_error_notice();
+                }
+            }
+            return true;
+        }
+        false
     }
 
     fn handle_api_key_dialog_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -417,6 +492,32 @@ impl App {
                 self.state.chat_state.scroll_page_down();
             }
             _ => {
+                // Drop characters that are clearly not deliberate typing:
+                //
+                // 1. ESC-remnant window: a split mouse/scroll sequence
+                //    (`\x1b[<b;x;yM`) delivers its leftover `[<b;x;yM` as
+                //    `Char` events back-to-back with the ESC event that
+                //    swallowed the sequence head. Within the window these
+                //    are remnants, not keystrokes.
+                // 2. ALT-modified chars: an ESC followed by a regular key
+                //    byte in the same read batch is parsed as Alt+char (or
+                //    arrives as such from the terminal); the char part must
+                //    not be typed into the input box. Pure ALT only — the
+                //    Input layer handles Ctrl combos (Ctrl+A select-all,
+                //    unknown Ctrl combos ignored), and AltGr (CONTROL|ALT)
+                //    must stay a valid input on European layouts.
+                if self.esc_discard_until.is_some_and(|until| Instant::now() < until) {
+                    if let KeyCode::Char(_) = key.code {
+                        return Ok(());
+                    }
+                }
+                if let KeyCode::Char(_) = key.code {
+                    if key.modifiers.contains(event::KeyModifiers::ALT)
+                        && !key.modifiers.contains(event::KeyModifiers::CONTROL)
+                    {
+                        return Ok(());
+                    }
+                }
                 let before = self.state.chat_state.input.value().to_string();
                 self.state.chat_state.input.handle_event(&Event::Key(key));
                 if self.state.chat_state.input.value() != before {

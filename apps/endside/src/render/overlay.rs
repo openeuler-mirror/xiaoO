@@ -288,7 +288,7 @@ impl App {
         frame.render_widget(list, area);
     }
 
-    pub(crate) fn render_input(&self, frame: &mut Frame, area: Rect) {
+    pub(crate) fn render_input(&mut self, frame: &mut Frame, area: Rect) {
         let has_tool_cards = self.state.active_transcript_has_tool_cards();
         let readonly_subagent_view = self.state.is_subagent_view_active()
             && self.state.input_mode == InputMode::Editing
@@ -332,6 +332,9 @@ impl App {
             .style(Style::default().bg(self.state.theme.input_bg));
 
         let inner = block.inner(area);
+        // Expose the input content area for mouse drag-select (see
+        // event_mouse.rs handle_input_mouse).
+        self.state.render_state.input_area = Some(inner);
         let readonly_value;
         let (value, cursor, selection) = if readonly_subagent_view {
             readonly_value = self.state.active_subagent_readonly_text();
@@ -1319,7 +1322,7 @@ fn flush_pending(
 ///
 /// `pos[p]` holds the visual (row, col) where character `p` is rendered, and
 /// `pos[len]` the end-of-text cursor. `pos[cursor]` is returned.
-fn calculate_visual_cursor_position(
+pub(crate) fn calculate_visual_cursor_position(
     value: &str,
     cursor: usize,
     max_width: usize,

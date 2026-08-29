@@ -9,7 +9,7 @@ use crossterm::terminal::{
 };
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use xiaoo_shared::backend::ProcessGroupCleanupGuard;
@@ -256,6 +256,17 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
         ratatui::Terminal::new(backend).context("failed to create TUI terminal backend")?;
     let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
     let _ = execute!(io::stdout(), EnableMouseCapture);
+    // `EnableMouseCapture` enables all-motion tracking (`?1003h`), which
+    // makes the terminal report every mouse-move as an SGR byte sequence
+    // (`\x1b[<b;x;yM`). xiaoO never uses plain `Moved` events (hover-less
+    // UI; scrollbar dragging uses `Drag` from `?1002h`), but the byte storm
+    // interleaves with keyboard input: when an ESC key lands next to a mouse
+    // sequence, crossterm's parser swallows the sequence head and the
+    // leftover `[<b;x;yM` is delivered as plain characters, which then get
+    // typed into the input box. Disable motion tracking; keep button
+    // (`?1000h`), drag (`?1002h`) and SGR (`?1006h`) modes.
+    let _ = io::stdout().write_all(b"\x1b[?1003l");
+    let _ = io::stdout().flush();
     let _ = execute!(io::stdout(), EnableBracketedPaste);
 
     let mut app = app::App::new_with_config(&config, config_path.clone(), workspace)

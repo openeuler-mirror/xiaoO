@@ -275,6 +275,8 @@ pub struct RenderState {
     /// Index of the first visible agent tab in the header.
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
+    /// Inner (content) area of the input box, used for mouse drag-select.
+    pub input_area: Option<Rect>,
     pub active_transcript_key: Option<String>,
     /// Cached terminal area for layout reuse across ticks.
     /// When `frame.area()` matches `cached_area`, layout splits are skipped.
@@ -337,6 +339,9 @@ pub struct AppState {
     pub transcript_selection: Option<TranscriptSelection>,
     /// Set when text is copied to clipboard; drives the toast notification.
     pub copy_notice: Option<Instant>,
+    /// Set when a copy attempt failed (no local clipboard tool and the
+    /// terminal did not support OSC 52); drives an error toast.
+    pub copy_error_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
     pub diff_tracker: SessionDiffTracker,
 }
@@ -374,6 +379,7 @@ impl AppState {
             render_state: RenderState::default(),
             transcript_selection: None,
             copy_notice: None,
+            copy_error_notice: None,
             external_commands: load_external_commands(),
             diff_tracker: SessionDiffTracker::new(workspace),
         })
@@ -424,6 +430,7 @@ impl AppState {
             external_commands: load_external_commands(),
             transcript_selection: None,
             copy_notice: None,
+            copy_error_notice: None,
             diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
@@ -452,6 +459,7 @@ impl AppState {
         self.render_state = RenderState::default();
         self.transcript_selection = None;
         self.copy_notice = None;
+        self.copy_error_notice = None;
         self.external_commands = load_external_commands();
         self.diff_tracker.clear();
     }
@@ -465,6 +473,18 @@ impl AppState {
     pub fn copy_notice_active(&self) -> bool {
         self.copy_notice
             .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false)
+    }
+
+    /// Mark that a copy attempt failed; shows the error toast for 2 s.
+    pub fn set_copy_error_notice(&mut self) {
+        self.copy_error_notice = Some(Instant::now());
+    }
+
+    /// Returns `true` while the copy-error toast should still be visible.
+    pub fn copy_error_notice_active(&self) -> bool {
+        self.copy_error_notice
+            .map(|t| t.elapsed() < Duration::from_millis(2000))
             .unwrap_or(false)
     }
 

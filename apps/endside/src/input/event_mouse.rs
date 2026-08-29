@@ -5,7 +5,7 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
-use crate::app_state::{AppState, TranscriptRenderCache};
+use crate::app_state::{AppState, InputMode, TranscriptRenderCache};
 use crate::interaction_prompt::PromptFocus;
 use crate::provider_service::copy_to_clipboard;
 use crate::render::find_substring_from;
@@ -41,7 +41,99 @@ impl App {
 
         self.handle_slash_popup_mouse(mouse_event)?;
         self.handle_transcript_mouse(mouse_event);
+        self.handle_input_mouse(mouse_event);
         Ok(())
+    }
+
+    /// Mouse drag-select on the input box. Terminals that intercept
+    /// Ctrl+Shift+C / Ctrl+Insert (mate-terminal, alacritty, …) make
+    /// keyboard copy unavailable, so the input box gets the same
+    /// drag-select-then-auto-copy behaviour as the transcript.
+    fn handle_input_mouse(&mut self, mouse_event: MouseEvent) {
+        if self.state.input_mode != InputMode::Editing {
+            self.input_drag_active = false;
+            return;
+        }
+        if self.state.is_subagent_view_active() {
+            self.input_drag_active = false;
+            return;
+        }
+        let Some(inner) = self.state.render_state.input_area else {
+            self.input_drag_active = false;
+            return;
+        };
+        let in_area = mouse_event.column >= inner.x
+            && mouse_event.column < inner.x + inner.width
+            && mouse_event.row >= inner.y
+            && mouse_event.row < inner.y + inner.height;
+
+        // Map a mouse position inside the input content area to a character
+        // index, accounting for the renderer's vertical scroll (scroll_y =
+        // visual row of the cursor - (height - 1)).
+        let char_index_at = |row: u16, col: u16| {
+            let value = self.state.chat_state.input.value();
+            let cursor = self.state.chat_state.input.cursor();
+            let max_width = inner.width.max(1) as usize;
+            let (visual_row, _) =
+                crate::render::overlay::calculate_visual_cursor_position(value, cursor, max_width);
+            let scroll_y = visual_row.saturating_sub(inner.height.max(1) as usize - 1);
+            let content_row = row.saturating_sub(inner.y) as usize + scroll_y;
+            let content_col = col.saturating_sub(inner.x) as usize;
+            input_char_index_at(value, max_width, content_row, content_col)
+        };
+
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) if in_area => {
+                self.input_drag_active = true;
+                let index = char_index_at(mouse_event.row, mouse_event.column);
+                // First click dismisses an existing selection and repositions
+                // the caret (standard text-input behaviour — unlike the
+                // transcript's dismiss-guard, the caret must follow the
+                // click so the next keystroke lands where the user pointed).
+                if self
+                    .state
+                    .chat_state
+                    .input
+                    .selected_range()
+                    .is_some()
+                {
+                    self.state.chat_state.input.set_cursor(index);
+                    self.state.chat_state.input.clear_selection();
+                    return;
+                }
+                self.state.chat_state.input.set_cursor(index);
+                self.state.chat_state.input.set_anchor();
+            }
+            // A left-button press anywhere else (tool toggle, scrollbar,
+            // transcript area) ends any input-box drag: the subsequent Up
+            // must not auto-copy a lingering input selection (e.g. one made
+            // with Ctrl+A).
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.input_drag_active = false;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if in_area => {
+                let index = char_index_at(mouse_event.row, mouse_event.column);
+                self.state.chat_state.input.set_cursor(index);
+            }
+            // Auto-copy only when the drag actually started inside the input
+            // box; releasing just outside still copies (anchor and cursor
+            // were both set while inside).
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.input_drag_active {
+                    self.input_drag_active = false;
+                    if self
+                        .state
+                        .chat_state
+                        .input
+                        .selected_range()
+                        .is_some()
+                    {
+                        self.copy_active_selection();
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_api_key_dialog_mouse(&mut self, mouse_event: MouseEvent) -> Result<()> {
@@ -421,8 +513,54 @@ fn visual_line_char_at_display_col(line: &Line<'_>, target_disp: usize) -> usize
     char_idx
 }
 
+/// Map a click inside the input content area to a character index of
+/// `value`. Visual lines break at `\n` and at every `max_width` display
+/// columns (a simplified approximation of the wrap used by the renderer —
+/// word-boundary wrapping is not modelled; for typical input lengths the
+/// difference is immaterial). `target_row`/`target_col` are relative to the
+/// input content area (row 0, col 0 = first cell).
+fn input_char_index_at(
+    value: &str,
+    max_width: usize,
+    target_row: usize,
+    target_col: usize,
+) -> usize {
+    let max_width = max_width.max(1);
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut char_idx = 0usize;
+    for ch in value.chars() {
+        if ch == '\n' {
+            if row == target_row {
+                return char_idx;
+            }
+            row += 1;
+            col = 0;
+            char_idx += 1;
+            continue;
+        }
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        if col + w > max_width && col > 0 {
+            row += 1;
+            col = 0;
+        }
+        if row > target_row {
+            return char_idx;
+        }
+        // The character occupies display columns [col, col + w); a click
+        // inside that span (or at its left edge) maps to this character.
+        if row == target_row && col + w > target_col {
+            return char_idx;
+        }
+        col += w;
+        char_idx += 1;
+    }
+    char_idx
+}
+
 #[cfg(test)]
 mod tests {
+    use super::input_char_index_at;
     use super::mouse_to_line_col;
     use crate::app_state::CachedMessageRender;
     use crate::render::{build_transcript_cache, wrap_line_to_visual_lines};
@@ -712,8 +850,7 @@ mod tests {
         );
     }
 
-    /// Drag selection across wrapped visual rows of the same logical line.
-    /// Builds a `TranscriptSelection` from two `mouse_to_line_col` calls
+    /// Drag selection across wrapped visual rows of the same logical line.    /// Builds a `TranscriptSelection` from two `mouse_to_line_col` calls
     /// (anchor on v0, cursor on v2) and verifies the normalised bounds are
     /// within the same logical line and ordered correctly.
     #[test]
@@ -751,5 +888,39 @@ mod tests {
         // Anchor on v0 should map to a smaller char offset than cursor on v2.
         assert_eq!(start_col, anchor_col);
         assert_eq!(end_col, cursor_col);
+    }
+
+    #[test]
+    fn input_char_index_maps_single_line() {
+        // "hello" with max_width 80: col 0..5 map to char 0..5; beyond the
+        // end clamps to the value length.
+        assert_eq!(input_char_index_at("hello", 80, 0, 0), 0);
+        assert_eq!(input_char_index_at("hello", 80, 0, 2), 2);
+        assert_eq!(input_char_index_at("hello", 80, 0, 4), 4);
+        assert_eq!(input_char_index_at("hello", 80, 0, 5), 5);
+        assert_eq!(input_char_index_at("hello", 80, 0, 99), 5);
+    }
+
+    #[test]
+    fn input_char_index_handles_wrap_and_newline() {
+        // max_width 4: "abcdef" wraps as "abcd" / "ef" (a,b,c,d = row 0;
+        // e,f = row 1).
+        assert_eq!(input_char_index_at("abcdef", 4, 0, 0), 0);
+        assert_eq!(input_char_index_at("abcdef", 4, 0, 3), 3);
+        assert_eq!(input_char_index_at("abcdef", 4, 1, 0), 4);
+        assert_eq!(input_char_index_at("abcdef", 4, 1, 1), 5);
+        // Hard newline starts a new row: 'c' at (1,0), 'd' at (1,1).
+        assert_eq!(input_char_index_at("ab\ncd", 80, 1, 0), 3);
+        assert_eq!(input_char_index_at("ab\ncd", 80, 1, 1), 4);
+    }
+
+    #[test]
+    fn input_char_index_handles_wide_chars() {
+        // CJK chars are 2 display columns wide; max_width 4 fits two of them.
+        assert_eq!(input_char_index_at("你好x", 4, 0, 0), 0);
+        assert_eq!(input_char_index_at("你好x", 4, 0, 1), 0);
+        assert_eq!(input_char_index_at("你好x", 4, 0, 2), 1);
+        // "你好" fills row 0 (4 cols); "x" wraps to row 1.
+        assert_eq!(input_char_index_at("你好x", 4, 1, 0), 2);
     }
 }

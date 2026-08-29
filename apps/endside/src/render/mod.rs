@@ -1,8 +1,7 @@
 mod header;
 pub(crate) mod interaction_prompt;
 pub(crate) mod markdown;
-mod overlay;
-pub(crate) mod provider_dialog;
+pub(crate) mod overlay;pub(crate) mod provider_dialog;
 mod root;
 mod session_diff;
 pub(crate) mod status_panel;
