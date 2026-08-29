@@ -15,8 +15,12 @@
 
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
-use llm_client::{create_llm_provider_from_resolved, resolve_provider_profile, LlmProviderWrapper};
+use llm_client::{
+    create_llm_provider_from_resolved, resolve_provider_profile, ChatMessage, ContentBlock,
+    LlmProviderWrapper, LlmRequest, MessageRole, ReasoningEffort, ToolChoice,
+};
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
 
@@ -44,6 +48,10 @@ pub enum LlmAssemblyError {
     MissingApiKeyEnv(String),
     #[error("API key environment variable is not valid unicode: {0}")]
     InvalidApiKeyEnv(String),
+    #[error("provider connection test timed out")]
+    ProbeTimeout,
+    #[error("provider connection test failed: {0}")]
+    Probe(String),
 }
 
 /// 解析 api-key：显式 > 环境变量 > provider profile 默认 env。
@@ -128,6 +136,49 @@ pub async fn build_llm_provider(
     let context_window = u32::try_from(effective_context_window).unwrap_or(u32::MAX);
 
     Ok((provider, context_window))
+}
+
+/// Test the configured provider, credentials and model with a minimal request.
+///
+/// This intentionally uses the same resolver and secret lookup path as runtime
+/// assembly. The response body is discarded and credentials never leave this
+/// facade.
+pub async fn probe_llm_provider(input: LlmAssemblyInput) -> Result<(), LlmAssemblyError> {
+    let api_key = resolve_api_key(&input)?;
+    let resolved = resolve_config(ResolveInput {
+        provider: Some(input.provider),
+        protocol: None,
+        api_key,
+        api_key_env: None,
+        base_url: input.api_base,
+    })
+    .map_err(|error| LlmAssemblyError::Resolve(error.to_string()))?;
+    let provider = create_llm_provider_from_resolved(&resolved, input.model, None, None)
+        .map_err(|error| LlmAssemblyError::Create(error.to_string()))?;
+    let request = LlmRequest {
+        messages: vec![ChatMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::Text {
+                text: "Reply with OK.".to_string(),
+            }],
+            message_id: None,
+            timestamp_ms: 0,
+            api_usage_tokens: None,
+            reasoning_content: None,
+            estimated_tokens: None,
+        }],
+        tools: vec![],
+        tool_choice: ToolChoice::None,
+        max_tokens: Some(8),
+        temperature: Some(0.0),
+        response_format: Default::default(),
+        reasoning_effort: ReasoningEffort::Off,
+    };
+    tokio::time::timeout(Duration::from_secs(20), provider.complete(&request))
+        .await
+        .map_err(|_| LlmAssemblyError::ProbeTimeout)?
+        .map_err(|error| LlmAssemblyError::Probe(error.to_string()))?;
+    Ok(())
 }
 
 /// 与原 serverside `resolve_effective_context_window` 等价的内部实现。

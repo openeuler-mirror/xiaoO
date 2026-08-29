@@ -28,6 +28,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config providers",
             "config validate",
             "config inspect",
+            "config test-model",
         ],
         domains: vec![
             domain(
@@ -38,7 +39,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["schema", "providers", "validate", "inspect"],
             ),
-            domain("models", true, false, true, false, &["session_select"]),
+            domain(
+                "models",
+                true,
+                false,
+                true,
+                true,
+                &["session_select", "test_connection"],
+            ),
             domain("agents", true, false, false, false, &[]),
             domain("roles", true, false, false, false, &[]),
             domain("subagents", true, false, false, false, &[]),
@@ -112,7 +120,9 @@ mod tests {
             .find(|domain| domain.id == "models")
             .expect("models capability");
         assert!(models.configurable);
+        assert!(models.test);
         assert!(models.actions.contains(&"session_select"));
+        assert!(models.actions.contains(&"test_connection"));
 
         let skills = capabilities
             .domains
