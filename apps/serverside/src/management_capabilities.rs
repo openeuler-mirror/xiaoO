@@ -31,6 +31,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config test-model",
             "config models",
             "config roles",
+            "config tools",
         ],
         domains: vec![
             domain(
@@ -52,7 +53,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("agents", true, false, false, false, &[]),
             domain("roles", true, false, false, false, &["list"]),
             domain("subagents", true, false, false, false, &["list_roles"]),
-            domain("tools", true, false, false, false, &[]),
+            domain("tools", true, false, false, false, &["list"]),
             domain("skills", true, false, false, false, &[]),
             domain("hooks", true, false, false, false, &[]),
             domain("mcp_client", true, false, false, false, &[]),
@@ -133,6 +134,13 @@ mod tests {
             .find(|domain| domain.id == "roles")
             .expect("roles capability");
         assert!(roles.actions.contains(&"list"));
+
+        let tools = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "tools")
+            .expect("tools capability");
+        assert!(tools.actions.contains(&"list"));
 
         let skills = capabilities
             .domains
