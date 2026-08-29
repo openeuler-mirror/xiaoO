@@ -29,6 +29,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config validate",
             "config inspect",
             "config test-model",
+            "config models",
         ],
         domains: vec![
             domain(
@@ -45,7 +46,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 false,
                 true,
                 true,
-                &["session_select", "test_connection"],
+                &["session_select", "test_connection", "list_catalog"],
             ),
             domain("agents", true, false, false, false, &[]),
             domain("roles", true, false, false, false, &[]),
@@ -123,6 +124,7 @@ mod tests {
         assert!(models.test);
         assert!(models.actions.contains(&"session_select"));
         assert!(models.actions.contains(&"test_connection"));
+        assert!(models.actions.contains(&"list_catalog"));
 
         let skills = capabilities
             .domains

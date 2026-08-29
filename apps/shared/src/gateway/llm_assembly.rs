@@ -18,9 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use llm_client::{
-    create_llm_provider_from_resolved, resolve_provider_profile, ChatMessage, ContentBlock,
-    LlmProviderWrapper, LlmRequest, MessageRole, ReasoningEffort, ToolChoice,
+    create_llm_provider_from_resolved, create_model_catalog, resolve_provider_profile, ChatMessage,
+    ContentBlock, LlmProviderWrapper, LlmRequest, MessageRole, ReasoningEffort, ToolChoice,
 };
+use serde::Serialize;
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
 
@@ -52,6 +53,24 @@ pub enum LlmAssemblyError {
     ProbeTimeout,
     #[error("provider connection test failed: {0}")]
     Probe(String),
+    #[error("provider `{0}` does not expose a model catalog")]
+    ModelCatalogUnsupported(String),
+    #[error("failed to list provider models: {0}")]
+    ModelCatalog(String),
+}
+
+/// Secret-free model metadata returned to application management surfaces.
+#[derive(Clone, Debug, Serialize)]
+pub struct LlmModelSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 /// 解析 api-key：显式 > 环境变量 > provider profile 默认 env。
@@ -179,6 +198,46 @@ pub async fn probe_llm_provider(input: LlmAssemblyInput) -> Result<(), LlmAssemb
         .map_err(|_| LlmAssemblyError::ProbeTimeout)?
         .map_err(|error| LlmAssemblyError::Probe(error.to_string()))?;
     Ok(())
+}
+
+/// List models using the provider's native catalog endpoint.
+///
+/// Raw provider responses are deliberately omitted from the public result so
+/// management clients receive a stable, bounded contract.
+pub async fn list_llm_models(
+    input: LlmAssemblyInput,
+) -> Result<Vec<LlmModelSummary>, LlmAssemblyError> {
+    let api_key = resolve_api_key(&input)?;
+    let requested_provider = input.provider.clone();
+    let resolved = resolve_config(ResolveInput {
+        provider: Some(input.provider),
+        protocol: None,
+        api_key,
+        api_key_env: None,
+        base_url: input.api_base,
+    })
+    .map_err(|error| LlmAssemblyError::Resolve(error.to_string()))?;
+    if !resolved.supports_model_catalog {
+        return Err(LlmAssemblyError::ModelCatalogUnsupported(
+            resolved.provider.unwrap_or(requested_provider),
+        ));
+    }
+    let catalog = create_model_catalog(&resolved)
+        .map_err(|error| LlmAssemblyError::ModelCatalog(error.to_string()))?;
+    let models = tokio::time::timeout(Duration::from_secs(20), catalog.list_models())
+        .await
+        .map_err(|_| LlmAssemblyError::ProbeTimeout)?
+        .map_err(|error| LlmAssemblyError::ModelCatalog(error.to_string()))?;
+    Ok(models
+        .into_iter()
+        .map(|model| LlmModelSummary {
+            id: model.id,
+            display_name: model.display_name,
+            provider: model.provider,
+            context_length: model.context_length,
+            max_output_tokens: model.max_output_tokens,
+        })
+        .collect())
 }
 
 /// 与原 serverside `resolve_effective_context_window` 等价的内部实现。

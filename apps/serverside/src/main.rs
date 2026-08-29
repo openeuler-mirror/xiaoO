@@ -98,6 +98,20 @@ async fn main() -> Result<()> {
                 bail!("model connection test failed")
             };
         }
+        CliAction::ConfigModels => {
+            let config_path = resolve_config_path(cli.config)?;
+            let profile_id = cli
+                .profile
+                .as_deref()
+                .context("config models requires --profile <id>")?;
+            let report = model_management::list_model_catalog(&config_path, profile_id).await?;
+            println!("{}", serde_json::to_string(&report)?);
+            return if report.success {
+                Ok(())
+            } else {
+                bail!("model catalog request failed")
+            };
+        }
         CliAction::Serve => {}
     }
     run_daemon(
@@ -575,6 +589,7 @@ enum CliAction {
     ConfigProviders,
     ConfigInspect,
     ConfigTestModel,
+    ConfigModels,
 }
 
 #[derive(Debug)]
@@ -617,7 +632,8 @@ impl Cli {
                     Some("providers") => CliAction::ConfigProviders,
                     Some("inspect") => CliAction::ConfigInspect,
                     Some("test-model") => CliAction::ConfigTestModel,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, or `config test-model`"),
+                    Some("models") => CliAction::ConfigModels,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, or `config models`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -742,6 +758,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config providers\n\n\
          \x20     xiaoo-daemon config inspect [--config <path>] [daemon overrides]\n\n\
          \x20     xiaoo-daemon config test-model --profile <id> [--config <path>]\n\n\
+         \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -856,6 +873,19 @@ mod tests {
         assert_eq!(cli.action, CliAction::ConfigTestModel);
         assert_eq!(cli.profile.as_deref(), Some("qwen"));
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_models_command() {
+        let cli = Cli::parse(
+            ["config", "models", "--profile", "qwen"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config models should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigModels);
+        assert_eq!(cli.profile.as_deref(), Some("qwen"));
     }
 
     #[test]

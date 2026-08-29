@@ -3,7 +3,9 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::Path;
 use std::time::Instant;
-use xiaoo_shared::gateway::llm_assembly::{probe_llm_provider, LlmAssemblyInput};
+use xiaoo_shared::gateway::llm_assembly::{
+    list_llm_models, probe_llm_provider, LlmAssemblyInput, LlmModelSummary,
+};
 
 #[derive(Debug, Serialize)]
 pub struct ModelConnectionReport {
@@ -13,6 +15,17 @@ pub struct ModelConnectionReport {
     pub model: String,
     pub success: bool,
     pub latency_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelCatalogReport {
+    pub schema_version: u32,
+    pub profile_id: String,
+    pub provider: String,
+    pub success: bool,
+    pub models: Vec<LlmModelSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -33,6 +46,27 @@ pub async fn test_model_connection(
         success: result.is_ok(),
         latency_ms: started.elapsed().as_millis(),
         error: result.err().map(|error| error.to_string()),
+    })
+}
+
+pub async fn list_model_catalog(
+    config_path: &Path,
+    profile_id: &str,
+) -> Result<ModelCatalogReport> {
+    let config = DaemonConfig::load_from(config_path)?;
+    let profile = configured_profile(&config, profile_id)?;
+    let result = list_llm_models(assembly_input(config_path, profile)).await;
+    let (models, error) = match result {
+        Ok(models) => (models, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    Ok(ModelCatalogReport {
+        schema_version: 1,
+        profile_id: profile_id.to_string(),
+        provider: profile.provider.clone(),
+        success: error.is_none(),
+        models,
+        error,
     })
 }
 
