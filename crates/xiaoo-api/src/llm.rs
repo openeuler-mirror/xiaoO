@@ -17,6 +17,12 @@ pub use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper}
 #[doc(inline)]
 pub use llm_client::{resolve_config, ResolveInput};
 
+// ---- provider registry ----
+#[doc(inline)]
+pub use llm_client::{
+    provider_catalog, resolve_provider_profile, ProviderMetadata, ProviderProfile,
+};
+
 // ---- 上下文窗口探测链 ----
 #[doc(inline)]
 pub use llm_client::{

@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::json!({
                     "schema_version": 1,
-                    "providers": llm_client::provider_catalog(),
+                    "providers": xiaoo_api::llm::provider_catalog(),
                 })
             );
             return Ok(());

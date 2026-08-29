@@ -121,7 +121,7 @@ fn inspect_profiles(config: &DaemonConfig) -> Vec<InspectedProfile> {
 }
 
 fn profile_summary(id: &str, active: bool, profile: &LlmProfileConfig) -> InspectedProfile {
-    let provider = llm_client::resolve_provider_profile(&profile.provider);
+    let provider = xiaoo_api::llm::resolve_provider_profile(&profile.provider);
     let api_key_env = profile
         .api_key_env
         .clone()
@@ -129,7 +129,7 @@ fn profile_summary(id: &str, active: bool, profile: &LlmProfileConfig) -> Inspec
     let key_required = profile.api_key_env.is_some()
         || provider
             .as_ref()
-            .is_some_and(llm_client::ProviderProfile::requires_api_key);
+            .is_some_and(xiaoo_api::llm::ProviderProfile::requires_api_key);
     let key_available = api_key_env
         .as_deref()
         .and_then(xiaoo_shared::gateway::get_decrypted_api_key)

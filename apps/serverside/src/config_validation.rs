@@ -35,21 +35,6 @@ impl ConfigValidationReport {
 }
 
 pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
-    let secrets_path = xiaoo_shared::llm_secrets::llm_secrets_path(config_path);
-    if secrets_path.exists() {
-        if let Err(error) = xiaoo_shared::llm_secrets::load_llm_secrets_to_memory(config_path) {
-            return ConfigValidationReport {
-                valid: false,
-                config_path: config_path.to_path_buf(),
-                active_profile: None,
-                errors: vec![ConfigValidationIssue {
-                    path: "vault".to_string(),
-                    code: "secret_store_invalid".to_string(),
-                    message: error.to_string(),
-                }],
-            };
-        }
-    }
     let config = match DaemonConfig::load_from(config_path) {
         Ok(config) => config,
         Err(error) => return ConfigValidationReport::from_error(config_path, error),
@@ -134,7 +119,7 @@ fn validate_profile(
         );
     }
 
-    let Some(provider) = llm_client::resolve_provider_profile(profile.provider.trim()) else {
+    let Some(provider) = xiaoo_api::llm::resolve_provider_profile(profile.provider.trim()) else {
         push_error(
             errors,
             format!("{path}.provider"),
