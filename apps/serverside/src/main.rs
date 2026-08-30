@@ -7,6 +7,7 @@ mod daemon_config;
 mod daemon_runtime;
 mod hook_management;
 mod httpserver;
+mod lsp_management;
 mod management_capabilities;
 mod mcp_management;
 mod mcp_server;
@@ -179,6 +180,15 @@ async fn main() -> Result<()> {
                 serde_json::to_string(
                     &mcp_management::mcp_catalog(&config, json_config_path.as_deref()).await
                 )?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigLsp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&lsp_management::lsp_catalog(&config))?
             );
             return Ok(());
         }
@@ -669,6 +679,7 @@ enum CliAction {
     ConfigSkills,
     ConfigHooks,
     ConfigMcp,
+    ConfigLsp,
     ProtocolSchema,
 }
 
@@ -718,7 +729,8 @@ impl Cli {
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
                     Some("mcp") => CliAction::ConfigMcp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, `config hooks`, or `config mcp`"),
+                    Some("lsp") => CliAction::ConfigLsp,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, `config hooks`, `config mcp`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -853,6 +865,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1054,6 +1067,19 @@ mod tests {
         assert_eq!(cli.action, CliAction::ConfigMcp);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
         assert_eq!(cli.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
+    }
+
+    #[test]
+    fn parses_config_lsp_command() {
+        let cli = Cli::parse(
+            ["config", "lsp", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config lsp should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigLsp);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
     #[test]
