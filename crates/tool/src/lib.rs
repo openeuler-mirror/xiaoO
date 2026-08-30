@@ -17,6 +17,7 @@ pub use invocation_context::{
 pub use r#impl::open_todo_lines;
 pub use r#impl::reqwest_util;
 pub use r#impl::{
-    load_tool_sources, load_tool_sources_with_services, McpToolSource, SubagentRoleConfig,
-    ToolRuntimeServices,
+    declarative_tool_catalog, load_tool_sources, load_tool_sources_with_services,
+    DeclarativeToolCatalog, DeclarativeToolDirectory, DeclarativeToolEffect,
+    DeclarativeToolSummary, McpToolSource, SubagentRoleConfig, ToolRuntimeServices,
 };

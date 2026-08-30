@@ -142,6 +142,23 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigCustomTools => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = DaemonConfig::load_from(&config_path)?;
+            let supported = config
+                .server_operation_backend()
+                .is_none_or(|backend| backend.kind != "e2b");
+            println!(
+                "{}",
+                serde_json::to_string(&xiaoo_shared::custom_tool_support::custom_tool_catalog(
+                    Some(&workspace),
+                    dirs::home_dir().as_deref(),
+                    supported,
+                ))?
+            );
+            return Ok(());
+        }
         CliAction::ConfigSkills => {
             let config_path = resolve_config_path(cli.config)?;
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -686,6 +703,7 @@ enum CliAction {
     ConfigModels,
     ConfigRoles,
     ConfigTools,
+    ConfigCustomTools,
     ConfigSkills,
     ConfigHooks,
     ConfigMcp,
@@ -737,12 +755,13 @@ impl Cli {
                     Some("models") => CliAction::ConfigModels,
                     Some("roles") => CliAction::ConfigRoles,
                     Some("tools") => CliAction::ConfigTools,
+                    Some("custom-tools") => CliAction::ConfigCustomTools,
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config custom-tools`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -874,6 +893,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config custom-tools [--config <path>]\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
@@ -1032,6 +1052,19 @@ mod tests {
         .expect("config tools should parse");
 
         assert_eq!(cli.action, CliAction::ConfigTools);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_custom_tools_command() {
+        let cli = Cli::parse(
+            ["config", "custom-tools", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config custom-tools should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigCustomTools);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
