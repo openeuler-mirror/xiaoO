@@ -4,170 +4,17 @@ use std::sync::{Arc, Mutex};
 
 use axum::response::sse;
 use futures_util::StreamExt;
-use serde::Serialize;
+pub use protocol::sse::{RuntimeSseEvent as SseStreamEvent, ToolCallStatus};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
-use xiaoo_api::chat::{AgentId, ChatMessage, HookAction};
+use xiaoo_api::chat::AgentId;
 use xiaoo_api::events::{
     LoopEndSummary, LoopEventSink, ToolEventSink, ToolLifecycleEvent, ToolResultEvent,
 };
-use xiaoo_api::interaction::InteractionRequest;
 use xiaoo_shared::plan::{
-    PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotItem,
-    TodoSnapshotUpdate,
+    PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotUpdate,
 };
 use xiaoo_shared::session_diff::{FileChangeDelta, SessionDiffForwarder};
-
-fn is_zero(value: &u64) -> bool { *value == 0 }
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SseStreamEvent {
-    TurnStart {
-        agent_id: String,
-        turn: u32,
-    },
-    TextDelta {
-        agent_id: String,
-        delta: String,
-        snapshot: String,
-    },
-    ThinkingDelta {
-        agent_id: String,
-        delta: String,
-        snapshot: String,
-    },
-    ToolResult {
-        agent_id: String,
-        call_id: String,
-        tool_name: String,
-        output_preview: String,
-        is_error: bool,
-        /// Args JSON preview for tool card rendering; backward compatible
-        /// (older TUIs ignore unknown fields).
-        #[serde(default)]
-        args_preview: String,
-    },
-    /// Per-call file change delta computed by the daemon's
-    /// `SessionDiffTracker`. Forwarded to the TUI so the remote-mode session
-    /// diff panel mirrors the local-mode computation exactly.
-    ToolFileChange {
-        call_id: String,
-        file_path: String,
-        additions: u32,
-        deletions: u32,
-    },
-    /// Plan snapshot parsed by the daemon from the `todo_write` tool's args.
-    /// Forwarded to the TUI so the remote-mode plan panel mirrors the
-    /// local-mode computation exactly.
-    PlanUpdate {
-        title: String,
-        items: Vec<TodoSnapshotItem>,
-    },
-    /// Subagent lane metadata parsed by the daemon from the `spawn_subagent`
-    /// tool's args + output. Forwarded to the TUI so the remote-mode
-    /// subagent lanes mirror the local-mode computation exactly.
-    SubagentSpawn {
-        agent_id: String,
-        parent_agent_id: Option<String>,
-        title: String,
-        description: String,
-        task_goal: String,
-    },
-    /// Tool lifecycle event forwarded so the remote TUI can drive the
-    /// same tool-card state machine as local mode. `agent_id` routes
-    /// to root message list or subagent lane.
-    ToolCall {
-        agent_id: String,
-        call_id: String,
-        tool_name: String,
-        #[serde(default)]
-        args_preview: String,
-        /// Lifecycle status carried over the wire. Mirrors the local
-        /// `ToolExecutionStatus` enum.
-        status: ToolCallStatus,
-        /// Populated for `denied` / `failed` statuses (denial reason
-        /// / executor error).
-        #[serde(default)]
-        detail: String,
-    },
-    /// Per-agent loop-end marker so the TUI clears `is_running` on the
-    /// matching lane. Summary fields default to zero/empty for backward
-    /// compat with older daemons.
-    LoopEnd {
-        agent_id: String,
-        #[serde(default)]
-        turn_count: u32,
-        #[serde(default)]
-        total_tokens: usize,
-        #[serde(default)]
-        stop_reason: String,
-    },
-    InteractionRequested {
-        request: InteractionRequest,
-    },
-    Done {
-        reply: String,
-        raw_reply: String,
-        conversation_id: String,
-        #[serde(rename = "runtime_id")]
-        session_id: String,
-        turn_count: u32,
-        total_tokens: usize,
-        prompt_tokens: u64,
-        completion_tokens: u64,
-        #[serde(default)]
-        #[serde(skip_serializing_if = "is_zero")]
-        cached_tokens: u64,
-        estimated_input_tokens: u64,
-        messages: Vec<ChatMessage>,
-        stop_reason: String,
-        #[serde(default)]
-        actions: Vec<HookAction>,
-    },
-    Error {
-        error: String,
-    },
-    Cancelled {
-        #[serde(rename = "runtime_id")]
-        session_id: String,
-    },
-}
-
-/// Wire-format mirror of `agent_types::tool::ToolExecutionStatus`,
-/// kept independent so the daemon ↔ TUI contract survives TUI renames.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallStatus {
-    /// Tool args received, executor about to run.
-    Running,
-    /// Executor returned successfully.
-    Completed,
-    /// Executor returned an error.
-    Failed,
-    /// Tool args were rejected by the policy layer before execution.
-    Denied,
-}
-
-impl SseStreamEvent {
-    fn event_name(&self) -> &'static str {
-        match self {
-            SseStreamEvent::TurnStart { .. } => "turn_start",
-            SseStreamEvent::TextDelta { .. } => "text_delta",
-            SseStreamEvent::ThinkingDelta { .. } => "thinking_delta",
-            SseStreamEvent::ToolResult { .. } => "tool_result",
-            SseStreamEvent::ToolFileChange { .. } => "tool_file_change",
-            SseStreamEvent::PlanUpdate { .. } => "plan_update",
-            SseStreamEvent::SubagentSpawn { .. } => "subagent_spawn",
-            SseStreamEvent::ToolCall { .. } => "tool_call",
-            SseStreamEvent::LoopEnd { .. } => "loop_end",
-            SseStreamEvent::InteractionRequested { .. } => "interaction_requested",
-            SseStreamEvent::Done { .. } => "done",
-            SseStreamEvent::Error { .. } => "error",
-            SseStreamEvent::Cancelled { .. } => "cancelled",
-        }
-    }
-}
 
 pub struct SseLoopEventSink {
     tx: mpsc::UnboundedSender<SseStreamEvent>,

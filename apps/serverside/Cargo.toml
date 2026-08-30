@@ -21,6 +21,7 @@ futures-util.workspace = true
 governor = "0.6"
 mime_guess.workspace = true
 prost = "0.13"
+protocol = { path = "../../crates/protocol" }
 regex = "1.11"
 reqwest.workspace = true
 rmcp = { version = "=2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-streamable-http-server"] }

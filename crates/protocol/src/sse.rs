@@ -164,6 +164,28 @@ pub enum ToolCallStatus {
     Denied,
 }
 
+impl RuntimeSseEvent {
+    /// Return the stable SSE event name associated with this wire event.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::TurnStart { .. } => "turn_start",
+            Self::TextDelta { .. } => "text_delta",
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::ToolResult { .. } => "tool_result",
+            Self::ToolFileChange { .. } => "tool_file_change",
+            Self::PlanUpdate { .. } => "plan_update",
+            Self::SubagentSpawn { .. } => "subagent_spawn",
+            Self::ToolCall { .. } => "tool_call",
+            Self::LoopEnd { .. } => "loop_end",
+            Self::InteractionRequested { .. } => "interaction_requested",
+            Self::Done { .. } => "done",
+            Self::Error { .. } => "error",
+            Self::Cancelled { .. } => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// 解析一行 SSE `data:` 载荷。
 ///
 /// - 已知事件类型 → `Ok(Some(event))`
