@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -146,6 +147,7 @@ pub struct DeclarativeToolDirectory {
 pub struct DeclarativeToolSummary {
     pub scope: &'static str,
     pub manifest_path: String,
+    pub content_hash: String,
     pub status: &'static str,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -268,6 +270,7 @@ fn valid_summary(
     DeclarativeToolSummary {
         scope,
         manifest_path: loaded.manifest_path.display().to_string(),
+        content_hash: file_hash(&loaded.manifest_path),
         status,
         name: Some(loaded.manifest.name),
         description: Some(loaded.manifest.description),
@@ -301,6 +304,7 @@ fn invalid_summary(scope: &'static str, path: PathBuf, error: String) -> Declara
     DeclarativeToolSummary {
         scope,
         manifest_path: path.display().to_string(),
+        content_hash: file_hash(&path),
         status: "invalid",
         name: None,
         description: None,
@@ -317,6 +321,11 @@ fn invalid_summary(scope: &'static str, path: PathBuf, error: String) -> Declara
         shadowed_by: None,
         error: Some(error),
     }
+}
+
+fn file_hash(path: &Path) -> String {
+    let content = std::fs::read(path).unwrap_or_default();
+    format!("{:x}", Sha256::digest(content))
 }
 
 fn find_command(command: &str, tool_dir: &Path) -> Option<PathBuf> {
@@ -380,6 +389,10 @@ mod tests {
         let catalog = declarative_tool_catalog(Some(&workspace), Some(&home), false);
         assert!(!catalog.supported);
         assert_eq!(catalog.tools.len(), 3);
+        assert!(catalog
+            .tools
+            .iter()
+            .all(|tool| tool.content_hash.len() == 64));
         assert_eq!(catalog.tools[0].status, "unsupported_backend");
         assert!(catalog.tools.iter().any(|tool| tool.status == "shadowed"));
         assert!(catalog.tools.iter().any(|tool| tool.status == "invalid"));
