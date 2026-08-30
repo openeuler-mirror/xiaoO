@@ -471,6 +471,8 @@ impl DaemonConfig {
         app.llm
             .activate_profile(None)
             .with_context(|| format!("invalid llm config {}", config_path.display()))?;
+        validate_agents(&app)
+            .with_context(|| format!("invalid agents config {}", config_path.display()))?;
         install_builtin_agent_roles(&mut app.agent)
             .with_context(|| format!("invalid config {}", config_path.display()))?;
         Ok(Self { app, config_path })
@@ -986,6 +988,38 @@ impl DaemonConfig {
     }
 }
 
+fn validate_agents(app: &AppConfig) -> Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for agent in &app.agents.list {
+        if agent.id.is_empty()
+            || !agent
+                .id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            bail!(
+                "agent id '{}' must use letters, numbers, '_' or '-'",
+                agent.id
+            );
+        }
+        if !ids.insert(agent.id.as_str()) {
+            bail!("duplicate agent id '{}'", agent.id);
+        }
+        if let Some(profile_id) = agent.profile_id.as_deref() {
+            app.llm.profile(profile_id)?;
+        }
+    }
+    if let Some(default_id) = app.agents.default_agent_id.as_deref() {
+        if !app.agents.list.iter().any(|agent| agent.id == default_id) {
+            bail!("agents.default_agent_id '{}' does not exist", default_id);
+        }
+    }
+    if app.agents.list.iter().filter(|agent| agent.default).count() > 1 {
+        bail!("only one agents.list item may set default=true");
+    }
+    Ok(())
+}
+
 fn install_builtin_agent_roles(agent_roles: &mut BTreeMap<String, AgentRoleConfig>) -> Result<()> {
     if agent_roles.contains_key(PLAN_AGENT_ID) {
         bail!("agent role `{PLAN_AGENT_ID}` is builtin and cannot be overridden in config");
@@ -1206,6 +1240,31 @@ model = "gpt-4o"
         let error = DaemonConfig::load_from(&config_path).expect_err("profile must be rejected");
         assert!(error.to_string().contains("invalid llm config"));
         assert!(format!("{error:#}").contains("llm profile `disabled` is disabled"));
+    }
+
+    #[test]
+    fn rejects_invalid_agent_references_and_duplicate_ids() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[llm]
+active_profile = "local"
+[llm.profiles.local]
+provider = "ollama"
+model = "qwen"
+[agents]
+default_agent_id = "missing"
+[[agents.list]]
+id = "main"
+profile_id = "unknown"
+[[agents.list]]
+id = "main"
+"#,
+        )
+        .expect("config");
+        let error = DaemonConfig::load_from(&config_path).expect_err("invalid agents");
+        assert!(error.to_string().contains("invalid agents config"));
     }
 
     #[test]
