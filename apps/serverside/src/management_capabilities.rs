@@ -26,6 +26,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config lsp",
             "config memory",
             "config compact",
+            "config backend",
         ]
         .into_iter()
         .map(str::to_string)
@@ -94,6 +95,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 &["inspect", "test_connection", "queue_status"],
             ),
             domain("compact", true, true, false, true, &["inspect", "validate"]),
+            domain(
+                "backend",
+                true,
+                true,
+                false,
+                true,
+                &["inspect", "preflight"],
+            ),
             domain("cron", true, false, false, false, &[]),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
@@ -292,5 +301,14 @@ mod tests {
         assert!(compact.test);
         assert!(compact.actions.iter().any(|action| action == "inspect"));
         assert!(compact.actions.iter().any(|action| action == "validate"));
+
+        let backend = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "backend")
+            .expect("backend capability");
+        assert!(backend.runtime_read);
+        assert!(backend.test);
+        assert!(backend.actions.iter().any(|action| action == "preflight"));
     }
 }
