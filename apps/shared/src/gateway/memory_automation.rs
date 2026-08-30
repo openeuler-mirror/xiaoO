@@ -119,10 +119,17 @@ pub struct RecallMemory {
 /// Last observed outcome of a RAM-A operation. It is deliberately coarse:
 /// callers must never treat it as a guarantee that the next operation will
 /// succeed, only as an operator-facing indication of the most recent result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryAutomationHealth {
     Healthy,
     Degraded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryAutomationInspection {
+    pub health: MemoryAutomationHealth,
+    pub pending_ingests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,6 +208,10 @@ impl DurableIngestQueue {
             Ok(())
         })
         .await
+    }
+
+    async fn pending_count(&self) -> usize {
+        self.entries.lock().await.len()
     }
     pub(crate) async fn drain_due<F, Fut>(
         &self,
@@ -440,39 +451,9 @@ impl McpMemoryAutomation {
         config: MemoryAutomationConfig,
         servers: &[mcp::McpServerConfig],
     ) -> Result<Option<Arc<dyn TurnMemoryAutomation>>, MemoryAutomationError> {
-        if !config.enabled {
+        let Some(client) = Self::connect_validated_client(&config, servers).await? else {
             return Ok(None);
-        }
-        let server = servers
-            .iter()
-            .find(|server| server.name == config.server && server.is_enabled())
-            .ok_or_else(|| {
-                MemoryAutomationError::Config(format!(
-                    "configured server `{}` is unavailable",
-                    config.server
-                ))
-            })?;
-        let client = mcp::McpClient::connect(server).await?;
-        if let Err(error) = client.initialize().await {
-            let _ = client.close().await;
-            return Err(error.into());
-        }
-        let tools = match client.list_tools().await {
-            Ok(tools) => tools,
-            Err(error) => {
-                let _ = client.close().await;
-                return Err(error.into());
-            }
         };
-        for required in ["memory_search", "memory_ingest"] {
-            if !tools.iter().any(|tool| tool.name == required) {
-                let _ = client.close().await;
-                return Err(MemoryAutomationError::Config(format!(
-                    "server `{}` does not expose `{required}`",
-                    server.name
-                )));
-            }
-        }
         let client = Arc::new(client);
         let queue = match DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
             .await
@@ -506,6 +487,70 @@ impl McpMemoryAutomation {
             _worker: worker,
         });
         Ok(Some(automation))
+    }
+
+    pub async fn inspect(
+        config: &MemoryAutomationConfig,
+        servers: &[mcp::McpServerConfig],
+    ) -> Result<Option<MemoryAutomationInspection>, MemoryAutomationError> {
+        let Some(client) = Self::connect_validated_client(config, servers).await? else {
+            return Ok(None);
+        };
+        let queue = match DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
+            .await
+        {
+            Ok(queue) => queue,
+            Err(error) => {
+                let _ = client.close().await;
+                return Err(error);
+            }
+        };
+        let pending_ingests = queue.pending_count().await;
+        client.close().await?;
+        Ok(Some(MemoryAutomationInspection {
+            health: MemoryAutomationHealth::Healthy,
+            pending_ingests,
+        }))
+    }
+
+    async fn connect_validated_client(
+        config: &MemoryAutomationConfig,
+        servers: &[mcp::McpServerConfig],
+    ) -> Result<Option<mcp::McpClient>, MemoryAutomationError> {
+        if !config.enabled {
+            return Ok(None);
+        }
+        let server = servers
+            .iter()
+            .find(|server| server.name == config.server && server.is_enabled())
+            .ok_or_else(|| {
+                MemoryAutomationError::Config(format!(
+                    "configured server `{}` is unavailable",
+                    config.server
+                ))
+            })?;
+        let client = mcp::McpClient::connect(server).await?;
+        if let Err(error) = client.initialize().await {
+            let _ = client.close().await;
+            return Err(error.into());
+        }
+        let tools = match client.list_tools().await {
+            Ok(tools) => tools,
+            Err(error) => {
+                let _ = client.close().await;
+                return Err(error.into());
+            }
+        };
+        for required in ["memory_search", "memory_ingest"] {
+            if !tools.iter().any(|tool| tool.name == required) {
+                let _ = client.close().await;
+                return Err(MemoryAutomationError::Config(format!(
+                    "server `{}` does not expose `{required}`",
+                    server.name
+                )));
+            }
+        }
+        Ok(Some(client))
     }
     fn allowed(&self, role: &str) -> bool {
         self.config.allowed_agent_roles.is_empty()

@@ -13,6 +13,7 @@ mod management_capabilities;
 mod mcp_management;
 mod mcp_server;
 mod mcp_server_management;
+mod memory_management;
 mod model_management;
 mod role_management;
 mod skill_management;
@@ -279,6 +280,22 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&mcp_server_management::mcp_server_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigMemory => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let home = dirs::home_dir();
+            let config = DaemonConfig::load_with_mcp_config(
+                &config_path,
+                cli.mcp_config.as_deref(),
+                &workspace,
+                home.as_deref(),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&memory_management::memory_automation_report(&config).await)?
             );
             return Ok(());
         }
@@ -776,6 +793,7 @@ enum CliAction {
     ConfigMcp,
     ConfigMcpServer,
     ConfigLsp,
+    ConfigMemory,
     ProtocolSchema,
 }
 
@@ -838,7 +856,8 @@ impl Cli {
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    Some("memory") => CliAction::ConfigMemory,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, or `config memory`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1004,6 +1023,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
+         \x20     xiaoo-daemon config memory [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1301,6 +1321,19 @@ mod tests {
         .expect("config mcp-server should parse");
 
         assert_eq!(cli.action, CliAction::ConfigMcpServer);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_memory_command() {
+        let cli = Cli::parse(
+            ["config", "memory", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config memory should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigMemory);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
