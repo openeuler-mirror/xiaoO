@@ -15,6 +15,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config roles",
             "config tools",
             "config skills",
+            "config hooks",
         ]
         .into_iter()
         .map(str::to_string)
@@ -41,7 +42,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("subagents", true, false, false, false, &["list_roles"]),
             domain("tools", true, false, false, false, &["list"]),
             domain("skills", true, false, false, false, &["list"]),
-            domain("hooks", true, false, false, false, &[]),
+            domain("hooks", true, false, false, false, &["list"]),
             domain("mcp_client", true, false, false, false, &[]),
             domain("mcp_server", true, false, false, false, &[]),
             domain("lsp", true, false, false, false, &[]),
@@ -144,5 +145,13 @@ mod tests {
         assert!(!skills.runtime_write);
         assert!(!skills.test);
         assert!(skills.actions.iter().any(|action| action == "list"));
+
+        let hooks = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "hooks")
+            .expect("hooks capability");
+        assert!(hooks.configurable);
+        assert!(hooks.actions.iter().any(|action| action == "list"));
     }
 }

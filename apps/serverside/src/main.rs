@@ -5,6 +5,7 @@ mod config_validation;
 mod cron;
 mod daemon_config;
 mod daemon_runtime;
+mod hook_management;
 mod httpserver;
 mod management_capabilities;
 mod mcp_server;
@@ -145,6 +146,15 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&skill_management::skill_catalog(&config, &workspace))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigHooks => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&hook_management::hook_catalog(&config)?)?
             );
             return Ok(());
         }
@@ -633,6 +643,7 @@ enum CliAction {
     ConfigRoles,
     ConfigTools,
     ConfigSkills,
+    ConfigHooks,
     ProtocolSchema,
 }
 
@@ -680,7 +691,8 @@ impl Cli {
                     Some("roles") => CliAction::ConfigRoles,
                     Some("tools") => CliAction::ConfigTools,
                     Some("skills") => CliAction::ConfigSkills,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, or `config skills`"),
+                    Some("hooks") => CliAction::ConfigHooks,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, or `config hooks`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -813,6 +825,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
+         \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -979,6 +992,19 @@ mod tests {
         .expect("config skills should parse");
 
         assert_eq!(cli.action, CliAction::ConfigSkills);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_hooks_command() {
+        let cli = Cli::parse(
+            ["config", "hooks", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config hooks should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigHooks);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
