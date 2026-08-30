@@ -25,6 +25,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config mcp-server",
             "config lsp",
             "config memory",
+            "config memory-queue",
             "config compact",
             "config backend",
         ]
@@ -92,7 +93,13 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 false,
                 true,
-                &["inspect", "test_connection", "queue_status"],
+                &[
+                    "inspect",
+                    "test_connection",
+                    "queue_status",
+                    "retry_failed_queue",
+                    "clear_failed_queue",
+                ],
             ),
             domain("compact", true, true, false, true, &["inspect", "validate"]),
             domain(
@@ -291,6 +298,14 @@ mod tests {
             .iter()
             .any(|action| action == "test_connection"));
         assert!(memory.actions.iter().any(|action| action == "queue_status"));
+        assert!(memory
+            .actions
+            .iter()
+            .any(|action| action == "retry_failed_queue"));
+        assert!(memory
+            .actions
+            .iter()
+            .any(|action| action == "clear_failed_queue"));
 
         let compact = capabilities
             .domains

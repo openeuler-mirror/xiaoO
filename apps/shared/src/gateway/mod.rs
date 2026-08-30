@@ -44,7 +44,7 @@ pub use hosted_runtime_resolver::{
 };
 pub use memory_automation::{
     McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationError, MemoryAutomationHealth,
-    MemoryAutomationInspection, TurnMemoryAutomation,
+    MemoryAutomationInspection, MemoryQueueStatus, TurnMemoryAutomation,
 };
 pub use progress_updates::ChannelProgressRelayHandle;
 pub(crate) use session_base::SessionHeartbeatRequest;

@@ -301,6 +301,20 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigMemoryQueue => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let action = cli
+                .memory_queue_action
+                .context("config memory-queue requires an action")?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &memory_management::memory_queue_action_report(&config, action).await
+                )?
+            );
+            return Ok(());
+        }
         CliAction::ConfigCompact => {
             let config_path = resolve_config_path(cli.config)?;
             let config = DaemonConfig::load_from(&config_path)?;
@@ -814,6 +828,7 @@ enum CliAction {
     ConfigMcpServer,
     ConfigLsp,
     ConfigMemory,
+    ConfigMemoryQueue,
     ConfigCompact,
     ConfigBackend,
     ProtocolSchema,
@@ -835,6 +850,7 @@ struct Cli {
     agent: Option<String>,
     manifest: Option<PathBuf>,
     allow_effects: bool,
+    memory_queue_action: Option<memory_management::MemoryQueueAction>,
     help: bool,
 }
 
@@ -856,6 +872,7 @@ impl Cli {
         let mut agent = None;
         let mut manifest = None;
         let mut allow_effects = false;
+        let mut memory_queue_action = None;
         let mut remaining = args.into_iter().collect::<Vec<_>>();
         let action = match remaining.first().map(String::as_str) {
             Some("config") => {
@@ -879,9 +896,22 @@ impl Cli {
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
                     Some("memory") => CliAction::ConfigMemory,
+                    Some("memory-queue") => {
+                        let value = remaining
+                            .get(2)
+                            .context("config memory-queue requires `status`, `retry-failed`, or `clear-failed`")?;
+                        memory_queue_action = Some(match value.as_str() {
+                            "status" => memory_management::MemoryQueueAction::Status,
+                            "retry-failed" => memory_management::MemoryQueueAction::RetryFailed,
+                            "clear-failed" => memory_management::MemoryQueueAction::ClearFailed,
+                            _ => bail!("unknown memory queue action `{value}`; expected `status`, `retry-failed`, or `clear-failed`"),
+                        });
+                        remaining.remove(2);
+                        CliAction::ConfigMemoryQueue
+                    }
                     Some("compact") => CliAction::ConfigCompact,
                     Some("backend") => CliAction::ConfigBackend,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config compact`, or `config backend`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, or `config backend`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -911,6 +941,7 @@ impl Cli {
                         agent,
                         manifest,
                         allow_effects,
+                        memory_queue_action,
                         help: true,
                     });
                 }
@@ -1019,6 +1050,7 @@ impl Cli {
             agent,
             manifest,
             allow_effects,
+            memory_queue_action,
             help: false,
         })
     }
@@ -1048,6 +1080,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
          \x20     xiaoo-daemon config memory [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1386,6 +1419,27 @@ mod tests {
         .expect("config backend should parse");
         assert_eq!(cli.action, CliAction::ConfigBackend);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_memory_queue_action() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "memory-queue",
+                "retry-failed",
+                "--config",
+                "/tmp/demo.toml",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("memory queue action should parse");
+        assert_eq!(cli.action, CliAction::ConfigMemoryQueue);
+        assert_eq!(
+            cli.memory_queue_action,
+            Some(crate::memory_management::MemoryQueueAction::RetryFailed)
+        );
     }
 
     #[test]

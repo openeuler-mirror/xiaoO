@@ -26,6 +26,7 @@ fn ingest_fixture(id: &str, user: &str, assistant: &str) -> CompletedTurnIngest 
         recent_messages: Vec::new(),
         retries: 0,
         next_attempt_ms: 0,
+        failed: false,
     }
 }
 
@@ -123,6 +124,7 @@ fn ram_a_mcp_arguments_match_the_published_tool_schemas() {
         recent_messages: vec!["older context".into()],
         retries: 0,
         next_attempt_ms: 0,
+        failed: false,
     };
     assert_eq!(
         ingest_args(&ingest),
@@ -268,6 +270,41 @@ async fn retry_worker_drains_entry_when_backoff_becomes_due() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     let restarted = DurableIngestQueue::open(path, 4).await.unwrap();
     assert_eq!(drain_count(&restarted, 0).await, 0);
+}
+
+#[tokio::test]
+async fn exhausted_ingests_are_retained_until_retried_or_cleared() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("memory-queue.jsonl");
+    let queue = DurableIngestQueue::open(path, 4).await.unwrap();
+    queue
+        .enqueue(ingest_fixture("message-1", "hello", "reply"))
+        .await
+        .unwrap();
+
+    queue
+        .drain_due(0, 1, 1, |_entry| async {
+            Err(MemoryAutomationError::Config("unavailable".into()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(queue.status().await.unwrap().failed_ingests, 1);
+
+    let (retried, status) = queue.retry_failed().await.unwrap();
+    assert_eq!(retried, 1);
+    assert_eq!(status.pending_ingests, 1);
+    assert_eq!(status.failed_ingests, 0);
+
+    queue
+        .drain_due(0, 1, 2, |_entry| async {
+            Err(MemoryAutomationError::Config("unavailable".into()))
+        })
+        .await
+        .unwrap();
+    let (cleared, status) = queue.clear_failed().await.unwrap();
+    assert_eq!(cleared, 1);
+    assert_eq!(status.pending_ingests, 0);
+    assert_eq!(status.failed_ingests, 0);
 }
 
 #[tokio::test]

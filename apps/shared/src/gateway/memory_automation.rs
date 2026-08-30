@@ -130,6 +130,14 @@ pub enum MemoryAutomationHealth {
 pub struct MemoryAutomationInspection {
     pub health: MemoryAutomationHealth,
     pub pending_ingests: usize,
+    pub failed_ingests: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct MemoryQueueStatus {
+    pub pending_ingests: usize,
+    pub failed_ingests: usize,
+    pub capacity: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +155,8 @@ pub struct CompletedTurnIngest {
     pub retries: u32,
     #[serde(default)]
     pub next_attempt_ms: u64,
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[async_trait]
@@ -210,8 +220,38 @@ impl DurableIngestQueue {
         .await
     }
 
-    async fn pending_count(&self) -> usize {
-        self.entries.lock().await.len()
+    pub(crate) async fn status(&self) -> Result<MemoryQueueStatus, MemoryAutomationError> {
+        let entries = self.read_entries_from_disk().await?;
+        Ok(queue_status(&entries, self.capacity))
+    }
+    pub(crate) async fn retry_failed(
+        &self,
+    ) -> Result<(usize, MemoryQueueStatus), MemoryAutomationError> {
+        let mut affected = 0;
+        self.update_entries(|entries| {
+            for entry in entries.iter_mut().filter(|entry| entry.failed) {
+                entry.retries = 0;
+                entry.next_attempt_ms = 0;
+                entry.failed = false;
+                affected += 1;
+            }
+            Ok(())
+        })
+        .await?;
+        Ok((affected, self.status().await?))
+    }
+    pub(crate) async fn clear_failed(
+        &self,
+    ) -> Result<(usize, MemoryQueueStatus), MemoryAutomationError> {
+        let mut affected = 0;
+        self.update_entries(|entries| {
+            let before = entries.len();
+            entries.retain(|entry| !entry.failed);
+            affected = before - entries.len();
+            Ok(())
+        })
+        .await?;
+        Ok((affected, self.status().await?))
     }
     pub(crate) async fn drain_due<F, Fut>(
         &self,
@@ -228,6 +268,10 @@ impl DurableIngestQueue {
         let mut entries = self.read_entries_from_disk().await?;
         let mut index = 0;
         while index < entries.len() {
+            if entries[index].failed {
+                index += 1;
+                continue;
+            }
             if entries[index].next_attempt_ms > now_ms {
                 index += 1;
                 continue;
@@ -240,9 +284,12 @@ impl DurableIngestQueue {
             }
             let retries = entry.retries.saturating_add(1);
             if retries > max_retries {
-                tracing::warn!(message_id = %entry.message_id, "memory ingest dropped after retry limit");
-                entries.remove(index);
+                tracing::warn!(message_id = %entry.message_id, "memory ingest moved to failed queue after retry limit");
+                entries[index].retries = retries;
+                entries[index].next_attempt_ms = u64::MAX;
+                entries[index].failed = true;
                 self.persist(&entries).await?;
+                index += 1;
                 continue;
             }
             let delay = retry_backoff_ms.saturating_mul(1u64 << retries.min(16));
@@ -360,6 +407,15 @@ impl DurableIngestQueue {
     }
 }
 
+fn queue_status(entries: &[CompletedTurnIngest], capacity: usize) -> MemoryQueueStatus {
+    let failed_ingests = entries.iter().filter(|entry| entry.failed).count();
+    MemoryQueueStatus {
+        pending_ingests: entries.len() - failed_ingests,
+        failed_ingests,
+        capacity,
+    }
+}
+
 fn try_lock_file(file: &File) -> Result<bool, MemoryAutomationError> {
     #[cfg(unix)]
     {
@@ -447,6 +503,33 @@ pub struct McpMemoryAutomation {
     _worker: DurableIngestWorker,
 }
 impl McpMemoryAutomation {
+    pub async fn queue_status(
+        config: &MemoryAutomationConfig,
+    ) -> Result<MemoryQueueStatus, MemoryAutomationError> {
+        DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
+            .await?
+            .status()
+            .await
+    }
+
+    pub async fn retry_failed_ingests(
+        config: &MemoryAutomationConfig,
+    ) -> Result<(usize, MemoryQueueStatus), MemoryAutomationError> {
+        DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
+            .await?
+            .retry_failed()
+            .await
+    }
+
+    pub async fn clear_failed_ingests(
+        config: &MemoryAutomationConfig,
+    ) -> Result<(usize, MemoryQueueStatus), MemoryAutomationError> {
+        DurableIngestQueue::open(config.queue_path.clone(), config.queue_capacity)
+            .await?
+            .clear_failed()
+            .await
+    }
+
     pub async fn connect(
         config: MemoryAutomationConfig,
         servers: &[mcp::McpServerConfig],
@@ -505,11 +588,12 @@ impl McpMemoryAutomation {
                 return Err(error);
             }
         };
-        let pending_ingests = queue.pending_count().await;
+        let queue_status = queue.status().await?;
         client.close().await?;
         Ok(Some(MemoryAutomationInspection {
             health: MemoryAutomationHealth::Healthy,
-            pending_ingests,
+            pending_ingests: queue_status.pending_ingests,
+            failed_ingests: queue_status.failed_ingests,
         }))
     }
 
