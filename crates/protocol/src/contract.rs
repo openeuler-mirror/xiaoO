@@ -5,7 +5,9 @@ use serde_json::{json, Value};
 
 use crate::response::{
     DaemonReadyMessage, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayHealthResponse,
-    RuntimeOpenResponse,
+    RuntimeCheckoutResponse, RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeOpenResponse, RuntimePauseResponse,
+    RuntimeReadFileResponse, RuntimeResumeResponse, RuntimeWriteFileResponse,
 };
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
@@ -38,6 +40,15 @@ pub fn protocol_contract() -> Value {
             "gateway_capabilities_response": schema_for!(GatewayCapabilitiesResponse),
             "gateway_error_response": schema_for!(GatewayErrorResponse),
             "runtime_open_response": schema_for!(RuntimeOpenResponse),
+            "runtime_checkpoint_response": schema_for!(RuntimeCheckpointResponse),
+            "runtime_checkout_response": schema_for!(RuntimeCheckoutResponse),
+            "runtime_pause_response": schema_for!(RuntimePauseResponse),
+            "runtime_resume_response": schema_for!(RuntimeResumeResponse),
+            "runtime_checkpoint_snapshot_delete_response": schema_for!(RuntimeCheckpointSnapshotDeleteResponse),
+            "runtime_exec_response": schema_for!(RuntimeExecResponse),
+            "runtime_exec_interrupted_response": schema_for!(RuntimeExecInterruptedResponse),
+            "runtime_read_file_response": schema_for!(RuntimeReadFileResponse),
+            "runtime_write_file_response": schema_for!(RuntimeWriteFileResponse),
         }
     })
 }
@@ -53,7 +64,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 13);
+        assert_eq!(schemas.len(), 22);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("runtime_close_request"));
@@ -67,5 +78,14 @@ mod tests {
         assert!(schemas.contains_key("gateway_capabilities_response"));
         assert!(schemas.contains_key("gateway_error_response"));
         assert!(schemas.contains_key("runtime_open_response"));
+        assert!(schemas.contains_key("runtime_checkpoint_response"));
+        assert!(schemas.contains_key("runtime_checkout_response"));
+        assert!(schemas.contains_key("runtime_pause_response"));
+        assert!(schemas.contains_key("runtime_resume_response"));
+        assert!(schemas.contains_key("runtime_checkpoint_snapshot_delete_response"));
+        assert!(schemas.contains_key("runtime_exec_response"));
+        assert!(schemas.contains_key("runtime_exec_interrupted_response"));
+        assert!(schemas.contains_key("runtime_read_file_response"));
+        assert!(schemas.contains_key("runtime_write_file_response"));
     }
 }

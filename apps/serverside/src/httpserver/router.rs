@@ -24,9 +24,12 @@ use axum::{
 };
 use protocol::response::{
     DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
-    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport,
+    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCheckoutResponse,
+    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeLifecycleStatus,
+    RuntimePauseResponse, RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
+    RuntimeWriteFileResponse,
 };
-use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -373,13 +376,102 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
     }
 }
 
-#[derive(Debug, Serialize)]
-struct RuntimeExecInterruptedResponse {
-    error: String,
-    execution_state: String,
-    stdout_base64: String,
-    stderr_base64: String,
-    retryable: bool,
+fn runtime_record_response(record: xiaoo_shared::RuntimeRecord) -> RuntimeRecordResponse {
+    RuntimeRecordResponse {
+        runtime_id: record.runtime_id,
+        conversation_id: record.conversation_id,
+        sender_id: record.sender_id,
+        status: match record.status {
+            xiaoo_shared::gateway::SessionLifecycleStatus::Idle => RuntimeLifecycleStatus::Idle,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Running => {
+                RuntimeLifecycleStatus::Running
+            }
+            xiaoo_shared::gateway::SessionLifecycleStatus::Paused => RuntimeLifecycleStatus::Paused,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Failed => RuntimeLifecycleStatus::Failed,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Closed => RuntimeLifecycleStatus::Closed,
+        },
+        created_at_ms: record.created_at_ms,
+        updated_at_ms: record.updated_at_ms,
+    }
+}
+
+fn runtime_checkpoint_response(
+    result: xiaoo_shared::RuntimeCheckpointResult,
+) -> RuntimeCheckpointResponse {
+    RuntimeCheckpointResponse {
+        checkpoint_id: result.checkpoint_id,
+        runtime: runtime_record_response(result.runtime),
+        parent_checkpoint_id: result.parent_checkpoint_id,
+        created_at_ms: result.created_at_ms,
+        metadata: result.metadata,
+        name: result.name,
+    }
+}
+
+fn runtime_checkout_response(
+    result: xiaoo_shared::RuntimeCheckoutResult,
+) -> RuntimeCheckoutResponse {
+    RuntimeCheckoutResponse {
+        checkpoint_id: result.checkpoint_id,
+        source_runtime_id: result.source_runtime_id,
+        runtime: runtime_record_response(result.runtime),
+    }
+}
+
+fn runtime_pause_response(result: xiaoo_shared::RuntimePauseResult) -> RuntimePauseResponse {
+    RuntimePauseResponse {
+        runtime: runtime_record_response(result.runtime),
+        checkpoint_id: result.checkpoint_id,
+        created_at_ms: result.created_at_ms,
+        metadata: result.metadata,
+        name: result.name,
+    }
+}
+
+fn runtime_resume_response(result: xiaoo_shared::RuntimeResumeResult) -> RuntimeResumeResponse {
+    RuntimeResumeResponse {
+        runtime: runtime_record_response(result.runtime),
+    }
+}
+
+fn runtime_checkpoint_snapshot_delete_response(
+    result: xiaoo_shared::RuntimeCheckpointSnapshotDeleteResult,
+) -> RuntimeCheckpointSnapshotDeleteResponse {
+    RuntimeCheckpointSnapshotDeleteResponse {
+        checkpoint_id: result.checkpoint_id,
+        runtime_id: result.runtime_id,
+        provider: result.provider,
+        provider_snapshot_id: result.provider_snapshot_id,
+        provider_snapshot_names: result.provider_snapshot_names,
+        deleted_provider_snapshot: result.deleted_provider_snapshot,
+        deleted_at_ms: result.deleted_at_ms,
+    }
+}
+
+fn runtime_exec_response(result: xiaoo_shared::RuntimeExecResult) -> RuntimeExecResponse {
+    RuntimeExecResponse {
+        stdout_base64: result.stdout_base64,
+        stderr_base64: result.stderr_base64,
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+    }
+}
+
+fn runtime_read_file_response(
+    result: xiaoo_shared::RuntimeReadFileResult,
+) -> RuntimeReadFileResponse {
+    RuntimeReadFileResponse {
+        content_base64: result.content_base64,
+    }
+}
+
+fn runtime_write_file_response(
+    result: xiaoo_shared::RuntimeWriteFileResult,
+) -> RuntimeWriteFileResponse {
+    RuntimeWriteFileResponse {
+        path: result.path,
+        created: result.created,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1095,7 +1187,7 @@ async fn handle_runtime_checkpoint(
     }
 
     match control_plane.checkpoint_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkpoint_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1118,7 +1210,7 @@ async fn handle_runtime_checkout(
     // — it doesn't mutate the source session's state, and the returned child
     // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkout_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1171,7 +1263,7 @@ async fn handle_runtime_pause(
     }
 
     match control_plane.pause_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_pause_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1198,7 +1290,7 @@ async fn handle_runtime_resume(
     }
 
     match control_plane.resume_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_resume_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1219,7 +1311,7 @@ async fn handle_runtime_checkpoint_snapshot_delete(
     // No lease check: keyed by `checkpoint_id`, not `runtime_id` — admin
     // operation that deletes a remote provider snapshot (e.g. e2b).
     match control_plane.delete_checkpoint_snapshot(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkpoint_snapshot_delete_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1245,7 +1337,7 @@ async fn handle_runtime_exec(
     }
 
     match control_plane.exec_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_exec_response(result)).into_response(),
         Err(xiaoo_shared::gateway::SessionServiceError::RuntimeExecInterrupted {
             message,
             stdout_base64,
@@ -1288,7 +1380,7 @@ async fn handle_runtime_read_file(
     }
 
     match control_plane.read_runtime_file(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_read_file_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1314,7 +1406,7 @@ async fn handle_runtime_write_file(
     }
 
     match control_plane.write_runtime_file(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_write_file_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
