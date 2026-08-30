@@ -41,15 +41,20 @@ impl DeclarativeToolExecutor {
         }
     }
 
-    fn stdin_payload(&self, call: &FinalToolCall, runtime: &dyn RuntimeView) -> serde_json::Value {
-        let workspace_root = runtime.agent_context().workspace().root.clone();
-        let metadata = runtime.agent_context().metadata();
+    fn stdin_payload(
+        &self,
+        call: &FinalToolCall,
+        workspace_root: &Path,
+        agent_id: &str,
+        model: &str,
+        session_id: Option<&str>,
+    ) -> serde_json::Value {
         json!({
             "args": call.input,
             "context": {
-                "agent_id": metadata.agent_id,
-                "model": metadata.model,
-                "session_id": metadata.session_id,
+                "agent_id": agent_id,
+                "model": model,
+                "session_id": session_id,
                 "directory": workspace_root,
                 "worktree": workspace_root,
                 "tool_dir": self.tool_dir,
@@ -101,6 +106,46 @@ impl DeclarativeToolExecutor {
         runtime: &dyn RuntimeView,
     ) -> Result<RawToolOutcome, ToolExecutionError> {
         let workspace_root = runtime.agent_context().workspace().root.clone();
+        let metadata = runtime.agent_context().metadata();
+        self.invoke_process_with_context(
+            call,
+            &workspace_root,
+            &metadata.agent_id,
+            &metadata.model,
+            metadata.session_id.as_deref(),
+        )
+        .await
+    }
+
+    pub(super) async fn invoke_for_test(
+        &self,
+        input: serde_json::Value,
+        workspace_root: &Path,
+    ) -> Result<RawToolOutcome, ToolExecutionError> {
+        let call = FinalToolCall {
+            call_id: "custom-tool-test".to_string(),
+            tool_name: self.spec.name().0.clone(),
+            input,
+            ..FinalToolCall::default()
+        };
+        self.invoke_process_with_context(
+            &call,
+            workspace_root,
+            "xiaoo-config-test",
+            "configuration-test",
+            None,
+        )
+        .await
+    }
+
+    async fn invoke_process_with_context(
+        &self,
+        call: &FinalToolCall,
+        workspace_root: &Path,
+        agent_id: &str,
+        model: &str,
+        session_id: Option<&str>,
+    ) -> Result<RawToolOutcome, ToolExecutionError> {
         let command_token = self.resolve_command_token(&self.command);
         let args = self
             .args
@@ -118,13 +163,10 @@ impl DeclarativeToolExecutor {
             .env("XIAOO_TOOL_MANIFEST", &self.manifest_path)
             .env("XIAOO_TOOL_DIR", &self.tool_dir);
 
-        if let Some(session_id) = runtime.agent_context().metadata().session_id.as_deref() {
+        if let Some(session_id) = session_id {
             command.env("XIAOO_SESSION_ID", session_id);
         }
-        command.env(
-            "XIAOO_AGENT_ID",
-            &runtime.agent_context().metadata().agent_id,
-        );
+        command.env("XIAOO_AGENT_ID", agent_id);
 
         for env_name in &self.env_names {
             if let Ok(value) = std::env::var(env_name) {
@@ -151,12 +193,16 @@ impl DeclarativeToolExecutor {
             })?;
 
         if self.stdin_mode == StdinMode::Json {
-            let payload =
-                serde_json::to_vec(&self.stdin_payload(call, runtime)).map_err(|error| {
-                    ToolExecutionError::ExecutionFailed {
-                        message: format!("failed to serialize custom tool input: {error}"),
-                    }
-                })?;
+            let payload = serde_json::to_vec(&self.stdin_payload(
+                call,
+                workspace_root,
+                agent_id,
+                model,
+                session_id,
+            ))
+            .map_err(|error| ToolExecutionError::ExecutionFailed {
+                message: format!("failed to serialize custom tool input: {error}"),
+            })?;
             if let Some(mut stdin) = child.stdin.take() {
                 stdin.write_all(&payload).await.map_err(|error| {
                     ToolExecutionError::ExecutionFailed {

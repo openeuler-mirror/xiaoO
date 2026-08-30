@@ -13,9 +13,10 @@ pub use builtin::file_read;
 pub use builtin::open_todo_lines;
 pub use mcp::McpToolSource;
 pub use plugin::{
-    declarative_tool_catalog, render_declarative_tool, DeclarativeToolCatalog,
-    DeclarativeToolDirectory, DeclarativeToolDraft, DeclarativeToolDraftEffect,
-    DeclarativeToolEffect, DeclarativeToolRenderReport, DeclarativeToolSummary,
+    declarative_tool_catalog, render_declarative_tool, test_declarative_tool,
+    DeclarativeToolCatalog, DeclarativeToolDirectory, DeclarativeToolDraft,
+    DeclarativeToolDraftEffect, DeclarativeToolEffect, DeclarativeToolRenderReport,
+    DeclarativeToolSummary, DeclarativeToolTestReport,
 };
 pub use runtime_services::{SubagentRoleConfig, ToolRuntimeServices};
 pub use source_loader::{load_tool_sources, load_tool_sources_with_services};

@@ -18,8 +18,8 @@ pub use r#impl::open_todo_lines;
 pub use r#impl::reqwest_util;
 pub use r#impl::{
     declarative_tool_catalog, load_tool_sources, load_tool_sources_with_services,
-    render_declarative_tool, DeclarativeToolCatalog, DeclarativeToolDirectory,
-    DeclarativeToolDraft, DeclarativeToolDraftEffect, DeclarativeToolEffect,
-    DeclarativeToolRenderReport, DeclarativeToolSummary, McpToolSource, SubagentRoleConfig,
-    ToolRuntimeServices,
+    render_declarative_tool, test_declarative_tool, DeclarativeToolCatalog,
+    DeclarativeToolDirectory, DeclarativeToolDraft, DeclarativeToolDraftEffect,
+    DeclarativeToolEffect, DeclarativeToolRenderReport, DeclarativeToolSummary,
+    DeclarativeToolTestReport, McpToolSource, SubagentRoleConfig, ToolRuntimeServices,
 };

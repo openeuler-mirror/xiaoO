@@ -3,11 +3,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
+use agent_types::tool::RawToolOutcome;
+
+use super::executor::DeclarativeToolExecutor;
 use super::manifest::{
     DeclarativeToolManifest, EffectSection, ExecSection, LoadedDeclarativeTool, OutputSection,
     StdinMode, StdoutMode,
 };
+use super::spec::DeclarativeToolSpec;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeclarativeToolDraft {
@@ -171,6 +177,119 @@ pub struct DeclarativeToolEffect {
     pub writes_filesystem: bool,
     pub network_access: bool,
     pub side_effects: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclarativeToolTestReport {
+    pub schema_version: u32,
+    pub manifest_path: String,
+    pub name: Option<String>,
+    pub success: bool,
+    pub duration_ms: u128,
+    pub output: Option<String>,
+    pub error: Option<String>,
+}
+
+pub async fn test_declarative_tool(
+    workspace_root: &Path,
+    home_dir: Option<&Path>,
+    manifest_path: &Path,
+    input: Value,
+    supported: bool,
+    allow_effects: bool,
+) -> DeclarativeToolTestReport {
+    let started = Instant::now();
+    let path_text = manifest_path.display().to_string();
+    let failure = |name: Option<String>, error: String| DeclarativeToolTestReport {
+        schema_version: 1,
+        manifest_path: path_text.clone(),
+        name,
+        success: false,
+        duration_ms: started.elapsed().as_millis(),
+        output: None,
+        error: Some(error),
+    };
+    if !input.is_object() {
+        return failure(None, "tool test input must be a JSON object".to_string());
+    }
+    let canonical = match std::fs::canonicalize(manifest_path) {
+        Ok(path) => path,
+        Err(error) => return failure(None, format!("failed to resolve manifest: {error}")),
+    };
+    let allowed_roots = [
+        Some(workspace_root.join(".xiaoo/tools")),
+        home_dir.map(|home| home.join(".xiaoo/tools")),
+    ];
+    if !allowed_roots
+        .into_iter()
+        .flatten()
+        .any(|root| std::fs::canonicalize(root).is_ok_and(|allowed| canonical.starts_with(allowed)))
+    {
+        return failure(
+            None,
+            "manifest resolves outside the discovered .xiaoo/tools directories".to_string(),
+        );
+    }
+    let catalog = declarative_tool_catalog(Some(workspace_root), home_dir, supported);
+    let selected = catalog.tools.iter().find(|tool| {
+        std::fs::canonicalize(&tool.manifest_path).is_ok_and(|candidate| candidate == canonical)
+    });
+    let Some(selected) = selected else {
+        return failure(
+            None,
+            "manifest must be inside a discovered .xiaoo/tools directory".to_string(),
+        );
+    };
+    if selected.status != "active" {
+        return failure(
+            selected.name.clone(),
+            format!(
+                "only an active custom tool can be tested (status={})",
+                selected.status
+            ),
+        );
+    }
+    let loaded = match LoadedDeclarativeTool::load(&canonical) {
+        Ok(tool) => tool,
+        Err(error) => return failure(selected.name.clone(), error),
+    };
+    let has_effects = loaded.manifest.effect.reads_filesystem
+        || loaded.manifest.effect.writes_filesystem
+        || loaded.manifest.effect.network_access
+        || loaded.manifest.effect.side_effects;
+    if has_effects && !allow_effects {
+        return failure(
+            Some(loaded.manifest.name),
+            "tool declares external effects; explicit effect confirmation is required".to_string(),
+        );
+    }
+    let name = loaded.manifest.name.clone();
+    let spec = Arc::new(DeclarativeToolSpec::from_loaded_tool(&loaded));
+    let executor = DeclarativeToolExecutor::from_loaded_tool(spec, &loaded);
+    match executor.invoke_for_test(input, workspace_root).await {
+        Ok(RawToolOutcome::Success { output }) => DeclarativeToolTestReport {
+            schema_version: 1,
+            manifest_path: path_text,
+            name: Some(name),
+            success: true,
+            duration_ms: started.elapsed().as_millis(),
+            output: Some(bounded_output(output)),
+            error: None,
+        },
+        Ok(RawToolOutcome::Error { message }) => failure(Some(name), bounded_output(message)),
+        Err(error) => failure(Some(name), bounded_output(error.to_string())),
+    }
+}
+
+fn bounded_output(value: String) -> String {
+    const MAX_CHARS: usize = 65_536;
+    let mut chars = value.chars();
+    let output = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{output}\n… output truncated by config test")
+    } else {
+        output
+    }
 }
 
 pub fn declarative_tool_catalog(
@@ -361,8 +480,8 @@ fn command_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        declarative_tool_catalog, render_declarative_tool, DeclarativeToolDraft,
-        DeclarativeToolDraftEffect,
+        declarative_tool_catalog, render_declarative_tool, test_declarative_tool,
+        DeclarativeToolDraft, DeclarativeToolDraftEffect,
     };
     use serde_json::json;
     use std::fs;
@@ -442,5 +561,34 @@ mod tests {
         assert!(!report.valid);
         assert!(report.content.is_none());
         assert!(report.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn tests_only_active_tools_and_requires_effect_confirmation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let workspace = temp.path().join("workspace");
+        let tools = workspace.join(".xiaoo/tools");
+        fs::create_dir_all(&tools).expect("tool dir");
+        let path = tools.join("echo.toml");
+        fs::write(
+            &path,
+            "name = \"echo\"\ndescription = \"echo\"\n[input_schema]\ntype = \"object\"\n[exec]\ncommand = \"sh\"\nargs = [\"-c\", \"printf tested\"]\nstdin = \"none\"\n",
+        )
+        .expect("manifest");
+        let report = test_declarative_tool(&workspace, None, &path, json!({}), true, false).await;
+        assert!(report.success);
+        assert_eq!(report.output.as_deref(), Some("tested"));
+
+        fs::write(
+            &path,
+            "name = \"echo\"\ndescription = \"echo\"\n[input_schema]\ntype = \"object\"\n[effect]\nside_effects = true\n[exec]\ncommand = \"sh\"\nargs = [\"-c\", \"printf tested\"]\nstdin = \"none\"\n",
+        )
+        .expect("effect manifest");
+        let denied = test_declarative_tool(&workspace, None, &path, json!({}), true, false).await;
+        assert!(!denied.success);
+        assert!(denied
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("confirmation")));
     }
 }
