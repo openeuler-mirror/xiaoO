@@ -13,6 +13,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config test-model",
             "config models",
             "config roles",
+            "config agents",
             "config tools",
             "config custom-tools",
             "config render-custom-tool",
@@ -43,7 +44,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["session_select", "test_connection", "list_catalog"],
             ),
-            domain("agents", true, false, false, false, &[]),
+            domain("agents", true, false, false, true, &["list"]),
             domain("roles", true, false, false, false, &["list"]),
             domain("subagents", true, false, false, false, &["list_roles"]),
             domain("tools", true, false, false, false, &["list"]),
@@ -155,6 +156,14 @@ mod tests {
             .find(|domain| domain.id == "roles")
             .expect("roles capability");
         assert!(roles.actions.iter().any(|action| action == "list"));
+
+        let agents = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "agents")
+            .expect("agents capability");
+        assert!(agents.test);
+        assert!(agents.actions.iter().any(|action| action == "list"));
 
         let tools = capabilities
             .domains

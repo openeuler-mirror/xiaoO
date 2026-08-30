@@ -1,3 +1,4 @@
+mod agent_management;
 mod channels;
 mod config_inspect;
 mod config_schema;
@@ -124,6 +125,15 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&role_management::role_catalog(&config_path)?)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigAgents => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&agent_management::agent_catalog(&config)?)?
             );
             return Ok(());
         }
@@ -744,6 +754,7 @@ enum CliAction {
     ConfigTestModel,
     ConfigModels,
     ConfigRoles,
+    ConfigAgents,
     ConfigTools,
     ConfigCustomTools,
     ConfigRenderCustomTool,
@@ -802,6 +813,7 @@ impl Cli {
                     Some("test-model") => CliAction::ConfigTestModel,
                     Some("models") => CliAction::ConfigModels,
                     Some("roles") => CliAction::ConfigRoles,
+                    Some("agents") => CliAction::ConfigAgents,
                     Some("tools") => CliAction::ConfigTools,
                     Some("custom-tools") => CliAction::ConfigCustomTools,
                     Some("render-custom-tool") => CliAction::ConfigRenderCustomTool,
@@ -811,7 +823,7 @@ impl Cli {
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -956,6 +968,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config test-model --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
+         \x20     xiaoo-daemon config agents [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config custom-tools [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-custom-tool < draft.json\n\n\
@@ -1105,6 +1118,19 @@ mod tests {
         .expect("config roles should parse");
 
         assert_eq!(cli.action, CliAction::ConfigRoles);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_agents_command() {
+        let cli = Cli::parse(
+            ["config", "agents", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config agents should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigAgents);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
