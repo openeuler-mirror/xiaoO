@@ -1,5 +1,6 @@
 mod agent_management;
 mod channels;
+mod compact_management;
 mod config_inspect;
 mod config_schema;
 mod config_validation;
@@ -296,6 +297,15 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&memory_management::memory_automation_report(&config).await)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigCompact => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&compact_management::compact_report(&config))?
             );
             return Ok(());
         }
@@ -794,6 +804,7 @@ enum CliAction {
     ConfigMcpServer,
     ConfigLsp,
     ConfigMemory,
+    ConfigCompact,
     ProtocolSchema,
 }
 
@@ -857,7 +868,8 @@ impl Cli {
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
                     Some("memory") => CliAction::ConfigMemory,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, or `config memory`"),
+                    Some("compact") => CliAction::ConfigCompact,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, or `config compact`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1024,6 +1036,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
          \x20     xiaoo-daemon config memory [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1334,6 +1347,19 @@ mod tests {
         .expect("config memory should parse");
 
         assert_eq!(cli.action, CliAction::ConfigMemory);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_compact_command() {
+        let cli = Cli::parse(
+            ["config", "compact", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config compact should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigCompact);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 

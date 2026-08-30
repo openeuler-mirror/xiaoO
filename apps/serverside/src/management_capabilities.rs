@@ -25,6 +25,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config mcp-server",
             "config lsp",
             "config memory",
+            "config compact",
         ]
         .into_iter()
         .map(str::to_string)
@@ -92,6 +93,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["inspect", "test_connection", "queue_status"],
             ),
+            domain("compact", true, true, false, true, &["inspect", "validate"]),
             domain("cron", true, false, false, false, &[]),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
@@ -280,5 +282,15 @@ mod tests {
             .iter()
             .any(|action| action == "test_connection"));
         assert!(memory.actions.iter().any(|action| action == "queue_status"));
+
+        let compact = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "compact")
+            .expect("compact capability");
+        assert!(compact.runtime_read);
+        assert!(compact.test);
+        assert!(compact.actions.iter().any(|action| action == "inspect"));
+        assert!(compact.actions.iter().any(|action| action == "validate"));
     }
 }

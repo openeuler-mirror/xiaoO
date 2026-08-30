@@ -35,7 +35,12 @@ pub use llm_client::{
 pub use agent_contracts::{CompressionPipeline, LlmProvider, ProviderCapabilities};
 
 #[doc(inline)]
-pub use compact::{build_context_manager, CompactOverrides};
+pub use compact::{
+    build_context_manager, CompactOverrides, ContextThresholds, DEFAULT_AUTO_COMPACT_RATIO,
+    DEFAULT_BLOCKING_RATIO, DEFAULT_COLLAPSE_PRESERVE_TAIL, DEFAULT_SNIP_PRESERVE_TAIL,
+    DEFAULT_SNIP_STALE_AFTER_MS, DEFAULT_SUMMARY_LLM_MAX_TOKENS, DEFAULT_SUMMARY_MAX_TOKENS,
+    DEFAULT_SUMMARY_PRESERVE_TAIL, DEFAULT_WARNING_RATIO,
+};
 
 // ---- token 预算与压缩策略 ----
 #[doc(inline)]

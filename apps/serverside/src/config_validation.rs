@@ -1,3 +1,4 @@
+use crate::compact_management::compact_issues;
 use crate::daemon_config::{DaemonConfig, LlmProfileConfig};
 use regex::Regex;
 use serde::Serialize;
@@ -69,6 +70,17 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                 );
             }
         }
+    }
+    if let Some(compact) = config.app.compact.as_ref() {
+        errors.extend(
+            compact_issues(compact)
+                .into_iter()
+                .map(|issue| ConfigValidationIssue {
+                    path: issue.path,
+                    code: issue.code,
+                    message: issue.message,
+                }),
+        );
     }
 
     ConfigValidationReport {
@@ -319,5 +331,28 @@ api_key_env = "{env_name}"
 
         let report = validate_config_file(&path);
         assert!(report.valid, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn rejects_invalid_compact_configuration_before_daemon_start() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[llm]\nprovider = \"ollama\"\nmodel = \"test\"\n\n[compact]\nwarning_ratio = 0.95\nauto_compact_ratio = 0.75\nblocking_ratio = 0.9\nsummary_llm_max_tokens = 0\n",
+        )
+        .expect("write config");
+
+        let report = validate_config_file(&path);
+
+        assert!(!report.valid);
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.code == "invalid_threshold_order"));
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.path == "compact.summary_llm_max_tokens"));
     }
 }
