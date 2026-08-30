@@ -11,8 +11,11 @@ use crate::response::{
 };
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
-    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
-    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
+    RuntimeCancelRequest, RuntimeCheckoutRequest, RuntimeCheckpointRequest,
+    RuntimeCheckpointSnapshotDeleteRequest, RuntimeCloseRequest, RuntimeDetachRequest,
+    RuntimeExecRequest, RuntimeHeartbeatRequest, RuntimeInteractionRequest, RuntimeOpenRequest,
+    RuntimePauseRequest, RuntimeReadFileRequest, RuntimeResumeRequest, RuntimeTurnRequest,
+    RuntimeWriteFileRequest,
 };
 
 /// Current daemon wire protocol version.
@@ -34,6 +37,14 @@ pub fn protocol_contract() -> Value {
             "runtime_heartbeat_request": schema_for!(RuntimeHeartbeatRequest),
             "runtime_detach_request": schema_for!(RuntimeDetachRequest),
             "runtime_interaction_request": schema_for!(RuntimeInteractionRequest),
+            "runtime_checkpoint_request": schema_for!(RuntimeCheckpointRequest),
+            "runtime_checkout_request": schema_for!(RuntimeCheckoutRequest),
+            "runtime_pause_request": schema_for!(RuntimePauseRequest),
+            "runtime_resume_request": schema_for!(RuntimeResumeRequest),
+            "runtime_checkpoint_snapshot_delete_request": schema_for!(RuntimeCheckpointSnapshotDeleteRequest),
+            "runtime_exec_request": schema_for!(RuntimeExecRequest),
+            "runtime_read_file_request": schema_for!(RuntimeReadFileRequest),
+            "runtime_write_file_request": schema_for!(RuntimeWriteFileRequest),
             "runtime_sse_event": schema_for!(RuntimeSseEvent),
             "daemon_ready_message": schema_for!(DaemonReadyMessage),
             "gateway_health_response": schema_for!(GatewayHealthResponse),
@@ -64,7 +75,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 22);
+        assert_eq!(schemas.len(), 30);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("runtime_close_request"));
@@ -72,6 +83,14 @@ mod tests {
         assert!(schemas.contains_key("runtime_heartbeat_request"));
         assert!(schemas.contains_key("runtime_detach_request"));
         assert!(schemas.contains_key("runtime_interaction_request"));
+        assert!(schemas.contains_key("runtime_checkpoint_request"));
+        assert!(schemas.contains_key("runtime_checkout_request"));
+        assert!(schemas.contains_key("runtime_pause_request"));
+        assert!(schemas.contains_key("runtime_resume_request"));
+        assert!(schemas.contains_key("runtime_checkpoint_snapshot_delete_request"));
+        assert!(schemas.contains_key("runtime_exec_request"));
+        assert!(schemas.contains_key("runtime_read_file_request"));
+        assert!(schemas.contains_key("runtime_write_file_request"));
         assert!(schemas.contains_key("runtime_sse_event"));
         assert!(schemas.contains_key("daemon_ready_message"));
         assert!(schemas.contains_key("gateway_health_response"));

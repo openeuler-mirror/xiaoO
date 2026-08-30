@@ -4,10 +4,11 @@
 //! `/api/v1/runtimes/*` HTTP surface: [`SessionOpenRequest`] (aliased
 //! [`RuntimeOpenRequest`]), [`AppTurnRequest`] (aliased
 //! [`RuntimeTurnRequest`]), and the close/cancel/heartbeat/detach/interaction
-//! request structs.  Their serde representation is a wire contract: any field
-//! change must stay byte-for-byte compatible with the daemon's serialization,
-//! and changes are treated as protocol changes coordinated with the daemon
-//! repository.
+//! request structs, plus checkpoint, lifecycle, command execution, and file
+//! operation requests. Their serde representation is a wire contract: any
+//! field change must stay byte-for-byte compatible with the daemon's
+//! serialization, and changes are treated as protocol changes coordinated
+//! with the daemon repository.
 //!
 //! The supporting entry-context and LLM-config types
 //! ([`GatewayEntryContext`] / [`GatewayEntryKind`] / [`LlmRuntimeConfig`] /
@@ -22,6 +23,8 @@ use agent_types::interaction::InteractionResponse;
 use agent_types::ReasoningEffort;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Originating entry surface for a runtime request (channel, TUI, CLI, …).
@@ -344,6 +347,127 @@ pub struct SessionInteractionRequest {
     /// Interaction response being delivered to a pending interaction.
     pub response: InteractionResponse,
     /// Process identifier of the responding client.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for creating a Runtime checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCheckpointRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Caller-provided checkpoint metadata.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Optional checkpoint display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for checking out a Runtime checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCheckoutRequest {
+    /// Checkpoint identifier.
+    pub checkpoint_id: String,
+    /// Optional conversation identifier for the new Runtime.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Optional sender identity for the new Runtime.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Caller-provided checkout metadata.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Backend-specific checkout options.
+    #[serde(default)]
+    pub options: Option<Value>,
+}
+
+/// Request body for pausing a Runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimePauseRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Caller-provided pause metadata.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Optional checkpoint display name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for resuming a Runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeResumeRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Caller-provided resume metadata.
+    #[serde(default)]
+    pub metadata: Value,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for deleting a provider checkpoint snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCheckpointSnapshotDeleteRequest {
+    /// Checkpoint identifier.
+    pub checkpoint_id: String,
+}
+
+/// Request body for executing a command in a Runtime backend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeExecRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Command to execute.
+    pub command: String,
+    /// Optional backend working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Optional execution timeout in milliseconds.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Optional shell executable.
+    #[serde(default)]
+    pub shell: Option<String>,
+    /// Environment variables passed to the command.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for reading a Runtime backend file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeReadFileRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Backend file path.
+    pub path: String,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
+/// Request body for writing a Runtime backend file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeWriteFileRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Backend file path.
+    pub path: String,
+    /// Base64-encoded file content.
+    pub content_base64: String,
+    /// Lease-holder client identifier.
     #[serde(default)]
     pub client_id: Option<String>,
 }
