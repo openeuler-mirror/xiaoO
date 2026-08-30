@@ -35,7 +35,7 @@ use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
 use std::env;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -155,6 +155,21 @@ async fn main() -> Result<()> {
                     Some(&workspace),
                     dirs::home_dir().as_deref(),
                     supported,
+                ))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigRenderCustomTool => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let draft = serde_json::from_str::<
+                xiaoo_shared::custom_tool_support::DeclarativeToolDraft,
+            >(&input)
+            .context("failed to parse custom tool draft JSON from stdin")?;
+            println!(
+                "{}",
+                serde_json::to_string(&xiaoo_shared::custom_tool_support::render_custom_tool(
+                    draft
                 ))?
             );
             return Ok(());
@@ -704,6 +719,7 @@ enum CliAction {
     ConfigRoles,
     ConfigTools,
     ConfigCustomTools,
+    ConfigRenderCustomTool,
     ConfigSkills,
     ConfigHooks,
     ConfigMcp,
@@ -756,12 +772,13 @@ impl Cli {
                     Some("roles") => CliAction::ConfigRoles,
                     Some("tools") => CliAction::ConfigTools,
                     Some("custom-tools") => CliAction::ConfigCustomTools,
+                    Some("render-custom-tool") => CliAction::ConfigRenderCustomTool,
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config custom-tools`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -894,6 +911,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config custom-tools [--config <path>]\n\n\
+         \x20     xiaoo-daemon config render-custom-tool < draft.json\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
@@ -1066,6 +1084,18 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigCustomTools);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_render_custom_tool_command() {
+        let cli = Cli::parse(
+            ["config", "render-custom-tool"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config render-custom-tool should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigRenderCustomTool);
     }
 
     #[test]

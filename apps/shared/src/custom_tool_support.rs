@@ -1,6 +1,8 @@
 use std::path::Path;
 pub use tool::{
-    DeclarativeToolCatalog, DeclarativeToolDirectory, DeclarativeToolEffect, DeclarativeToolSummary,
+    DeclarativeToolCatalog, DeclarativeToolDirectory, DeclarativeToolDraft,
+    DeclarativeToolDraftEffect, DeclarativeToolEffect, DeclarativeToolRenderReport,
+    DeclarativeToolSummary,
 };
 
 pub fn custom_tool_catalog(
@@ -9,4 +11,8 @@ pub fn custom_tool_catalog(
     supported: bool,
 ) -> DeclarativeToolCatalog {
     tool::declarative_tool_catalog(workspace_root, home_dir, supported)
+}
+
+pub fn render_custom_tool(draft: DeclarativeToolDraft) -> DeclarativeToolRenderReport {
+    tool::render_declarative_tool(draft)
 }

@@ -1,9 +1,131 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::manifest::{LoadedDeclarativeTool, StdinMode, StdoutMode};
+use super::manifest::{
+    DeclarativeToolManifest, EffectSection, ExecSection, LoadedDeclarativeTool, OutputSection,
+    StdinMode, StdoutMode,
+};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeclarativeToolDraft {
+    pub name: String,
+    pub description: String,
+    pub timeout_ms: u64,
+    pub input_schema: Value,
+    pub output_description: Option<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub stdin: String,
+    pub stdout: String,
+    #[serde(default)]
+    pub env_names: Vec<String>,
+    #[serde(default)]
+    pub effect: DeclarativeToolDraftEffect,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DeclarativeToolDraftEffect {
+    #[serde(default)]
+    pub reads_filesystem: bool,
+    #[serde(default)]
+    pub writes_filesystem: bool,
+    #[serde(default)]
+    pub network_access: bool,
+    #[serde(default)]
+    pub side_effects: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclarativeToolRenderReport {
+    pub schema_version: u32,
+    pub valid: bool,
+    pub content: Option<String>,
+    pub error: Option<String>,
+}
+
+pub fn render_declarative_tool(draft: DeclarativeToolDraft) -> DeclarativeToolRenderReport {
+    match render_draft(draft) {
+        Ok(content) => DeclarativeToolRenderReport {
+            schema_version: 1,
+            valid: true,
+            content: Some(content),
+            error: None,
+        },
+        Err(error) => DeclarativeToolRenderReport {
+            schema_version: 1,
+            valid: false,
+            content: None,
+            error: Some(error),
+        },
+    }
+}
+
+fn render_draft(draft: DeclarativeToolDraft) -> Result<String, String> {
+    let stdin = match draft.stdin.as_str() {
+        "json" => StdinMode::Json,
+        "none" => StdinMode::None,
+        value => return Err(format!("unsupported stdin mode `{value}`")),
+    };
+    let stdout = match draft.stdout.as_str() {
+        "text" => StdoutMode::Text,
+        "json" => StdoutMode::Json,
+        value => return Err(format!("unsupported stdout mode `{value}`")),
+    };
+    if !draft.input_schema.is_object() {
+        return Err("input_schema must be a JSON object".to_string());
+    }
+    let input_schema = json_to_toml(draft.input_schema)?;
+    let manifest = DeclarativeToolManifest {
+        name: draft.name,
+        description: draft.description,
+        timeout_ms: draft.timeout_ms,
+        output: draft
+            .output_description
+            .map(|description| OutputSection { description }),
+        effect: EffectSection {
+            reads_filesystem: draft.effect.reads_filesystem,
+            writes_filesystem: draft.effect.writes_filesystem,
+            network_access: draft.effect.network_access,
+            side_effects: draft.effect.side_effects,
+        },
+        input_schema,
+        exec: ExecSection {
+            command: draft.command,
+            args: draft.args,
+            stdin,
+            stdout,
+            env: draft.env_names,
+        },
+    };
+    manifest.validate(Path::new("custom-tool.toml"))?;
+    toml::to_string_pretty(&manifest).map_err(|error| format!("failed to render manifest: {error}"))
+}
+
+fn json_to_toml(value: Value) -> Result<toml::Value, String> {
+    match value {
+        Value::Null => Err("input_schema cannot contain null".to_string()),
+        Value::Bool(value) => Ok(toml::Value::Boolean(value)),
+        Value::Number(value) => value
+            .as_i64()
+            .map(toml::Value::Integer)
+            .or_else(|| value.as_f64().map(toml::Value::Float))
+            .ok_or_else(|| "input_schema contains an unsupported number".to_string()),
+        Value::String(value) => Ok(toml::Value::String(value)),
+        Value::Array(values) => values
+            .into_iter()
+            .map(json_to_toml)
+            .collect::<Result<Vec<_>, _>>()
+            .map(toml::Value::Array),
+        Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| json_to_toml(value).map(|value| (key, value)))
+            .collect::<Result<toml::map::Map<_, _>, _>>()
+            .map(toml::Value::Table),
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DeclarativeToolCatalog {
@@ -229,7 +351,11 @@ fn command_candidates(directory: &Path, command: &str) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::declarative_tool_catalog;
+    use super::{
+        declarative_tool_catalog, render_declarative_tool, DeclarativeToolDraft,
+        DeclarativeToolDraftEffect,
+    };
+    use serde_json::json;
     use std::fs;
 
     #[test]
@@ -257,5 +383,51 @@ mod tests {
         assert_eq!(catalog.tools[0].status, "unsupported_backend");
         assert!(catalog.tools.iter().any(|tool| tool.status == "shadowed"));
         assert!(catalog.tools.iter().any(|tool| tool.status == "invalid"));
+    }
+
+    #[test]
+    fn renders_and_reloads_a_valid_manifest() {
+        let report = render_declarative_tool(DeclarativeToolDraft {
+            name: "echo_payload".to_string(),
+            description: "Echo input".to_string(),
+            timeout_ms: 5_000,
+            input_schema: json!({"type": "object", "required": ["message"]}),
+            output_description: Some("Echo result".to_string()),
+            command: "sh".to_string(),
+            args: vec!["./echo.sh".to_string()],
+            stdin: "json".to_string(),
+            stdout: "text".to_string(),
+            env_names: vec!["TOKEN".to_string()],
+            effect: DeclarativeToolDraftEffect {
+                side_effects: true,
+                ..DeclarativeToolDraftEffect::default()
+            },
+        });
+        assert!(report.valid);
+        let content = report.content.expect("rendered content");
+        let parsed: toml::Value = toml::from_str(&content).expect("valid TOML");
+        assert_eq!(parsed["name"].as_str(), Some("echo_payload"));
+        assert_eq!(parsed["exec"]["stdin"].as_str(), Some("json"));
+        assert_eq!(parsed["effect"]["side_effects"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn rejects_invalid_visual_drafts() {
+        let report = render_declarative_tool(DeclarativeToolDraft {
+            name: "bad name".to_string(),
+            description: String::new(),
+            timeout_ms: 0,
+            input_schema: json!([]),
+            output_description: None,
+            command: String::new(),
+            args: Vec::new(),
+            stdin: "binary".to_string(),
+            stdout: "text".to_string(),
+            env_names: Vec::new(),
+            effect: DeclarativeToolDraftEffect::default(),
+        });
+        assert!(!report.valid);
+        assert!(report.content.is_none());
+        assert!(report.error.is_some());
     }
 }

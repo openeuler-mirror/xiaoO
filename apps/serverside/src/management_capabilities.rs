@@ -15,6 +15,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config roles",
             "config tools",
             "config custom-tools",
+            "config render-custom-tool",
             "config skills",
             "config hooks",
             "config mcp",
@@ -51,7 +52,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 false,
                 false,
-                &["list", "validate"],
+                &["list", "validate", "render"],
             ),
             domain("skills", true, false, false, false, &["list"]),
             domain("hooks", true, false, false, false, &["list"]),
@@ -184,6 +185,7 @@ mod tests {
             .actions
             .iter()
             .any(|action| action == "validate"));
+        assert!(custom_tools.actions.iter().any(|action| action == "render"));
 
         let hooks = capabilities
             .domains
