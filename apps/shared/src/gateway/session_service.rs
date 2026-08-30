@@ -249,6 +249,14 @@ pub trait SessionControlPlane: Send + Sync {
         })
     }
 
+    async fn list_sandboxes(
+        &self,
+    ) -> Result<Vec<crate::backend::BackendInfo>, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "list_sandboxes".to_string(),
+        })
+    }
+
     async fn checkpoint_runtime(
         &self,
         _request: RuntimeCheckpointRequest,

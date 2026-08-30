@@ -110,7 +110,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 true,
                 false,
-                &["pause", "resume", "exec", "read_file", "write_file"],
+                &["list", "pause", "resume", "exec", "read_file", "write_file"],
             ),
         ],
     }
@@ -250,5 +250,13 @@ mod tests {
             .actions
             .iter()
             .any(|action| action == "preflight"));
+
+        let sandboxes = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "sandboxes")
+            .expect("sandbox capability");
+        assert!(sandboxes.runtime_read);
+        assert!(sandboxes.actions.iter().any(|action| action == "list"));
     }
 }

@@ -46,7 +46,7 @@ pub use e2b::{
     build_e2b_bootstrap_archive, canonicalize_bootstrap_dir, E2bBootstrapArchive,
     E2bBootstrapBuildError,
 };
-pub use labels::{backend_endpoint_str, backend_state_label};
+pub use labels::{backend_endpoint_kind, backend_endpoint_str, backend_state_label};
 
 // 不透明 RAII 句柄再导出：应用（endside / serverside）启动时安装进程组清理
 // 守卫，无需命名底层 process_group 内部类型，故只导出该句柄。
