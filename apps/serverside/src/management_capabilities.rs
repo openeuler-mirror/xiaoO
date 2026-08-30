@@ -16,6 +16,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config tools",
             "config skills",
             "config hooks",
+            "config mcp",
         ]
         .into_iter()
         .map(str::to_string)
@@ -43,7 +44,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("tools", true, false, false, false, &["list"]),
             domain("skills", true, false, false, false, &["list"]),
             domain("hooks", true, false, false, false, &["list"]),
-            domain("mcp_client", true, false, false, false, &[]),
+            domain(
+                "mcp_client",
+                true,
+                true,
+                false,
+                true,
+                &["list", "test_connections"],
+            ),
             domain("mcp_server", true, false, false, false, &[]),
             domain("lsp", true, false, false, false, &[]),
             domain("memory", true, false, false, false, &[]),
@@ -153,5 +161,18 @@ mod tests {
             .expect("hooks capability");
         assert!(hooks.configurable);
         assert!(hooks.actions.iter().any(|action| action == "list"));
+
+        let mcp = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "mcp_client")
+            .expect("MCP capability");
+        assert!(mcp.runtime_read);
+        assert!(mcp.test);
+        assert!(mcp.actions.iter().any(|action| action == "list"));
+        assert!(mcp
+            .actions
+            .iter()
+            .any(|action| action == "test_connections"));
     }
 }

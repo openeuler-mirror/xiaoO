@@ -8,6 +8,7 @@ mod daemon_runtime;
 mod hook_management;
 mod httpserver;
 mod management_capabilities;
+mod mcp_management;
 mod mcp_server;
 mod model_management;
 mod role_management;
@@ -155,6 +156,29 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&hook_management::hook_catalog(&config)?)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigMcp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let home = dirs::home_dir();
+            let json_config_path = xiaoo_shared::mcp_support::resolve_json_config_path(
+                cli.mcp_config.as_deref(),
+                &workspace,
+                home.as_deref(),
+            );
+            let config = DaemonConfig::load_with_mcp_config(
+                &config_path,
+                cli.mcp_config.as_deref(),
+                &workspace,
+                home.as_deref(),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &mcp_management::mcp_catalog(&config, json_config_path.as_deref()).await
+                )?
             );
             return Ok(());
         }
@@ -644,6 +668,7 @@ enum CliAction {
     ConfigTools,
     ConfigSkills,
     ConfigHooks,
+    ConfigMcp,
     ProtocolSchema,
 }
 
@@ -692,7 +717,8 @@ impl Cli {
                     Some("tools") => CliAction::ConfigTools,
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, or `config hooks`"),
+                    Some("mcp") => CliAction::ConfigMcp,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, `config hooks`, or `config mcp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -826,6 +852,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
+         \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1006,6 +1033,27 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigHooks);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_mcp_command() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "mcp",
+                "--config",
+                "/tmp/demo.toml",
+                "--mcp-config",
+                "/tmp/mcp.json",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config mcp should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigMcp);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+        assert_eq!(cli.mcp_config, Some(PathBuf::from("/tmp/mcp.json")));
     }
 
     #[test]
