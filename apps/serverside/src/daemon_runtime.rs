@@ -178,6 +178,18 @@ pub struct ConfiguredRuntimeResolver {
 impl ConfiguredRuntimeResolver {
     pub async fn from_config(config: &DaemonConfig) -> Result<Self> {
         let agent = config.resolve_agent()?;
+        Self::from_config_and_agent(config, agent).await
+    }
+
+    pub async fn from_config_for_agent(config: &DaemonConfig, agent_id: &str) -> Result<Self> {
+        let agent = config.resolve_agent_by_id(agent_id)?;
+        Self::from_config_and_agent(config, agent).await
+    }
+
+    async fn from_config_and_agent(
+        config: &DaemonConfig,
+        agent: ResolvedAgentConfig,
+    ) -> Result<Self> {
         ensure_workspace_exists(&agent.workspace_root)?;
         let startup_profile = agent
             .profile_id

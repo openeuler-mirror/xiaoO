@@ -137,6 +137,17 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigTestAgent => {
+            let config_path = resolve_config_path(cli.config)?;
+            let agent_id = cli
+                .agent
+                .as_deref()
+                .context("config test-agent requires --agent <id>")?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let report = agent_management::test_agent_startup(&config, agent_id).await;
+            println!("{}", serde_json::to_string(&report)?);
+            return Ok(());
+        }
         CliAction::ConfigTools => {
             let config_path = resolve_config_path(cli.config)?;
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -755,6 +766,7 @@ enum CliAction {
     ConfigModels,
     ConfigRoles,
     ConfigAgents,
+    ConfigTestAgent,
     ConfigTools,
     ConfigCustomTools,
     ConfigRenderCustomTool,
@@ -780,6 +792,7 @@ struct Cli {
     ready_stdio: bool,
     bearer_token_env: Option<String>,
     profile: Option<String>,
+    agent: Option<String>,
     manifest: Option<PathBuf>,
     allow_effects: bool,
     help: bool,
@@ -800,6 +813,7 @@ impl Cli {
         let mut ready_stdio = false;
         let mut bearer_token_env = None;
         let mut profile = None;
+        let mut agent = None;
         let mut manifest = None;
         let mut allow_effects = false;
         let mut remaining = args.into_iter().collect::<Vec<_>>();
@@ -814,6 +828,7 @@ impl Cli {
                     Some("models") => CliAction::ConfigModels,
                     Some("roles") => CliAction::ConfigRoles,
                     Some("agents") => CliAction::ConfigAgents,
+                    Some("test-agent") => CliAction::ConfigTestAgent,
                     Some("tools") => CliAction::ConfigTools,
                     Some("custom-tools") => CliAction::ConfigCustomTools,
                     Some("render-custom-tool") => CliAction::ConfigRenderCustomTool,
@@ -823,7 +838,7 @@ impl Cli {
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -850,6 +865,7 @@ impl Cli {
                         ready_stdio,
                         bearer_token_env,
                         profile,
+                        agent,
                         manifest,
                         allow_effects,
                         help: true,
@@ -923,6 +939,14 @@ impl Cli {
                     }
                     profile = Some(value.clone());
                 }
+                "--agent" => {
+                    index += 1;
+                    let value = remaining.get(index).context("missing value for --agent")?;
+                    if value.trim().is_empty() {
+                        bail!("--agent must not be empty");
+                    }
+                    agent = Some(value.clone());
+                }
                 "--manifest" => {
                     index += 1;
                     let value = remaining
@@ -949,6 +973,7 @@ impl Cli {
             ready_stdio,
             bearer_token_env,
             profile,
+            agent,
             manifest,
             allow_effects,
             help: false,
@@ -969,6 +994,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config agents [--config <path>]\n\n\
+         \x20     xiaoo-daemon config test-agent --agent <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config custom-tools [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-custom-tool < draft.json\n\n\
@@ -1132,6 +1158,19 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigAgents);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_test_agent_command() {
+        let cli = Cli::parse(
+            ["config", "test-agent", "--agent", "review"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config test-agent should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigTestAgent);
+        assert_eq!(cli.agent.as_deref(), Some("review"));
     }
 
     #[test]

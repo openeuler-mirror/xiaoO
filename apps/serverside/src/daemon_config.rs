@@ -516,13 +516,24 @@ impl DaemonConfig {
             .or_else(|| self.app.agents.list.first().map(|agent| agent.id.clone()))
             .unwrap_or_else(|| "main".to_string());
 
+        self.resolve_agent_by_id(&default_agent_id)
+    }
+
+    pub fn resolve_agent_by_id(&self, agent_id: &str) -> Result<ResolvedAgentConfig> {
+        let agent_id = agent_id.trim();
+        if agent_id.is_empty() {
+            bail!("agent id must not be empty");
+        }
         let explicit = self
             .app
             .agents
             .list
             .iter()
-            .find(|agent| agent.id == default_agent_id)
+            .find(|agent| agent.id == agent_id)
             .cloned();
+        if explicit.is_none() && !self.app.agents.list.is_empty() {
+            bail!("agent '{}' does not exist", agent_id);
+        }
 
         let profile_id = explicit
             .as_ref()
@@ -554,12 +565,12 @@ impl DaemonConfig {
                     .paths
                     .data_dir
                     .as_ref()
-                    .map(|data_dir| data_dir.join("workspace").join(default_agent_id.as_str()))
+                    .map(|data_dir| data_dir.join("workspace").join(agent_id))
             })
-            .unwrap_or_else(|| default_user_workspace_dir(&default_agent_id));
+            .unwrap_or_else(|| default_user_workspace_dir(agent_id));
 
         Ok(ResolvedAgentConfig {
-            id: default_agent_id,
+            id: agent_id.to_string(),
             profile_id,
             model,
             system_prompt,
