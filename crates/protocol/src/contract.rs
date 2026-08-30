@@ -1,0 +1,57 @@
+//! Machine-readable daemon protocol contract.
+
+use schemars::schema_for;
+use serde_json::{json, Value};
+
+use crate::sse::RuntimeSseEvent;
+use crate::wire::{
+    RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
+    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimeTurnRequest,
+};
+
+/// Current daemon wire protocol version.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Current layout version of the machine-readable protocol artifact.
+pub const PROTOCOL_ARTIFACT_VERSION: u32 = 1;
+
+/// Build the versioned JSON Schema bundle consumed by external clients.
+pub fn protocol_contract() -> Value {
+    json!({
+        "artifact_version": PROTOCOL_ARTIFACT_VERSION,
+        "protocol_version": PROTOCOL_VERSION,
+        "schemas": {
+            "runtime_open_request": schema_for!(RuntimeOpenRequest),
+            "runtime_turn_request": schema_for!(RuntimeTurnRequest),
+            "runtime_close_request": schema_for!(RuntimeCloseRequest),
+            "runtime_cancel_request": schema_for!(RuntimeCancelRequest),
+            "runtime_heartbeat_request": schema_for!(RuntimeHeartbeatRequest),
+            "runtime_detach_request": schema_for!(RuntimeDetachRequest),
+            "runtime_interaction_request": schema_for!(RuntimeInteractionRequest),
+            "runtime_sse_event": schema_for!(RuntimeSseEvent),
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{protocol_contract, PROTOCOL_ARTIFACT_VERSION, PROTOCOL_VERSION};
+
+    #[test]
+    fn contract_contains_all_runtime_wire_schemas() {
+        let contract = protocol_contract();
+        assert_eq!(contract["artifact_version"], PROTOCOL_ARTIFACT_VERSION);
+        assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
+
+        let schemas = contract["schemas"].as_object().expect("schemas object");
+        assert_eq!(schemas.len(), 8);
+        assert!(schemas.contains_key("runtime_open_request"));
+        assert!(schemas.contains_key("runtime_turn_request"));
+        assert!(schemas.contains_key("runtime_close_request"));
+        assert!(schemas.contains_key("runtime_cancel_request"));
+        assert!(schemas.contains_key("runtime_heartbeat_request"));
+        assert!(schemas.contains_key("runtime_detach_request"));
+        assert!(schemas.contains_key("runtime_interaction_request"));
+        assert!(schemas.contains_key("runtime_sse_event"));
+    }
+}

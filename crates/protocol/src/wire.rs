@@ -20,6 +20,7 @@
 use agent_types::chat::CommandContext;
 use agent_types::interaction::InteractionResponse;
 use agent_types::ReasoningEffort;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -27,7 +28,7 @@ use std::path::PathBuf;
 ///
 /// Carried on open/turn requests so the daemon can branch on entry kind
 /// (e.g. noop tool registry for TUI/CLI vs full registry for channel).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayEntryKind {
     /// Originated from a chat channel integration.
@@ -48,7 +49,7 @@ pub enum GatewayEntryKind {
 ///
 /// Default-constructs to an "unknown entry" (all fields `None`/empty) which
 /// the daemon treats as an anonymous caller.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct GatewayEntryContext {
     /// Entry surface kind. `None` means the caller did not state one.
     pub kind: Option<GatewayEntryKind>,
@@ -97,7 +98,7 @@ impl GatewayEntryContext {
 ///
 /// All fields optional and default-emptied; absent fields fall back to the
 /// daemon's resolved provider/model/api-key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct LlmRuntimeConfig {
     /// Native LLM profile id selected for this runtime.
     #[serde(default)]
@@ -123,7 +124,7 @@ pub struct LlmRuntimeConfig {
 }
 
 /// A user/channel mention carried on a turn request.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct TurnMention {
     /// Stable mention id (e.g. `@user-handle`).
     pub id: String,
@@ -137,7 +138,7 @@ pub struct TurnMention {
 ///
 /// `runtime_id` is the on-the-wire name; `session_id` is accepted as a legacy
 /// alias for backward compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct AppTurnRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -211,7 +212,7 @@ pub type RuntimeTurnRequest = AppTurnRequest;
 ///
 /// `runtime_id` is the on-the-wire name; `session_id` is accepted as a legacy
 /// alias for backward compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct SessionOpenRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -283,7 +284,7 @@ impl SessionOpenRequest {
 }
 
 /// A session-close request body sent to `/api/v1/runtimes/close`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct SessionCloseRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -294,7 +295,7 @@ pub struct SessionCloseRequest {
 }
 
 /// A session-cancel request body sent to `/api/v1/runtimes/cancel`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct SessionCancelRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -305,7 +306,7 @@ pub struct SessionCancelRequest {
 }
 
 /// A session-heartbeat request body sent to `/api/v1/runtimes/heartbeat`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct SessionHeartbeatRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -324,7 +325,7 @@ pub struct SessionHeartbeatRequest {
 }
 
 /// A session-detach request body sent to `/api/v1/runtimes/detach`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct SessionDetachRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]
@@ -335,7 +336,7 @@ pub struct SessionDetachRequest {
 }
 
 /// A session-interaction request body carrying an interaction response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionInteractionRequest {
     /// Runtime (session) id, serialized as `runtime_id`.
     #[serde(rename = "runtime_id", alias = "session_id")]

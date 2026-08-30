@@ -8,10 +8,11 @@
 //! single source; `xiaoo_shared::plan` re-exports them to preserve existing
 //! import paths.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Display status of a single todo item in the TUI's plan panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoDisplayStatus {
     /// Not yet started.
@@ -23,7 +24,7 @@ pub enum TodoDisplayStatus {
 }
 
 /// One row in the TUI plan panel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TodoSnapshotItem {
     /// Display status of the row.
     pub status: TodoDisplayStatus,

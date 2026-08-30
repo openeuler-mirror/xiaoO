@@ -612,8 +612,8 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
     Json(GatewayCapabilitiesResponse {
         service: "xiaoo-daemon",
         version: env!("CARGO_PKG_VERSION"),
-        protocol_version: 1,
-        minimum_client_protocol_version: 1,
+        protocol_version: protocol::PROTOCOL_VERSION,
+        minimum_client_protocol_version: protocol::PROTOCOL_VERSION,
         transport: "http+sse",
         runtime_api: vec![
             "open",

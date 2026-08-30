@@ -23,3 +23,7 @@
 pub mod plan;
 pub mod sse;
 pub mod wire;
+
+mod contract;
+
+pub use contract::{protocol_contract, PROTOCOL_ARTIFACT_VERSION, PROTOCOL_VERSION};

@@ -1,4 +1,5 @@
 use crate::llm::ChatMessage;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Lightweight model reference carried by chat-level hook inputs.
@@ -12,7 +13,7 @@ pub struct ModelRef {
 /// `*.Chat.command.before` hooker can fire with `{ command, arguments }`.
 /// Populated by the TUI when the user input originated from
 /// `~/.xiaoo/commands/<name>.md`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CommandContext {
     pub command: String,
     pub arguments: String,
