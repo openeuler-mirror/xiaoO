@@ -1,29 +1,11 @@
 use crate::config_schema::CONFIG_SCHEMA_VERSION;
-use serde::Serialize;
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ManagementCapabilities {
-    pub api_version: u32,
-    pub config_schema_version: u32,
-    pub config_commands: Vec<&'static str>,
-    pub domains: Vec<ManagementDomainCapability>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ManagementDomainCapability {
-    pub id: &'static str,
-    pub configurable: bool,
-    pub runtime_read: bool,
-    pub runtime_write: bool,
-    pub test: bool,
-    pub actions: Vec<&'static str>,
-}
+use protocol::response::{ManagementCapabilities, ManagementDomainCapability};
 
 pub fn management_capabilities() -> ManagementCapabilities {
     ManagementCapabilities {
         api_version: 1,
         config_schema_version: CONFIG_SCHEMA_VERSION,
-        config_commands: vec![
+        config_commands: [
             "config schema",
             "config providers",
             "config validate",
@@ -33,7 +15,10 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config roles",
             "config tools",
             "config skills",
-        ],
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         domains: vec![
             domain(
                 "config",
@@ -102,12 +87,12 @@ fn domain(
     actions: &[&'static str],
 ) -> ManagementDomainCapability {
     ManagementDomainCapability {
-        id,
+        id: id.to_string(),
         configurable,
         runtime_read,
         runtime_write,
         test,
-        actions: actions.to_vec(),
+        actions: actions.iter().map(|action| (*action).to_string()).collect(),
     }
 }
 
@@ -125,23 +110,29 @@ mod tests {
             .expect("models capability");
         assert!(models.configurable);
         assert!(models.test);
-        assert!(models.actions.contains(&"session_select"));
-        assert!(models.actions.contains(&"test_connection"));
-        assert!(models.actions.contains(&"list_catalog"));
+        assert!(models
+            .actions
+            .iter()
+            .any(|action| action == "session_select"));
+        assert!(models
+            .actions
+            .iter()
+            .any(|action| action == "test_connection"));
+        assert!(models.actions.iter().any(|action| action == "list_catalog"));
 
         let roles = capabilities
             .domains
             .iter()
             .find(|domain| domain.id == "roles")
             .expect("roles capability");
-        assert!(roles.actions.contains(&"list"));
+        assert!(roles.actions.iter().any(|action| action == "list"));
 
         let tools = capabilities
             .domains
             .iter()
             .find(|domain| domain.id == "tools")
             .expect("tools capability");
-        assert!(tools.actions.contains(&"list"));
+        assert!(tools.actions.iter().any(|action| action == "list"));
 
         let skills = capabilities
             .domains
@@ -152,6 +143,6 @@ mod tests {
         assert!(!skills.runtime_read);
         assert!(!skills.runtime_write);
         assert!(!skills.test);
-        assert!(skills.actions.contains(&"list"));
+        assert!(skills.actions.iter().any(|action| action == "list"));
     }
 }

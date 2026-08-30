@@ -21,6 +21,7 @@
 #![deny(missing_docs)]
 
 pub mod plan;
+pub mod response;
 pub mod sse;
 pub mod wire;
 

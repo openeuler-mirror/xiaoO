@@ -3,6 +3,10 @@
 use schemars::schema_for;
 use serde_json::{json, Value};
 
+use crate::response::{
+    DaemonReadyMessage, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayHealthResponse,
+    RuntimeOpenResponse,
+};
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
     RuntimeCancelRequest, RuntimeCloseRequest, RuntimeDetachRequest, RuntimeHeartbeatRequest,
@@ -29,6 +33,11 @@ pub fn protocol_contract() -> Value {
             "runtime_detach_request": schema_for!(RuntimeDetachRequest),
             "runtime_interaction_request": schema_for!(RuntimeInteractionRequest),
             "runtime_sse_event": schema_for!(RuntimeSseEvent),
+            "daemon_ready_message": schema_for!(DaemonReadyMessage),
+            "gateway_health_response": schema_for!(GatewayHealthResponse),
+            "gateway_capabilities_response": schema_for!(GatewayCapabilitiesResponse),
+            "gateway_error_response": schema_for!(GatewayErrorResponse),
+            "runtime_open_response": schema_for!(RuntimeOpenResponse),
         }
     })
 }
@@ -44,7 +53,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 8);
+        assert_eq!(schemas.len(), 13);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("runtime_close_request"));
@@ -53,5 +62,10 @@ mod tests {
         assert!(schemas.contains_key("runtime_detach_request"));
         assert!(schemas.contains_key("runtime_interaction_request"));
         assert!(schemas.contains_key("runtime_sse_event"));
+        assert!(schemas.contains_key("daemon_ready_message"));
+        assert!(schemas.contains_key("gateway_health_response"));
+        assert!(schemas.contains_key("gateway_capabilities_response"));
+        assert!(schemas.contains_key("gateway_error_response"));
+        assert!(schemas.contains_key("runtime_open_response"));
     }
 }

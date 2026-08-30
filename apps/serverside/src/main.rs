@@ -374,15 +374,15 @@ async fn run_daemon(
             .context("failed to resolve daemon listener address")?;
         tracing::info!(config = %config_path.display(), %resolved_addr, "starting xiaoo daemon");
         if ready_stdio {
-            let ready = serde_json::json!({
-                "type": "ready",
-                "service": "xiaoo-daemon",
-                "host": resolved_addr.ip().to_string(),
-                "port": resolved_addr.port(),
-                "version": env!("CARGO_PKG_VERSION"),
-                "protocol_version": protocol::PROTOCOL_VERSION,
-            });
-            println!("{ready}");
+            let ready = protocol::response::DaemonReadyMessage {
+                r#type: protocol::response::DaemonReadyMessageType::Ready,
+                service: protocol::response::DaemonService::XiaooDaemon,
+                host: resolved_addr.ip().to_string(),
+                port: resolved_addr.port(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: protocol::PROTOCOL_VERSION,
+            };
+            println!("{}", serde_json::to_string(&ready)?);
             std::io::stdout()
                 .flush()
                 .context("failed to flush daemon ready message")?;

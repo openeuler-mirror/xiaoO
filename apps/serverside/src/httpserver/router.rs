@@ -22,7 +22,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use protocol::response::{
+    DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
+    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport,
+};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -370,45 +374,6 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
 }
 
 #[derive(Debug, Serialize)]
-pub struct GatewayHealthResponse {
-    pub status: &'static str,
-    pub version: &'static str,
-}
-
-/// Stable, read-only protocol metadata used by GUI clients before opening a
-/// runtime. Keep this endpoint additive: older clients ignore new fields and
-/// newer clients can fail early when the protocol major version is unknown.
-#[derive(Debug, Serialize)]
-pub struct GatewayCapabilitiesResponse {
-    pub service: &'static str,
-    pub version: &'static str,
-    pub protocol_version: u32,
-    pub minimum_client_protocol_version: u32,
-    pub transport: &'static str,
-    pub runtime_api: Vec<&'static str>,
-    pub sse_events: Vec<&'static str>,
-    pub interaction_kinds: Vec<&'static str>,
-    pub features: GatewayFeatureCapabilities,
-    pub management: crate::management_capabilities::ManagementCapabilities,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GatewayFeatureCapabilities {
-    pub session_persistence: bool,
-    pub runtime_leases: bool,
-    pub checkpoints: bool,
-    pub file_operations: bool,
-    pub file_change_summary: bool,
-    pub file_change_patch: bool,
-    pub sse_resume: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct GatewayErrorResponse {
-    pub error: String,
-}
-
-#[derive(Debug, Serialize)]
 struct RuntimeExecInterruptedResponse {
     error: String,
     execution_state: String,
@@ -603,18 +568,18 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
 
 async fn health_check() -> Json<GatewayHealthResponse> {
     Json(GatewayHealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        status: GatewayHealthStatus::Ok,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
 async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
     Json(GatewayCapabilitiesResponse {
-        service: "xiaoo-daemon",
-        version: env!("CARGO_PKG_VERSION"),
+        service: DaemonService::XiaooDaemon,
+        version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: protocol::PROTOCOL_VERSION,
         minimum_client_protocol_version: protocol::PROTOCOL_VERSION,
-        transport: "http+sse",
+        transport: GatewayTransport::HttpSse,
         runtime_api: vec![
             "open",
             "input",
@@ -632,7 +597,10 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
             "read_file",
             "write_file",
             "export",
-        ],
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         sse_events: vec![
             "turn_start",
             "text_delta",
@@ -647,8 +615,14 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
             "done",
             "error",
             "cancelled",
-        ],
-        interaction_kinds: vec!["confirm", "text_input", "choice"],
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        interaction_kinds: ["confirm", "text_input", "choice"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         features: GatewayFeatureCapabilities {
             session_persistence: false,
             runtime_leases: true,
