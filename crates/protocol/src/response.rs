@@ -413,3 +413,24 @@ pub struct RuntimeWriteFileResponse {
     /// Whether the operation created a new file.
     pub created: bool,
 }
+
+/// Runtime export payload format.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExportFormat {
+    /// Complete, sanitized xiaoO Runtime session JSON.
+    XiaooRuntimeSessionJson,
+}
+
+/// Response returned after exporting a Runtime session.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeExportResponse {
+    /// Exported Runtime identifier.
+    pub runtime_id: String,
+    /// Export payload format.
+    pub format: RuntimeExportFormat,
+    /// Suggested output file name.
+    pub file_name: String,
+    /// Sanitized Runtime session document.
+    pub content: Value,
+}

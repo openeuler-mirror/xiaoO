@@ -472,6 +472,16 @@ pub struct RuntimeWriteFileRequest {
     pub client_id: Option<String>,
 }
 
+/// Request body for exporting a Runtime session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct RuntimeExportRequest {
+    /// Runtime identifier.
+    pub runtime_id: String,
+    /// Lease-holder client identifier.
+    #[serde(default)]
+    pub client_id: Option<String>,
+}
+
 /// Alias for [`SessionOpenRequest`] under the runtime-protocol naming.
 pub type RuntimeOpenRequest = SessionOpenRequest;
 /// Alias for [`SessionCloseRequest`] under the runtime-protocol naming.
