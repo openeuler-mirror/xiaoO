@@ -271,7 +271,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub workspace: Option<PathBuf>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub profile_id: Option<String>,
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
@@ -449,6 +449,7 @@ impl xiaoo_shared::lsp_support::ExtraServerConfigView for ExtraServerConfig {
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub id: String,
+    pub profile_id: Option<String>,
     pub model: String,
     pub system_prompt: String,
     pub workspace_root: PathBuf,
@@ -521,9 +522,19 @@ impl DaemonConfig {
             .find(|agent| agent.id == default_agent_id)
             .cloned();
 
-        let model = explicit
+        let profile_id = explicit
             .as_ref()
-            .and_then(|agent| agent.model.clone())
+            .and_then(|agent| agent.profile_id.clone())
+            .or_else(|| self.app.llm.active_profile.clone());
+        let model = profile_id
+            .as_deref()
+            .map(|id| {
+                self.app
+                    .llm
+                    .profile(id)
+                    .map(|profile| profile.model.clone())
+            })
+            .transpose()?
             .unwrap_or_else(|| self.app.llm.model.clone());
         let system_prompt = explicit
             .as_ref()
@@ -547,6 +558,7 @@ impl DaemonConfig {
 
         Ok(ResolvedAgentConfig {
             id: default_agent_id,
+            profile_id,
             model,
             system_prompt,
             workspace_root,

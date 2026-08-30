@@ -70,7 +70,7 @@ pub fn config_schema() -> Value {
                 field("id", "string", true),
                 field_default("default", "boolean", false, json!(false)),
                 field("workspace", "path", false),
-                field("model", "string", false),
+                field("profile_id", "string", false),
                 field("system_prompt", "multiline", false),
             ]),
             section("agent.*", "Agent 角色", "map", &[
