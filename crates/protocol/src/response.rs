@@ -195,6 +195,39 @@ pub struct RuntimeRecordResponse {
     pub updated_at_ms: u64,
 }
 
+/// Response containing all Runtimes currently tracked by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCatalogResponse {
+    /// Runtime records ordered by most recent update.
+    pub runtimes: Vec<RuntimeRecordResponse>,
+}
+
+/// Stable checkpoint metadata returned by the Runtime catalog API.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCheckpointCatalogItem {
+    /// Checkpoint identifier.
+    pub checkpoint_id: String,
+    /// Runtime that created the checkpoint.
+    pub runtime_id: String,
+    /// Parent checkpoint identifier, when present.
+    pub parent_checkpoint_id: Option<String>,
+    /// Creation time in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Caller-provided checkpoint metadata.
+    pub metadata: Value,
+    /// Optional checkpoint display name.
+    pub name: Option<String>,
+    /// Whether the checkpoint currently owns a provider snapshot.
+    pub has_provider_snapshot: bool,
+}
+
+/// Response containing checkpoints currently tracked by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeCheckpointCatalogResponse {
+    /// Checkpoints ordered by most recent creation.
+    pub checkpoints: Vec<RuntimeCheckpointCatalogItem>,
+}
+
 /// Response returned after creating a Runtime checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeCheckpointResponse {

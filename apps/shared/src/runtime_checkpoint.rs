@@ -103,12 +103,45 @@ pub struct RuntimeWriteFileResult {
     pub created: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointSummary {
+    pub checkpoint_id: String,
+    pub runtime_id: String,
+    pub parent_checkpoint_id: Option<String>,
+    pub created_at_ms: u64,
+    pub metadata: Value,
+    pub name: Option<String>,
+    pub has_provider_snapshot: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeCheckpoint {
     pub checkpoint_id: String,
     pub runtime_id: String,
+    pub parent_checkpoint_id: Option<String>,
+    pub created_at_ms: u64,
+    pub metadata: Value,
+    pub name: Option<String>,
     pub session: SessionRecord,
     pub backend_checkpoint: Option<BackendCheckpointRef>,
+}
+
+impl RuntimeCheckpoint {
+    fn summary(&self) -> RuntimeCheckpointSummary {
+        RuntimeCheckpointSummary {
+            checkpoint_id: self.checkpoint_id.clone(),
+            runtime_id: self.runtime_id.clone(),
+            parent_checkpoint_id: self.parent_checkpoint_id.clone(),
+            created_at_ms: self.created_at_ms,
+            metadata: self.metadata.clone(),
+            name: self.name.clone(),
+            has_provider_snapshot: self
+                .backend_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.provider_snapshot_id.as_ref())
+                .is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -215,6 +248,24 @@ impl InMemoryRuntimeCheckpointStore {
             .filter(|c| c.runtime_id == runtime_id)
             .cloned()
             .collect()
+    }
+
+    pub(crate) async fn list_checkpoint_summaries(&self) -> Vec<RuntimeCheckpointSummary> {
+        let mut checkpoints = self
+            .state
+            .read()
+            .await
+            .checkpoints
+            .values()
+            .map(RuntimeCheckpoint::summary)
+            .collect::<Vec<_>>();
+        checkpoints.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.checkpoint_id.cmp(&right.checkpoint_id))
+        });
+        checkpoints
     }
 
     /// Removes all in-memory tracking for `runtime_id`: its `runtime_heads`

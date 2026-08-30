@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::response::{
     DaemonReadyMessage, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayHealthResponse,
-    RuntimeCheckoutResponse, RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeCatalogResponse, RuntimeCheckoutResponse, RuntimeCheckpointCatalogResponse,
+    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
     RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeOpenResponse, RuntimePauseResponse,
     RuntimeReadFileResponse, RuntimeResumeResponse, RuntimeWriteFileResponse,
 };
@@ -60,6 +61,8 @@ pub fn protocol_contract() -> Value {
             "runtime_exec_interrupted_response": schema_for!(RuntimeExecInterruptedResponse),
             "runtime_read_file_response": schema_for!(RuntimeReadFileResponse),
             "runtime_write_file_response": schema_for!(RuntimeWriteFileResponse),
+            "runtime_catalog_response": schema_for!(RuntimeCatalogResponse),
+            "runtime_checkpoint_catalog_response": schema_for!(RuntimeCheckpointCatalogResponse),
         }
     })
 }
@@ -75,7 +78,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 30);
+        assert_eq!(schemas.len(), 32);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("runtime_close_request"));
@@ -106,5 +109,7 @@ mod tests {
         assert!(schemas.contains_key("runtime_exec_interrupted_response"));
         assert!(schemas.contains_key("runtime_read_file_response"));
         assert!(schemas.contains_key("runtime_write_file_response"));
+        assert!(schemas.contains_key("runtime_catalog_response"));
+        assert!(schemas.contains_key("runtime_checkpoint_catalog_response"));
     }
 }

@@ -17,8 +17,8 @@ pub mod testing;
 pub use runtime_checkpoint::{
     RuntimeCheckoutRequest, RuntimeCheckoutResult, RuntimeCheckpointRequest,
     RuntimeCheckpointResult, RuntimeCheckpointSnapshotDeleteRequest,
-    RuntimeCheckpointSnapshotDeleteResult, RuntimeExecRequest, RuntimeExecResult,
-    RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest, RuntimeReadFileResult,
-    RuntimeRecord, RuntimeResumeRequest, RuntimeResumeResult, RuntimeWriteFileRequest,
-    RuntimeWriteFileResult,
+    RuntimeCheckpointSnapshotDeleteResult, RuntimeCheckpointSummary, RuntimeExecRequest,
+    RuntimeExecResult, RuntimePauseRequest, RuntimePauseResult, RuntimeReadFileRequest,
+    RuntimeReadFileResult, RuntimeRecord, RuntimeResumeRequest, RuntimeResumeResult,
+    RuntimeWriteFileRequest, RuntimeWriteFileResult,
 };

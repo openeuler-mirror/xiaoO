@@ -24,7 +24,8 @@ use axum::{
 };
 use protocol::response::{
     DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
-    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCheckoutResponse,
+    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCatalogResponse,
+    RuntimeCheckoutResponse, RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse,
     RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
     RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeLifecycleStatus,
     RuntimePauseResponse, RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
@@ -474,6 +475,20 @@ fn runtime_write_file_response(
     }
 }
 
+fn runtime_checkpoint_catalog_item(
+    checkpoint: xiaoo_shared::RuntimeCheckpointSummary,
+) -> RuntimeCheckpointCatalogItem {
+    RuntimeCheckpointCatalogItem {
+        checkpoint_id: checkpoint.checkpoint_id,
+        runtime_id: checkpoint.runtime_id,
+        parent_checkpoint_id: checkpoint.parent_checkpoint_id,
+        created_at_ms: checkpoint.created_at_ms,
+        metadata: checkpoint.metadata,
+        name: checkpoint.name,
+        has_provider_snapshot: checkpoint.has_provider_snapshot,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpBearerAuthConfig {
     token: Arc<str>,
@@ -529,6 +544,11 @@ fn create_router_from_state(
 ) -> Router {
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
+            .route("/api/v1/runtimes", get(handle_runtime_catalog))
+            .route(
+                "/api/v1/runtimes/checkpoints",
+                get(handle_runtime_checkpoint_catalog),
+            )
             .route("/api/v1/runtimes/open", post(handle_session_open))
             .route("/api/v1/runtimes/input", post(handle_session_input))
             .route(
@@ -673,6 +693,8 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
         minimum_client_protocol_version: protocol::PROTOCOL_VERSION,
         transport: GatewayTransport::HttpSse,
         runtime_api: vec![
+            "list",
+            "list_checkpoints",
             "open",
             "input",
             "interaction",
@@ -1162,6 +1184,47 @@ async fn handle_session_detach(
 
     match control_plane.detach_session(payload).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match control_plane.list_runtimes().await {
+        Ok(runtimes) => Json(RuntimeCatalogResponse {
+            runtimes: runtimes.into_iter().map(runtime_record_response).collect(),
+        })
+        .into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_checkpoint_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match control_plane.list_runtime_checkpoints().await {
+        Ok(checkpoints) => Json(RuntimeCheckpointCatalogResponse {
+            checkpoints: checkpoints
+                .into_iter()
+                .map(runtime_checkpoint_catalog_item)
+                .collect(),
+        })
+        .into_response(),
         Err(error) => map_session_error(error),
     }
 }

@@ -763,6 +763,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
+            parent_checkpoint_id: parent_checkpoint_id.clone(),
+            created_at_ms,
+            metadata: request.metadata.clone(),
+            name: request.name.clone(),
             session: session.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
@@ -913,6 +917,10 @@ impl CoreBackedSessionService {
 
         let checkpoint_id = format!("rtcp_{}", uuid::Uuid::new_v4().simple());
         let created_at_ms = current_time_ms();
+        let parent_checkpoint_id = self
+            .runtime_checkpoints
+            .latest_for_runtime(&request.runtime_id)
+            .await;
         let mut paused = session.clone();
         paused.status = SessionLifecycleStatus::Paused;
         paused.backend_instance = None;
@@ -922,6 +930,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
+            parent_checkpoint_id,
+            created_at_ms,
+            metadata: request.metadata.clone(),
+            name: request.name.clone(),
             session: paused.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
@@ -1969,6 +1981,29 @@ impl SessionControlPlane for CoreBackedSessionService {
                 session_id, failure,
             )),
         }
+    }
+
+    async fn list_runtimes(&self) -> Result<Vec<RuntimeRecord>, SessionServiceError> {
+        let mut runtimes = self
+            .session_store
+            .list_all()
+            .await
+            .iter()
+            .map(RuntimeRecord::from_session)
+            .collect::<Vec<_>>();
+        runtimes.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.runtime_id.cmp(&right.runtime_id))
+        });
+        Ok(runtimes)
+    }
+
+    async fn list_runtime_checkpoints(
+        &self,
+    ) -> Result<Vec<crate::RuntimeCheckpointSummary>, SessionServiceError> {
+        Ok(self.runtime_checkpoints.list_checkpoint_summaries().await)
     }
 
     async fn checkpoint_runtime(
