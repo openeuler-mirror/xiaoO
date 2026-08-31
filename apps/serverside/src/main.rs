@@ -523,6 +523,7 @@ async fn run_daemon(
                 session_control_plane.clone(),
                 bearer_auth,
                 rate_limit.clone(),
+                cron_scheduler.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -532,6 +533,7 @@ async fn run_daemon(
                 interaction_timeout_secs,
                 bearer_auth,
                 rate_limit.clone(),
+                cron_scheduler.clone(),
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?

@@ -1,4 +1,5 @@
 use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
+use crate::cron::scheduler::{CronScheduler, TriggerError};
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
 use crate::httpserver::channel_runtime::{ChannelMessageProcessingError, ChannelRuntimeProcessor};
 use crate::httpserver::rate_limit::RateLimitConfig;
@@ -29,14 +30,15 @@ use tower_http::cors::CorsLayer;
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::daemon_protocol::response::{
-    DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
-    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCatalogResponse,
-    RuntimeCheckoutResponse, RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse,
-    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
-    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeExportFormat,
-    RuntimeExportResponse, RuntimeLifecycleStatus, RuntimePauseResponse, RuntimeReadFileResponse,
-    RuntimeRecordResponse, RuntimeResumeResponse, RuntimeWriteFileResponse, SandboxCatalogItem,
-    SandboxCatalogResponse, SandboxLifecycleStatus, SandboxResourceAllocation,
+    CronCatalogResponse, CronRunResponse, DaemonService, GatewayCapabilitiesResponse,
+    GatewayErrorResponse, GatewayFeatureCapabilities, GatewayHealthResponse, GatewayHealthStatus,
+    GatewayTransport, RuntimeCatalogResponse, RuntimeCheckoutResponse,
+    RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse, RuntimeCheckpointResponse,
+    RuntimeCheckpointSnapshotDeleteResponse, RuntimeExecInterruptedResponse, RuntimeExecResponse,
+    RuntimeExportFormat, RuntimeExportResponse, RuntimeLifecycleStatus, RuntimePauseResponse,
+    RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
+    RuntimeWriteFileResponse, SandboxCatalogItem, SandboxCatalogResponse, SandboxLifecycleStatus,
+    SandboxResourceAllocation,
 };
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
@@ -54,6 +56,7 @@ pub struct GatewayAppState {
     channel_processor: ChannelRuntimeProcessor,
     remote_interactions: Arc<RemoteInteractionStore>,
     action_sink: Option<Arc<xiaoo_shared::gateway::DaemonHookActionSink>>,
+    cron_scheduler: Option<Arc<CronScheduler>>,
     session_diff_trackers: SessionDiffTrackerMap,
 }
 
@@ -81,6 +84,7 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(HashMap::new()),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            cron_scheduler: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -111,6 +115,7 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(runtimes),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            cron_scheduler: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -137,6 +142,7 @@ impl GatewayAppState {
             channel_runtimes: Arc::new(runtime_map),
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
+            cron_scheduler: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
@@ -152,6 +158,10 @@ impl GatewayAppState {
         )));
         state.session_control_plane = Some(session_control_plane);
         Ok(state)
+    }
+
+    fn set_cron_scheduler(&mut self, cron_scheduler: Option<Arc<CronScheduler>>) {
+        self.cron_scheduler = cron_scheduler;
     }
 
     fn set_channel_interaction_timeout(&mut self, interaction_timeout_secs: u64) {
@@ -562,6 +572,7 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     interaction_timeout_secs: u64,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
+    cron_scheduler: Option<Arc<CronScheduler>>,
 ) -> ChannelResult<Router> {
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
@@ -569,6 +580,7 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
         runtimes,
     )?;
     state.set_channel_interaction_timeout(interaction_timeout_secs);
+    state.set_cron_scheduler(cron_scheduler);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     Ok(create_router_from_state(state, bearer_auth, rate_limit))
 }
@@ -613,7 +625,9 @@ fn create_router_from_state(
                 "/api/v1/runtimes/write-file",
                 post(handle_runtime_write_file),
             )
-            .route("/api/v1/runtimes/export", post(handle_session_export)),
+            .route("/api/v1/runtimes/export", post(handle_session_export))
+            .route("/api/v1/cron/jobs", get(handle_cron_catalog))
+            .route("/api/v1/cron/run", post(handle_cron_run)),
         bearer_auth.clone(),
     );
 
@@ -641,8 +655,11 @@ pub fn create_router_with_control_plane_and_auth(
     session_control_plane: Arc<dyn SessionControlPlane>,
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
+    cron_scheduler: Option<Arc<CronScheduler>>,
 ) -> Router {
-    let state = GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
+    let mut state =
+        GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
+    state.set_cron_scheduler(cron_scheduler);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     create_router_from_state(state, bearer_auth, rate_limit)
 }
@@ -1241,6 +1258,62 @@ async fn handle_runtime_catalog(State(state): State<Arc<GatewayAppState>>) -> Re
     }
 }
 
+async fn handle_cron_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(scheduler) = state.cron_scheduler.as_ref() else {
+        return Json(CronCatalogResponse {
+            available: false,
+            jobs: Vec::new(),
+        })
+        .into_response();
+    };
+    Json(CronCatalogResponse {
+        available: true,
+        jobs: scheduler.catalog().await,
+    })
+    .into_response()
+}
+
+async fn handle_cron_run(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::daemon_protocol::wire::CronRunRequest>,
+) -> Response {
+    let Some(scheduler) = state.cron_scheduler.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(GatewayErrorResponse {
+                error: "no enabled Cron jobs are loaded by the active daemon".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    if payload.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GatewayErrorResponse {
+                error: "Cron job name must not be empty".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    match scheduler.trigger_now(&payload.name).await {
+        Ok(job) => (StatusCode::ACCEPTED, Json(CronRunResponse { job })).into_response(),
+        Err(TriggerError::NotFound) => (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse {
+                error: format!("enabled Cron job '{}' was not found", payload.name),
+            }),
+        )
+            .into_response(),
+        Err(TriggerError::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            Json(GatewayErrorResponse {
+                error: format!("Cron job '{}' is already running", payload.name),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_sandbox_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -1333,7 +1406,7 @@ async fn handle_runtime_checkout(
 
 async fn handle_session_export(
     State(state): State<Arc<GatewayAppState>>,
-    Json(payload): Json<protocol::wire::RuntimeExportRequest>,
+    Json(payload): Json<xiaoo_shared::daemon_protocol::wire::RuntimeExportRequest>,
 ) -> Response {
     // Export returns the full SessionRecord (history, memory, agent state,
     // resolved LLM config). Restrict it to the current lease holder,
@@ -1753,14 +1826,16 @@ fn map_channel_message_processing_error(error: ChannelMessageProcessingError) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        create_router_with_auth, create_router_with_control_plane_and_auth, handle_channel_events,
-        map_session_error, reject_forged_daemon_principal, runtime_export_file_name,
-        GatewayAppState, GatewayErrorResponse, HttpBearerAuthConfig,
+        create_router_from_state, create_router_with_auth,
+        create_router_with_control_plane_and_auth, handle_channel_events, map_session_error,
+        reject_forged_daemon_principal, runtime_export_file_name, GatewayAppState,
+        GatewayErrorResponse, HttpBearerAuthConfig,
     };
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
         ChannelMessage, ChannelMeta, ChannelResult, ChannelRuntime, ChannelTextFormat,
     };
+    use crate::cron::scheduler::CronScheduler;
     use async_trait::async_trait;
     use axum::{
         body::{to_bytes, Body, Bytes},
@@ -1773,6 +1848,7 @@ mod tests {
     use tower::util::ServiceExt;
     use xiaoo_api::events::LoopEventSink;
     use xiaoo_shared::backend::{BackendInfo, BackendLineageInfo};
+    use xiaoo_shared::cron::{CronExpression, CronJobConfig};
     use xiaoo_shared::gateway::{
         AppTurnRequest, AppTurnResult, SessionControlPlane, SessionService, SessionServiceError,
         TurnOutcome,
@@ -1837,6 +1913,7 @@ mod tests {
             Arc::new(SandboxCatalogControlPlane),
             Some(HttpBearerAuthConfig::new("secret-token")),
             None,
+            None,
         );
 
         let unauthorized = router
@@ -1878,6 +1955,7 @@ mod tests {
         let router = create_router_with_control_plane_and_auth(
             Arc::new(FakeSessionService::new("unused")),
             Arc::new(InterruptedExecControlPlane),
+            None,
             None,
             None,
         );
@@ -2282,6 +2360,94 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_runtime_routes_trigger_and_report_results() {
+        let service = Arc::new(FakeSessionService::with_delay(
+            "scheduled reply",
+            Duration::from_millis(25),
+        ));
+        let scheduler = Arc::new(CronScheduler::new(
+            vec![CronJobConfig {
+                name: "daily-review".to_string(),
+                description: None,
+                cron: CronExpression::parse("0 0 1 1 *").expect("valid cron"),
+                prompt: "Review the workspace".to_string(),
+                agent_role: None,
+                timeout_secs: 5,
+                enabled: true,
+                max_retries: 0,
+                retry_delay_secs: 0,
+            }],
+            1,
+            service,
+        ));
+        let mut state = GatewayAppState::new(Arc::new(FakeSessionService::new("unused")));
+        state.set_cron_scheduler(Some(scheduler.clone()));
+        let router = create_router_from_state(state, None, None);
+
+        let catalog = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/cron/jobs")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("catalog response");
+        assert_eq!(catalog.status(), StatusCode::OK);
+        let body = to_bytes(catalog.into_body(), usize::MAX)
+            .await
+            .expect("catalog body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("catalog JSON");
+        assert_eq!(body["available"], true);
+        assert_eq!(body["jobs"][0]["name"], "daily-review");
+
+        let trigger_body = serde_json::json!({"name": "daily-review"}).to_string();
+        let trigger = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cron/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(trigger_body.clone()))
+                    .expect("request"),
+            )
+            .await
+            .expect("trigger response");
+        assert_eq!(trigger.status(), StatusCode::ACCEPTED);
+
+        let overlap = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/cron/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(trigger_body))
+                    .expect("request"),
+            )
+            .await
+            .expect("overlap response");
+        assert_eq!(overlap.status(), StatusCode::CONFLICT);
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let jobs = scheduler.catalog().await;
+                if !jobs[0].running {
+                    assert_eq!(jobs[0].last_reply.as_deref(), Some("scheduled reply"));
+                    assert_eq!(jobs[0].success_count, 1);
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Cron job should complete");
+        scheduler.stop().await;
+    }
+
     struct FakeChannelAdapter {
         event_result: ChannelResult<(AdapterResponse, Option<ChannelMessage>)>,
         sent_texts: Mutex<Vec<(String, String, Option<String>)>>,
@@ -2629,6 +2795,7 @@ mod tests {
         let router = create_router_with_control_plane_and_auth(
             Arc::new(FakeSessionService::new("unused")),
             Arc::new(LeaseRejectingControlPlane),
+            None,
             None,
             None,
         );

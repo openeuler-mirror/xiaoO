@@ -482,6 +482,13 @@ pub struct RuntimeExportRequest {
     pub client_id: Option<String>,
 }
 
+/// Request body for triggering an enabled Cron job immediately.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct CronRunRequest {
+    /// Unique Cron job name from the active `jobs.toml`.
+    pub name: String,
+}
+
 /// Alias for [`SessionOpenRequest`] under the runtime-protocol naming.
 pub type RuntimeOpenRequest = SessionOpenRequest;
 /// Alias for [`SessionCloseRequest`] under the runtime-protocol naming.

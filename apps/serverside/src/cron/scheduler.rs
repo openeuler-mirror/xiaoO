@@ -1,11 +1,14 @@
 //! Cron scheduler — per-job tokio timer loops with retry and concurrency control.
 
-use std::sync::atomic::AtomicU64;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
+
+use xiaoo_shared::daemon_protocol::response::{CronJobRuntimeResponse, CronRunOutcome};
 
 use xiaoo_shared::cron::{CronExecutionError, CronJobConfig};
 use xiaoo_shared::gateway::{
@@ -18,6 +21,7 @@ use xiaoo_shared::gateway::{
 pub struct CronScheduler {
     cancel_token: CancellationToken,
     handles: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    jobs: HashMap<String, Arc<CronJob>>,
 }
 
 impl CronScheduler {
@@ -36,6 +40,7 @@ impl CronScheduler {
         let concurrency_limiter = Arc::new(Semaphore::new(limit));
 
         let mut handles = Vec::new();
+        let mut runtime_jobs = HashMap::new();
         let mut enabled_count = 0;
         for config in jobs {
             if !config.enabled {
@@ -49,14 +54,16 @@ impl CronScheduler {
                 session_service: session_service.clone(),
                 cancel_token: cancel_token.clone(),
                 concurrency_limiter: concurrency_limiter.clone(),
-                last_run: Mutex::new(None),
                 next_run: Mutex::new(None),
+                running: AtomicBool::new(false),
+                last_result: Mutex::new(None),
                 trigger_count: AtomicU64::new(0),
                 success_count: AtomicU64::new(0),
                 failure_count: AtomicU64::new(0),
             });
 
-            handles.push(Self::spawn_job_timer(job));
+            handles.push(Self::spawn_job_timer(job.clone()));
+            runtime_jobs.insert(job.config.name.clone(), job);
         }
 
         tracing::info!(
@@ -68,7 +75,37 @@ impl CronScheduler {
         Self {
             cancel_token,
             handles: Mutex::new(handles),
+            jobs: runtime_jobs,
         }
+    }
+
+    /// Return the live state of all enabled jobs ordered by name.
+    pub async fn catalog(&self) -> Vec<CronJobRuntimeResponse> {
+        let mut jobs = Vec::with_capacity(self.jobs.len());
+        for job in self.jobs.values() {
+            jobs.push(job.runtime_response().await);
+        }
+        jobs.sort_by(|left, right| left.name.cmp(&right.name));
+        jobs
+    }
+
+    /// Trigger an enabled job without waiting for the Agent turn to finish.
+    pub async fn trigger_now(&self, name: &str) -> Result<CronJobRuntimeResponse, TriggerError> {
+        let job = self.jobs.get(name).cloned().ok_or(TriggerError::NotFound)?;
+        if job
+            .running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(TriggerError::AlreadyRunning);
+        }
+        job.trigger_count.fetch_add(1, Ordering::Relaxed);
+        let execution_job = job.clone();
+        let handle = tokio::spawn(async move {
+            execute_job(execution_job).await;
+        });
+        self.handles.lock().await.push(handle);
+        Ok(job.runtime_response().await)
     }
 
     /// Cancel all timers and wait for them to exit gracefully.
@@ -89,6 +126,15 @@ impl CronScheduler {
     }
 }
 
+/// Reason a manual Cron trigger could not be accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerError {
+    /// The active scheduler does not contain this enabled job.
+    NotFound,
+    /// A previous scheduled or manual execution is still active.
+    AlreadyRunning,
+}
+
 // ── Internal job runtime ────────────────────────────────────────
 
 struct CronJob {
@@ -96,14 +142,54 @@ struct CronJob {
     session_service: Arc<dyn SessionService>,
     cancel_token: CancellationToken,
     concurrency_limiter: Arc<Semaphore>,
-    last_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     next_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    running: AtomicBool,
+    last_result: Mutex<Option<CronLastResult>>,
     /// Number of times this job was triggered.
     trigger_count: AtomicU64,
     /// Number of successful executions.
     success_count: AtomicU64,
     /// Number of executions that failed permanently (after all retries exhausted).
     failure_count: AtomicU64,
+}
+
+struct CronLastResult {
+    started_at_ms: u64,
+    completed_at_ms: u64,
+    outcome: CronRunOutcome,
+    session_id: Option<String>,
+    reply: Option<String>,
+    error: Option<String>,
+    total_tokens: Option<u64>,
+    duration_ms: u64,
+}
+
+impl CronJob {
+    async fn runtime_response(&self) -> CronJobRuntimeResponse {
+        let next_run_ms = self
+            .next_run
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|time| u64::try_from(time.timestamp_millis()).ok());
+        let last = self.last_result.lock().await;
+        CronJobRuntimeResponse {
+            name: self.config.name.clone(),
+            running: self.running.load(Ordering::Acquire),
+            next_run_ms,
+            trigger_count: self.trigger_count.load(Ordering::Relaxed),
+            success_count: self.success_count.load(Ordering::Relaxed),
+            failure_count: self.failure_count.load(Ordering::Relaxed),
+            last_started_at_ms: last.as_ref().map(|result| result.started_at_ms),
+            last_completed_at_ms: last.as_ref().map(|result| result.completed_at_ms),
+            last_outcome: last.as_ref().map(|result| result.outcome.clone()),
+            last_session_id: last.as_ref().and_then(|result| result.session_id.clone()),
+            last_reply: last.as_ref().and_then(|result| result.reply.clone()),
+            last_error: last.as_ref().and_then(|result| result.error.clone()),
+            last_total_tokens: last.as_ref().and_then(|result| result.total_tokens),
+            last_duration_ms: last.as_ref().map(|result| result.duration_ms),
+        }
+    }
 }
 
 impl CronScheduler {
@@ -149,42 +235,23 @@ impl CronScheduler {
                     }
                 }
 
-                // 3. Record trigger and log
-                job.trigger_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // 3. Skip an overlapping manual execution.
+                if job
+                    .running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    tracing::warn!(job = %job.config.name, "cron trigger skipped while job is running");
+                    continue;
+                }
+                *job.next_run.lock().await = None;
+                job.trigger_count.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(
                     job = %job.config.name,
                     "cron triggered, acquiring concurrency permit"
                 );
 
-                // 4. Acquire concurrency permit
-                let permit = match job.concurrency_limiter.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        tracing::info!(job = %job.config.name, "semaphore closed, exiting");
-                        break;
-                    }
-                };
-
-                // 5. Execute with retry (permit released when dropped)
-                let result = execute_job_with_retry(&job).await;
-                drop(permit); // Explicitly release permit before updating stats
-
-                // 6. Update stats
-                *job.last_run.lock().await = Some(chrono::Utc::now());
-                match result {
-                    ExecutionOutcome::Success => {
-                        job.success_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    ExecutionOutcome::Failed => {
-                        job.failure_count
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    ExecutionOutcome::Cancelled => {
-                        // Don't count as success or failure
-                    }
-                }
+                execute_job(job.clone()).await;
             }
 
             tracing::info!(job = %job.config.name, "cron job timer stopped");
@@ -197,11 +264,84 @@ impl CronScheduler {
 /// Outcome of a job execution attempt.
 enum ExecutionOutcome {
     /// Job completed successfully.
-    Success,
+    Success(JobRunResult),
     /// Job failed permanently after all retries.
-    Failed,
+    Failed(String),
     /// Job was cancelled during execution or retry backoff.
     Cancelled,
+}
+
+async fn execute_job(job: Arc<CronJob>) {
+    let started_at_ms = unix_time_ms();
+    let started = std::time::Instant::now();
+    let permit = tokio::select! {
+        permit = job.concurrency_limiter.acquire() => permit.ok(),
+        _ = job.cancel_token.cancelled() => None,
+    };
+    let outcome = match permit {
+        Some(permit) => {
+            let outcome = execute_job_with_retry(&job).await;
+            drop(permit);
+            outcome
+        }
+        None => ExecutionOutcome::Cancelled,
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let result = match outcome {
+        ExecutionOutcome::Success(result) => {
+            job.success_count.fetch_add(1, Ordering::Relaxed);
+            CronLastResult {
+                started_at_ms,
+                completed_at_ms: unix_time_ms(),
+                outcome: CronRunOutcome::Succeeded,
+                session_id: Some(result.session_id),
+                reply: Some(truncate_reply(result.reply)),
+                error: None,
+                total_tokens: Some(result.total_tokens),
+                duration_ms,
+            }
+        }
+        ExecutionOutcome::Failed(error) => {
+            job.failure_count.fetch_add(1, Ordering::Relaxed);
+            CronLastResult {
+                started_at_ms,
+                completed_at_ms: unix_time_ms(),
+                outcome: CronRunOutcome::Failed,
+                session_id: None,
+                reply: None,
+                error: Some(error),
+                total_tokens: None,
+                duration_ms,
+            }
+        }
+        ExecutionOutcome::Cancelled => CronLastResult {
+            started_at_ms,
+            completed_at_ms: unix_time_ms(),
+            outcome: CronRunOutcome::Cancelled,
+            session_id: None,
+            reply: None,
+            error: None,
+            total_tokens: None,
+            duration_ms,
+        },
+    };
+    *job.last_result.lock().await = Some(result);
+    job.running.store(false, Ordering::Release);
+}
+
+fn unix_time_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+fn truncate_reply(reply: String) -> String {
+    const MAX_CHARS: usize = 4_000;
+    let mut chars = reply.chars();
+    let truncated: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
 }
 
 async fn execute_job_with_retry(job: &CronJob) -> ExecutionOutcome {
@@ -219,7 +359,7 @@ async fn execute_job_with_retry(job: &CronJob) -> ExecutionOutcome {
                     duration_ms = %result.duration_ms,
                     "cron job completed"
                 );
-                return ExecutionOutcome::Success;
+                return ExecutionOutcome::Success(result);
             }
             Err(error) if attempt < max_attempts => {
                 tracing::warn!(
@@ -253,13 +393,13 @@ async fn execute_job_with_retry(job: &CronJob) -> ExecutionOutcome {
                     error = %error,
                     "cron job permanently failed"
                 );
-                return ExecutionOutcome::Failed;
+                return ExecutionOutcome::Failed(error.to_string());
             }
         }
     }
 
     // This should not be reached, but return Failed as fallback
-    ExecutionOutcome::Failed
+    ExecutionOutcome::Failed("cron job exhausted retries without a result".to_string())
 }
 
 struct JobRunResult {

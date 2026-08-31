@@ -116,9 +116,9 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 "cron",
                 true,
                 true,
-                false,
                 true,
-                &["list", "validate", "render"],
+                true,
+                &["list", "validate", "render", "runtime_status", "run_now"],
             ),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
@@ -334,5 +334,15 @@ mod tests {
         assert!(backend.runtime_read);
         assert!(backend.test);
         assert!(backend.actions.iter().any(|action| action == "preflight"));
+
+        let cron = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "cron")
+            .expect("Cron capability");
+        assert!(cron.runtime_read);
+        assert!(cron.runtime_write);
+        assert!(cron.actions.iter().any(|action| action == "runtime_status"));
+        assert!(cron.actions.iter().any(|action| action == "run_now"));
     }
 }
