@@ -489,6 +489,13 @@ pub struct CronRunRequest {
     pub name: String,
 }
 
+/// Request body for testing one enabled channel with its active credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ChannelTestRequest {
+    /// Channel identifier, currently `feishu` or `telegram`.
+    pub id: String,
+}
+
 /// Alias for [`SessionOpenRequest`] under the runtime-protocol naming.
 pub type RuntimeOpenRequest = SessionOpenRequest;
 /// Alias for [`SessionCloseRequest`] under the runtime-protocol naming.

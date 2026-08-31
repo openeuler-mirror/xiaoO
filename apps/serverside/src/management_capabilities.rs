@@ -127,7 +127,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 false,
                 true,
-                &["inspect", "preflight"],
+                &["inspect", "preflight", "runtime_status", "test_connection"],
             ),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
@@ -352,6 +352,14 @@ mod tests {
         assert!(channels.test);
         assert!(channels.actions.iter().any(|action| action == "inspect"));
         assert!(channels.actions.iter().any(|action| action == "preflight"));
+        assert!(channels
+            .actions
+            .iter()
+            .any(|action| action == "runtime_status"));
+        assert!(channels
+            .actions
+            .iter()
+            .any(|action| action == "test_connection"));
 
         let cron = capabilities
             .domains

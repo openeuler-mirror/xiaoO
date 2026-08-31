@@ -23,6 +23,7 @@ mod role_management;
 mod skill_management;
 mod tool_management;
 
+use crate::channel_management::ChannelManager;
 use crate::channels::{
     build_feishu_runtime, build_telegram_runtime, FeishuConfig, FeishuEventTransport,
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramConfig,
@@ -473,22 +474,32 @@ async fn run_daemon(
         )?;
         let session_service = app.session_service.clone();
         let session_control_plane = app.session_control_plane.clone();
+        let feishu_config = config.feishu_config()?;
+        let telegram_config = config.telegram_config()?;
+        let channel_manager = Arc::new(ChannelManager::new(
+            feishu_config.clone(),
+            telegram_config.clone(),
+        ));
 
-        if let Some(telegram_config) = config.telegram_polling_config()? {
+        if let Some(telegram_config) = telegram_config.clone().filter(|config| {
+            config.event_transport == crate::channels::TelegramEventTransport::Polling
+        }) {
             spawn_telegram_polling_service(
                 telegram_config,
                 session_service.clone(),
                 interaction_timeout_secs,
+                channel_manager.clone(),
             )
             .context("failed to start telegram polling service")?;
         }
 
-        if let Some(feishu_config) = config.feishu_config()? {
+        if let Some(feishu_config) = feishu_config {
             if feishu_config.event_transport == FeishuEventTransport::Websocket {
                 spawn_feishu_websocket_service(
                     feishu_config,
                     session_service.clone(),
                     interaction_timeout_secs,
+                    channel_manager.clone(),
                 )
                 .context("failed to start Feishu websocket service")?;
             }
@@ -534,6 +545,7 @@ async fn run_daemon(
                 bearer_auth,
                 rate_limit.clone(),
                 cron_scheduler.clone(),
+                channel_manager.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -544,6 +556,7 @@ async fn run_daemon(
                 bearer_auth,
                 rate_limit.clone(),
                 cron_scheduler.clone(),
+                channel_manager.clone(),
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?
@@ -784,10 +797,14 @@ fn spawn_feishu_websocket_service(
     feishu_config: FeishuConfig,
     session_service: Arc<dyn xiaoo_shared::gateway::SessionService>,
     interaction_timeout_secs: u64,
+    channel_manager: Arc<ChannelManager>,
 ) -> Result<()> {
     let runtime = build_feishu_runtime(feishu_config.clone()).map_err(anyhow::Error::new)?;
-    let processor =
-        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let processor = ChannelRuntimeProcessor::with_monitor(
+        session_service,
+        interaction_timeout_secs,
+        channel_manager,
+    );
     let service = FeishuWebsocketService::new(feishu_config).map_err(anyhow::Error::new)?;
     let handler: FeishuWebsocketMessageHandler = Arc::new(move |message| {
         let processor = processor.clone();
@@ -809,10 +826,14 @@ fn spawn_telegram_polling_service(
     telegram_config: TelegramConfig,
     session_service: Arc<dyn xiaoo_shared::gateway::SessionService>,
     interaction_timeout_secs: u64,
+    channel_manager: Arc<ChannelManager>,
 ) -> Result<()> {
     let runtime = build_telegram_runtime(telegram_config.clone()).map_err(anyhow::Error::new)?;
-    let processor =
-        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let processor = ChannelRuntimeProcessor::with_monitor(
+        session_service,
+        interaction_timeout_secs,
+        channel_manager,
+    );
     let service = TelegramPollingService::new(telegram_config).map_err(anyhow::Error::new)?;
     let handler: TelegramPollingMessageHandler = Arc::new(move |message| {
         let processor = processor.clone();

@@ -25,6 +25,10 @@ impl FeishuClient {
         }
     }
 
+    pub(crate) async fn test_connection(&self) -> ChannelResult<()> {
+        self.fetch_tenant_access_token().await.map(|_| ())
+    }
+
     pub async fn send_text(&self, request: &FeishuSendRequest) -> ChannelResult<Option<String>> {
         let token = self.fetch_tenant_access_token().await?;
         let content = serde_json::to_string(&FeishuTextContent {

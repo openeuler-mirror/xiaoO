@@ -19,6 +19,7 @@
 //! dedicated protocol-change review, never as a drive-by.
 
 #![deny(missing_docs)]
+#![recursion_limit = "256"]
 
 pub mod plan;
 pub mod response;

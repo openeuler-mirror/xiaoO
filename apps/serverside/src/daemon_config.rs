@@ -831,17 +831,6 @@ impl DaemonConfig {
         }))
     }
 
-    pub fn telegram_polling_config(&self) -> Result<Option<TelegramConfig>> {
-        let Some(telegram) = self.telegram_config()? else {
-            return Ok(None);
-        };
-        if telegram.event_transport == TelegramEventTransport::Polling {
-            Ok(Some(telegram))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub fn channel_runtimes(&self) -> Result<Vec<ChannelRuntime>> {
         let mut runtimes = Vec::new();
         if let Some(feishu) = self.feishu_config()? {
@@ -1483,9 +1472,9 @@ command = "toml-server"
             config_path: "config.toml".into(),
         };
         let telegram = daemon
-            .telegram_polling_config()
-            .expect("telegram polling config should validate")
-            .expect("telegram polling should be enabled");
+            .telegram_config()
+            .expect("telegram config should validate")
+            .expect("telegram should be enabled");
 
         assert_eq!(
             telegram.event_transport,

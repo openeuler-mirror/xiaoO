@@ -19,6 +19,21 @@ impl TelegramClient {
         }
     }
 
+    pub(crate) async fn test_connection(&self) -> ChannelResult<()> {
+        let url = self.bot_api_url("getMe")?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| ChannelError::Transport {
+                message: "telegram getMe request failed".to_string(),
+            })?;
+        validate_api_response::<serde_json::Value>(response, "telegram getMe")
+            .await
+            .map(|_| ())
+    }
+
     pub async fn send_text(
         &self,
         conversation_id: &str,

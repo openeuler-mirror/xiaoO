@@ -1,6 +1,16 @@
+use xiaoo_shared::daemon_protocol::response::{
+    ChannelCatalogResponse, ChannelRuntimeResponse, ChannelTestResponse,
+};
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::channels::{FeishuEventTransport, TelegramEventTransport};
+use crate::channels::feishu::FeishuClient;
+use crate::channels::telegram::TelegramClient;
+use crate::channels::{
+    ChannelError, FeishuConfig, FeishuEventTransport, TelegramConfig, TelegramEventTransport,
+};
 use crate::daemon_config::DaemonConfig;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -34,6 +44,192 @@ pub struct ChannelReport {
     pub schema_version: u32,
     pub interaction_timeout_secs: u64,
     pub channels: Vec<ChannelStatus>,
+}
+
+#[derive(Debug, Clone)]
+struct ChannelRuntimeState {
+    transport: String,
+    received_count: u64,
+    success_count: u64,
+    failure_count: u64,
+    last_received_at_ms: Option<u64>,
+    last_completed_at_ms: Option<u64>,
+    last_error_kind: Option<String>,
+}
+
+/// Secret-free runtime status and connection tests for enabled channels.
+pub struct ChannelManager {
+    states: Mutex<HashMap<String, ChannelRuntimeState>>,
+    feishu: Option<FeishuConfig>,
+    telegram: Option<TelegramConfig>,
+}
+
+impl ChannelManager {
+    pub fn new(feishu: Option<FeishuConfig>, telegram: Option<TelegramConfig>) -> Self {
+        let mut states = HashMap::new();
+        if let Some(config) = feishu.as_ref() {
+            states.insert(
+                "feishu".to_string(),
+                ChannelRuntimeState::new(match config.event_transport {
+                    FeishuEventTransport::Webhook => "webhook",
+                    FeishuEventTransport::Websocket => "websocket",
+                }),
+            );
+        }
+        if let Some(config) = telegram.as_ref() {
+            states.insert(
+                "telegram".to_string(),
+                ChannelRuntimeState::new(match config.event_transport {
+                    TelegramEventTransport::Webhook => "webhook",
+                    TelegramEventTransport::Polling => "polling",
+                }),
+            );
+        }
+        Self {
+            states: Mutex::new(states),
+            feishu,
+            telegram,
+        }
+    }
+
+    pub fn catalog(&self) -> ChannelCatalogResponse {
+        let states = self.states.lock().expect("channel state mutex poisoned");
+        let mut channels = states
+            .iter()
+            .map(|(id, state)| state.response(id))
+            .collect::<Vec<_>>();
+        channels.sort_by(|left, right| left.id.cmp(&right.id));
+        ChannelCatalogResponse { channels }
+    }
+
+    pub fn record_received(&self, id: &str) {
+        if let Some(state) = self
+            .states
+            .lock()
+            .expect("channel state mutex poisoned")
+            .get_mut(id)
+        {
+            state.received_count = state.received_count.saturating_add(1);
+            state.last_received_at_ms = Some(now_ms());
+        }
+    }
+
+    pub fn record_success(&self, id: &str) {
+        if let Some(state) = self
+            .states
+            .lock()
+            .expect("channel state mutex poisoned")
+            .get_mut(id)
+        {
+            state.success_count = state.success_count.saturating_add(1);
+            state.last_completed_at_ms = Some(now_ms());
+            state.last_error_kind = None;
+        }
+    }
+
+    pub fn record_failure(&self, id: &str, kind: &str) {
+        if let Some(state) = self
+            .states
+            .lock()
+            .expect("channel state mutex poisoned")
+            .get_mut(id)
+        {
+            state.failure_count = state.failure_count.saturating_add(1);
+            state.last_completed_at_ms = Some(now_ms());
+            state.last_error_kind = Some(kind.to_string());
+        }
+    }
+
+    pub async fn test_connection(&self, id: &str) -> Option<ChannelTestResponse> {
+        let started = Instant::now();
+        let result = match id {
+            "feishu" => match self.feishu.clone() {
+                Some(config) => {
+                    let client = FeishuClient::new(config);
+                    tokio::time::timeout(Duration::from_secs(15), client.test_connection())
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(ChannelError::Transport {
+                                message: "request timed out".to_string(),
+                            })
+                        })
+                }
+                None => return None,
+            },
+            "telegram" => match self.telegram.clone() {
+                Some(config) => {
+                    let client = TelegramClient::new(config);
+                    tokio::time::timeout(Duration::from_secs(15), client.test_connection())
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(ChannelError::Transport {
+                                message: "request timed out".to_string(),
+                            })
+                        })
+                }
+                None => return None,
+            },
+            _ => return None,
+        };
+        let error_kind = result
+            .as_ref()
+            .err()
+            .map(channel_error_kind)
+            .map(str::to_string);
+        Some(ChannelTestResponse {
+            id: id.to_string(),
+            success: result.is_ok(),
+            duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            error_kind,
+        })
+    }
+}
+
+impl ChannelRuntimeState {
+    fn new(transport: &str) -> Self {
+        Self {
+            transport: transport.to_string(),
+            received_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            last_received_at_ms: None,
+            last_completed_at_ms: None,
+            last_error_kind: None,
+        }
+    }
+
+    fn response(&self, id: &str) -> ChannelRuntimeResponse {
+        ChannelRuntimeResponse {
+            id: id.to_string(),
+            transport: self.transport.clone(),
+            loaded: true,
+            received_count: self.received_count,
+            success_count: self.success_count,
+            failure_count: self.failure_count,
+            last_received_at_ms: self.last_received_at_ms,
+            last_completed_at_ms: self.last_completed_at_ms,
+            last_error_kind: self.last_error_kind.clone(),
+        }
+    }
+}
+
+pub fn channel_error_kind(error: &ChannelError) -> &'static str {
+    match error {
+        ChannelError::Config { .. } => "configuration",
+        ChannelError::InvalidEvent { .. } => "invalid_event",
+        ChannelError::Authentication { .. } => "authentication",
+        ChannelError::Transport { .. } => "transport",
+        ChannelError::Delivery { .. } => "delivery",
+        ChannelError::UnsupportedCapability { .. } => "unsupported_capability",
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 pub fn channel_report(config: &DaemonConfig) -> ChannelReport {
@@ -191,7 +387,8 @@ fn issue_message(errors: &mut Vec<ChannelIssue>, path: &str, code: &str, message
 
 #[cfg(test)]
 mod tests {
-    use super::channel_report;
+    use super::{channel_error_kind, channel_report, ChannelManager};
+    use crate::channels::{ChannelError, FeishuConfig, FeishuEventTransport};
     use crate::daemon_config::{AppConfig, DaemonConfig};
     use std::path::PathBuf;
 
@@ -233,5 +430,51 @@ mod tests {
         assert!(!telegram.valid);
         let json = serde_json::to_string(&report).expect("report JSON");
         assert!(!json.contains("secret-value"));
+    }
+
+    #[test]
+    fn runtime_catalog_tracks_only_loaded_channels() {
+        let manager = ChannelManager::new(
+            Some(FeishuConfig {
+                channel_instance_id: None,
+                base_url: "https://open.feishu.cn".to_string(),
+                app_id: "app-id".to_string(),
+                app_secret_env: "FEISHU_SECRET".to_string(),
+                event_transport: FeishuEventTransport::Websocket,
+                verification_token: None,
+                parse_file_messages: false,
+                max_file_download_bytes: 0,
+                max_file_text_chars: 0,
+            }),
+            None,
+        );
+        manager.record_received("feishu");
+        manager.record_failure("feishu", "gateway");
+        manager.record_received("unknown");
+
+        let catalog = manager.catalog();
+        assert_eq!(catalog.channels.len(), 1);
+        let channel = &catalog.channels[0];
+        assert_eq!(channel.id, "feishu");
+        assert_eq!(channel.transport, "websocket");
+        assert_eq!(channel.received_count, 1);
+        assert_eq!(channel.failure_count, 1);
+        assert_eq!(channel.last_error_kind.as_deref(), Some("gateway"));
+        assert!(channel.last_received_at_ms.is_some());
+        assert!(channel.last_completed_at_ms.is_some());
+
+        manager.record_success("feishu");
+        let channel = &manager.catalog().channels[0];
+        assert_eq!(channel.success_count, 1);
+        assert!(channel.last_error_kind.is_none());
+    }
+
+    #[test]
+    fn classifies_channel_errors_without_exposing_messages() {
+        let error = ChannelError::Authentication {
+            message: "sensitive provider response".to_string(),
+        };
+        assert_eq!(channel_error_kind(&error), "authentication");
+        assert!(!channel_error_kind(&error).contains("sensitive"));
     }
 }
