@@ -28,6 +28,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config memory-queue",
             "config compact",
             "config backend",
+            "config cron",
         ]
         .into_iter()
         .map(str::to_string)
@@ -110,7 +111,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["inspect", "preflight"],
             ),
-            domain("cron", true, false, false, false, &[]),
+            domain("cron", true, false, false, true, &["list", "validate"]),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
