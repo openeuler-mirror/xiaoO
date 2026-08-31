@@ -17,6 +17,22 @@ pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
     pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+    /// Deadline for discarding stray character events after an ESC key.
+    ///
+    /// When an ESC byte lands next to a mouse/scroll escape sequence
+    /// (`\x1b[<b;x;yM`), crossterm's parser can swallow the sequence head
+    /// and deliver the leftover `[<b;x;yM` as plain `KeyCode::Char` events.
+    /// Those always arrive back-to-back with the ESC event (same read
+    /// batch, <1ms apart), so any `Char` received within this window is a
+    /// sequence remnant, not real typing — discard it. Human key presses
+    /// are >50ms apart, so a 5ms window never eats legitimate input.
+    pub(crate) esc_discard_until: Option<Instant>,
+    /// True while a mouse drag that started inside the input box is in
+    /// progress. The input-box `Up` handler only auto-copies when this is
+    /// set, so a left-button release elsewhere (tool toggle, scrollbar,
+    /// transcript area) can never copy the input box's lingering selection
+    /// (e.g. one created with Ctrl+A).
+    pub(crate) input_drag_active: bool,
     /// Wall-clock origin for the loading spinner (see `loading_animation`).
     /// The spinner frame is `elapsed_ms / 16 % FRAMES`, decoupling the
     /// animation cadence from the event-loop cycle time.
@@ -37,6 +53,8 @@ impl App {
             state,
             gateway,
             pending_local_model_fetch: None,
+            esc_discard_until: None,
+            input_drag_active: false,
             animation_origin: Instant::now(),
         })
     }
@@ -458,16 +476,16 @@ impl App {
     /// finds None, and drops the action with a `tracing::warn!`. This is
     /// intentional — create_session / switch_session are not supported in
     /// local mode. See [`switch_to_remote_session`].
-    async fn execute_hook_action(&mut self, action: agent_types::hook::HookAction) {
+    async fn execute_hook_action(&mut self, action: xiaoo_api::chat::HookAction) {
         match action {
-            agent_types::hook::HookAction::CreateSession { session_id } => {
+            xiaoo_api::chat::HookAction::CreateSession { session_id } => {
                 tracing::info!(
                     session_id = %session_id,
                     "TUI: hook action create_session — switching focus"
                 );
                 self.switch_to_remote_session(session_id).await;
             }
-            agent_types::hook::HookAction::SwitchSession { session_id } => {
+            xiaoo_api::chat::HookAction::SwitchSession { session_id } => {
                 // Skip the switch (and the transcript reload + "Switched to
                 // session" system message it inserts) when the TUI is already
                 // focused on the target. This commonly happens when a plugin
@@ -488,7 +506,7 @@ impl App {
                 );
                 self.switch_to_remote_session(session_id).await;
             }
-            agent_types::hook::HookAction::SendPrompt {
+            xiaoo_api::chat::HookAction::SendPrompt {
                 session_id,
                 text,
                 chain_depth,

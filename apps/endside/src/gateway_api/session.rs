@@ -15,8 +15,8 @@ use crate::gateway::{
 use crate::interaction_prompt::PromptRequest;
 use crate::status_panel::MemoryStatus;
 
-use agent_types::common::ids::AgentId;
-use agent_types::events::LoopEndSummary;
+use xiaoo_api::chat::AgentId;
+use xiaoo_api::events::LoopEndSummary;
 use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotUpdate};
 
 #[derive(Debug)]
@@ -86,9 +86,9 @@ pub enum SessionTurnUpdate {
         completion_tokens: u64,
         total_tokens: u64,
         estimated_input_tokens: u64,
-        messages: Vec<llm_client::ChatMessage>,
+        messages: Vec<xiaoo_api::chat::ChatMessage>,
     },
-    HookActions(Vec<agent_types::hook::HookAction>),
+    HookActions(Vec<xiaoo_api::chat::HookAction>),
     Err(String),
 }
 
@@ -144,7 +144,7 @@ impl Default for SessionGateway {
 
 pub(super) struct ChannelLoopEventSink {
     pub(super) updates_tx: UnboundedSender<SessionTurnUpdate>,
-    pub(super) loop_summary: Arc<Mutex<Option<agent_types::events::LoopEndSummary>>>,
+    pub(super) loop_summary: Arc<Mutex<Option<xiaoo_api::events::LoopEndSummary>>>,
 }
 
 pub(super) struct ChannelToolEventSink {
@@ -228,7 +228,7 @@ mod tests {
 }
 
 #[async_trait]
-impl xiaoo_core::PendingUserMessageSource for ChannelPendingUserMessages {
+impl xiaoo_api::runtime::PendingUserMessageSource for ChannelPendingUserMessages {
     async fn drain_pending_user_messages(&self) -> Vec<String> {
         let prompts = self
             .pending

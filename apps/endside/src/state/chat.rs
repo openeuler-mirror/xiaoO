@@ -82,7 +82,7 @@ pub struct QueuedTurn {
     /// `~/.xiaoo/commands/<name>.md` invocation; `None` for free-form input.
     /// Carried through the queue so `*.Chat.command.before` still fires when
     /// the turn is dequeued after the running turn finishes.
-    pub command_context: Option<agent_types::chat::CommandContext>,
+    pub command_context: Option<xiaoo_api::chat::CommandContext>,
     /// Cross-turn `send_prompt` chain depth. `0` for user-typed turns
     /// (resets the chain). When a `SendPrompt` hook action is enqueued
     /// because a turn is already running, the daemon-stamped
@@ -242,9 +242,9 @@ impl Message {
 /// System messages are dropped: they are internal LLM context (system
 /// prompt, tool descriptions) and not part of the user-visible chat
 /// transcript the TUI maintains.
-pub fn messages_from_chat_messages(messages: Vec<llm_client::ChatMessage>) -> Vec<Message> {
-    use agent_types::llm::message::{ContentBlock, MessageRole};
+pub fn messages_from_chat_messages(messages: Vec<xiaoo_api::chat::ChatMessage>) -> Vec<Message> {
     use std::collections::HashMap;
+    use xiaoo_api::chat::{ContentBlock, MessageRole};
 
     // First pass: collect ToolUse (tool_name, args) keyed by call_id so the
     // ToolResult pass can attach the original invocation args to the same
@@ -917,7 +917,7 @@ impl ChatState {
     pub fn enqueue_pending_turn(
         &mut self,
         prompt: String,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) {
         self.pending_turns.push_back(QueuedTurn {
@@ -1390,8 +1390,8 @@ mod tests {
     fn messages_from_chat_messages_drops_system_role_and_maps_user_assistant_text() {
         use super::messages_from_chat_messages;
         use super::MessageRole;
-        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
-        use llm_client::ChatMessage;
+        use xiaoo_api::chat::ChatMessage;
+        use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
         let messages = vec![
             ChatMessage {
@@ -1451,8 +1451,8 @@ mod tests {
     fn messages_from_chat_messages_merges_tool_use_and_tool_result_into_one_card() {
         use super::messages_from_chat_messages;
         use super::{MessageRole, ToolExecutionStatus};
-        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
-        use llm_client::ChatMessage;
+        use xiaoo_api::chat::ChatMessage;
+        use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
         let messages = vec![
             ChatMessage {
@@ -1505,8 +1505,8 @@ mod tests {
     fn messages_from_chat_messages_marks_failed_tool_results() {
         use super::messages_from_chat_messages;
         use super::ToolExecutionStatus;
-        use agent_types::llm::message::{ContentBlock, MessageRole as LlmRole};
-        use llm_client::ChatMessage;
+        use xiaoo_api::chat::ChatMessage;
+        use xiaoo_api::chat::{ContentBlock, MessageRole as LlmRole};
 
         let messages = vec![ChatMessage {
             role: LlmRole::Tool,

@@ -48,7 +48,7 @@ pub fn default_api_base_for_provider(provider: &str) -> String {
         "mistral" => "https://api.mistral.ai/v1".to_string(),
         "together" => "https://api.together.xyz/v1".to_string(),
         "xai" | "xai-grok" => "https://api.x.ai/v1".to_string(),
-        "deepseek" => "https://api.deepseek.com".to_string(),
+        "deepseek" => "https://api.deepseek.com/v1".to_string(),
         "gitcode" => "https://api-ai.gitcode.com/v1".to_string(),
         "minimax" | "minimax-openai" => "https://api.minimaxi.com/v1".to_string(),
         "minimax-anthropic" => "https://api.minimaxi.com/anthropic/v1".to_string(),
@@ -289,7 +289,7 @@ mod tests {
         let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "deepseek");
 
         assert_eq!(api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-        assert_eq!(api_base, "https://api.deepseek.com");
+        assert_eq!(api_base, "https://api.deepseek.com/v1");
     }
 
     #[test]

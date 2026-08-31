@@ -58,7 +58,7 @@ pub(crate) struct E2bBackendState {
     pub(crate) lifecycle: Mutex<E2bLifecycle>,
 }
 
-pub struct E2bOperationBackend {
+pub(crate) struct E2bOperationBackend {
     backend_id: String,
     capabilities: OperationBackendCapabilities,
     state: Arc<E2bBackendState>,

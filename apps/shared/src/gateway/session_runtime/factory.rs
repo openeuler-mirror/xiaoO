@@ -1,6 +1,5 @@
 use agent_contracts::backend::OperationBackend;
 use agent_contracts::context::budget::TokenBudgetPolicy;
-use agent_contracts::runtime::RuntimeView;
 use agent_contracts::tool::{ToolSpecView, ToolStateStoreBuilder};
 use agent_contracts::trace::TraceRecorderBuilder;
 use agent_contracts::{
@@ -23,10 +22,12 @@ use tool::{
     ToolStateStoreBuilderImpl,
 };
 use trace::TraceRecorderBuilderImpl;
-use xiaoo_core::{
-    AgentRuntime, AgentRuntimeBuilder, BasicAgentContext, BasicRuntimeView, EmptySkillRegistry,
-    NoopInteractionHandle, NoopToolEventSink,
+use xiaoo_api::events::NoopToolEventSink;
+use xiaoo_api::interaction::NoopInteractionHandle;
+use xiaoo_api::runtime::{
+    BasicAgentContext, BasicRuntimeView, Runtime, RuntimeBuildError, RuntimeView,
 };
+use xiaoo_api::skills::EmptySkillRegistry;
 
 use parking_lot::RwLock;
 
@@ -34,15 +35,15 @@ use super::ResolvedSessionRuntime;
 use crate::gateway::permission_backend::PermissionAwareOperationBackend;
 use crate::gateway::{GatewayEntryKind, SessionRecord};
 
-pub struct AppRuntimeAssembly {
-    pub runtime: AgentRuntime,
+pub(crate) struct AppRuntimeAssembly {
+    pub runtime: Runtime,
     pub runtime_view: Option<Arc<dyn RuntimeView>>,
     pub visible_tools: Vec<Arc<dyn ToolSpecView>>,
     pub tool_manifest: Vec<ToolSpecSnapshot>,
 }
 
 impl AppRuntimeAssembly {
-    pub async fn shutdown(self) -> Result<(), agent_contracts::backend::OperationError> {
+    pub(crate) async fn shutdown(self) -> Result<(), agent_contracts::backend::OperationError> {
         let AppRuntimeAssembly {
             runtime,
             runtime_view,
@@ -57,12 +58,14 @@ impl AppRuntimeAssembly {
     }
 }
 
-pub struct AppRuntimeFactory;
+pub(crate) struct AppRuntimeFactory;
 
 #[derive(Debug, thiserror::Error)]
-pub enum AppRuntimeFactoryError {
+pub(crate) enum AppRuntimeFactoryError {
     #[error("core runtime build failed: {0}")]
     CoreBuild(#[from] BuildError),
+    #[error("runtime build failed: {0}")]
+    ApiBuild(#[from] RuntimeBuildError),
     #[error("trace config serialization failed: {0}")]
     TraceConfigSerialization(#[from] serde_json::Error),
     #[error("compression pipeline build failed: {0}")]
@@ -70,7 +73,7 @@ pub enum AppRuntimeFactoryError {
 }
 
 impl AppRuntimeFactory {
-    pub async fn build(
+    pub(crate) async fn build(
         resolved: &ResolvedSessionRuntime,
         session: &SessionRecord,
         messages: Arc<RwLock<Vec<agent_types::ChatMessage>>>,
@@ -188,7 +191,7 @@ impl AppRuntimeFactory {
             Some(runtime_view)
         };
 
-        let mut builder = AgentRuntimeBuilder::new()
+        let mut builder = Runtime::builder()
             .llm_provider(Arc::clone(&resolved.llm_provider))
             .compression_pipeline(compression_pipeline)
             .prompt_builder(prompt_builder)

@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
-use agent_contracts::{LoopEventSink, ToolEventSink};
-use agent_types::common::ids::AgentId;
-use agent_types::events::{LoopEndSummary, ToolLifecycleEvent, ToolResultEvent};
-use agent_types::interaction::InteractionRequest;
 use axum::response::sse;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use xiaoo_api::chat::{AgentId, ChatMessage, HookAction};
+use xiaoo_api::events::{
+    LoopEndSummary, LoopEventSink, ToolEventSink, ToolLifecycleEvent, ToolResultEvent,
+};
+use xiaoo_api::interaction::InteractionRequest;
 use xiaoo_shared::plan::{
     PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotItem,
     TodoSnapshotUpdate,
@@ -114,10 +115,10 @@ pub enum SseStreamEvent {
         prompt_tokens: u64,
         completion_tokens: u64,
         estimated_input_tokens: u64,
-        messages: Vec<llm_client::ChatMessage>,
+        messages: Vec<ChatMessage>,
         stop_reason: String,
         #[serde(default)]
-        actions: Vec<agent_types::hook::HookAction>,
+        actions: Vec<HookAction>,
     },
     Error {
         error: String,

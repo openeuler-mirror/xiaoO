@@ -10,12 +10,12 @@ use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, HostedSessionRuntimeConfig, LlmRuntimeConfig,
     SessionOpenRequest, SessionRuntimeDescriptor,
 };
-use agent_types::common::ids::AgentId;
-use agent_types::context::{FeatureFlags, TokenBudgetConfig};
-use tool::{load_tool_sources_with_services, ToolRuntimeServices};
+use xiaoo_api::chat::AgentId;
+use xiaoo_api::chat::{FeatureFlags, TokenBudgetConfig};
+use xiaoo_shared::gateway::tool_assembly::{discover_tool_names, ToolAssemblyInput};
 
 use super::runtime::GatewayRuntime;
-use xiaoo_core::spawn_prefetch;
+use xiaoo_api::runtime::spawn_prefetch;
 
 /// User-facing system message (with glyph) shown when the daemon reports the
 /// session has been taken over by another TUI process.
@@ -46,7 +46,7 @@ impl GatewayRuntime {
         &mut self,
         state: &mut AppState,
         prompt: String,
-        command_context: agent_types::chat::CommandContext,
+        command_context: xiaoo_api::chat::CommandContext,
     ) -> Result<(), String> {
         self.start_turn_internal(state, prompt, true, Some(command_context), 0)
             .await
@@ -101,7 +101,7 @@ impl GatewayRuntime {
         state: &mut AppState,
         prompt: String,
         append_user_message: bool,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<(), String> {
         // Refuse the submission locally when the heartbeat has already
@@ -161,7 +161,7 @@ impl GatewayRuntime {
             }
         }
 
-        let runtime_config = self.build_runtime_config(state)?;
+        let runtime_config = self.build_runtime_config(state).await?;
         let open_request = self.session_open_request(state)?;
         let turn_request =
             self.turn_request(state, prompt.clone(), command_context, chain_depth)?;
@@ -226,7 +226,10 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    fn build_runtime_config(&self, state: &AppState) -> Result<HostedSessionRuntimeConfig, String> {
+    async fn build_runtime_config(
+        &self,
+        state: &AppState,
+    ) -> Result<HostedSessionRuntimeConfig, String> {
         let agent_id = resolve_agent_id(None, None, &state.agent_config)?;
         let system_prompt = state
             .active_agent_role_config()
@@ -295,7 +298,7 @@ impl GatewayRuntime {
             } else {
                 Some(state.agent_config.llm.api_base.clone())
             },
-            visible_tool_names: resolve_visible_tool_names(state),
+            visible_tool_names: resolve_visible_tool_names(state).await,
             compression_pipeline: None,
             llm_provider: None,
             trace: state
@@ -350,7 +353,7 @@ impl GatewayRuntime {
         &self,
         state: &AppState,
         text: String,
-        command_context: Option<agent_types::chat::CommandContext>,
+        command_context: Option<xiaoo_api::chat::CommandContext>,
         chain_depth: usize,
     ) -> Result<AppTurnRequest, String> {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
@@ -430,20 +433,22 @@ pub(crate) fn tui_entry_context(
     entry
 }
 
-fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
+async fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
     let role = state.active_agent_role_config()?;
     if role.tools.is_empty() {
         return None;
     }
 
-    let all_tool_names: BTreeSet<String> = load_tool_sources_with_services(ToolRuntimeServices {
+    let input = ToolAssemblyInput {
         workspace_root: Some(state.workspace.clone()),
-        ..ToolRuntimeServices::default()
-    })
-    .iter()
-    .flat_map(|source| source.discover())
-    .map(|tool| tool.spec.name().0.clone())
-    .collect();
+        ..ToolAssemblyInput::default()
+    };
+    let all_tool_names: BTreeSet<String> = discover_tool_names(&input)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| name.0)
+        .collect();
     let mut visible_tool_names = all_tool_names.clone();
 
     for (configured_name, enabled) in &role.tools {
@@ -504,8 +509,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
-    #[test]
-    fn resolve_visible_tool_names_requires_exact_tool_names() {
+    #[tokio::test]
+    async fn resolve_visible_tool_names_requires_exact_tool_names() {
         let mut config = Config::default();
         config.agent.insert(
             "code-reviewer".to_string(),
@@ -525,7 +530,9 @@ mod tests {
                 .expect("app state should initialize");
         state.active_agent_role = Some("code-reviewer".to_string());
 
-        let visible = resolve_visible_tool_names(&state).expect("tool visibility should resolve");
+        let visible = resolve_visible_tool_names(&state)
+            .await
+            .expect("tool visibility should resolve");
         let visible: BTreeSet<_> = visible.into_iter().collect();
 
         assert!(visible.contains("file_edit"));

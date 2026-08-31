@@ -37,14 +37,14 @@ pub(crate) fn interaction_timeout_response(request: &InteractionRequest) -> Inte
     }
 }
 
-pub struct SubagentInteractionHandle {
+pub(crate) struct SubagentInteractionHandle {
     supervisor: Arc<SessionSupervisor>,
     agent_id: AgentId,
     parent_agent_id: AgentId,
 }
 
 impl SubagentInteractionHandle {
-    pub fn new(
+    pub(crate) fn new(
         supervisor: Arc<SessionSupervisor>,
         agent_id: AgentId,
         parent_agent_id: AgentId,

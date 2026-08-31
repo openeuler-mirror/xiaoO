@@ -1,7 +1,7 @@
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink, ToolEventSink};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use xiaoo_core::PendingUserMessageSource;
+use xiaoo_api::runtime::PendingUserMessageSource;
 
 #[derive(Clone, Default)]
 pub struct SessionRuntimeBindings {

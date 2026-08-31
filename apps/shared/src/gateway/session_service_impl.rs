@@ -35,7 +35,7 @@ use subagent::{
     SubagentControl, SubagentControlError,
 };
 use tokio::sync::Mutex;
-use xiaoo_core::NoopRuntimeView;
+use xiaoo_api::runtime::NoopRuntimeView;
 
 use super::memory_automation::{
     render_memory_context, CompletedTurnIngest, TurnMemoryAutomation, TurnMemoryContext,
@@ -68,7 +68,7 @@ fn resolve_runtime_exec_shell(requested: Option<String>, backend_default: Option
         .unwrap_or_else(|| RUNTIME_EXEC_FALLBACK_SHELL.to_string())
 }
 
-pub struct CoreBackedSessionService {
+pub(crate) struct CoreBackedSessionService {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     sessions_handler: Mutex<HashMap<String, SessionHandle>>,
@@ -104,7 +104,7 @@ pub struct CoreBackedSessionService {
 }
 
 impl CoreBackedSessionService {
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         hooker_registry: Arc<dyn HookerRegistry>,
@@ -128,24 +128,18 @@ impl CoreBackedSessionService {
         }
     }
 
-    /// Public accessor so the daemon-side GC reaper can inspect the lease
-    /// table. Returns a clone (Arc-interned, cheap).
-    pub fn lease_table(&self) -> SessionLeaseTable {
-        self.sessions_lease.clone()
-    }
-
     /// Toggle strict lease enforcement for anonymous callers. When `true`,
     /// `assert_lease_holder` returns
     /// [`SessionServiceError::LeaseRequired`] for any RPC whose body omits
     /// `client_id`. Idempotent; safe to call at any time (atomic store).
-    pub fn set_enforce_anonymous_lease(&self, enabled: bool) {
+    pub(crate) fn set_enforce_anonymous_lease(&self, enabled: bool) {
         self.enforce_anonymous_lease
             .store(enabled, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Read-side helper for `assert_lease_holder` and the bootstrap startup
     /// log. Pure for testability.
-    pub fn anonymous_lease_enforced(&self) -> bool {
+    pub(crate) fn anonymous_lease_enforced(&self) -> bool {
         self.enforce_anonymous_lease
             .load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -155,7 +149,7 @@ impl CoreBackedSessionService {
     /// handles (existing supervisors keep their creation-time value).
     /// `None` (the default) disables the outer cap; the supervisor then
     /// relies on the handle's own timeout or blocks until the user replies.
-    pub fn set_interaction_timeout(&self, timeout: Option<std::time::Duration>) {
+    pub(crate) fn set_interaction_timeout(&self, timeout: Option<std::time::Duration>) {
         let secs = timeout.map(|d| d.as_secs()).unwrap_or(0);
         self.interaction_timeout
             .store(secs, std::sync::atomic::Ordering::Release);
@@ -166,7 +160,7 @@ impl CoreBackedSessionService {
     /// sessions whose lease has been gone for longer than
     /// [`ORPHAN_SESSION_THRESHOLD_MS`](crate::gateway::ORPHAN_SESSION_THRESHOLD_MS)
     /// and whose last activity is older than the same threshold, reclaiming
-    /// leaked backends (e2b sandboxes, conch processes) when a TUI crashes
+    /// leaked backends (e2b sandboxes) when a TUI crashes
     /// and nobody comes back.
     ///
     /// The reaper must NOT close sessions whose in-memory handle is currently
@@ -176,7 +170,7 @@ impl CoreBackedSessionService {
     /// Returns a `JoinHandle` (currently only the daemon's `main.rs`) so
     /// callers can `.abort()` it on shutdown. Errors are logged and never
     /// propagated (best-effort).
-    pub fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn_orphan_reaper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         const ORPHAN_THRESHOLD_MS: u64 = crate::gateway::ORPHAN_SESSION_THRESHOLD_MS;
         const STALE_LEASE_MS: u64 = crate::gateway::STALE_LEASE_THRESHOLD_MS;
 
@@ -434,7 +428,7 @@ impl CoreBackedSessionService {
     /// `JoinError` here (rather than unwinding into `run_turn_inner` and
     /// tearing down the SSE connection); `JoinError` yields an empty action
     /// set so the turn result is still delivered.
-    pub async fn fire_session_state_hook_and_collect_actions(
+    pub(crate) async fn fire_session_state_hook_and_collect_actions(
         &self,
         session_id: String,
         sender_id: String,
@@ -769,14 +763,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
-            parent_checkpoint_id: parent_checkpoint_id.clone(),
             session: session.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
                 .map(|result| result.checkpoint.clone()),
-            created_at_ms,
-            metadata: request.metadata.clone(),
-            name: request.name.clone(),
         };
         self.runtime_checkpoints.save(checkpoint).await;
 
@@ -921,10 +911,6 @@ impl CoreBackedSessionService {
                 message: format!("failed to release runtime backend during pause: {error}"),
             })?;
 
-        let parent_checkpoint_id = self
-            .runtime_checkpoints
-            .latest_for_runtime(&request.runtime_id)
-            .await;
         let checkpoint_id = format!("rtcp_{}", uuid::Uuid::new_v4().simple());
         let created_at_ms = current_time_ms();
         let mut paused = session.clone();
@@ -936,14 +922,10 @@ impl CoreBackedSessionService {
         let checkpoint = RuntimeCheckpoint {
             checkpoint_id: checkpoint_id.clone(),
             runtime_id: request.runtime_id.clone(),
-            parent_checkpoint_id,
             session: paused.clone(),
             backend_checkpoint: backend_checkpoint
                 .as_ref()
                 .map(|result| result.checkpoint.clone()),
-            created_at_ms,
-            metadata: request.metadata.clone(),
-            name: request.name.clone(),
         };
         self.runtime_checkpoints.save(checkpoint).await;
         self.runtime_checkpoints
@@ -2345,7 +2327,7 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
-    use xiaoo_core::LoopStateSnapshot;
+    use xiaoo_api::runtime::LoopStateSnapshot;
 
     use agent_contracts::{Hooker, RuntimeView};
     use agent_types::hook::{HookInvokeError, HookInvokeOutput};

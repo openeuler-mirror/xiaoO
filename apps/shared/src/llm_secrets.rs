@@ -49,23 +49,6 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     save_encrypted_store(&secrets_path, &store, use_sdf)
 }
 
-pub fn save_token(config_path: &Path, token_name: &str, token: &str) -> Result<()> {
-    let secrets_path = llm_secrets_path(config_path);
-    if let Some(parent) = secrets_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create secrets directory {}", parent.display()))?;
-    }
-
-    let use_sdf = get_use_sdf_from_config(config_path);
-
-    let mut store = load_secrets_store(&secrets_path, use_sdf)?;
-    store
-        .tokens
-        .insert(token_name.to_string(), token.to_string());
-
-    save_encrypted_store(&secrets_path, &store, use_sdf)
-}
-
 pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     let config_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -204,41 +187,6 @@ fn decrypt_aes_gcm(encrypted: &[u8]) -> Result<Vec<u8>> {
     cipher
         .decrypt(nonce, ciphertext)
         .map_err(|_| anyhow::anyhow!("decryption failed"))
-}
-
-pub fn load_llm_secrets_to_memory(config_path: &Path) -> Result<()> {
-    let use_sdf = get_use_sdf_from_config(config_path);
-
-    let secrets_path = llm_secrets_path(config_path);
-
-    let bytes = fs::read(&secrets_path)
-        .with_context(|| format!("failed to read secrets file {}", secrets_path.display()))?;
-
-    if bytes.is_empty() {
-        let _ = fs::remove_file(&secrets_path);
-        return Ok(());
-    }
-
-    if bytes.len() < 2 {
-        let _ = fs::remove_file(&secrets_path);
-        return Ok(());
-    }
-
-    let decrypted = if use_sdf {
-        use vault::sdf::{decrypt_secret, init_sdf_provider};
-        if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
-            anyhow::bail!("SDF 初始化失败: {}", e);
-        }
-        decrypt_secret(&bytes).map_err(|e| anyhow::anyhow!("SDF 解密失败: {}", e))?
-    } else {
-        decrypt_aes_gcm(&bytes)?
-    };
-
-    let _store: SecretsStore =
-        serde_json::from_slice(&decrypted).with_context(|| "failed to parse decrypted secrets")?;
-
-    tracing::info!("successfully verified secrets decryption");
-    Ok(())
 }
 
 pub fn llm_secrets_path(config_path: &Path) -> PathBuf {

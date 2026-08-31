@@ -22,6 +22,8 @@ members = [
     "crates/operation_backend",
     "crates/lsp",
     "crates/mcp",
+    "crates/xiaoo-api",
+    "crates/protocol",
     # Cerberus - secure execution (optional, requires eBPF toolchain)
     # "crates/cerberus/cerberus-core",
     # "crates/cerberus/cerberus-cli",

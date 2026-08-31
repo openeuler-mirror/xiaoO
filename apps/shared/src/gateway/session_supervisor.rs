@@ -25,8 +25,8 @@ use subagent::{
 use tokio::sync::{oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::agent_loop::build_tool_result_message;
-use xiaoo_core::{LoopRunResult, LoopStateSnapshot, LoopSuspendReason, SuspendedToolCall};
+use xiaoo_api::runtime::build_tool_result_message;
+use xiaoo_api::runtime::{LoopStateSnapshot, LoopSuspendReason, RuntimeOutput, SuspendedToolCall};
 
 use super::session_worker::{SessionWorker, SessionWorkerInput};
 
@@ -76,7 +76,7 @@ struct LaneTerminal {
     memory_snapshot: MemorySnapshot,
 }
 
-pub struct SessionSupervisor {
+pub(crate) struct SessionSupervisor {
     session_store: Arc<dyn SessionStore>,
     runtime_resolver: Arc<dyn SessionRuntimeResolver>,
     backend_manager: Arc<BackendManager>,
@@ -102,7 +102,7 @@ pub struct SessionSupervisor {
 }
 
 impl SessionSupervisor {
-    pub fn new(
+    pub(crate) fn new(
         session_store: Arc<dyn SessionStore>,
         runtime_resolver: Arc<dyn SessionRuntimeResolver>,
         backend_manager: Arc<BackendManager>,
@@ -128,7 +128,7 @@ impl SessionSupervisor {
         self.session.lock().await.clone()
     }
 
-    pub async fn prepare_root_turn(
+    pub(crate) async fn prepare_root_turn(
         &self,
         request: &AppTurnRequest,
         resolved: &ResolvedSessionRuntime,
@@ -153,7 +153,7 @@ impl SessionSupervisor {
         self.session_store.save(snapshot).await;
     }
 
-    pub async fn force_close(&self) -> SessionRecord {
+    pub(crate) async fn force_close(&self) -> SessionRecord {
         let session_id;
         let snapshot = {
             let mut session = self.session.lock().await;
@@ -172,7 +172,7 @@ impl SessionSupervisor {
         snapshot
     }
 
-    pub async fn hibernate_idle(&self) -> SessionRecord {
+    pub(crate) async fn hibernate_idle(&self) -> SessionRecord {
         let mut session = self.session.lock().await;
         session.status = SessionLifecycleStatus::Paused;
         session.backend_instance = None;
@@ -185,7 +185,7 @@ impl SessionSupervisor {
         snapshot
     }
 
-    pub async fn request_interaction(
+    pub(crate) async fn request_interaction(
         self: &Arc<Self>,
         request_id: String,
         agent_id: AgentId,
@@ -310,7 +310,7 @@ impl SessionSupervisor {
         resolved.bindings.interaction_handle.clone()
     }
 
-    pub async fn deliver_interaction_response_from_user(
+    pub(crate) async fn deliver_interaction_response_from_user(
         self: &Arc<Self>,
         request_id: String,
         response: InteractionResponse,
@@ -415,7 +415,7 @@ impl SessionSupervisor {
         }
     }
 
-    pub async fn run_root_turn(
+    pub(crate) async fn run_root_turn(
         self: &Arc<Self>,
         request: AppTurnRequest,
         resolved_runtime: ResolvedSessionRuntime,
@@ -607,7 +607,7 @@ impl SessionSupervisor {
             .await?;
 
             match worker_result.loop_result {
-                LoopRunResult::Complete(outcome) => {
+                RuntimeOutput::Complete(outcome) => {
                     let terminal = terminal_from_outcome(
                         outcome,
                         worker_result.loop_state,
@@ -623,7 +623,7 @@ impl SessionSupervisor {
                     .await?;
                     return Ok(terminal);
                 }
-                LoopRunResult::Suspended(suspended_calls) => {
+                RuntimeOutput::Suspended(suspended_calls) => {
                     let mut resumed_loop_state =
                         loop_state
                             .clone()
@@ -806,7 +806,7 @@ impl SessionSupervisor {
         // leased one), but now that the binding is in place the call will
         // succeed and update the registry entry's session status. This closes
         // the race where another process evicts the freshly-bound sandbox
-        // before the turn re-reports Running. Only e2b/conch backends are
+        // before the turn re-reports Running. Only e2b backends are
         // tracked in the shared registry; local backends skip the registry
         // write (avoiding needless `IN_PROCESS_LOCK` + flock contention on
         // the local-backend hot path).

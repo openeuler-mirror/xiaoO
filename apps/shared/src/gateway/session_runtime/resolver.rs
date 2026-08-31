@@ -1,5 +1,6 @@
 use crate::backend::GatewayBackendConfig;
 use crate::gateway::session_record::SubagentRoleRecord;
+use crate::gateway::tool_assembly::BoundControlStore;
 use crate::gateway::{
     AppTurnRequest, GatewayEntryContext, GatewayEntryKind, LlmRuntimeConfig, SessionOpenRequest,
     SessionRecord,
@@ -78,7 +79,7 @@ pub struct SessionRuntimeBuildInput {
 }
 
 impl SessionRuntimeBuildInput {
-    pub fn from_turn_request(request: &AppTurnRequest) -> Self {
+    pub(crate) fn from_turn_request(request: &AppTurnRequest) -> Self {
         Self {
             session_id: request.session_id.clone(),
             conversation_id: request.conversation_id.clone(),
@@ -96,7 +97,7 @@ impl SessionRuntimeBuildInput {
         }
     }
 
-    pub fn from_open_request(request: &SessionOpenRequest) -> Self {
+    pub(crate) fn from_open_request(request: &SessionOpenRequest) -> Self {
         Self {
             session_id: request.session_id.clone(),
             conversation_id: request.conversation_id.clone(),
@@ -130,6 +131,13 @@ pub enum SessionRuntimeResolveError {
 #[async_trait]
 pub trait SessionRuntimeResolver: Send + Sync {
     fn bind_subagent_control(&self, _control: Arc<dyn SubagentControl>) {}
+
+    /// 暴露一个不透明的已绑定控制句柄存储，供 `AppBootstrap` 启动期注入
+    /// 绑定（与 [`SessionRuntimeResolver::bind_subagent_control`] 二选一：
+    /// 解析器自行管理绑定时返回 `None`，否则返回共享 store 让 bootstrap 写入）。
+    fn bound_control_store(&self) -> Option<&BoundControlStore> {
+        None
+    }
 
     async fn resolve(
         &self,

@@ -1,4 +1,3 @@
-use agent_types::ReasoningEffort;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,6 +5,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Paragraph},
     Frame,
 };
+use xiaoo_api::chat::ReasoningEffort;
 
 use crate::app::App;
 use crate::app_state::RuntimeStatusLight;

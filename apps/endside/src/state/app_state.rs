@@ -1,8 +1,8 @@
-use agent_types::ReasoningEffort;
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
@@ -275,6 +275,8 @@ pub struct RenderState {
     /// Index of the first visible agent tab in the header.
     /// Used for horizontal scrolling when there are many agent tabs.
     pub first_visible_agent_tab: usize,
+    /// Inner (content) area of the input box, used for mouse drag-select.
+    pub input_area: Option<Rect>,
     pub active_transcript_key: Option<String>,
     /// Cached terminal area for layout reuse across ticks.
     /// When `frame.area()` matches `cached_area`, layout splits are skipped.
@@ -320,7 +322,7 @@ pub struct AppState {
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
-    pub session_messages: Vec<llm_client::ChatMessage>,
+    pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     pub session_id: String,
     /// Per-process ephemeral UUID sent with every remote RPC; used by the
@@ -337,6 +339,9 @@ pub struct AppState {
     pub transcript_selection: Option<TranscriptSelection>,
     /// Set when text is copied to clipboard; drives the toast notification.
     pub copy_notice: Option<Instant>,
+    /// Set when a copy attempt failed (no local clipboard tool and the
+    /// terminal did not support OSC 52); drives an error toast.
+    pub copy_error_notice: Option<Instant>,
     pub external_commands: Vec<ExternalCommand>,
     pub diff_tracker: SessionDiffTracker,
 }
@@ -374,6 +379,7 @@ impl AppState {
             render_state: RenderState::default(),
             transcript_selection: None,
             copy_notice: None,
+            copy_error_notice: None,
             external_commands: load_external_commands(),
             diff_tracker: SessionDiffTracker::new(workspace),
         })
@@ -424,6 +430,7 @@ impl AppState {
             external_commands: load_external_commands(),
             transcript_selection: None,
             copy_notice: None,
+            copy_error_notice: None,
             diff_tracker: SessionDiffTracker::new(workspace),
         })
     }
@@ -452,6 +459,7 @@ impl AppState {
         self.render_state = RenderState::default();
         self.transcript_selection = None;
         self.copy_notice = None;
+        self.copy_error_notice = None;
         self.external_commands = load_external_commands();
         self.diff_tracker.clear();
     }
@@ -465,6 +473,18 @@ impl AppState {
     pub fn copy_notice_active(&self) -> bool {
         self.copy_notice
             .map(|t| t.elapsed() < Duration::from_millis(1500))
+            .unwrap_or(false)
+    }
+
+    /// Mark that a copy attempt failed; shows the error toast for 2 s.
+    pub fn set_copy_error_notice(&mut self) {
+        self.copy_error_notice = Some(Instant::now());
+    }
+
+    /// Returns `true` while the copy-error toast should still be visible.
+    pub fn copy_error_notice_active(&self) -> bool {
+        self.copy_error_notice
+            .map(|t| t.elapsed() < Duration::from_millis(2000))
             .unwrap_or(false)
     }
 
@@ -1096,10 +1116,10 @@ mod tests {
     use crate::config::{AgentRoleConfig, Config};
     use crate::input::Input;
     use crate::interaction_prompt::{PromptChoice, PromptRequest};
-    use agent_types::ReasoningEffort;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+    use xiaoo_api::chat::ReasoningEffort;
 
     #[test]
     fn runtime_status_light_is_idle_by_default() {

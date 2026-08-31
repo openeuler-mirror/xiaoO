@@ -1,0 +1,22 @@
+[package]
+name = "xiaoo-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
+
+xiaoo-core = { path = "../core" }
+agent-types = { path = "../agent-types" }
+agent-contracts = { path = "../agent-contracts" }
+llm-client = { path = "../llm-client" }
+compact = { path = "../compact" }
+tool = { path = "../tool" }
+skill = { path = "../skill" }
+prompt = { path = "../prompt" }
+
+[dev-dependencies]
+async-trait.workspace = true

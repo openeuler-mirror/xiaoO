@@ -16,26 +16,41 @@ mod backend_registry;
 mod base;
 mod dirty_write;
 mod e2b;
+mod labels;
 mod sandbox_counter;
 
 pub use backend_manager::BackendManager;
 use backend_manager::BackendManagerState;
 use backend_registry::{BackendRegistry, BackendRegistryEntry, BackendRegistryError};
-pub use base::{
-    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRef, BackendCheckpointRequest,
-    BackendCheckpointResult, BackendCheckpointSnapshotDeleteRequest, BackendCreateRequest,
-    BackendEnsureSessionRequest, BackendError, BackendForkResult, BackendInfo, BackendLease,
-    BackendListFilter, BackendTreeNode, GatewayBackendConfig,
+pub(crate) use base::{
+    BackendCheckoutRequest, BackendCheckoutResult, BackendCheckpointRequest,
+    BackendCheckpointResult, BackendEnsureSessionRequest, BackendLease,
 };
-use base::{
-    BackendCheckpointSnapshotDeleteResult, BackendConnectRequest, BackendForkRequest,
-    BackendLineageInfo, BackendManagerLimits, STALE_OWNER_THRESHOLD_MS,
+pub use base::{
+    BackendCheckpointRef, BackendInfo, BackendLineageInfo, BackendListFilter, GatewayBackendConfig,
+};
+// Backend checkpoint snapshot request/result types and the BackendError enum
+// are internal to this crate: the app-facing surface is the `Runtime*`
+// checkpoint types (via SessionControlPlane) and OperationBackendBuildError,
+// never the `Backend*` counterparts. `BackendCheckpointRef` stays pub because
+// it surfaces in the `SessionStore` trait method signature and the
+// `SessionRecord.paused_backend_checkpoint` field. The rest are demoted to
+// pub(crate).
+pub use base::BackendManagerLimits;
+use base::STALE_OWNER_THRESHOLD_MS;
+pub(crate) use base::{
+    BackendCheckpointSnapshotDeleteRequest, BackendCheckpointSnapshotDeleteResult, BackendError,
 };
 use dirty_write::{BackendDirtyTracker, DirtyTrackedOperationBackend};
 pub use e2b::{
     build_e2b_bootstrap_archive, canonicalize_bootstrap_dir, E2bBootstrapArchive,
     E2bBootstrapBuildError,
 };
+pub use labels::{backend_endpoint_str, backend_state_label};
+
+// 不透明 RAII 句柄再导出：应用（endside / serverside）启动时安装进程组清理
+// 守卫，无需命名底层 process_group 内部类型，故只导出该句柄。
+pub use operation_backend::process_group::ProcessGroupCleanupGuard;
 use sandbox_counter::{
     load_global_max_sandbox_cnt, SandboxCounter, SandboxCounterError, SandboxCounterKey,
     MAX_ACTIVE_SANDBOXES_PER_KEY,
@@ -121,22 +136,6 @@ fn default_local_provider_options() -> Value {
         Value::String(std::env::temp_dir().to_string_lossy().to_string()),
     );
     Value::Object(options)
-}
-
-fn resolve_backend_config(
-    provider: Option<String>,
-    options: Option<Value>,
-) -> Result<GatewayBackendConfig, BackendError> {
-    let kind = provider.unwrap_or_else(|| "local".to_string());
-    let options = options.unwrap_or_else(|| {
-        if kind == "local" {
-            default_local_provider_options()
-        } else {
-            Value::Object(Map::new())
-        }
-    });
-    resolve_session_backend_config(Some(GatewayBackendConfig::new(kind, options)))
-        .map_err(BackendError::from_build_error)
 }
 
 fn requested_backend_id(backend_id: Option<String>) -> Result<BackendId, BackendError> {
@@ -270,33 +269,6 @@ fn detach_from_parent(
             "parent backend already removed during detach; child entry is being deleted"
         );
     }
-}
-
-fn backend_tree_node(
-    state: &BackendManagerState,
-    backend_id: &BackendId,
-) -> Option<BackendTreeNode> {
-    let entry = state.backends.get(backend_id)?;
-    let mut child_ids = entry
-        .lineage
-        .children_backend_ids
-        .keys()
-        .filter_map(|id| {
-            state
-                .backends
-                .contains_key(&BackendId(id.clone()))
-                .then(|| id.clone())
-        })
-        .collect::<Vec<_>>();
-    child_ids.sort();
-    let children = child_ids
-        .into_iter()
-        .filter_map(|id| backend_tree_node(state, &BackendId(id)))
-        .collect();
-    Some(BackendTreeNode {
-        backend: entry.info(),
-        children,
-    })
 }
 
 struct BuildBackendInput {
@@ -495,196 +467,8 @@ mod tests {
         json!({"temp_root": workspace.path().to_string_lossy().to_string()})
     }
 
-    #[tokio::test]
-    async fn e2b_limit_rejects_before_provider_build() {
-        let workspace = TempDir::new().expect("workspace");
-        // Use an explicit limit and an isolated storage dir so the test does
-        // not depend on, nor mutate, the shared `~/.xiaoo/` and
-        // `~/.config/xiaoo/` files used by a running daemon.
-        let storage = TempDir::new().expect("storage");
-        let manager = BackendManager::new_with_storage_dir(
-            BackendManagerLimits {
-                max_active_sandboxes_per_key: Some(MAX_ACTIVE_SANDBOXES_PER_KEY),
-                ..Default::default()
-            },
-            storage.path().to_path_buf(),
-        );
-
-        // Compute the sandbox key the same way `create_backend` does so the
-        // pre-filled counter matches what the manager will check, regardless
-        // of whether E2B_API_KEY is set in the test environment.
-        let config = resolve_backend_config(Some("e2b".to_string()), None).expect("config");
-        let key = BackendManager::sandbox_key_from_config(&config);
-
-        // The sandbox counter is persisted in a shared file, so drain any
-        // leftover count for this key from prior (possibly crashed) runs
-        // before the test begins.
-        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
-            manager.sandbox_counter().release(&key).await.ok();
-        }
-
-        // Pre-fill the sandbox pool to the hard limit via the counter directly,
-        // without building real e2b sandboxes (which need provider
-        // credentials). This isolates the limit-check path from the provider
-        // build path.
-        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
-            manager
-                .sandbox_counter()
-                .check_and_reserve(&key)
-                .await
-                .expect("reserve");
-            manager
-                .sandbox_counter()
-                .confirm_creation(&key)
-                .await
-                .expect("confirm");
-        }
-
-        let result = manager
-            .create_backend(BackendCreateRequest {
-                workspace_root: workspace.path().to_path_buf(),
-                backend_id: Some("e2b-blocked".to_string()),
-                provider: Some("e2b".to_string()),
-                session_id: None,
-                timeout: None,
-                metadata: Value::Null,
-                resource_limits: BackendResourceLimits::default(),
-                options: None,
-            })
-            .await;
-
-        // The pool is full, so create_backend must short-circuit with
-        // NeedsEviction before attempting to build the e2b sandbox.
-        assert!(matches!(result, Err(BackendError::NeedsEviction)));
-
-        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
-            manager
-                .sandbox_counter()
-                .release(&key)
-                .await
-                .expect("release");
-        }
-    }
-
-    #[tokio::test]
-    async fn reconcile_counts_includes_stale_owner_entries() {
-        // Regression test for the sandbox-limit bypass: when a previous
-        // daemon process leaves stale-owner entries in the shared registry,
-        // `reconcile_counts_with_registry` must STILL count them so that a
-        // subsequent `reclaim_orphaned_backend` -> `release` decrement
-        // balances correctly. If stale entries were excluded from the
-        // reconciled count, the orphan-reclaim path would decrement a slot
-        // that belongs to a live sandbox, letting
-        // `MAX_ACTIVE_SANDBOXES_PER_KEY + N_stale` sandboxes coexist before
-        // the limit truly bites.
-        let storage = TempDir::new().expect("storage");
-        let manager = BackendManager::new_with_storage_dir(
-            BackendManagerLimits::default(),
-            storage.path().to_path_buf(),
-        );
-        let key = SandboxCounterKey::new("e2b", "e2b_reconcile_stale_unique");
-
-        // Clean slate for this test key in both shared stores.
-        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
-            manager.sandbox_counter().release(&key).await.ok();
-        }
-        manager
-            .registry()
-            .unregister("backend-reconcile-stale-unique")
-            .await
-            .ok();
-
-        // Seed a stale-owner entry directly: owner heartbeat is far in the
-        // past so `is_owner_stale` returns true.
-        let mut entry = BackendRegistryEntry::new(
-            "backend-reconcile-stale-unique".to_string(),
-            key.clone(),
-            vec!["session-stale".to_string()],
-            "dead_process".to_string(),
-            "e2b-sandbox-stale".to_string(),
-            None,
-        );
-        entry.owner_heartbeat_ms =
-            current_time_ms().saturating_sub(STALE_OWNER_THRESHOLD_MS + 60_000);
-
-        manager
-            .registry()
-            .register(entry)
-            .await
-            .expect("should register stale entry");
-
-        // Reconcile: the stale entry must be counted.
-        manager
-            .reconcile_counts_with_registry()
-            .await
-            .expect("reconcile");
-
-        let count = manager
-            .sandbox_counter()
-            .get_count(&key)
-            .await
-            .expect("count");
-        assert_eq!(
-            count, 1,
-            "stale-owner registry entries must be counted so the later \
-             orphan-reclaim `release` decrement balances"
-        );
-
-        // Simulate the orphan-reclaim path: release + unregister. The count
-        // must drop back to 0 (not go negative, not stay at 1).
-        manager.sandbox_counter().release(&key).await.ok();
-        manager
-            .registry()
-            .unregister("backend-reconcile-stale-unique")
-            .await
-            .ok();
-
-        let count = manager
-            .sandbox_counter()
-            .get_count(&key)
-            .await
-            .expect("count after reclaim");
-        assert_eq!(count, 0);
-    }
-
     fn test_session_store() -> Arc<dyn SessionStore> {
         Arc::new(InMemorySessionStore::default())
-    }
-
-    #[tokio::test]
-    async fn local_backends_do_not_consume_sandbox_counter() {
-        let workspace = TempDir::new().expect("workspace");
-        let storage = TempDir::new().expect("storage");
-        let manager = BackendManager::new_with_storage_dir(
-            BackendManagerLimits::default(),
-            storage.path().to_path_buf(),
-        );
-
-        for name in ["local-a", "local-b", "local-c"] {
-            manager
-                .ensure_session_backend(
-                    local_request(
-                        name,
-                        workspace.path().to_path_buf(),
-                        temp_options(&workspace),
-                    ),
-                    test_session_store(),
-                )
-                .await
-                .expect("local backend");
-        }
-
-        // local backends are not subject to the e2b/conch sandbox pool, so the
-        // counter for any e2b key must remain untouched. Use a key no other
-        // test touches to avoid cross-test interference from the shared
-        // persisted counter file.
-        let key = SandboxCounterKey::new("e2b", "e2b_local_test_unique");
-        let count = manager
-            .sandbox_counter()
-            .get_total_count(&key)
-            .await
-            .expect("count");
-        assert_eq!(count, 0);
     }
 
     #[test]
@@ -774,160 +558,6 @@ mod tests {
             other_config,
             Err(OperationBackendBuildError::InvalidConfig { .. })
                 | Err(OperationBackendBuildError::BuildFailed { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn independent_backend_create_generates_backend_id_and_supports_get_list_delete() {
-        let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
-        let created = manager
-            .create_backend(BackendCreateRequest {
-                workspace_root: workspace.path().to_path_buf(),
-                backend_id: None,
-                provider: None,
-                session_id: None,
-                timeout: Some(60),
-                metadata: json!({"user": "abc", "app": "prod"}),
-                resource_limits: BackendResourceLimits::default(),
-                options: Some(temp_options(&workspace)),
-            })
-            .await
-            .expect("create managed backend");
-
-        assert!(created.backend_id.starts_with("bkd_"));
-        assert_eq!(created.session_id, None);
-        assert!(created.expires_at_ms.is_some());
-
-        let fetched = manager
-            .get_backend(&created.backend_id)
-            .await
-            .expect("get managed backend");
-        assert_eq!(fetched.backend_id, created.backend_id);
-
-        let listed = manager
-            .list_backends(BackendListFilter {
-                metadata: BTreeMap::from([("user".to_string(), "abc".to_string())]),
-            })
-            .await;
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].backend_id, created.backend_id);
-
-        manager
-            .delete_backend(&created.backend_id)
-            .await
-            .expect("delete managed backend");
-        assert!(matches!(
-            manager.get_backend(&created.backend_id).await,
-            Err(BackendError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn backend_create_allows_session_id_and_independent_backend_id() {
-        let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
-        let created = manager
-            .create_backend(BackendCreateRequest {
-                workspace_root: workspace.path().to_path_buf(),
-                backend_id: Some("backend-a".to_string()),
-                provider: None,
-                session_id: Some("session-a".to_string()),
-                timeout: None,
-                metadata: Value::Null,
-                resource_limits: BackendResourceLimits::default(),
-                options: Some(temp_options(&workspace)),
-            })
-            .await
-            .expect("create managed backend");
-
-        assert_eq!(created.backend_id, "backend-a");
-        assert_eq!(created.session_id.as_deref(), Some("session-a"));
-        assert_eq!(created.session_ids, vec!["session-a".to_string()]);
-
-        let lease = manager
-            .ensure_session_backend(
-                local_request(
-                    "session-a",
-                    workspace.path().to_path_buf(),
-                    temp_options(&workspace),
-                ),
-                test_session_store(),
-            )
-            .await
-            .expect("session lease");
-        assert_eq!(lease.instance().backend_id.0, "backend-a");
-    }
-
-    #[tokio::test]
-    async fn connect_backend_explicitly_attaches_session_to_existing_backend() {
-        let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
-        let root = workspace.path().to_path_buf();
-        let first = manager
-            .ensure_session_backend(
-                local_request("s1", root.clone(), temp_options(&workspace)),
-                test_session_store(),
-            )
-            .await
-            .expect("first lease");
-        let backend_id = first.instance().backend_id.0;
-
-        let connected = manager
-            .connect_backend(
-                &backend_id,
-                BackendConnectRequest {
-                    timeout: None,
-                    session_id: Some("s2".to_string()),
-                },
-            )
-            .await
-            .expect("connect managed backend");
-        assert_eq!(
-            connected.session_ids,
-            vec!["s1".to_string(), "s2".to_string()]
-        );
-
-        let second = manager
-            .ensure_session_backend(
-                local_request("s2", root, temp_options(&workspace)),
-                test_session_store(),
-            )
-            .await
-            .expect("second lease");
-        assert_eq!(first.instance(), second.instance());
-        assert!(Arc::ptr_eq(&first.backend(), &second.backend()));
-    }
-
-    #[tokio::test]
-    async fn fork_backend_rejects_non_e2b_parent() {
-        let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
-        let parent = manager
-            .ensure_session_backend(
-                local_request(
-                    "s1",
-                    workspace.path().to_path_buf(),
-                    temp_options(&workspace),
-                ),
-                test_session_store(),
-            )
-            .await
-            .expect("local backend");
-
-        let forked = manager
-            .fork_backend(BackendForkRequest {
-                parent_backend_id: Some(parent.instance().backend_id.0),
-                parent_session_id: Some("s1".to_string()),
-                backend_id: Some("child".to_string()),
-                session_id: Some("s2".to_string()),
-                ..Default::default()
-            })
-            .await;
-
-        assert!(matches!(
-            forked,
-            Err(BackendError::UnsupportedBackend { kind }) if kind == "local:checkout"
         ));
     }
 
@@ -1109,59 +739,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_backend_trees_uses_recorded_lineage() {
-        let workspace = TempDir::new().expect("workspace");
-        let manager = BackendManager::new();
-        let root = workspace.path().to_path_buf();
-        let parent = manager
-            .ensure_session_backend(
-                local_request("parent", root.clone(), temp_options(&workspace)),
-                test_session_store(),
-            )
-            .await
-            .expect("parent backend")
-            .instance()
-            .backend_id;
-        let child = manager
-            .ensure_session_backend(
-                local_request("child", root, temp_options(&workspace)),
-                test_session_store(),
-            )
-            .await
-            .expect("child backend")
-            .instance()
-            .backend_id;
-
-        {
-            let mut state = manager.state.lock().await;
-            state
-                .backends
-                .get_mut(&parent)
-                .expect("parent entry")
-                .lineage
-                .children_backend_ids
-                .insert(child.0.clone(), ());
-            let child_entry = state.backends.get_mut(&child).expect("child entry");
-            child_entry.lineage.parent_backend_id = Some(parent.clone());
-            child_entry.lineage.forked_from_snapshot_id = Some("snap:default".to_string());
-        }
-
-        let forest = manager.list_backend_trees().await;
-        assert_eq!(forest.len(), 1);
-        assert_eq!(forest[0].backend.backend_id, parent.0);
-        assert_eq!(forest[0].children.len(), 1);
-        assert_eq!(forest[0].children[0].backend.backend_id, child.0);
-        assert_eq!(
-            forest[0].children[0]
-                .backend
-                .lineage
-                .forked_from_snapshot_id
-                .as_deref(),
-            Some("snap:default")
-        );
-    }
-
-    #[tokio::test]
     async fn release_session_deletes_local_backend_cache() {
         let workspace = TempDir::new().expect("workspace");
         let manager = BackendManager::new();
@@ -1232,5 +809,193 @@ mod tests {
         assert_eq!(outcome.backend_id, instance.backend_id);
         assert_eq!(outcome.instance_id, Some(instance.instance_id));
         assert_eq!(outcome.state, BackendLifecycleState::Deleted);
+    }
+
+    #[tokio::test]
+    async fn e2b_limit_rejects_before_provider_build() {
+        let workspace = TempDir::new().expect("workspace");
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits {
+                max_active_sandboxes_per_key: Some(MAX_ACTIVE_SANDBOXES_PER_KEY),
+                ..Default::default()
+            },
+            storage.path().to_path_buf(),
+        );
+
+        // Compute the sandbox key the same way `ensure_session_backend`
+        // does, so the pre-filled counter matches what the manager will
+        // check, regardless of whether E2B_API_KEY is set in the test env.
+        let config = GatewayBackendConfig::new("e2b", Value::Object(Map::new()));
+        let key = BackendManager::sandbox_key_from_config(&config);
+
+        // The sandbox counter is persisted in a shared file, so drain any
+        // leftover count for this key from prior (possibly crashed) runs.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager.sandbox_counter().release(&key).await.ok();
+        }
+
+        // Pre-fill the sandbox pool to the hard limit via the counter
+        // directly, without building real e2b sandboxes (which need
+        // provider credentials). This isolates the limit-check path from
+        // the provider build path.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager
+                .sandbox_counter()
+                .check_and_reserve(&key)
+                .await
+                .expect("reserve");
+            manager
+                .sandbox_counter()
+                .confirm_creation(&key)
+                .await
+                .expect("confirm");
+        }
+
+        // A new session whose e2b config would need a fresh sandbox must
+        // short-circuit with ResourceLimitExceeded (mapped from
+        // BackendError::NeedsEviction) before attempting to build the
+        // e2b sandbox.
+        let result = manager
+            .ensure_session_backend(
+                BackendEnsureSessionRequest {
+                    config: Some(config),
+                    workspace_root: workspace.path().to_path_buf(),
+                    session_id: "e2b-blocked".to_string(),
+                    e2b_bootstrap: None,
+                    initial_session_status: None,
+                },
+                test_session_store(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(OperationBackendBuildError::ResourceLimitExceeded { .. })
+        ));
+
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager
+                .sandbox_counter()
+                .release(&key)
+                .await
+                .expect("release");
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_counts_includes_stale_owner_entries() {
+        // Regression test for the sandbox-limit bypass: when a previous
+        // daemon process leaves stale-owner entries in the shared registry,
+        // `reconcile_counts_with_registry` must STILL count them so that a
+        // subsequent `reclaim_orphaned_backend` -> `release` decrement
+        // balances correctly. If stale entries were excluded from the
+        // reconciled count, the orphan-reclaim path would decrement a slot
+        // that belongs to a live sandbox, letting
+        // `MAX_ACTIVE_SANDBOXES_PER_KEY + N_stale` sandboxes coexist before
+        // the limit truly bites.
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits::default(),
+            storage.path().to_path_buf(),
+        );
+        let key = SandboxCounterKey::new("e2b", "e2b_reconcile_stale_unique");
+
+        // Clean slate for this test key in both shared stores.
+        for _ in 0..MAX_ACTIVE_SANDBOXES_PER_KEY {
+            manager.sandbox_counter().release(&key).await.ok();
+        }
+        manager
+            .registry()
+            .unregister("backend-reconcile-stale-unique")
+            .await
+            .ok();
+
+        // Seed a stale-owner entry directly: owner heartbeat is far in the
+        // past so `is_owner_stale` returns true.
+        let mut entry = BackendRegistryEntry::new(
+            "backend-reconcile-stale-unique".to_string(),
+            key.clone(),
+            vec!["session-stale".to_string()],
+            "dead_process".to_string(),
+            "e2b-sandbox-stale".to_string(),
+            None,
+        );
+        entry.owner_heartbeat_ms =
+            current_time_ms().saturating_sub(STALE_OWNER_THRESHOLD_MS + 60_000);
+
+        manager
+            .registry()
+            .register(entry)
+            .await
+            .expect("should register stale entry");
+
+        // Reconcile: the stale entry must be counted.
+        manager
+            .reconcile_counts_with_registry()
+            .await
+            .expect("reconcile");
+
+        let count = manager
+            .sandbox_counter()
+            .get_count(&key)
+            .await
+            .expect("count");
+        assert_eq!(
+            count, 1,
+            "stale-owner registry entries must be counted so the later \
+             orphan-reclaim `release` decrement balances"
+        );
+
+        // Simulate the orphan-reclaim path: release + unregister. The count
+        // must drop back to 0 (not go negative, not stay at 1).
+        manager.sandbox_counter().release(&key).await.ok();
+        manager
+            .registry()
+            .unregister("backend-reconcile-stale-unique")
+            .await
+            .ok();
+
+        let count = manager
+            .sandbox_counter()
+            .get_count(&key)
+            .await
+            .expect("count after reclaim");
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn local_backends_do_not_consume_sandbox_counter() {
+        let workspace = TempDir::new().expect("workspace");
+        let storage = TempDir::new().expect("storage");
+        let manager = BackendManager::new_with_storage_dir(
+            BackendManagerLimits::default(),
+            storage.path().to_path_buf(),
+        );
+
+        for name in ["local-a", "local-b", "local-c"] {
+            manager
+                .ensure_session_backend(
+                    local_request(
+                        name,
+                        workspace.path().to_path_buf(),
+                        temp_options(&workspace),
+                    ),
+                    test_session_store(),
+                )
+                .await
+                .expect("local backend");
+        }
+
+        // local backends are not subject to the e2b sandbox pool, so the
+        // counter for any e2b key must remain untouched. Use a key no other
+        // test touches to avoid cross-test interference from the shared
+        // persisted counter file.
+        let key = SandboxCounterKey::new("e2b", "e2b_local_test_unique");
+        let count = manager
+            .sandbox_counter()
+            .get_total_count(&key)
+            .await
+            .expect("count");
+        assert_eq!(count, 0);
     }
 }

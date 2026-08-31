@@ -3106,6 +3106,202 @@ mod tests {
         (a_us, b_us.saturating_sub(a_us), c_us)
     }
 
+    /// Deterministic equivalence check between an incremental rebuild (prev
+    /// cache + partial dirty renders) and a full rebuild of the same
+    /// messages: every flat index, background, and per-block `lines` /
+    /// `visual_lines` / offset table must be identical — and both caches
+    /// must satisfy the flat-index invariants (`assert_cache_invariants`).
+    ///
+    /// This is the unit-testable correctness property of the incremental
+    /// path. It replaces wall-clock assertions: µs-scale `Instant`
+    /// measurements are inherently unreliable under parallel test load (a
+    /// single preemption in one measurement window but not the other can
+    /// invert any `incr < full` comparison), so timing is printed for humans
+    /// and never asserted.
+    fn assert_incremental_equivalent_to_full(
+        all_dirty: &[Option<CachedMessageRender>],
+        partial: &[Option<CachedMessageRender>],
+        label: &str,
+    ) {
+        let full_cache = build_transcript_cache(None, all_dirty.to_vec());
+        let prev_cache = build_transcript_cache(None, all_dirty.to_vec());
+        let incr_cache = build_transcript_cache(Some(prev_cache), partial.to_vec());
+        assert_caches_equivalent(&incr_cache, &full_cache, label);
+        assert_cache_invariants(&incr_cache, label);
+        assert_cache_invariants(&full_cache, label);
+    }
+
+    /// Flat-index bookkeeping invariants of a `TranscriptRenderCache`:
+    ///
+    ///  - blocks are contiguous: `block[i+1].start_visual_row` /
+    ///    `logical_line_start` continue exactly where `block[i]` ended, and
+    ///    `total_lines` equals the sum of all `visual_lines`;
+    ///  - the flat logical indices (`logical_line_visual_starts`,
+    ///    `line_texts`, `line_is_header`) have one entry per logical line,
+    ///    and each global start equals `block.start_visual_row +
+    ///    block.logical_to_visual_offset[j]`;
+    ///  - per block, `logical_to_visual_offset` has one entry per logical
+    ///    line, starts at 0, and is non-decreasing;
+    ///  - `visual_line_backgrounds` has one entry per visual line;
+    ///  - `line_texts[i]` is exactly the concatenated span text of logical
+    ///    line `i` (the mouse/selection copy source).
+    ///
+    /// These are the fields the incremental path rebuilds by walking moved
+    /// blocks, so a bookkeeping bug (wrong truncate/extend, shifted offsets,
+    /// stale text) breaks them even when a visual comparison would pass.
+    fn assert_cache_invariants(cache: &TranscriptRenderCache, label: &str) {
+        let mut expect_visual_row = 0usize;
+        let mut expect_logical_row = 0usize;
+        for (i, block) in cache.message_blocks.iter().enumerate() {
+            assert_eq!(
+                block.start_visual_row, expect_visual_row,
+                "{label}: block {i} start_visual_row must continue contiguously"
+            );
+            assert_eq!(
+                block.logical_line_start, expect_logical_row,
+                "{label}: block {i} logical_line_start must continue contiguously"
+            );
+            assert_eq!(
+                block.logical_to_visual_offset.len(),
+                block.lines.len(),
+                "{label}: block {i} l2v length must match lines length"
+            );
+            if !block.lines.is_empty() {
+                assert_eq!(
+                    block.logical_to_visual_offset[0], 0,
+                    "{label}: block {i} first logical line starts at visual row 0"
+                );
+            }
+            for j in 1..block.logical_to_visual_offset.len() {
+                assert!(
+                    block.logical_to_visual_offset[j] >= block.logical_to_visual_offset[j - 1],
+                    "{label}: block {i} l2v must be non-decreasing at line {j}"
+                );
+            }
+            for (j, &local_visual_start) in block.logical_to_visual_offset.iter().enumerate() {
+                let global_logical = block.logical_line_start + j;
+                assert_eq!(
+                    cache.logical_line_visual_starts.get(global_logical),
+                    Some(&(block.start_visual_row + local_visual_start)),
+                    "{label}: block {i} logical line {j} global visual start"
+                );
+            }
+            expect_visual_row += block.visual_lines.len();
+            expect_logical_row += block.lines.len();
+        }
+        assert_eq!(
+            cache.total_lines, expect_visual_row,
+            "{label}: total_lines must equal the sum of block visual_lines"
+        );
+        assert_eq!(
+            cache.logical_line_visual_starts.len(),
+            expect_logical_row,
+            "{label}: logical_line_visual_starts must have one entry per logical line"
+        );
+        assert_eq!(
+            cache.line_texts.len(),
+            expect_logical_row,
+            "{label}: line_texts must have one entry per logical line"
+        );
+        assert_eq!(
+            cache.line_is_header.len(),
+            expect_logical_row,
+            "{label}: line_is_header must have one entry per logical line"
+        );
+        assert_eq!(
+            cache.visual_line_backgrounds.len(),
+            cache.total_lines,
+            "{label}: visual_line_backgrounds must have one entry per visual line"
+        );
+        for i in 1..cache.logical_line_visual_starts.len() {
+            assert!(
+                cache.logical_line_visual_starts[i] >= cache.logical_line_visual_starts[i - 1],
+                "{label}: logical_line_visual_starts must be non-decreasing at {i}"
+            );
+        }
+        for (i, text) in cache.line_texts.iter().enumerate() {
+            let Some(line) = cache.logical_line(i) else {
+                panic!("{label}: logical line {i} missing from blocks");
+            };
+            let joined: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(
+                &joined, text,
+                "{label}: line_texts[{i}] must match the block's logical line"
+            );
+        }
+    }
+
+    /// Field-wise equality of two `TranscriptRenderCache`s (the struct is
+    /// `Clone` but not `PartialEq`). Compares the flat indices plus every
+    /// block's content — a moved block must carry over byte-identical data.
+    fn assert_caches_equivalent(
+        actual: &TranscriptRenderCache,
+        expected: &TranscriptRenderCache,
+        label: &str,
+    ) {
+        assert_eq!(
+            actual.total_lines, expected.total_lines,
+            "{label}: total_lines"
+        );
+        assert_eq!(
+            actual.logical_line_visual_starts, expected.logical_line_visual_starts,
+            "{label}: logical_line_visual_starts"
+        );
+        assert_eq!(actual.line_texts, expected.line_texts, "{label}: line_texts");
+        assert_eq!(
+            actual.line_is_header, expected.line_is_header,
+            "{label}: line_is_header"
+        );
+        assert_eq!(
+            actual.visual_line_backgrounds, expected.visual_line_backgrounds,
+            "{label}: visual_line_backgrounds"
+        );
+        assert_eq!(
+            actual.message_blocks.len(),
+            expected.message_blocks.len(),
+            "{label}: message_blocks.len()"
+        );
+        for (i, (a, e)) in actual
+            .message_blocks
+            .iter()
+            .zip(&expected.message_blocks)
+            .enumerate()
+        {
+            assert_eq!(a.message_index, e.message_index, "{label}: block {i} message_index");
+            assert_eq!(
+                a.start_visual_row, e.start_visual_row,
+                "{label}: block {i} start_visual_row"
+            );
+            assert_eq!(
+                a.logical_line_start, e.logical_line_start,
+                "{label}: block {i} logical_line_start"
+            );
+            assert_eq!(
+                a.logical_to_visual_offset, e.logical_to_visual_offset,
+                "{label}: block {i} logical_to_visual_offset"
+            );
+            assert_eq!(
+                a.tool_toggle_row_offset, e.tool_toggle_row_offset,
+                "{label}: block {i} tool_toggle_row_offset"
+            );
+            assert_eq!(
+                a.subagent_open_target
+                    .as_ref()
+                    .map(|t| (&t.agent_id, t.row_offset)),
+                e.subagent_open_target
+                    .as_ref()
+                    .map(|t| (&t.agent_id, t.row_offset)),
+                "{label}: block {i} subagent_open_target"
+            );
+            assert_eq!(a.lines, e.lines, "{label}: block {i} lines");
+            assert_eq!(a.visual_lines, e.visual_lines, "{label}: block {i} visual_lines");
+        }
+    }
+
     /// Short content fixture: each logical line fits in one visual line at
     /// the bench widths, so wrapping is a no-op. Isolates the per-message /
     /// per-logical-line overhead from the wrap cost.
@@ -3130,7 +3326,8 @@ mod tests {
 
     /// Microbenchmark for incremental `build_transcript_cache`.
     ///
-    /// Compares three paths:
+    /// Compares three paths and prints the timings (informational only — see
+    /// the note on wall-clock assertions below):
     ///  - A) Full rebuild, no prev (`None` for every message) — the
     ///    worst-case cost when the cache is cold (first tick / post-switch).
     ///  - B) Incremental rebuild: a prev cache exists, only the last message
@@ -3140,9 +3337,17 @@ mod tests {
     ///
     /// B includes the cost of building the prev cache each iteration (it is
     /// consumed by `build_transcript_cache`), so `B - A` isolates the pure
-    /// incremental step. The move-verification assertion checks that non-dirty
-    /// blocks share the same `visual_lines` allocation as the prev cache
-    /// (i.e. moved, not cloned).
+    /// incremental step. The deterministic assertions are:
+    ///  - move-verification: non-dirty blocks share the same `visual_lines`
+    ///    heap allocation as the prev cache (moved, not cloned);
+    ///  - output-equivalence: the incremental rebuild is structurally
+    ///    identical to a full rebuild of the same messages.
+    ///
+    /// No wall-clock assertion is made: µs-scale `Instant` measurements are
+    /// inherently flaky under parallel test load (a scheduler preemption or
+    /// CPU-frequency step in one measurement window but not the other
+    /// inverts any `incr < full` comparison — the original timing assert
+    /// failed 11/12 runs under 12-way parallel `cargo test` load).
     #[test]
     fn build_transcript_cache_bench() {
         // Bench fixture: 50 messages × 5 logical lines, wrapped at width 80.
@@ -3236,65 +3441,61 @@ mod tests {
         );
         eprintln!();
 
-        // The pure incremental step must be cheaper than a full rebuild.
-        assert!(
-            incremental_step_us < a_us,
-            "incremental step ({}µs) should be cheaper than full rebuild ({}µs)",
-            incremental_step_us,
-            a_us
+        // Output equivalence: the incremental rebuild (prev cache + 1 dirty
+        // tail) must be structurally identical to a full rebuild of the same
+        // messages — the deterministic correctness property of the move path
+        // (the pointer-identity checks above already prove the move itself).
+        //
+        // The µs timings printed above are informational ONLY. No wall-clock
+        // assertion is made here: µs-scale `Instant` measurements are
+        // inherently flaky under parallel test load (a scheduler preemption
+        // or CPU-frequency step in one measurement window but not the other
+        // inverts any `incr < full` comparison).
+        assert_incremental_equivalent_to_full(
+            &renders_all_dirty,
+            &renders_incremental,
+            "bench",
         );
     }
 
-    /// Scalability matrix for `build_transcript_cache`.
+    /// Deterministic matrix test for `build_transcript_cache`: for every
+    /// scenario, the incremental rebuild (prev cache + partial dirty
+    /// renders) must be structurally identical to a full rebuild of the
+    /// same messages, and both caches must satisfy the flat-index
+    /// invariants (see `assert_cache_invariants`).
     ///
-    /// Sweeps four axes and prints one row per scenario, holding the others
-    /// fixed at the bench defaults (50 messages, long content, width 80, 1
-    /// dirty tail). Each row reports `full` (cold rebuild) and `incr` (the
-    /// pure incremental step, B-A) in µs, plus the speedup ratio. A high
-    /// `full/incr` ratio is the goal; it should stay well above 1× across
-    /// the matrix except the 100%-dirty degenerate case.
-    ///
-    /// Axes:
-    ///  1. Message count (10 / 50 / 200) at 1 dirty — does the incremental
-    ///     step stay flat (move-only) while full rebuild grows linearly?
-    ///  2. Dirty count (1 / 10% / 50% / 100%) at 50 messages — how does the
-    ///     incremental step degrade as more messages re-wrap? At 100% it
-    ///     approaches full rebuild (width-change worst case).
+    /// Scenario axes (defaults: 50 messages, long content, width 80, 1
+    /// dirty tail):
+    ///  1. Message count (0 / 10 / 50 / 200) at 1 dirty — 0 exercises the
+    ///     empty transcript, 200 the largest flat-index rebuild.
+    ///  2. Dirty count (1 / 10% / 50% / 100%) at 50 messages — 100%
+    ///     exercises the "prev present but every message re-renders" path
+    ///     (width-change worst case), where nothing moves but the prev
+    ///     cache is still consumed.
     ///  3. Terminal width (40 / 80 / 120) at 50 messages, 1 dirty — wider
     ///     terminals wrap less, so fewer visual lines per message.
     ///  4. Content shape (short / long) at 50 messages, 1 dirty — short
     ///     content skips wrapping, isolating per-logical-line overhead.
+    ///
+    /// This test deliberately contains NO timing. µs-scale wall-clock
+    /// assertions flake under parallel test load (the original timing-based
+    /// `build_transcript_cache_scalability` failed 11/12 runs under 12-way
+    /// parallel `cargo test`); timings for humans live in
+    /// `build_transcript_cache_bench`.
     #[test]
-    fn build_transcript_cache_scalability() {
-        // Fewer runs than the main bench: the matrix has many scenarios and
-        // we care about the trend, not single-scenario precision.
-        let num_warmup_runs = 5u32;
-        let num_measure_runs = 30u32;
+    fn build_transcript_cache_incremental_matches_full_matrix() {
         let default_messages = 50usize;
         let default_lines = 5usize;
         let default_width: u16 = 80;
         let default_dirty = 1usize;
 
-        let mut rows: Vec<(String, u128, u128, f64)> = Vec::new();
-
         // Axis 1: message count, 1 dirty tail, long content, width 80.
-        for &num_messages in &[10usize, 50usize, 200usize] {
+        for &num_messages in &[0usize, 10usize, 50usize, 200usize] {
             let content = long_content(default_lines);
             let (all, partial) =
                 make_bench_renders(num_messages, &content, default_width, default_dirty);
-            let (full, incr, _) =
-                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 {
-                full as f64 / incr as f64
-            } else {
-                f64::INFINITY
-            };
-            rows.push((
-                format!("msgs={num_messages:>3} dirty=1"),
-                full,
-                incr,
-                speedup,
-            ));
+            let label = format!("msgs={num_messages} dirty=1");
+            assert_incremental_equivalent_to_full(&all, &partial, &label);
         }
 
         // Axis 2: dirty count (tail), 50 messages, long content, width 80.
@@ -3302,20 +3503,9 @@ mod tests {
             let content = long_content(default_lines);
             let (all, partial) =
                 make_bench_renders(default_messages, &content, default_width, dirty);
-            let (full, incr, _) =
-                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 {
-                full as f64 / incr as f64
-            } else {
-                f64::INFINITY
-            };
             let pct = (dirty * 100) / default_messages;
-            rows.push((
-                format!("msgs=50 dirty={dirty:>2} ({pct}%)"),
-                full,
-                incr,
-                speedup,
-            ));
+            let label = format!("msgs=50 dirty={dirty} ({pct}%)");
+            assert_incremental_equivalent_to_full(&all, &partial, &label);
         }
 
         // Axis 3: terminal width, 50 messages, 1 dirty, long content.
@@ -3323,14 +3513,8 @@ mod tests {
             let content = long_content(default_lines);
             let (all, partial) =
                 make_bench_renders(default_messages, &content, width, default_dirty);
-            let (full, incr, _) =
-                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 {
-                full as f64 / incr as f64
-            } else {
-                f64::INFINITY
-            };
-            rows.push((format!("msgs=50 dirty=1 w={width:>3}"), full, incr, speedup));
+            let label = format!("msgs=50 dirty=1 w={width}");
+            assert_incremental_equivalent_to_full(&all, &partial, &label);
         }
 
         // Axis 4: content shape, 50 messages, 1 dirty, width 80.
@@ -3340,47 +3524,8 @@ mod tests {
         ] {
             let (all, partial) =
                 make_bench_renders(default_messages, &content, default_width, default_dirty);
-            let (full, incr, _) =
-                time_bench_paths(&all, &partial, num_warmup_runs, num_measure_runs);
-            let speedup = if incr > 0 {
-                full as f64 / incr as f64
-            } else {
-                f64::INFINITY
-            };
-            rows.push((format!("msgs=50 dirty=1 {label}"), full, incr, speedup));
-        }
-
-        eprintln!();
-        eprintln!("=== build_transcript_cache scalability matrix ===");
-        eprintln!(
-            "  (full = cold rebuild µs, incr = pure incremental step µs, speedup = full/incr)"
-        );
-        eprintln!(
-            "  {:<22} {:>10} {:>10} {:>10}",
-            "scenario", "full", "incr", "speedup"
-        );
-        eprintln!("  {:-<22} {:-<10} {:-<10} {:-<10}", "", "", "", "");
-        for (label, full, incr, speedup) in &rows {
-            eprintln!(
-                "  {:<22} {:>8}µs {:>8}µs {:>8.1}×",
-                label, full, incr, speedup
-            );
-        }
-        eprintln!();
-
-        // The incremental step must beat full rebuild in every scenario
-        // except the 100%-dirty degenerate case (where they are equal by
-        // construction: nothing moves). Assert the non-degenerate cases.
-        for (label, full, incr, _speedup) in &rows {
-            if label.contains("dirty=50 (100%)") {
-                // 100% dirty = width-change worst case; incr ≈ full is expected.
-                continue;
-            }
-            assert!(
-                incr < full,
-                "scenario {label}: incremental step ({incr}µs) must be cheaper \
-                 than full rebuild ({full}µs)",
-            );
+            let label = format!("msgs=50 dirty=1 {label}");
+            assert_incremental_equivalent_to_full(&all, &partial, &label);
         }
     }
 

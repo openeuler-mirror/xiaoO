@@ -2,12 +2,12 @@
 //!
 //! Bounding all outbound HTTP protects the event loop from the OS's 75 s+
 //! TCP timeout. The values live in the TUI crate (not `xiaoo_shared`) to keep
-//! TUI-only config out of the shared crate; the daemon-side
-//! [`STALE_LEASE_THRESHOLD_MS`](xiaoo_shared::gateway::STALE_LEASE_THRESHOLD_MS)
-//! remains the single source of truth for the staleness threshold.
+//! TUI-only config out of the shared crate; the daemon-side staleness
+//! threshold (45 s, in `xiaoo_shared::gateway::session_lease`) remains the
+//! single source of truth for staleness.
 
 /// Heartbeat interval; 3x safety margin under the daemon's 45 s staleness
-/// threshold ([`STALE_LEASE_THRESHOLD_MS`](xiaoo_shared::gateway::STALE_LEASE_THRESHOLD_MS)).
+/// threshold (in `xiaoo_shared::gateway::session_lease`).
 pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Per-call timeout for the TUI's `/runtimes/heartbeat` RPC. A timeout is

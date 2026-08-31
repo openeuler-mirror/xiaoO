@@ -22,31 +22,24 @@ clap = { version = "4", features = ["derive"] }
 crossterm.workspace = true
 dirs = "6"
 futures-util.workspace = true
-llm-client = { path = "../../crates/llm-client" }
-lsp = { path = "../../crates/lsp" }
-mcp = { path = "../../crates/mcp" }
-operation_backend = { path = "../../crates/operation_backend" }
 ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shellexpand.workspace = true
-skill = { path = "../../crates/skill" }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
-tool = { path = "../../crates/tool" }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-width = "0.1.14"
 uuid.workspace = true
 textwrap = "0.16"
 
-agent-contracts = { path = "../../crates/agent-contracts" }
-agent-types = { path = "../../crates/agent-types" }
-compact = { path = "../../crates/compact" }
-xiaoo-core = { path = "../../crates/core" }
-xiaoo-shared = { path = "../shared" }
+# runtime SDK 门面 / 应用装配面（粗粒度装配入口 + 最小词汇）：
+xiaoo-api = { path = "../../crates/xiaoo-api" }            # runtime SDK 门面（冻结面）
+xiaoo-shared = { path = "../shared" }                      # 应用装配门面
 
 [dev-dependencies]
 tempfile.workspace = true
+xiaoo-shared = { path = "../shared", features = ["test-support"] }

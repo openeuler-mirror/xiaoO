@@ -23,14 +23,14 @@ pub fn render_mcp_overview(config: &Config) -> String {
         let _ = write!(output, "\n- 状态: {status}");
 
         let transport_label = match server.transport {
-            mcp::Transport::Stdio => "stdio（标准输入输出）",
-            mcp::Transport::Sse => "SSE（Server-Sent Events）",
-            mcp::Transport::StreamableHttp => "Streamable HTTP",
+            xiaoo_shared::mcp_support::Transport::Stdio => "stdio（标准输入输出）",
+            xiaoo_shared::mcp_support::Transport::Sse => "SSE（Server-Sent Events）",
+            xiaoo_shared::mcp_support::Transport::StreamableHttp => "Streamable HTTP",
         };
         let _ = write!(output, "\n- 传输方式: {transport_label}");
 
         match server.transport {
-            mcp::Transport::Stdio => {
+            xiaoo_shared::mcp_support::Transport::Stdio => {
                 if let Some(cmd) = &server.command {
                     let _ = write!(output, "\n- 命令: {cmd}");
                     if !server.args.is_empty() {
@@ -38,7 +38,8 @@ pub fn render_mcp_overview(config: &Config) -> String {
                     }
                 }
             }
-            mcp::Transport::Sse | mcp::Transport::StreamableHttp => {
+            xiaoo_shared::mcp_support::Transport::Sse
+            | xiaoo_shared::mcp_support::Transport::StreamableHttp => {
                 if let Some(url) = &server.url {
                     let _ = write!(output, "\n- URL: {url}");
                 }

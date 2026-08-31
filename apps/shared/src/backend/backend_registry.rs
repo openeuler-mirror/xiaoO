@@ -13,7 +13,7 @@ use super::sandbox_counter::SandboxCounterKey;
 static IN_PROCESS_LOCK: Lazy<Arc<Mutex<()>>> = Lazy::new(|| Arc::new(Mutex::new(())));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionStatusSnapshot {
+pub(crate) struct SessionStatusSnapshot {
     pub status: String,
     pub queue_depth: usize,
     pub updated_at_ms: u64,
@@ -30,7 +30,7 @@ impl Default for SessionStatusSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackendRegistryEntry {
+pub(crate) struct BackendRegistryEntry {
     pub backend_id: String,
     pub sandbox_key: SandboxCounterKey,
     pub session_ids: Vec<String>,
@@ -59,7 +59,7 @@ pub struct BackendRegistryEntry {
 }
 
 impl BackendRegistryEntry {
-    pub fn new(
+    pub(crate) fn new(
         backend_id: String,
         sandbox_key: SandboxCounterKey,
         session_ids: Vec<String>,
@@ -125,7 +125,7 @@ impl BackendRegistryEntry {
 
     /// True if the owner process is presumed dead (no heartbeat within the
     /// threshold).
-    pub fn is_owner_stale(&self, threshold_ms: u64) -> bool {
+    pub(crate) fn is_owner_stale(&self, threshold_ms: u64) -> bool {
         if self.owner_heartbeat_ms == 0 {
             return true;
         }
@@ -138,7 +138,7 @@ impl BackendRegistryEntry {
     ///
     /// Use this in selection paths (e.g. `try_evict_if_needed`) to skip
     /// backends that another process has already marked for eviction.
-    pub fn is_evictable(&self, stale_threshold_ms: u64) -> bool {
+    pub(crate) fn is_evictable(&self, stale_threshold_ms: u64) -> bool {
         !self.pending_eviction && self.is_eviction_safe(stale_threshold_ms)
     }
 
@@ -150,18 +150,18 @@ impl BackendRegistryEntry {
     /// use it in the actual eviction path (e.g.
     /// `check_and_evict_marked_backends`) where the entry is already known
     /// to be marked and we only need to confirm it is still safe to delete.
-    pub fn is_eviction_safe(&self, stale_threshold_ms: u64) -> bool {
+    pub(crate) fn is_eviction_safe(&self, stale_threshold_ms: u64) -> bool {
         self.is_all_sessions_idle() || self.is_owner_stale(stale_threshold_ms)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct BackendRegistryData {
+pub(crate) struct BackendRegistryData {
     pub entries: HashMap<String, BackendRegistryEntry>,
 }
 
 #[derive(Debug, Clone)]
-pub enum BackendRegistryError {
+pub(crate) enum BackendRegistryError {
     FileError { message: String },
     LockError { message: String },
     ParseError { message: String },
@@ -179,7 +179,7 @@ impl std::fmt::Display for BackendRegistryError {
 
 impl std::error::Error for BackendRegistryError {}
 
-pub struct BackendRegistry {
+pub(crate) struct BackendRegistry {
     storage_path: PathBuf,
     lock_path: PathBuf,
 }
@@ -189,7 +189,7 @@ impl BackendRegistry {
     /// files are derived from `dir`, so callers (notably tests) can isolate
     /// from the shared `~/.xiaoo/` files by pointing at a fresh temporary
     /// directory.
-    pub fn new_with_storage_dir(dir: PathBuf) -> Self {
+    pub(crate) fn new_with_storage_dir(dir: PathBuf) -> Self {
         std::fs::create_dir_all(&dir).ok();
         Self {
             storage_path: dir.join("backend_registry.json"),
@@ -208,7 +208,7 @@ impl BackendRegistry {
         Ok(())
     }
 
-    pub async fn unregister(&self, backend_id: &str) -> Result<(), BackendRegistryError> {
+    pub(crate) async fn unregister(&self, backend_id: &str) -> Result<(), BackendRegistryError> {
         let _in_process = IN_PROCESS_LOCK.lock().await;
         let _file_lock = self.acquire_lock()?;
         let mut data = self.load_data()?;
@@ -231,7 +231,7 @@ impl BackendRegistry {
         Ok(data.entries.get(backend_id).cloned())
     }
 
-    pub async fn get_entries_by_key(
+    pub(crate) async fn get_entries_by_key(
         &self,
         key: &SandboxCounterKey,
     ) -> Result<Vec<BackendRegistryEntry>, BackendRegistryError> {
@@ -247,7 +247,9 @@ impl BackendRegistry {
             .collect())
     }
 
-    pub async fn get_all_entries(&self) -> Result<Vec<BackendRegistryEntry>, BackendRegistryError> {
+    pub(crate) async fn get_all_entries(
+        &self,
+    ) -> Result<Vec<BackendRegistryEntry>, BackendRegistryError> {
         let _in_process = IN_PROCESS_LOCK.lock().await;
         let _file_lock = self.acquire_lock()?;
         let data = self.load_data()?;
@@ -255,7 +257,7 @@ impl BackendRegistry {
         Ok(data.entries.values().cloned().collect())
     }
 
-    pub async fn set_pending_eviction(
+    pub(crate) async fn set_pending_eviction(
         &self,
         backend_id: &str,
         pending: bool,
@@ -272,7 +274,10 @@ impl BackendRegistry {
         Ok(())
     }
 
-    pub async fn update_activity(&self, backend_id: &str) -> Result<(), BackendRegistryError> {
+    pub(crate) async fn update_activity(
+        &self,
+        backend_id: &str,
+    ) -> Result<(), BackendRegistryError> {
         let _in_process = IN_PROCESS_LOCK.lock().await;
         let _file_lock = self.acquire_lock()?;
         let mut data = self.load_data()?;
@@ -289,7 +294,7 @@ impl BackendRegistry {
     /// `process_id`. Called periodically by the owner process's registry
     /// poller so that other processes can detect when this process has died
     /// (heartbeat goes stale) and reclaim its sandboxes.
-    pub async fn refresh_heartbeats_for_process(
+    pub(crate) async fn refresh_heartbeats_for_process(
         &self,
         process_id: &str,
     ) -> Result<(), BackendRegistryError> {
@@ -310,7 +315,7 @@ impl BackendRegistry {
         Ok(())
     }
 
-    pub async fn update_session_status(
+    pub(crate) async fn update_session_status(
         &self,
         backend_id: &str,
         session_id: &str,
@@ -330,7 +335,7 @@ impl BackendRegistry {
         Ok(())
     }
 
-    pub async fn get_entries_for_process(
+    pub(crate) async fn get_entries_for_process(
         &self,
         process_id: &str,
     ) -> Result<Vec<BackendRegistryEntry>, BackendRegistryError> {

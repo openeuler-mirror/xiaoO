@@ -129,7 +129,7 @@ impl SessionDiffTracker {
         self.reconcile_tool_file_change(call_id, Some(delta));
     }
 
-    pub fn reconcile_tool_file_change(
+    pub(crate) fn reconcile_tool_file_change(
         &mut self,
         call_id: &str,
         next: Option<FileChangeDelta>,
@@ -153,7 +153,12 @@ impl SessionDiffTracker {
         Some(next)
     }
 
-    pub fn capture_tool_file_baseline(&mut self, call_id: &str, tool: &str, args_preview: &str) {
+    pub(crate) fn capture_tool_file_baseline(
+        &mut self,
+        call_id: &str,
+        tool: &str,
+        args_preview: &str,
+    ) {
         if self.tool_file_baselines.contains_key(call_id) {
             return;
         }
@@ -182,7 +187,7 @@ impl SessionDiffTracker {
         );
     }
 
-    pub fn reconcile_tool_file_change_from_baseline(
+    pub(crate) fn reconcile_tool_file_change_from_baseline(
         &mut self,
         call_id: &str,
         fallback: Option<FileChangeDelta>,
@@ -246,7 +251,7 @@ impl SessionDiffTracker {
         }
     }
 
-    pub fn discard_tool_file_baseline(&mut self, call_id: &str) {
+    pub(crate) fn discard_tool_file_baseline(&mut self, call_id: &str) {
         self.tool_file_baselines.remove(call_id);
     }
 
@@ -321,7 +326,7 @@ impl SessionDiffTracker {
     }
 }
 
-pub fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
+pub(crate) fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
     match tool {
         "file_edit" | "file_write" => {
             let value: serde_json::Value = serde_json::from_str(args_preview).ok()?;

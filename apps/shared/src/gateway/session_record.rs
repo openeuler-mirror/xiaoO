@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use subagent::SubagentSessionState;
 use tool::ToolSpecSnapshot;
-use xiaoo_core::LoopStateSnapshot;
+use xiaoo_api::runtime::LoopStateSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -25,7 +25,7 @@ impl SessionLifecycleStatus {
     /// Snake-case wire tag for `*.Session.lifecycle.state` payloads
     /// (matches the serde renaming). Use this instead of hardcoded
     /// literals so the wire contract stays in sync with the enum.
-    pub fn as_tag(&self) -> &'static str {
+    pub(crate) fn as_tag(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Running => "running",
@@ -41,12 +41,12 @@ impl SessionLifecycleStatus {
 /// tag (today: only `state="failed"` → `Error`). `idle` uses
 /// `TurnOutcome::as_tag()` directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionStateOutcome {
+pub(crate) enum SessionStateOutcome {
     Error,
 }
 
 impl SessionStateOutcome {
-    pub fn as_tag(&self) -> &'static str {
+    pub(crate) fn as_tag(&self) -> &'static str {
         match self {
             Self::Error => "error",
         }
@@ -64,7 +64,7 @@ pub struct SubagentRoleRecord {
 
 pub const E2B_BOOTSTRAP_MANIFEST_VERSION: u32 = 1;
 pub const E2B_REMOTE_WORKSPACE_ROOT: &str = "/home/user/workspace";
-pub const E2B_REMOTE_SKILLS_ROOT: &str = "/home/user/.xiaoo/skills";
+pub(crate) const E2B_REMOTE_SKILLS_ROOT: &str = "/home/user/.xiaoo/skills";
 
 /// Immutable host-to-E2B bootstrap identity persisted with the runtime.
 /// Host paths are only consulted while the first sandbox is being created.

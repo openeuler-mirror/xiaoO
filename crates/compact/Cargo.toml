@@ -3,6 +3,7 @@ name = "compact"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 agent-contracts = { path = "../agent-contracts" }

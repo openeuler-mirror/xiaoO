@@ -12,7 +12,7 @@ use super::session::{
     ChannelInteractionHandle, ChannelLoopEventSink, ChannelPendingUserMessages,
     ChannelToolEventSink, SessionGateway, SessionTurnUpdate,
 };
-use xiaoo_core::spawn_prefetch;
+use xiaoo_api::runtime::spawn_prefetch;
 
 fn memory_status_from_health(health: MemoryAutomationHealth) -> crate::status_panel::MemoryStatus {
     match health {
@@ -32,7 +32,7 @@ impl SessionGateway {
     /// `open_session` / `force_close_session`.
     async fn get_or_init_lifecycle_control_plane(
         &self,
-        hooker_config: agent_types::hook::HookerRegistryConfig,
+        hooker_config: xiaoo_api::chat::HookerRegistryConfig,
     ) -> Result<Arc<dyn SessionControlPlane>, String> {
         let mut lock = self.lifecycle_control_plane.lock().await;
         if let Some(cp) = lock.as_ref() {
