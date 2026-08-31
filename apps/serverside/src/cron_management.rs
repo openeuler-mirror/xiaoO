@@ -1,4 +1,5 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::daemon_config::DaemonConfig;
@@ -35,6 +36,118 @@ pub struct CronReport {
     pub default_timeout_secs: u64,
     pub jobs: Vec<CronJobReport>,
     pub errors: Vec<CronIssue>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CronJobsDraft {
+    pub jobs: Vec<CronJobDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronJobDraft {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub cron: String,
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<String>,
+    pub timeout_secs: u64,
+    pub enabled: bool,
+    pub max_retries: u32,
+    pub retry_delay_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct CronJobsDocument {
+    #[serde(rename = "job")]
+    jobs: Vec<CronJobDraft>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CronRenderReport {
+    pub schema_version: u32,
+    pub valid: bool,
+    pub content: Option<String>,
+    pub errors: Vec<CronIssue>,
+}
+
+pub fn render_cron_jobs(draft: CronJobsDraft) -> CronRenderReport {
+    let mut errors = Vec::new();
+    let mut names = HashSet::new();
+    for (index, job) in draft.jobs.iter().enumerate() {
+        let path = format!("cron.jobs[{index}]");
+        if job.name.trim().is_empty() {
+            issue(
+                &mut errors,
+                &format!("{path}.name"),
+                "required",
+                "任务名称不能为空",
+            );
+        } else if !names.insert(job.name.trim()) {
+            issue(
+                &mut errors,
+                &format!("{path}.name"),
+                "duplicate",
+                "任务名称不能重复",
+            );
+        }
+        if let Err(error) = xiaoo_shared::cron::validate_cron_expr(&job.cron) {
+            issue(&mut errors, &format!("{path}.cron"), "invalid_cron", error);
+        }
+        if job.prompt.trim().is_empty() {
+            issue(
+                &mut errors,
+                &format!("{path}.prompt"),
+                "required",
+                "任务 Prompt 不能为空",
+            );
+        }
+        if job.timeout_secs == 0 {
+            issue(
+                &mut errors,
+                &format!("{path}.timeout_secs"),
+                "out_of_range",
+                "任务超时必须大于 0",
+            );
+        }
+    }
+    if !errors.is_empty() {
+        return CronRenderReport {
+            schema_version: 1,
+            valid: false,
+            content: None,
+            errors,
+        };
+    }
+
+    let document = CronJobsDocument { jobs: draft.jobs };
+    match toml::to_string_pretty(&document) {
+        Ok(content) => CronRenderReport {
+            schema_version: 1,
+            valid: true,
+            content: Some(content),
+            errors: Vec::new(),
+        },
+        Err(error) => CronRenderReport {
+            schema_version: 1,
+            valid: false,
+            content: None,
+            errors: vec![CronIssue {
+                path: "cron.jobs".to_string(),
+                code: "serialization_failed".to_string(),
+                message: error.to_string(),
+            }],
+        },
+    }
+}
+
+fn issue(errors: &mut Vec<CronIssue>, path: &str, code: &str, message: impl Into<String>) {
+    errors.push(CronIssue {
+        path: path.to_string(),
+        code: code.to_string(),
+        message: message.into(),
+    });
 }
 
 pub fn cron_report(config: &DaemonConfig) -> CronReport {
@@ -133,7 +246,7 @@ fn expand_home(path: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::cron_report;
+    use super::{cron_report, render_cron_jobs, CronJobDraft, CronJobsDraft};
     use crate::daemon_config::DaemonConfig;
 
     #[test]
@@ -200,5 +313,55 @@ retry_delay_secs = 10
         assert!(report.jobs.is_empty());
         assert_eq!(report.errors[0].code, "invalid_jobs_file");
         assert!(!report.errors[0].message.contains("private prompt"));
+    }
+
+    #[test]
+    fn renders_validated_jobs_document() {
+        let report = render_cron_jobs(CronJobsDraft {
+            jobs: vec![CronJobDraft {
+                name: "daily-review".to_string(),
+                description: None,
+                cron: "0 9 * * *".to_string(),
+                prompt: "Review repository".to_string(),
+                agent_role: Some("plan".to_string()),
+                timeout_secs: 120,
+                enabled: true,
+                max_retries: 1,
+                retry_delay_secs: 60,
+            }],
+        });
+        assert!(report.valid);
+        let content = report.content.expect("rendered content");
+        assert!(content.contains("[[job]]"));
+        assert!(content.contains("name = \"daily-review\""));
+    }
+
+    #[test]
+    fn rejects_duplicate_names_invalid_cron_and_empty_prompt() {
+        let invalid = |cron: &str| CronJobDraft {
+            name: "duplicate".to_string(),
+            description: None,
+            cron: cron.to_string(),
+            prompt: "".to_string(),
+            agent_role: None,
+            timeout_secs: 0,
+            enabled: true,
+            max_retries: 0,
+            retry_delay_secs: 60,
+        };
+        let report = render_cron_jobs(CronJobsDraft {
+            jobs: vec![invalid("invalid"), invalid("0 9 * * *")],
+        });
+        assert!(!report.valid);
+        assert!(report.content.is_none());
+        assert!(report.errors.iter().any(|error| error.code == "duplicate"));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.code == "invalid_cron"));
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.path.ends_with("prompt")));
     }
 }

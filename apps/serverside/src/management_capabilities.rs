@@ -29,6 +29,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config compact",
             "config backend",
             "config cron",
+            "config render-cron",
         ]
         .into_iter()
         .map(str::to_string)
@@ -111,7 +112,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["inspect", "preflight"],
             ),
-            domain("cron", true, false, false, true, &["list", "validate"]),
+            domain(
+                "cron",
+                true,
+                true,
+                false,
+                true,
+                &["list", "validate", "render"],
+            ),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
