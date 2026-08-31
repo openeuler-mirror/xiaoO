@@ -1,4 +1,5 @@
 use crate::backend_management::backend_issues;
+use crate::channel_management::channel_report;
 use crate::compact_management::compact_issues;
 use crate::daemon_config::{DaemonConfig, LlmProfileConfig};
 use regex::Regex;
@@ -94,6 +95,17 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                 }),
         );
     }
+    errors.extend(
+        channel_report(&config)
+            .channels
+            .into_iter()
+            .flat_map(|channel| channel.errors)
+            .map(|issue| ConfigValidationIssue {
+                path: issue.path,
+                code: issue.code,
+                message: issue.message,
+            }),
+    );
 
     ConfigValidationReport {
         valid: errors.is_empty(),
@@ -385,6 +397,25 @@ api_key_env = "{env_name}"
         assert!(report.errors.iter().any(|issue| {
             issue.path == "server.operation_backend.options.api_key_env"
                 && issue.code == "missing_api_key"
+        }));
+    }
+
+    #[test]
+    fn rejects_missing_channel_secret_before_daemon_start() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::env::remove_var("XIAOO_TEST_MISSING_TELEGRAM_VALIDATION");
+        std::fs::write(
+            &path,
+            "[llm]\nprovider='ollama'\nmodel='test'\n\n[channels.telegram]\nenabled=true\ntransport='polling'\nbot_token_env='XIAOO_TEST_MISSING_TELEGRAM_VALIDATION'\n",
+        )
+        .expect("write config");
+
+        let report = validate_config_file(&path);
+
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|issue| {
+            issue.path == "channels.telegram.bot_token_env" && issue.code == "missing_secret"
         }));
     }
 }

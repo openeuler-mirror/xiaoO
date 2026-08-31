@@ -1,5 +1,6 @@
 mod agent_management;
 mod backend_management;
+mod channel_management;
 mod channels;
 mod compact_management;
 mod config_inspect;
@@ -331,6 +332,15 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&backend_management::backend_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigChannels => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&channel_management::channel_report(&config))?
             );
             return Ok(());
         }
@@ -854,6 +864,7 @@ enum CliAction {
     ConfigMemoryQueue,
     ConfigCompact,
     ConfigBackend,
+    ConfigChannels,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -936,9 +947,10 @@ impl Cli {
                     }
                     Some("compact") => CliAction::ConfigCompact,
                     Some("backend") => CliAction::ConfigBackend,
+                    Some("channels") => CliAction::ConfigChannels,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1110,6 +1122,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
+         \x20     xiaoo-daemon config channels [--config <path>]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1447,6 +1460,18 @@ mod tests {
         )
         .expect("config backend should parse");
         assert_eq!(cli.action, CliAction::ConfigBackend);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_channels_command() {
+        let cli = Cli::parse(
+            ["config", "channels", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config channels should parse");
+        assert_eq!(cli.action, CliAction::ConfigChannels);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
