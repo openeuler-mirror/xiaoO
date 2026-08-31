@@ -29,6 +29,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config compact",
             "config backend",
             "config channels",
+            "config http",
             "config cron",
             "config render-cron",
         ]
@@ -129,6 +130,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["inspect", "preflight", "runtime_status", "test_connection"],
             ),
+            domain("http", true, true, false, true, &["inspect", "preflight"]),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
             domain(
@@ -360,6 +362,16 @@ mod tests {
             .actions
             .iter()
             .any(|action| action == "test_connection"));
+
+        let http = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "http")
+            .expect("HTTP capability");
+        assert!(http.runtime_read);
+        assert!(http.test);
+        assert!(http.actions.iter().any(|action| action == "inspect"));
+        assert!(http.actions.iter().any(|action| action == "preflight"));
 
         let cron = capabilities
             .domains

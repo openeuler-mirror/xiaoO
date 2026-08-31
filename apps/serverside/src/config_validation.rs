@@ -106,12 +106,122 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
                 message: issue.message,
             }),
     );
+    validate_http(&config, &mut errors);
 
     ConfigValidationReport {
         valid: errors.is_empty(),
         config_path: config_path.to_path_buf(),
         active_profile: config.app.llm.active_profile,
         errors,
+    }
+}
+
+fn validate_http(config: &DaemonConfig, errors: &mut Vec<ConfigValidationIssue>) {
+    let http = &config.app.http;
+    let inline = http
+        .bearer_token
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let environment = http
+        .bearer_token_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if inline && environment.is_some() {
+        push_error(
+            errors,
+            "http.bearer_token".to_string(),
+            "conflicting_secret_sources",
+            "bearer_token 与 bearer_token_env 不能同时配置",
+        );
+    }
+    if let Some(name) = environment {
+        let valid_name =
+            Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").expect("environment variable regex");
+        if !valid_name.is_match(name) {
+            push_error(
+                errors,
+                "http.bearer_token_env".to_string(),
+                "invalid_environment_variable",
+                "Bearer Token 环境变量名不合法",
+            );
+        } else if match std::env::var(name) {
+            Ok(value) => value.trim().is_empty(),
+            Err(_) => true,
+        } {
+            push_error(
+                errors,
+                "http.bearer_token_env".to_string(),
+                "missing_secret",
+                "引用的 Bearer Token 环境变量未设置",
+            );
+        }
+    }
+    if let Some(limit) = http.rate_limit.as_ref() {
+        if limit.enabled && limit.requests_per_second == 0 {
+            push_error(
+                errors,
+                "http.rate_limit.requests_per_second".to_string(),
+                "out_of_range",
+                "启用限流时 requests_per_second 必须大于 0",
+            );
+        }
+        if limit.enabled && limit.burst == 0 {
+            push_error(
+                errors,
+                "http.rate_limit.burst".to_string(),
+                "out_of_range",
+                "启用限流时 burst 必须大于 0",
+            );
+        }
+        for (name, route) in &limit.routes {
+            if name.trim().is_empty() {
+                push_error(
+                    errors,
+                    "http.rate_limit.routes".to_string(),
+                    "invalid_route_name",
+                    "限流路由名称不能为空",
+                );
+            }
+            if route.requests_per_second == 0 {
+                push_error(
+                    errors,
+                    format!("http.rate_limit.routes.{name}.requests_per_second"),
+                    "out_of_range",
+                    "requests_per_second 必须大于 0",
+                );
+            }
+            if route.burst == 0 {
+                push_error(
+                    errors,
+                    format!("http.rate_limit.routes.{name}.burst"),
+                    "out_of_range",
+                    "burst 必须大于 0",
+                );
+            }
+        }
+    }
+    if let Some(dashboard) = http.dashboard.as_ref() {
+        if dashboard
+            .host
+            .as_deref()
+            .is_some_and(|host| host.trim().is_empty())
+        {
+            push_error(
+                errors,
+                "http.dashboard.host".to_string(),
+                "required",
+                "Dashboard Host 不能为空",
+            );
+        }
+        if dashboard.port == Some(0) {
+            push_error(
+                errors,
+                "http.dashboard.port".to_string(),
+                "out_of_range",
+                "Dashboard Port 必须大于 0",
+            );
+        }
     }
 }
 
@@ -417,5 +527,33 @@ api_key_env = "{env_name}"
         assert!(report.errors.iter().any(|issue| {
             issue.path == "channels.telegram.bot_token_env" && issue.code == "missing_secret"
         }));
+    }
+
+    #[test]
+    fn rejects_invalid_http_limits_and_missing_bearer_secret() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::env::remove_var("XIAOO_TEST_MISSING_HTTP_TOKEN");
+        std::fs::write(
+            &path,
+            "[llm]\nprovider='ollama'\nmodel='test'\n\n[http]\nbearer_token_env='XIAOO_TEST_MISSING_HTTP_TOKEN'\n\n[http.rate_limit]\nenabled=true\nrequests_per_second=0\nburst=0\n\n[http.dashboard]\nhost=''\nport=0\n",
+        )
+        .expect("write config");
+
+        let report = validate_config_file(&path);
+
+        assert!(!report.valid);
+        for path in [
+            "http.bearer_token_env",
+            "http.rate_limit.requests_per_second",
+            "http.rate_limit.burst",
+            "http.dashboard.host",
+            "http.dashboard.port",
+        ] {
+            assert!(
+                report.errors.iter().any(|issue| issue.path == path),
+                "{path}"
+            );
+        }
     }
 }

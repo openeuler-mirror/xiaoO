@@ -11,6 +11,7 @@ mod cron_management;
 mod daemon_config;
 mod daemon_runtime;
 mod hook_management;
+mod http_management;
 mod httpserver;
 mod lsp_management;
 mod management_capabilities;
@@ -342,6 +343,25 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&channel_management::channel_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigHttp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&http_management::http_report(
+                    &config,
+                    &ConfigInspectOverrides {
+                        daemon_host: cli.host,
+                        daemon_port: cli.port,
+                        no_dashboard: cli.no_dashboard,
+                        dashboard_host: cli.dashboard_host,
+                        dashboard_port: cli.dashboard_port,
+                        bearer_token_env: cli.bearer_token_env,
+                    },
+                ))?
             );
             return Ok(());
         }
@@ -886,6 +906,7 @@ enum CliAction {
     ConfigCompact,
     ConfigBackend,
     ConfigChannels,
+    ConfigHttp,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -969,9 +990,10 @@ impl Cli {
                     Some("compact") => CliAction::ConfigCompact,
                     Some("backend") => CliAction::ConfigBackend,
                     Some("channels") => CliAction::ConfigChannels,
+                    Some("http") => CliAction::ConfigHttp,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1144,6 +1166,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
          \x20     xiaoo-daemon config channels [--config <path>]\n\n\
+         \x20     xiaoo-daemon config http [--config <path>] [--host <host>] [--port <port>] [--no-dashboard]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1494,6 +1517,25 @@ mod tests {
         .expect("config channels should parse");
         assert_eq!(cli.action, CliAction::ConfigChannels);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_http_command() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "http",
+                "--config",
+                "/tmp/demo.toml",
+                "--no-dashboard",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config http should parse");
+        assert_eq!(cli.action, CliAction::ConfigHttp);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+        assert!(cli.no_dashboard);
     }
 
     #[test]
