@@ -420,11 +420,23 @@ def _handle_hook_payload(data: dict) -> int:
 
     # === Step 3: 映射 PreHookResult ===
     decision = result.get("decision", "Deny")
+    # AgentMoss 命中的违规层（L1.1/L1.2/L2.1/L2.2/L2.3/L3.1 + brain_L1/brain_L2，按真实执行顺序）。
+    # xiaoO 本体 PreHookResult 暂只携带 reason（无独立层字段），因此把层数拼进 reason 让用户可见，
+    # 同时 stdout 附带 violated_layers 字段——xiaoO 本体后续支持后可无感读取。
+    raw_layers = result.get("violated_layers") or []
+    if not isinstance(raw_layers, list):
+        raw_layers = [raw_layers]
+    layers = [str(l) for l in raw_layers if str(l)]
+    layers_text = ",".join(layers)
     if decision == "Allow":
         hook_result = {"result": "allow", "reason": result.get("reason", "")}
     else:
         reason_text = result.get("violated_policy") or result.get("reason", "")
+        if layers_text:
+            reason_text = f"[触发层: {layers_text}] {reason_text}"
         hook_result = {"result": "deny", "reason": reason_text}
+        if layers_text:
+            hook_result["violated_layers"] = layers
 
     _log("HOOK_OUTPUT", {"tool_name": tool_name, "hook_result": hook_result, "audit_result": result})
     print(json.dumps(hook_result, ensure_ascii=False))
