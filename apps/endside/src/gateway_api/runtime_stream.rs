@@ -9,6 +9,8 @@ use super::runtime::{GatewayRuntime, PendingStreamDone, STREAM_REVEAL_CHARS_PER_
 
 impl GatewayRuntime {
     pub fn poll_stream_updates(&mut self, state: &mut AppState) -> bool {
+        #[cfg(debug_assertions)]
+        let _start = std::time::Instant::now();
         let mut changed = false;
         if self.remote.is_none() {
             if let Some(health) = self.session_gateway.take_memory_health_update() {
@@ -95,6 +97,36 @@ impl GatewayRuntime {
                             &agent_id.0,
                             content,
                             true,
+                        );
+                    }
+                }
+                SessionTurnUpdate::AppendAssistantContent {
+                    agent_id,
+                    delta,
+                } => {
+                    if is_root_stream_agent(&agent_id, state) {
+                        self.append_stream_message_content(state, &delta);
+                        self.record_first_token_latency_if_needed(state);
+                    } else {
+                        self.append_subagent_stream_message_content(
+                            state,
+                            &agent_id.0,
+                            &delta,
+                        );
+                    }
+                }
+                SessionTurnUpdate::AppendAssistantThinking {
+                    agent_id,
+                    delta,
+                } => {
+                    if is_root_stream_agent(&agent_id, state) {
+                        self.append_stream_message_thinking_content(state, &delta);
+                        self.record_first_token_latency_if_needed(state);
+                    } else {
+                        self.append_subagent_stream_message_thinking_content(
+                            state,
+                            &agent_id.0,
+                            &delta,
                         );
                     }
                 }
@@ -201,6 +233,10 @@ impl GatewayRuntime {
             }
         }
 
+        #[cfg(debug_assertions)]
+        if _start.elapsed() > std::time::Duration::from_micros(100) {
+            tracing::debug!(target: "perf", elapsed_us = _start.elapsed().as_micros(), changed, "poll_stream_updates");
+        }
         changed
     }
 
@@ -296,6 +332,31 @@ impl GatewayRuntime {
             message.set_thinking_content(content);
             message.set_streaming(streaming);
         }
+    }
+
+    fn append_stream_message_content(&mut self, state: &mut AppState, delta: &str) {
+        #[cfg(debug_assertions)]
+        let _start = std::time::Instant::now();
+        self.ensure_stream_message(state);
+        if let Some(message) = self.stream_message_mut(state) {
+            message.append_content(delta);
+            message.set_streaming(true);
+        }
+        #[cfg(debug_assertions)]
+        tracing::debug!(target: "perf", delta_len = delta.len(), elapsed_us = _start.elapsed().as_micros(), "append_stream_message_content");
+    }
+
+    fn append_stream_message_thinking_content(&mut self, state: &mut AppState, delta: &str) {
+        #[cfg(debug_assertions)]
+        let _start = std::time::Instant::now();
+        self.ensure_stream_message(state);
+        if let Some(message) = self.stream_message_mut(state) {
+            message.thinking_content.push_str(delta);
+            message.mark_render_dirty();
+            message.set_streaming(true);
+        }
+        #[cfg(debug_assertions)]
+        tracing::debug!(target: "perf", delta_len = delta.len(), elapsed_us = _start.elapsed().as_micros(), "append_stream_message_thinking_content");
     }
 
     fn record_first_token_latency_if_needed(&mut self, state: &mut AppState) {
@@ -549,6 +610,33 @@ impl GatewayRuntime {
         if let Some(message) = self.subagent_stream_message_mut(state, agent_id) {
             message.set_thinking_content(content);
             message.set_streaming(streaming);
+        }
+    }
+
+    fn append_subagent_stream_message_content(
+        &mut self,
+        state: &mut AppState,
+        agent_id: &str,
+        delta: &str,
+    ) {
+        self.ensure_subagent_stream_message(state, agent_id);
+        if let Some(message) = self.subagent_stream_message_mut(state, agent_id) {
+            message.append_content(delta);
+            message.set_streaming(true);
+        }
+    }
+
+    fn append_subagent_stream_message_thinking_content(
+        &mut self,
+        state: &mut AppState,
+        agent_id: &str,
+        delta: &str,
+    ) {
+        self.ensure_subagent_stream_message(state, agent_id);
+        if let Some(message) = self.subagent_stream_message_mut(state, agent_id) {
+            message.thinking_content.push_str(delta);
+            message.mark_render_dirty();
+            message.set_streaming(true);
         }
     }
 

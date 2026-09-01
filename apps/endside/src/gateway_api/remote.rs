@@ -56,15 +56,15 @@ enum RemoteSseEvent {
     TextDelta {
         #[serde(default)]
         agent_id: Option<String>,
-        #[allow(dead_code)]
         delta: String,
+        #[allow(dead_code)]
         snapshot: String,
     },
     ThinkingDelta {
         #[serde(default)]
         agent_id: Option<String>,
-        #[allow(dead_code)]
         delta: String,
+        #[allow(dead_code)]
         snapshot: String,
     },
     ToolResult {
@@ -742,20 +742,16 @@ async fn handle_remote_event(
                 turn,
             });
         }
-        RemoteSseEvent::TextDelta {
-            agent_id, snapshot, ..
-        } => {
-            let _ = updates_tx.send(SessionTurnUpdate::SetAssistantContent {
+        RemoteSseEvent::TextDelta { agent_id, delta, .. } => {
+            let _ = updates_tx.send(SessionTurnUpdate::AppendAssistantContent {
                 agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
-                text: snapshot,
+                delta,
             });
         }
-        RemoteSseEvent::ThinkingDelta {
-            agent_id, snapshot, ..
-        } => {
-            let _ = updates_tx.send(SessionTurnUpdate::SetAssistantThinking {
+        RemoteSseEvent::ThinkingDelta { agent_id, delta, .. } => {
+            let _ = updates_tx.send(SessionTurnUpdate::AppendAssistantThinking {
                 agent_id: AgentId(agent_id.unwrap_or_else(|| "cli-agent".to_string())),
-                text: snapshot,
+                delta,
             });
         }
         RemoteSseEvent::ToolResult {

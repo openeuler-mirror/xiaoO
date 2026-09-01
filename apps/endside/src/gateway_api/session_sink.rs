@@ -45,6 +45,34 @@ impl LoopEventSink for ChannelLoopEventSink {
             });
     }
 
+    fn on_assistant_message_delta(&self, agent_id: &xiaoo_api::chat::AgentId, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let _ = self
+            .updates_tx
+            .send(SessionTurnUpdate::AppendAssistantContent {
+                agent_id: agent_id.clone(),
+                delta: delta.to_string(),
+            });
+    }
+
+    fn on_assistant_reasoning_delta(&self, agent_id: &xiaoo_api::chat::AgentId, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let _ = self
+            .updates_tx
+            .send(SessionTurnUpdate::AppendAssistantThinking {
+                agent_id: agent_id.clone(),
+                delta: delta.to_string(),
+            });
+    }
+
+    fn supports_message_delta(&self) -> bool {
+        true
+    }
+
     fn on_tool_result(&self, agent_id: &xiaoo_api::chat::AgentId, event: &ToolResultEvent) {
         let status = if event.is_error {
             ToolExecutionStatus::Failed

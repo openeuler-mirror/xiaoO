@@ -257,6 +257,8 @@ impl GatewayRuntime {
                     let mut flags = FeatureFlags::default();
                     flags.kvcache_enabled = state.agent_config.llm.kvcache_enabled;
                     flags.kvcache_debug_enabled = state.agent_config.llm.kvcache_debug_enabled;
+                    flags.redact_secrets_display =
+                        state.agent_config.tui.redact_secrets_display;
                     flags
                 },
                 token_budget: TokenBudgetConfig {
