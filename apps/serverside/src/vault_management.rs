@@ -243,6 +243,31 @@ pub fn vault_issues(config: &DaemonConfig) -> Vec<(String, String, String)> {
     Vec::new()
 }
 
+pub fn ensure_environment_is_referenced(
+    config: &DaemonConfig,
+    environment: &str,
+) -> anyhow::Result<()> {
+    let environment = environment.trim();
+    if environment.is_empty()
+        || !environment.chars().enumerate().all(|(index, character)| {
+            character == '_'
+                || character.is_ascii_alphanumeric()
+                    && (index > 0 || character.is_ascii_alphabetic())
+        })
+    {
+        anyhow::bail!("invalid secret environment variable name");
+    }
+    if vault_report(config)
+        .references
+        .iter()
+        .any(|reference| reference.environment.as_deref() == Some(environment))
+    {
+        Ok(())
+    } else {
+        anyhow::bail!("secret environment variable is not referenced by the selected configuration")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::vault_report;

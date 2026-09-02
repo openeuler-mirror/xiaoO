@@ -55,6 +55,27 @@ pub fn save_llm_secret(config_path: &Path, env_name: &str, secret: &str) -> Resu
     save_encrypted_store(&secrets_path, &store, use_sdf)
 }
 
+pub fn delete_llm_secret(config_path: &Path, env_name: &str) -> Result<bool> {
+    let secrets_path = llm_secrets_path(config_path);
+    if !secrets_path.exists() {
+        return Ok(false);
+    }
+    let use_sdf = get_use_sdf_from_config(config_path);
+    let mut store = load_secrets_store(&secrets_path, use_sdf)?;
+    let removed =
+        store.api_keys.remove(env_name).is_some() | store.tokens.remove(env_name).is_some();
+    if !removed {
+        return Ok(false);
+    }
+    if store.api_keys.is_empty() && store.tokens.is_empty() {
+        fs::remove_file(&secrets_path)
+            .with_context(|| format!("failed to delete secrets file {}", secrets_path.display()))?;
+    } else {
+        save_encrypted_store(&secrets_path, &store, use_sdf)?;
+    }
+    Ok(true)
+}
+
 pub fn auto_save_from_env(config_path: &Path) -> Result<()> {
     let config_content = match fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -247,7 +268,8 @@ pub fn inspect_secret_store(config_path: &Path) -> Result<SecretStoreMetadata> {
 #[cfg(test)]
 mod tests {
     use super::{
-        get_llm_secret, inject_llm_secrets_into_env, inspect_secret_store, save_llm_secret,
+        delete_llm_secret, get_llm_secret, inject_llm_secrets_into_env, inspect_secret_store,
+        llm_secrets_path, save_llm_secret,
     };
 
     #[test]
@@ -273,5 +295,15 @@ mod tests {
 
         std::env::remove_var(env_name);
         std::env::remove_var("USE_SDF");
+    }
+
+    #[test]
+    fn deleting_the_last_secret_removes_the_store() {
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        save_llm_secret(&config_path, "DELETE_ME", "secret").expect("save secret");
+        assert!(delete_llm_secret(&config_path, "DELETE_ME").expect("delete secret"));
+        assert!(!llm_secrets_path(&config_path).exists());
+        assert!(!delete_llm_secret(&config_path, "DELETE_ME").expect("delete missing secret"));
     }
 }

@@ -32,6 +32,8 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config http",
             "config trace",
             "config vault",
+            "config set-secret",
+            "config delete-secret",
             "config cron",
             "config render-cron",
         ]
@@ -145,9 +147,16 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 "vault",
                 true,
                 true,
-                false,
                 true,
-                &["inspect", "preflight", "list_references"],
+                true,
+                &[
+                    "inspect",
+                    "preflight",
+                    "list_references",
+                    "set",
+                    "rotate",
+                    "delete",
+                ],
             ),
             domain(
                 "sessions",
@@ -405,12 +414,15 @@ mod tests {
             .find(|domain| domain.id == "vault")
             .expect("Vault capability");
         assert!(vault.runtime_read);
+        assert!(vault.runtime_write);
         assert!(vault.test);
         assert!(vault.actions.iter().any(|action| action == "inspect"));
         assert!(vault
             .actions
             .iter()
             .any(|action| action == "list_references"));
+        assert!(vault.actions.iter().any(|action| action == "rotate"));
+        assert!(vault.actions.iter().any(|action| action == "delete"));
 
         let cron = capabilities
             .domains
