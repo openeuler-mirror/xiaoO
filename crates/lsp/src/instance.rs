@@ -89,6 +89,17 @@ impl LspServerInstance {
         Ok(())
     }
 
+    pub async fn shutdown(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.shutdown().await;
+        }
+        if let Some(task) = self._diag_task.take() {
+            task.abort();
+        }
+        self.open_files.clear();
+        self.state = State::Stopped;
+    }
+
     async fn start_server(&mut self) -> Result<(), LspError> {
         let root_uri = path_to_uri(&self.root);
 

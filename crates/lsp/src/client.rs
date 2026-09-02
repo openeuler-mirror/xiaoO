@@ -22,8 +22,8 @@ pub struct LspClient {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     notification_tx: broadcast::Sender<Notification>,
     next_id: Arc<AtomicU64>,
-    _child: Arc<Mutex<Child>>,
-    _reader_task: tokio::task::JoinHandle<()>,
+    child: Arc<Mutex<Child>>,
+    reader_task: tokio::task::JoinHandle<()>,
 }
 
 impl LspClient {
@@ -50,8 +50,8 @@ impl LspClient {
             pending,
             notification_tx,
             next_id: Arc::new(AtomicU64::new(1)),
-            _child: Arc::new(Mutex::new(child)),
-            _reader_task: reader_task,
+            child: Arc::new(Mutex::new(child)),
+            reader_task,
         }
     }
 
@@ -138,6 +138,27 @@ impl LspClient {
     async fn write_message(&self, msg: &Value) -> Result<(), LspError> {
         let mut stdin = self.stdin.lock().await;
         write_framed(&mut *stdin, msg).await
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.request("shutdown", Value::Null),
+        )
+        .await;
+        let _ = self
+            .write_message(&json!({ "jsonrpc": "2.0", "method": "exit" }))
+            .await;
+
+        let mut child = self.child.lock().await;
+        if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        self.reader_task.abort();
     }
 }
 

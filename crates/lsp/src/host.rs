@@ -64,8 +64,14 @@ impl LspEnv for LocalLspEnv {
     fn which(&self, cmd: &str) -> Option<PathBuf> {
         let path_var = std::env::var("PATH").unwrap_or_default();
         let extra = self.global_bin_dir();
+        let user_bin = self
+            .backend
+            .paths()
+            .home_dir()
+            .map(|path| PathBuf::from(path.0.as_str()).join(".local/bin"));
         std::env::split_paths(&path_var)
-            .chain(std::iter::once(extra))
+            .chain([extra.clone(), extra.join("bin")])
+            .chain(user_bin)
             .flat_map(|dir| {
                 let candidate = dir.join(cmd);
                 #[cfg(windows)]
@@ -105,6 +111,7 @@ impl LspEnv for LocalLspEnv {
         let mut child = tokio::process::Command::new(cmd)
             .args(args)
             .current_dir(cwd)
+            .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

@@ -45,6 +45,14 @@ impl LspService {
             manager: Arc::new(Mutex::new(LspServerManager::new_custom(configs, env))),
         }
     }
+
+    pub async fn test_startup(&self, server_id: &str, root: &Path) -> Result<(), LspError> {
+        self.manager
+            .lock()
+            .await
+            .test_startup(server_id, root)
+            .await
+    }
 }
 
 #[async_trait]

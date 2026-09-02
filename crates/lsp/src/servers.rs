@@ -60,6 +60,12 @@ pub async fn resolve_binary(config: &ServerConfig, env: &dyn LspEnv) -> Result<P
 }
 
 async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<PathBuf, String> {
+    if matches!(config.auto_install, AutoInstall::None) {
+        return Err(format!(
+            "'{}' not found in PATH. Please install it manually.",
+            config.command
+        ));
+    }
     let bin_dir = env.global_bin_dir();
     let bin_dir_bp = BackendPath(bin_dir.to_string_lossy().into_owned());
     env.backend()
@@ -69,10 +75,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
         .map_err(|e| format!("failed to create bin dir: {e}"))?;
 
     match config.auto_install {
-        AutoInstall::None => Err(format!(
-            "'{}' not found in PATH. Please install it manually.",
-            config.command
-        )),
+        AutoInstall::None => unreachable!("handled before preparing the install directory"),
 
         AutoInstall::GoInstall { package } => {
             if env.which("go").is_none() {
@@ -141,19 +144,25 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
                     config.command
                 ));
             }
-            info!(server = config.id, %package, "running: npm install -g");
+            let prefix = bin_dir.to_string_lossy().into_owned();
+            info!(server = config.id, %package, %prefix, "running: npm install --prefix");
             let result = env
                 .backend()
                 .exec()
                 .exec(ExecRequest {
                     command: "npm".to_string(),
-                    args: vec!["install".to_string(), "-g".to_string(), package.to_string()],
+                    args: vec![
+                        "install".to_string(),
+                        "--prefix".to_string(),
+                        prefix,
+                        package.to_string(),
+                    ],
                     ..Default::default()
                 })
                 .await
                 .map_err(|e| e.to_string())?;
             if result.exit_code != Some(0) {
-                return Err(format!("npm install -g {package} failed"));
+                return Err(format!("npm install {package} failed"));
             }
             env.which(config.command)
                 .ok_or_else(|| format!("'{}' still not found after npm install", config.command))
