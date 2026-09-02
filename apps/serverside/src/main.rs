@@ -250,6 +250,18 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigTestHook => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let hooker = cli
+                .hooker
+                .context("config test-hook requires --hooker <id>")?;
+            println!(
+                "{}",
+                serde_json::to_string(&hook_management::test_hook(&config, &hooker).await?)?
+            );
+            return Ok(());
+        }
         CliAction::ConfigMcp => {
             let config_path = resolve_config_path(cli.config)?;
             let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -956,6 +968,7 @@ enum CliAction {
     ConfigTestCustomTool,
     ConfigSkills,
     ConfigHooks,
+    ConfigTestHook,
     ConfigMcp,
     ConfigMcpServer,
     ConfigLsp,
@@ -988,6 +1001,7 @@ struct Cli {
     bearer_token_env: Option<String>,
     profile: Option<String>,
     agent: Option<String>,
+    hooker: Option<String>,
     manifest: Option<PathBuf>,
     allow_effects: bool,
     memory_queue_action: Option<memory_management::MemoryQueueAction>,
@@ -1011,6 +1025,7 @@ impl Cli {
         let mut bearer_token_env = None;
         let mut profile = None;
         let mut agent = None;
+        let mut hooker = None;
         let mut manifest = None;
         let mut allow_effects = false;
         let mut memory_queue_action = None;
@@ -1034,6 +1049,7 @@ impl Cli {
                     Some("test-custom-tool") => CliAction::ConfigTestCustomTool,
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
+                    Some("test-hook") => CliAction::ConfigTestHook,
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
@@ -1061,7 +1077,7 @@ impl Cli {
                     Some("delete-secret") => CliAction::ConfigDeleteSecret,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config vault`, `config set-secret`, `config delete-secret`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; run `xiaoo-daemon --help` for the current command list"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1089,6 +1105,7 @@ impl Cli {
                         bearer_token_env,
                         profile,
                         agent,
+                        hooker,
                         manifest,
                         allow_effects,
                         memory_queue_action,
@@ -1172,6 +1189,14 @@ impl Cli {
                     }
                     agent = Some(value.clone());
                 }
+                "--hooker" => {
+                    index += 1;
+                    let value = remaining.get(index).context("missing value for --hooker")?;
+                    if value.trim().is_empty() {
+                        bail!("--hooker must not be empty");
+                    }
+                    hooker = Some(value.clone());
+                }
                 "--manifest" => {
                     index += 1;
                     let value = remaining
@@ -1206,6 +1231,7 @@ impl Cli {
             bearer_token_env,
             profile,
             agent,
+            hooker,
             manifest,
             allow_effects,
             memory_queue_action,
@@ -1235,6 +1261,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config test-custom-tool --manifest <path> [--allow-effects] [--config <path>] < input.json\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
+         \x20     xiaoo-daemon config test-hook --hooker <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
@@ -1501,6 +1528,29 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigHooks);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_test_hook_command() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "test-hook",
+                "--hooker",
+                "builtin_session_created_hooker",
+                "--config",
+                "/tmp/demo.toml",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config test-hook should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigTestHook);
+        assert_eq!(
+            cli.hooker.as_deref(),
+            Some("builtin_session_created_hooker")
+        );
     }
 
     #[test]
