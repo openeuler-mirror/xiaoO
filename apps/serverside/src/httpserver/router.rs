@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
+use tower_http::cors::CorsLayer;
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
@@ -484,6 +485,9 @@ fn create_router_from_state(
             post(handle_channel_events),
         )
         .merge(protected_runtime_routes)
+        // The Harness web UI runs on a different local origin (usually :3080)
+        // and calls this daemon directly from the browser.
+        .layer(CorsLayer::very_permissive())
         .with_state(Arc::new(state));
 
     match rate_limit.and_then(|c| c.governor_layer()) {
