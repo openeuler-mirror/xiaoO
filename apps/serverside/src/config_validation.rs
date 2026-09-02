@@ -107,6 +107,7 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
             }),
     );
     validate_http(&config, &mut errors);
+    validate_trace(&config, &mut errors);
 
     ConfigValidationReport {
         valid: errors.is_empty(),
@@ -222,6 +223,37 @@ fn validate_http(config: &DaemonConfig, errors: &mut Vec<ConfigValidationIssue>)
                 "Dashboard Port 必须大于 0",
             );
         }
+    }
+}
+
+fn validate_trace(config: &DaemonConfig, errors: &mut Vec<ConfigValidationIssue>) {
+    let Some(trace) = config.app.trace.as_ref() else {
+        return;
+    };
+    let backend = trace
+        .storage_backend
+        .as_deref()
+        .unwrap_or("moirai-sqlite")
+        .trim();
+    if !matches!(backend, "moirai-sqlite" | "stdout" | "noop") {
+        push_error(
+            errors,
+            "trace.storage_backend".to_string(),
+            "unsupported_backend",
+            "Trace Backend 只支持 moirai-sqlite、stdout 或 noop",
+        );
+    }
+    if trace
+        .db_path
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        push_error(
+            errors,
+            "trace.db_path".to_string(),
+            "required",
+            "Trace 数据库路径不能为空",
+        );
     }
 }
 
@@ -555,5 +587,25 @@ api_key_env = "{env_name}"
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn rejects_unknown_trace_backend_and_empty_database_path() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[llm]\nprovider='ollama'\nmodel='test'\n\n[trace]\nstorage_backend='unknown'\ndb_path=''\n",
+        )
+        .expect("write config");
+        let report = validate_config_file(&path);
+        assert!(!report.valid);
+        assert!(report.errors.iter().any(|issue| {
+            issue.path == "trace.storage_backend" && issue.code == "unsupported_backend"
+        }));
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.path == "trace.db_path" && issue.code == "required"));
     }
 }

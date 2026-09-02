@@ -14,6 +14,10 @@ pub mod runtime_checkpoint;
 pub mod session_diff;
 pub mod skills_support;
 
+pub mod trace_support {
+    pub use trace::{default_trace_db_path, inspect_trace_database, TraceDiagnosticSummary};
+}
+
 #[cfg(feature = "test-support")]
 pub mod testing;
 

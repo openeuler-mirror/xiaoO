@@ -15,6 +15,11 @@ moirai = { path = "src/moirai", default-features = false }
 async-trait.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 ulid.workspace = true
 dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
