@@ -24,6 +24,7 @@ mod role_management;
 mod skill_management;
 mod tool_management;
 mod trace_management;
+mod vault_management;
 
 use crate::channel_management::ChannelManager;
 use crate::channels::{
@@ -372,6 +373,15 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&trace_management::trace_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigVault => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&vault_management::vault_report(&config))?
             );
             return Ok(());
         }
@@ -918,6 +928,7 @@ enum CliAction {
     ConfigChannels,
     ConfigHttp,
     ConfigTrace,
+    ConfigVault,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -1003,9 +1014,10 @@ impl Cli {
                     Some("channels") => CliAction::ConfigChannels,
                     Some("http") => CliAction::ConfigHttp,
                     Some("trace") => CliAction::ConfigTrace,
+                    Some("vault") => CliAction::ConfigVault,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config vault`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1180,6 +1192,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config channels [--config <path>]\n\n\
          \x20     xiaoo-daemon config http [--config <path>] [--host <host>] [--port <port>] [--no-dashboard]\n\n\
          \x20     xiaoo-daemon config trace [--config <path>]\n\n\
+         \x20     xiaoo-daemon config vault [--config <path>]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1560,6 +1573,18 @@ mod tests {
         )
         .expect("config trace should parse");
         assert_eq!(cli.action, CliAction::ConfigTrace);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_vault_command() {
+        let cli = Cli::parse(
+            ["config", "vault", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config vault should parse");
+        assert_eq!(cli.action, CliAction::ConfigVault);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 

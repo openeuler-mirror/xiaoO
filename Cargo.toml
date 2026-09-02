@@ -3,6 +3,7 @@ members = [
     "apps/shared",
     "apps/endside",
     "apps/serverside",
+    "apps/vault",
     "crates/llm-client",
     "crates/llm-client-cli",
     "crates/agent-types",

@@ -2,6 +2,7 @@ use crate::backend_management::backend_issues;
 use crate::channel_management::channel_report;
 use crate::compact_management::compact_issues;
 use crate::daemon_config::{DaemonConfig, LlmProfileConfig};
+use crate::vault_management::vault_issues;
 use regex::Regex;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -108,6 +109,15 @@ pub fn validate_config_file(config_path: &Path) -> ConfigValidationReport {
     );
     validate_http(&config, &mut errors);
     validate_trace(&config, &mut errors);
+    errors.extend(
+        vault_issues(&config)
+            .into_iter()
+            .map(|(path, code, message)| ConfigValidationIssue {
+                path,
+                code,
+                message,
+            }),
+    );
 
     ConfigValidationReport {
         valid: errors.is_empty(),
