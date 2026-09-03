@@ -7,6 +7,10 @@ pub struct TokenUsage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    /// Number of prompt tokens served from the provider KV cache.
+    /// Zero means the provider did not report a cache hit.
+    #[serde(default)]
+    pub cached_tokens: usize,
 }
 
 pub enum AgentOutcome {

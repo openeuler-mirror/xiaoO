@@ -192,6 +192,7 @@ impl GatewayRuntime {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens,
+                    cached_tokens: _,
                     estimated_input_tokens,
                     messages,
                 } => {

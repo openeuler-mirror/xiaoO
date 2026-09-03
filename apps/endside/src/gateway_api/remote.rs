@@ -148,6 +148,8 @@ enum RemoteSseEvent {
         total_tokens: usize,
         prompt_tokens: u64,
         completion_tokens: u64,
+        #[serde(default)]
+        cached_tokens: u64,
         estimated_input_tokens: u64,
         messages: Vec<xiaoo_api::chat::ChatMessage>,
         #[allow(dead_code)]
@@ -918,6 +920,7 @@ async fn handle_remote_event(
             total_tokens,
             prompt_tokens,
             completion_tokens,
+            cached_tokens,
             estimated_input_tokens,
             messages,
             actions,
@@ -934,6 +937,7 @@ async fn handle_remote_event(
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: total_tokens as u64,
+                cached_tokens,
                 estimated_input_tokens,
                 messages,
             });

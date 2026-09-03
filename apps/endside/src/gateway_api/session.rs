@@ -85,6 +85,8 @@ pub enum SessionTurnUpdate {
         prompt_tokens: u64,
         completion_tokens: u64,
         total_tokens: u64,
+        #[allow(dead_code)]
+        cached_tokens: u64,
         estimated_input_tokens: u64,
         messages: Vec<xiaoo_api::chat::ChatMessage>,
     },

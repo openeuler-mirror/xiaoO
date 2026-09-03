@@ -52,6 +52,7 @@ pub struct AppTurnResult {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    pub cached_tokens: u64,
     pub estimated_input_tokens: u64,
     pub outcome: TurnOutcome,
     /// Actions requested by `*.Session.lifecycle.state` plugin hookers after

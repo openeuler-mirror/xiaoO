@@ -283,6 +283,7 @@ impl SessionGateway {
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
+                        cached_tokens: 0,
                         estimated_input_tokens,
                         messages,
                     });

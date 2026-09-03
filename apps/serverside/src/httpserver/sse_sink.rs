@@ -18,6 +18,8 @@ use xiaoo_shared::plan::{
 };
 use xiaoo_shared::session_diff::{FileChangeDelta, SessionDiffForwarder};
 
+fn is_zero(value: &u64) -> bool { *value == 0 }
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SseStreamEvent {
@@ -114,6 +116,9 @@ pub enum SseStreamEvent {
         total_tokens: usize,
         prompt_tokens: u64,
         completion_tokens: u64,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "is_zero")]
+        cached_tokens: u64,
         estimated_input_tokens: u64,
         messages: Vec<ChatMessage>,
         stop_reason: String,
