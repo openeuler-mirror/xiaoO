@@ -1435,6 +1435,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     ctx.state.token_usage.prompt_tokens = response.message.usage.prompt_tokens;
     ctx.state.token_usage.completion_tokens = completion_tokens;
     ctx.state.token_usage.total_tokens = response.message.usage.total_tokens;
+    ctx.state.token_usage.cached_tokens = response.message.usage.cached_tokens;
 
     // Flush the final filtered text/reasoning only when the last in-stream
     // emit did not already cover the full content (throttling may have

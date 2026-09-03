@@ -29,6 +29,8 @@ use agent_types::interaction::InteractionRequest;
 use agent_types::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 
+fn is_zero(value: &u64) -> bool { *value == 0 }
+
 use crate::plan::TodoSnapshotItem;
 
 /// SSE 流中的一条事件。`agent_id` 区分主 Agent 与 Subagent 泳道。
@@ -125,6 +127,9 @@ pub enum RuntimeSseEvent {
         total_tokens: usize,
         prompt_tokens: u64,
         completion_tokens: u64,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "is_zero")]
+        cached_tokens: u64,
         estimated_input_tokens: u64,
         messages: Vec<ChatMessage>,
         stop_reason: String,

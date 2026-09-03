@@ -1308,6 +1308,7 @@ mod tests {
             prompt_tokens: 3,
             completion_tokens: 2,
             total_tokens: 5,
+            cached_tokens: 0,
             estimated_input_tokens: 3,
             outcome: xiaoo_shared::gateway::TurnOutcome::Complete,
             hook_actions: Vec::new(),
