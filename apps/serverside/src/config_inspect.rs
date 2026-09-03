@@ -72,7 +72,10 @@ pub fn inspect_config_file(
     apply_startup_overrides(&mut values, overrides);
 
     let loaded = DaemonConfig::load_from(config_path).ok();
-    let profiles = loaded.as_ref().map(inspect_profiles).unwrap_or_default();
+    let profiles = loaded
+        .as_ref()
+        .map(|config| inspect_profiles(config_path, config))
+        .unwrap_or_default();
 
     ConfigInspectReport {
         schema_version: CONFIG_SCHEMA_VERSION,
@@ -86,9 +89,10 @@ pub fn inspect_config_file(
     }
 }
 
-fn inspect_profiles(config: &DaemonConfig) -> Vec<InspectedProfile> {
+fn inspect_profiles(config_path: &Path, config: &DaemonConfig) -> Vec<InspectedProfile> {
     if config.app.llm.profiles.is_empty() {
         return vec![profile_summary(
+            config_path,
             "default",
             true,
             &LlmProfileConfig {
@@ -112,6 +116,7 @@ fn inspect_profiles(config: &DaemonConfig) -> Vec<InspectedProfile> {
         .iter()
         .map(|(id, profile)| {
             profile_summary(
+                config_path,
                 id,
                 config.app.llm.active_profile.as_deref() == Some(id.as_str()),
                 profile,
@@ -120,7 +125,12 @@ fn inspect_profiles(config: &DaemonConfig) -> Vec<InspectedProfile> {
         .collect()
 }
 
-fn profile_summary(id: &str, active: bool, profile: &LlmProfileConfig) -> InspectedProfile {
+fn profile_summary(
+    config_path: &Path,
+    id: &str,
+    active: bool,
+    profile: &LlmProfileConfig,
+) -> InspectedProfile {
     let provider = xiaoo_api::llm::resolve_provider_profile(&profile.provider);
     let api_key_env = profile
         .api_key_env
@@ -132,7 +142,7 @@ fn profile_summary(id: &str, active: bool, profile: &LlmProfileConfig) -> Inspec
             .is_some_and(xiaoo_api::llm::ProviderProfile::requires_api_key);
     let key_available = api_key_env
         .as_deref()
-        .and_then(|env_name| std::env::var(env_name).ok())
+        .and_then(|env_name| xiaoo_shared::llm_secrets::get_llm_secret(config_path, env_name).ok())
         .is_some_and(|value| !value.trim().is_empty());
     let api_key_status = if key_available {
         "available"
@@ -339,5 +349,34 @@ bearer_token = "do-not-print"
         );
         assert_eq!(report.config["http"]["bearer_token"], "<redacted>");
         assert_eq!(report.profiles[0].api_key_status, "not_required");
+    }
+
+    #[test]
+    fn reports_api_key_available_from_the_selected_config_secret_store() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let env_name = "XIAOO_INSPECT_ENCRYPTED_KEY_42";
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[llm]
+active_profile = "remote"
+
+[llm.profiles.remote]
+provider = "openrouter"
+model = "test-model"
+api_key_env = "{env_name}"
+"#,
+            ),
+        )
+        .expect("write config");
+        xiaoo_shared::llm_secrets::save_llm_secret(&path, env_name, "secret-key")
+            .expect("save secret");
+
+        let report = inspect_config_file(&path, &ConfigInspectOverrides::default());
+
+        assert!(report.valid, "{:?}", report.errors);
+        assert_eq!(report.profiles[0].api_key_status, "available");
     }
 }
