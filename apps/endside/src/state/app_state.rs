@@ -8,6 +8,10 @@ use xiaoo_shared::session_diff::SessionDiffTracker;
 use crate::backend::GatewayBackendConfig;
 use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
 use crate::config::{AgentRoleConfig, Config};
+use crate::input::file_mention::{
+    file_mention_candidates, file_mention_token, FileMentionCandidate, FileMentionToken,
+    FILE_MENTION_MAX_CANDIDATES,
+};
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
@@ -270,6 +274,8 @@ pub struct RenderState {
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub subagent_open_regions: Vec<SubagentOpenRegion>,
     pub slash_popup_inner: Option<Rect>,
+    pub file_mention_popup_inner: Option<Rect>,
+    pub file_mention_view_start: usize,
     pub interaction_prompt_list_area: Option<Rect>,
     pub interaction_prompt_supplement_area: Option<Rect>,
     /// Index of the first visible agent tab in the header.
@@ -297,6 +303,14 @@ pub struct RenderState {
 pub struct SlashState {
     pub selected: usize,
     pub dismissed_prefix: Option<String>,
+}
+
+#[derive(Default)]
+pub struct FileMentionState {
+    pub selected: usize,
+    pub dismissed_prefix: Option<String>,
+    pub cached_token: Option<FileMentionToken>,
+    pub candidates: Vec<FileMentionCandidate>,
 }
 
 pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeStats};
@@ -333,6 +347,7 @@ pub struct AppState {
     pub session_taken_over: bool,
     pub current_snapshot_context: Option<crate::session_snapshot_service::SnapshotContext>,
     pub slash: SlashState,
+    pub file_mention: FileMentionState,
     pub interaction_prompt: Option<InteractionPromptState>,
     pub render_state: RenderState,
     /// Active text selection in the transcript area, if any.
@@ -375,6 +390,7 @@ impl AppState {
             session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
+            file_mention: FileMentionState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
             transcript_selection: None,
@@ -425,6 +441,7 @@ impl AppState {
             session_taken_over: false,
             current_snapshot_context: None,
             slash: SlashState::default(),
+            file_mention: FileMentionState::default(),
             interaction_prompt: None,
             render_state: RenderState::default(),
             external_commands: load_external_commands(),
@@ -454,6 +471,7 @@ impl AppState {
         self.session_taken_over = false;
         self.current_snapshot_context = None;
         self.slash = SlashState::default();
+        self.file_mention = FileMentionState::default();
         self.reasoning_effort = self.agent_config.llm.reasoning_effort;
         self.interaction_prompt = None;
         self.render_state = RenderState::default();
@@ -721,6 +739,10 @@ impl AppState {
     /// workspace rather than a stale one captured at construction time.
     pub fn sync_diff_tracker_workspace(&mut self) {
         self.diff_tracker.set_workspace(self.workspace.clone());
+        // File-mention candidates are built against the workspace root; a cd
+        // invalidates any cached list until the next input change refreshes it.
+        self.file_mention.cached_token = None;
+        self.file_mention.candidates.clear();
     }
 
     pub fn display_file_path(&self, file_path: &str) -> String {
@@ -826,10 +848,115 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    pub fn file_mention_menu_visible(&self) -> bool {
+        if self.is_subagent_view_active() || self.interaction_prompt.is_some() {
+            return false;
+        }
+        if self.input_mode != InputMode::Editing || self.chat_state.is_loading {
+            return false;
+        }
+        if self.slash_menu_visible() {
+            return false;
+        }
+        let Some(token) = self.file_mention_current_token() else {
+            return false;
+        };
+        if self
+            .file_mention
+            .dismissed_prefix
+            .as_deref()
+            .is_some_and(|dismissed| dismissed == &token.typed)
+        {
+            return false;
+        }
+        !self.file_mention_candidates().is_empty()
+    }
+
+    fn file_mention_current_token(&self) -> Option<FileMentionToken> {
+        file_mention_token(
+            self.chat_state.input.value(),
+            self.chat_state.input.cursor(),
+        )
+    }
+
+    pub fn file_mention_candidates(&self) -> &[FileMentionCandidate] {
+        let Some(current) = self.file_mention_current_token() else {
+            return &[];
+        };
+        if self
+            .file_mention
+            .cached_token
+            .as_ref()
+            .is_some_and(|cached| cached == &current)
+        {
+            return &self.file_mention.candidates;
+        }
+        &[]
+    }
+
+    pub fn file_mention_candidate_count(&self) -> usize {
+        self.file_mention_candidates().len()
+    }
+
+    pub fn file_mention_selected_candidates(&self) -> Vec<FileMentionCandidate> {
+        self.file_mention_candidates().to_vec()
+    }
+
+    pub fn refresh_file_mention_candidates(&mut self) {
+        let Some(current) = self.file_mention_current_token() else {
+            self.file_mention.cached_token = None;
+            self.file_mention.candidates.clear();
+            return;
+        };
+        if self
+            .file_mention
+            .cached_token
+            .as_ref()
+            .is_some_and(|cached| cached == &current)
+        {
+            return;
+        }
+        let candidates =
+            file_mention_candidates(&self.workspace, &current.typed, FILE_MENTION_MAX_CANDIDATES);
+        self.file_mention.selected = self
+            .file_mention
+            .selected
+            .min(candidates.len().saturating_sub(1));
+        self.file_mention.candidates = candidates;
+        self.file_mention.cached_token = Some(current);
+    }
+
+    pub fn apply_file_mention_selection(&mut self) {
+        let Some(chosen) = self
+            .file_mention
+            .candidates
+            .get(self.file_mention.selected)
+            .map(|c| c.path.clone())
+        else {
+            return;
+        };
+        crate::input::file_mention::apply_file_mention_pick(&mut self.chat_state.input, &chosen);
+        self.chat_state.reset_input_history_navigation();
+        self.file_mention.dismissed_prefix = Some(chosen);
+        self.file_mention.cached_token = None;
+        self.file_mention.candidates.clear();
+        self.note_input_changed();
+    }
+
+    pub fn dismiss_current_file_mention_menu(&mut self) {
+        self.file_mention.dismissed_prefix =
+            self.file_mention_current_token().map(|token| token.typed);
+        self.file_mention.cached_token = None;
+        self.file_mention.candidates.clear();
+    }
+
     pub fn note_input_changed(&mut self) {
         let value = self.chat_state.input.value();
         let cursor = self.chat_state.input.cursor();
+
         let prefix = slash_typed_prefix(value, cursor);
+        let mention_token = file_mention_token(value, cursor);
+
         if self
             .slash
             .dismissed_prefix
@@ -838,11 +965,27 @@ impl AppState {
         {
             self.slash.dismissed_prefix = None;
         }
-        let candidate_count = self.slash_candidate_count();
-        if candidate_count == 0 {
-            return;
+
+        if mention_token.as_ref().map(|token| token.typed.as_str())
+            != self.file_mention.dismissed_prefix.as_deref()
+        {
+            self.file_mention.dismissed_prefix = None;
         }
-        self.slash.selected = self.slash.selected.min(candidate_count - 1);
+        if self
+            .file_mention
+            .cached_token
+            .as_ref()
+            .is_some_and(|cached| Some(cached) != mention_token.as_ref())
+        {
+            self.file_mention.cached_token = None;
+            self.file_mention.candidates.clear();
+        }
+        self.refresh_file_mention_candidates();
+
+        let candidate_count = self.slash_candidate_count();
+        if candidate_count > 0 {
+            self.slash.selected = self.slash.selected.min(candidate_count - 1);
+        }
     }
 
     pub fn apply_slash_selection(&mut self) {
