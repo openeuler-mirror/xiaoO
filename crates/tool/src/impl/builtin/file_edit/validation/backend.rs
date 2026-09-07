@@ -8,7 +8,6 @@
 //! - File was not modified since read (mtime tracking)
 //! - old_string exists in file
 //! - Ambiguous match check (multiple matches but replace_all=false)
-//! - Secret patterns not present in edit strings
 
 use std::path::Path;
 
@@ -22,8 +21,6 @@ use agent_contracts::backend::PathStat;
 ///
 /// These codes MUST match the TypeScript error codes exactly.
 pub mod error_code {
-    /// Secret pattern detected (error_code = 0)
-    pub const SECRET_DETECTED: u32 = 0;
     /// No change made (old_string == new_string) (error_code = 1)
     pub const NO_CHANGE: u32 = 1;
     /// File exists when trying to create with empty old_string (error_code = 3)
@@ -76,43 +73,6 @@ impl ValidationResult {
 /// Notebook file extension.
 const NOTEBOOK_EXTENSION: &str = "ipynb";
 
-/// Secret patterns that should not be edited.
-///
-/// These patterns indicate potentially sensitive data that should not be modified.
-const SECRET_PATTERNS: &[&str] = &[
-    "API_KEY",
-    "api_key",
-    "API-KEY",
-    "SECRET",
-    "PASSWORD",
-    "PWD",
-    "TOKEN",
-    "ACCESS_TOKEN",
-    "AUTH_TOKEN",
-    "PRIVATE_KEY",
-    "AWS_ACCESS_KEY",
-    "AWS_SECRET_KEY",
-    "STRIPE_KEY",
-    "GITHUB_TOKEN",
-];
-
-/// Checks if a string contains a secret pattern.
-///
-/// # Arguments
-/// * `s` - The string to check
-///
-/// # Returns
-/// * `true` if a secret pattern is found, `false` otherwise
-fn contains_secret(s: &str) -> bool {
-    let upper = s.to_uppercase();
-    for pattern in SECRET_PATTERNS {
-        if upper.contains(&pattern.to_uppercase()) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Checks if a file extension indicates a notebook file.
 ///
 /// # Arguments
@@ -157,29 +117,6 @@ fn validate_no_change(input: &FileEditInput) -> ValidationResult {
     ValidationResult::ok()
 }
 
-/// Validates that the file doesn't contain secret patterns.
-///
-/// # Arguments
-/// * `input` - The FileEditInput to validate
-///
-/// # Returns
-/// * `ValidationResult` indicating success or failure
-fn validate_no_secrets(input: &FileEditInput) -> ValidationResult {
-    if contains_secret(&input.old_string) {
-        return ValidationResult::error(
-            "Secret pattern detected in old_string",
-            error_code::SECRET_DETECTED,
-        );
-    }
-    if contains_secret(&input.new_string) {
-        return ValidationResult::error(
-            "Secret pattern detected in new_string",
-            error_code::SECRET_DETECTED,
-        );
-    }
-    ValidationResult::ok()
-}
-
 /// Validates that the file is not a notebook file.
 ///
 /// # Arguments
@@ -213,11 +150,6 @@ pub fn validate_input_backend(
     mtime: i64,
 ) -> ValidationResult {
     let result = validate_no_change(input);
-    if !result.result {
-        return result;
-    }
-
-    let result = validate_no_secrets(input);
     if !result.result {
         return result;
     }

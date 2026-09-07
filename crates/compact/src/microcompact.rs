@@ -49,20 +49,69 @@ pub fn apply_microcompact(
         }
     }
 
-    let mut removable_call_ids = windows
-        .into_iter()
-        .filter_map(|(call_id, window)| {
-            let assistant_index = window.assistant_index?;
-            let tool_index = window.tool_index?;
-            let latest_index = assistant_index.max(tool_index);
-            let age_ms = now_ms.saturating_sub(window.latest_timestamp);
-            if latest_index >= protected_tail_start || age_ms < policy.stale_tool_pair_after_ms {
-                return None;
-            }
+    // Tool-call protocol messages are atomic: an assistant message may contain
+    // several calls, and the provider requires a result for *every* call in that
+    // message.  Only compact a whole assistant call message when every call in
+    // it has a stale, paired result outside the protected tail.  In particular,
+    // never remove one result from a multi-call assistant message while keeping
+    // the assistant message (which would leave a dangling tool_call_id).
+    let mut removable_call_ids = HashSet::<String>::new();
+    for (assistant_index, message) in messages.iter().enumerate() {
+        if assistant_index >= protected_tail_start {
+            continue;
+        }
+        let call_ids = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if call_ids.is_empty()
+            || message
+                .blocks
+                .iter()
+                .any(|block| !matches!(block, ContentBlock::ToolUse { .. }))
+        {
+            continue;
+        }
 
-            Some(call_id)
-        })
-        .collect::<Vec<_>>();
+        let all_stale_and_paired = call_ids.iter().all(|call_id| {
+            let Some(window) = windows.get(call_id) else {
+                return false;
+            };
+            if window.assistant_index != Some(assistant_index) {
+                return false;
+            }
+            let Some(tool_index) = window.tool_index else {
+                return false;
+            };
+            tool_index < protected_tail_start
+                && now_ms.saturating_sub(window.latest_timestamp) >= policy.stale_tool_pair_after_ms
+        });
+        if !all_stale_and_paired {
+            continue;
+        }
+
+        // A result message can itself contain multiple blocks.  Keep the
+        // pairing atomic there too: if it contains an unqualified result, do
+        // not remove any call from this assistant message.
+        let result_messages_are_atomic = call_ids.iter().all(|call_id| {
+            let tool_index = windows
+                .get(call_id)
+                .and_then(|window| window.tool_index)
+                .expect("paired tool result checked above");
+            messages[tool_index].blocks.iter().all(|block| match block {
+                ContentBlock::ToolResult { call_id: id, .. } => call_ids.contains(id),
+                _ => false,
+            })
+        });
+        if result_messages_are_atomic {
+            removable_call_ids.extend(call_ids);
+        }
+    }
+    let mut removable_call_ids = removable_call_ids.into_iter().collect::<Vec<_>>();
     removable_call_ids.sort();
 
     let removable_lookup = removable_call_ids
