@@ -137,6 +137,9 @@ impl GatewayRuntime {
                         self.apply_subagent_tool_update(state, &agent_id.0, update);
                     }
                 }
+                SessionTurnUpdate::ToolBaseline { call_id, payload } => {
+                    state.inject_tool_file_baseline(&call_id, payload);
+                }
                 SessionTurnUpdate::ToolFileChange { call_id, delta } => {
                     state.apply_remote_delta(&call_id, delta);
                 }

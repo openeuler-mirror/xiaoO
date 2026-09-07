@@ -51,6 +51,19 @@ pub enum SessionTurnUpdate {
         agent_id: AgentId,
         update: ToolExecutionUpdate,
     },
+    /// Pre-execution file baseline captured synchronously by
+    /// `ChannelToolEventSink` on the executor thread when the
+    /// Pending/Running lifecycle event is emitted (i.e. BEFORE the tool
+    /// runs), and forwarded ahead of the matching `Tool` update. The TUI
+    /// event loop drains the channel only after the tool has typically
+    /// already finished, so a baseline read at `Tool`-processing time
+    /// would freeze the post-execution content (the local-mode race that
+    /// made content-diffs report 0/0); this message carries the true
+    /// "before" content for `AppState::inject_tool_file_baseline`.
+    ToolBaseline {
+        call_id: String,
+        payload: xiaoo_shared::session_diff::ToolFileBaselinePayload,
+    },
     /// Per-call file change delta forwarded from the daemon in remote mode.
     /// The TUI applies it directly to its session-diff tracker, bypassing
     /// the baseline/args computation that only the daemon can do (since it
@@ -151,6 +164,10 @@ pub(super) struct ChannelLoopEventSink {
 
 pub(super) struct ChannelToolEventSink {
     pub(super) updates_tx: UnboundedSender<SessionTurnUpdate>,
+    /// Workspace root used to resolve tool target-file paths for the
+    /// synchronous pre-execution baseline capture (see
+    /// `capture_baseline_update`).
+    pub(super) workspace: std::path::PathBuf,
 }
 
 pub(super) struct ChannelInteractionHandle {

@@ -684,6 +684,19 @@ impl AppState {
             .on_tool_running(call_id, tool, args_preview);
     }
 
+    /// High-level entry: pre-execution file baseline captured
+    /// synchronously by the tool-event sink on the executor thread
+    /// (before the tool ran), delivered via
+    /// `SessionTurnUpdate::ToolBaseline`.
+    pub fn inject_tool_file_baseline(
+        &mut self,
+        call_id: &str,
+        payload: xiaoo_shared::session_diff::ToolFileBaselinePayload,
+    ) {
+        self.diff_tracker
+            .inject_session_file_baseline(call_id, &payload);
+    }
+
     /// High-level entry: tool transitioned to Completed. Returns the computed
     /// delta (used in remote mode to forward to the TUI; local callers may
     /// discard it).
@@ -694,6 +707,19 @@ impl AppState {
         args_preview: &str,
         file_change: Option<crate::chat::FileChangeDelta>,
     ) -> Option<crate::chat::FileChangeDelta> {
+        let file_change_str = match &file_change {
+            Some(delta) => format!(
+                "Some(file_path={}, additions={}, deletions={})",
+                delta.file_path, delta.additions, delta.deletions
+            ),
+            None => "None".to_string(),
+        };
+        let _ = crate::support::error_log::append_error_log(
+            "app_state on_tool_completed",
+            &format!(
+                "call_id={call_id} tool={tool} args_preview={args_preview} file_change={file_change_str}"
+            ),
+        );
         self.diff_tracker
             .on_tool_completed(call_id, tool, args_preview, file_change.map(Into::into))
             .map(Into::into)

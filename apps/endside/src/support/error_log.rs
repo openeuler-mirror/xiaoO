@@ -20,7 +20,10 @@ pub(crate) fn record_tui_error(source: &str, error: impl AsRef<str>) -> String {
     }
 }
 
-fn append_error_log(source: &str, error: &str) -> std::io::Result<()> {
+/// Append a raw entry to `~/.xiaoo/log/error.log`. Exposed so non-error
+/// diagnostics (e.g. `on_tool_completed` parameter dumps) can share the same
+/// log file without going through the user-facing `record_tui_error`.
+pub(crate) fn append_error_log(source: &str, error: &str) -> std::io::Result<()> {
     let path = error_log_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
