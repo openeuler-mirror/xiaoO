@@ -403,6 +403,8 @@ impl App {
                 }
                 self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
+            } else if self.state.file_mention_menu_visible() {
+                self.state.apply_file_mention_selection();
             } else {
                 self.state.cycle_agent_role(false);
             }
@@ -435,6 +437,38 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.state.dismiss_current_slash_menu();
+                    return Ok(());
+                }
+                KeyCode::PageUp | KeyCode::PageDown => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        if self.state.file_mention_menu_visible() {
+            self.state.refresh_file_mention_candidates();
+            match key.code {
+                KeyCode::Up => {
+                    self.state.file_mention.selected =
+                        self.state.file_mention.selected.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    let candidate_count = self.state.file_mention_candidates().len();
+                    if candidate_count > 0 {
+                        self.state.file_mention.selected =
+                            (self.state.file_mention.selected + 1).min(candidate_count - 1);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    self.state.apply_file_mention_selection();
+                    self.state.dismiss_current_file_mention_menu();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.state.dismiss_current_file_mention_menu();
                     return Ok(());
                 }
                 KeyCode::PageUp | KeyCode::PageDown => {

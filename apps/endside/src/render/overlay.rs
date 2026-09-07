@@ -235,6 +235,96 @@ impl App {
         self.render_slash_popup(frame, dialog_area, &refs, self.state.slash.selected);
     }
 
+    pub(crate) fn render_file_mention_popup_dialog(&mut self, frame: &mut Frame, area: Rect) {
+        if !self.state.file_mention_menu_visible() {
+            self.state.render_state.file_mention_popup_inner = None;
+            return;
+        }
+        self.state.refresh_file_mention_candidates();
+        let candidate_count = self.state.file_mention_candidate_count();
+        if candidate_count == 0 {
+            self.state.render_state.file_mention_popup_inner = None;
+            return;
+        }
+
+        let desired_height = (candidate_count as u16 + 2).max(3);
+        let available_height = area.height.saturating_sub(4).max(1);
+        let height = desired_height.min(available_height).max(3);
+        let available_width = area.width.saturating_sub(4).max(1);
+        let width = if available_width >= 32 {
+            available_width.min(80).max(32)
+        } else {
+            available_width
+        };
+        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        let y = area.y + (area.height.saturating_sub(height)) / 2;
+        let dialog_area = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+
+        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        self.render_file_mention_popup(
+            frame,
+            dialog_area,
+            self.state.file_mention_selected_candidates(),
+            self.state.file_mention.selected,
+        );
+    }
+
+    pub(crate) fn render_file_mention_popup(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        candidates: Vec<crate::input::file_mention::FileMentionCandidate>,
+        selected: usize,
+    ) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(self.state.theme.border_active))
+            .title(" @ 文件 ")
+            .style(Style::default().bg(self.state.theme.background));
+        let inner = block.inner(area);
+        self.state.render_state.file_mention_popup_inner = Some(inner);
+
+        let items: Vec<ListItem> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let is_selected = index == selected;
+                let style = if is_selected {
+                    Style::default()
+                        .fg(self.state.theme.foreground)
+                        .bg(self.state.theme.selection)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.state.theme.foreground)
+                };
+                let label = if candidate.path.is_empty() {
+                    "@.".to_string()
+                } else {
+                    format!("@{}", candidate.path)
+                };
+                let trailing = if candidate.is_dir { "/" } else { "" };
+                ListItem::new(Line::from(vec![
+                    Span::styled(label, style),
+                    Span::styled(trailing, Style::default().fg(self.state.theme.muted)),
+                ]))
+            })
+            .collect();
+        let view_len = inner.height as usize;
+        let start = selected
+            .saturating_sub(view_len.saturating_sub(1))
+            .min(candidates.len().saturating_sub(view_len).max(0));
+        let end = (start + view_len).min(candidates.len());
+        self.state.render_state.file_mention_view_start = start;
+        let list = List::new(items.into_iter().skip(start).take(end - start)).block(block);
+        frame.render_widget(list, area);
+    }
+
     pub(crate) fn render_slash_popup(
         &mut self,
         frame: &mut Frame,
@@ -302,6 +392,8 @@ impl App {
         let title = if self.state.input_mode == InputMode::InteractionPrompt {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 | Tab 切换补充 "
         } else if self.state.slash_menu_visible() {
+            " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
+        } else if self.state.file_mention_menu_visible() {
             " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
         } else if self.state.api_key_dialog.is_some() {
             " Enter 连接 | Esc 取消 "

@@ -87,6 +87,7 @@ impl App {
         self.state.render_state.interaction_prompt_list_area = None;
         self.state.render_state.interaction_prompt_supplement_area = None;
         self.state.render_state.slash_popup_inner = None;
+        self.state.render_state.file_mention_popup_inner = None;
         self.state.render_state.api_key_toggle_area = None;
         self.render_input(frame, input_chunk);
         #[cfg(debug_assertions)]
@@ -115,6 +116,7 @@ impl App {
         {
             self.render_interaction_prompt_dialog(frame, frame.area());
             self.render_slash_popup_dialog(frame, frame.area());
+            self.render_file_mention_popup_dialog(frame, frame.area());
         }
         if let Some(dialog) = self.state.provider_dialog.as_ref() {
             self.render_provider_dialog(frame, frame.area(), dialog);

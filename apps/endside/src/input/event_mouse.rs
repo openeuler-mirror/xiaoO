@@ -27,6 +27,14 @@ impl App {
             return Ok(());
         }
 
+        if self.state.file_mention_menu_visible() {
+            if self.handle_header_mouse(mouse_event) {
+                return Ok(());
+            }
+            self.handle_file_mention_popup_mouse(mouse_event)?;
+            return Ok(());
+        }
+
         if self.state.slash_menu_visible() {
             if self.handle_header_mouse(mouse_event) {
                 return Ok(());
@@ -40,6 +48,7 @@ impl App {
         }
 
         self.handle_slash_popup_mouse(mouse_event)?;
+        self.handle_file_mention_popup_mouse(mouse_event)?;
         self.handle_transcript_mouse(mouse_event);
         self.handle_input_mouse(mouse_event);
         Ok(())
@@ -221,6 +230,26 @@ impl App {
                         self.state.slash.selected = row;
                         self.state.apply_slash_selection();
                     }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_file_mention_popup_mouse(&mut self, mouse_event: MouseEvent) -> Result<()> {
+        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left)
+            || !self.state.file_mention_menu_visible()
+        {
+            return Ok(());
+        }
+        if let Some(inner) = self.state.render_state.file_mention_popup_inner {
+            if mouse_in_rect(mouse_event.column, mouse_event.row, inner) {
+                self.state.refresh_file_mention_candidates();
+                let visible_row = (mouse_event.row - inner.y) as usize;
+                let index = self.state.render_state.file_mention_view_start + visible_row;
+                if index < self.state.file_mention_candidates().len() {
+                    self.state.file_mention.selected = index;
+                    self.state.apply_file_mention_selection();
                 }
             }
         }
