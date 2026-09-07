@@ -315,6 +315,7 @@ Main agent call example:
 [skills]
 dirs = ["~/.xiaoo/skills", "/path/to/custom/skills"]  # Skills directory list (optional)
 allow_scripts = true                                    # Allow script-type skills (optional)
+disabled = ["legacy-review"]                           # Installed Skill IDs not loaded at runtime (optional)
 ```
 
 For detailed skills usage instructions, please refer to [skill_usage.md](./skill_usage.md).

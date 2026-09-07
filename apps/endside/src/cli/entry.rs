@@ -372,6 +372,11 @@ fn resolve_skills_config_from_file(file_cfg: &FileConfig) -> SkillsConfig {
             .as_ref()
             .and_then(|s| s.allow_scripts)
             .unwrap_or(false),
+        disabled: file_cfg
+            .skills
+            .as_ref()
+            .map(|skills| skills.disabled.iter().cloned().collect())
+            .unwrap_or_default(),
         ..SkillsConfig::default()
     }
 }
@@ -422,10 +427,16 @@ fn build_skills_config() -> SkillsConfig {
         .as_ref()
         .and_then(|s| s.allow_scripts)
         .unwrap_or(false);
+    let disabled = file_cfg
+        .skills
+        .as_ref()
+        .map(|skills| skills.disabled.iter().cloned().collect())
+        .unwrap_or_default();
 
     SkillsConfig {
         skills_dirs,
         allow_scripts,
+        disabled,
         ..SkillsConfig::default()
     }
 }
