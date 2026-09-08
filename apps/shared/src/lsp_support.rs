@@ -5,6 +5,9 @@
 // 本模块内 `build_extra_server_configs` 亦使用 `ServerConfig` / `AutoInstall`，
 // 直接复用此 `pub use`，无需重复私有 import。
 pub use lsp::{AutoInstall, LspServiceRegistry, ServerConfig};
+use serde::Serialize;
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 pub trait ExtraServerConfigView {
     fn id(&self) -> &str;
@@ -60,4 +63,168 @@ pub fn build_extra_server_configs<T: ExtraServerConfigView>(
             }
         })
         .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct LspCatalogReport {
+    pub schema_version: u32,
+    pub enabled: bool,
+    pub servers: Vec<LspServerSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LspServerSummary {
+    pub id: String,
+    pub source: &'static str,
+    pub extensions: Vec<String>,
+    pub command: String,
+    pub args: Vec<String>,
+    pub root_markers: Vec<String>,
+    pub language_id: String,
+    pub auto_install: &'static str,
+    pub configured: bool,
+    pub installed: bool,
+    pub executable_path: Option<String>,
+    pub startable: bool,
+    pub running: bool,
+}
+
+pub fn lsp_catalog<T: ExtraServerConfigView>(
+    enabled: bool,
+    disabled_servers: &[String],
+    extra_servers: &[T],
+) -> LspCatalogReport {
+    let disabled = disabled_servers
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut servers = lsp::servers::builtin_servers()
+        .into_iter()
+        .map(|server| server_summary(server, "builtin", enabled, &disabled))
+        .collect::<Vec<_>>();
+    servers.extend(
+        build_extra_server_configs(extra_servers)
+            .into_iter()
+            .map(|server| server_summary(server, "custom", enabled, &disabled)),
+    );
+    servers.sort_by(|left, right| left.id.cmp(&right.id));
+    LspCatalogReport {
+        schema_version: 1,
+        enabled,
+        servers,
+    }
+}
+
+fn server_summary(
+    server: ServerConfig,
+    source: &'static str,
+    globally_enabled: bool,
+    disabled: &HashSet<&str>,
+) -> LspServerSummary {
+    let executable = find_executable(server.command);
+    let installed = executable.is_some();
+    let configured = globally_enabled && !disabled.contains(server.id);
+    LspServerSummary {
+        id: server.id.to_string(),
+        source,
+        extensions: server
+            .extensions
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        command: server.command.to_string(),
+        args: server
+            .args
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        root_markers: server
+            .root_markers
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        language_id: server.language_id.to_string(),
+        auto_install: auto_install_name(&server.auto_install),
+        configured,
+        installed,
+        executable_path: executable.map(|path| path.display().to_string()),
+        startable: configured && installed,
+        running: false,
+    }
+}
+
+fn find_executable(command: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let extra = std::env::var_os("XIAOO_BIN")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local/share/xiaoo/bin")));
+    std::env::split_paths(&path)
+        .chain(extra)
+        .flat_map(|directory| {
+            let candidate = directory.join(command);
+            #[cfg(windows)]
+            let candidates = vec![candidate, directory.join(format!("{command}.exe"))];
+            #[cfg(not(windows))]
+            let candidates = vec![candidate];
+            candidates
+        })
+        .find(|path| path.is_file())
+}
+
+fn auto_install_name(auto_install: &AutoInstall) -> &'static str {
+    match auto_install {
+        AutoInstall::None => "none",
+        AutoInstall::GoInstall { .. } => "go",
+        AutoInstall::PipInstall { .. } => "pip",
+        AutoInstall::NpmInstall { .. } => "npm",
+        AutoInstall::CargoInstall { .. } => "cargo",
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::{lsp_catalog, ExtraServerConfigView};
+
+    struct Extra;
+
+    impl ExtraServerConfigView for Extra {
+        fn id(&self) -> &str {
+            "custom-lsp"
+        }
+        fn extensions(&self) -> &[String] {
+            &[]
+        }
+        fn command(&self) -> &str {
+            "missing-custom-lsp-command"
+        }
+        fn args(&self) -> &[String] {
+            &[]
+        }
+        fn root_markers(&self) -> &[String] {
+            &[]
+        }
+        fn language_id(&self) -> &str {
+            "custom"
+        }
+    }
+
+    #[test]
+    fn reports_builtin_and_custom_server_availability() {
+        let report = lsp_catalog(true, &["rust-analyzer".to_string()], &[Extra]);
+        assert_eq!(report.schema_version, 1);
+        let rust = report
+            .servers
+            .iter()
+            .find(|server| server.id == "rust-analyzer")
+            .unwrap();
+        assert!(!rust.configured);
+        let custom = report
+            .servers
+            .iter()
+            .find(|server| server.id == "custom-lsp")
+            .unwrap();
+        assert_eq!(custom.source, "custom");
+        assert!(!custom.installed);
+        assert!(!custom.startable);
+    }
 }

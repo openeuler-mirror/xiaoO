@@ -15,6 +15,9 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config roles",
             "config tools",
             "config skills",
+            "config hooks",
+            "config mcp",
+            "config lsp",
         ]
         .into_iter()
         .map(str::to_string)
@@ -41,10 +44,17 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("subagents", true, false, false, false, &["list_roles"]),
             domain("tools", true, false, false, false, &["list"]),
             domain("skills", true, false, false, false, &["list"]),
-            domain("hooks", true, false, false, false, &[]),
-            domain("mcp_client", true, false, false, false, &[]),
+            domain("hooks", true, false, false, false, &["list"]),
+            domain(
+                "mcp_client",
+                true,
+                true,
+                false,
+                true,
+                &["list", "test_connections"],
+            ),
             domain("mcp_server", true, false, false, false, &[]),
-            domain("lsp", true, false, false, false, &[]),
+            domain("lsp", true, true, false, true, &["list", "detect"]),
             domain("memory", true, false, false, false, &[]),
             domain("cron", true, false, false, false, &[]),
             domain("channels", true, false, false, false, &[]),
@@ -144,5 +154,36 @@ mod tests {
         assert!(!skills.runtime_write);
         assert!(!skills.test);
         assert!(skills.actions.iter().any(|action| action == "list"));
+
+        let hooks = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "hooks")
+            .expect("hooks capability");
+        assert!(hooks.configurable);
+        assert!(hooks.actions.iter().any(|action| action == "list"));
+
+        let mcp = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "mcp_client")
+            .expect("MCP capability");
+        assert!(mcp.runtime_read);
+        assert!(mcp.test);
+        assert!(mcp.actions.iter().any(|action| action == "list"));
+        assert!(mcp
+            .actions
+            .iter()
+            .any(|action| action == "test_connections"));
+
+        let lsp = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "lsp")
+            .expect("LSP capability");
+        assert!(lsp.runtime_read);
+        assert!(lsp.test);
+        assert!(lsp.actions.iter().any(|action| action == "list"));
+        assert!(lsp.actions.iter().any(|action| action == "detect"));
     }
 }
