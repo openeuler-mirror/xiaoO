@@ -191,7 +191,7 @@ fn optional_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
     })
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 struct AgentOperationOutput {
     operation_id: String,
     session_id: String,
@@ -219,6 +219,47 @@ enum AgentOperationDetail {
         /// Never `null`, so the schema can declare a plain scalar `string`.
         error: String,
     },
+}
+
+/// Schema-only mirror of `AgentOperationOutput` that additionally declares the
+/// `state` discriminator as a top-level property. Workflow tools (n8n, Dify)
+/// surface only root-level `properties` and ignore `oneOf` branches, so without
+/// this the `state` field is invisible to their parameter auto-detection. The
+/// wire format is unchanged: `state` is still emitted by the flattened
+/// `AgentOperationDetail` tag.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[schemars(rename = "AgentOperationOutput")]
+struct AgentOperationOutputSchema {
+    operation_id: String,
+    session_id: String,
+    created: bool,
+    /// "running" until the operation finishes, "done" afterwards.
+    #[schemars(schema_with = "operation_state_schema")]
+    state: String,
+    #[serde(flatten)]
+    detail: AgentOperationDetail,
+}
+
+fn operation_state_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": ["running", "done"]
+    })
+}
+
+impl JsonSchema for AgentOperationOutput {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AgentOperationOutput".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        "AgentOperationOutput".into()
+    }
+
+    fn json_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <AgentOperationOutputSchema as JsonSchema>::json_schema(gen)
+    }
 }
 
 struct AgentOperationRegistry {
@@ -1727,6 +1768,105 @@ mod tests {
     }
 
     #[test]
+    fn agent_operation_schema_exposes_state_as_top_level_property() {
+        let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
+            .expect("agent operation schema should serialize");
+        let schema_text = schema.to_string();
+
+        let properties = schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .expect("顶层 properties 必须存在");
+        let actual: std::collections::BTreeSet<&str> =
+            properties.keys().map(|k| k.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["created", "operation_id", "session_id", "state"].into_iter().collect();
+        assert_eq!(actual, expected, "顶层属性必须与集合完全一致: {schema_text}");
+
+        let state = properties.get("state").expect("state 顶层属性");
+        assert_eq!(state.get("type").and_then(|v| v.as_str()), Some("string"));
+        let variants: Vec<&str> = state
+            .get("enum")
+            .and_then(|v| v.as_array())
+            .expect("state 必须声明 enum 取值")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(variants, vec!["running", "done"]);
+
+        let required: Vec<&str> = schema
+            .pointer("/required")
+            .and_then(|v| v.as_array())
+            .expect("required 列表")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            required.contains(&"state"),
+            "state 必须是必填字段: {schema_text}"
+        );
+
+        assert!(schema.pointer("/oneOf/0/properties/snapshot").is_some());
+        assert!(schema.pointer("/oneOf/1/properties/reply").is_some());
+    }
+
+    #[test]
+    fn agent_operation_schema_state_enum_matches_serialized_tag() {
+        // 影子 schema 的 state enum 是手写的，必须与 AgentOperationDetail
+        // 的 serde tag 实际输出保持一致：逐变体序列化，校验 wire 上的
+        // `state` 值都落在 schema enum 里。
+        let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
+            .expect("agent operation schema should serialize");
+        let allowed: Vec<String> = schema
+            .pointer("/properties/state/enum")
+            .and_then(|v| v.as_array())
+            .expect("state enum")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        assert!(!allowed.is_empty());
+
+        let outputs = [
+            AgentOperationOutput {
+                operation_id: "op".to_string(),
+                session_id: "session".to_string(),
+                created: true,
+                detail: AgentOperationDetail::Running {
+                    poll_after_ms: 1_000,
+                    snapshot: AgentRunningSnapshot {
+                        phase: AgentOperationPhase::Queued,
+                        current_turn: 0,
+                        last_text: String::new(),
+                        updated_at_ms: 0,
+                    },
+                },
+            },
+            AgentOperationOutput {
+                operation_id: "op".to_string(),
+                session_id: "session".to_string(),
+                created: false,
+                detail: AgentOperationDetail::Done {
+                    reply: "done reply".to_string(),
+                    outcome: "complete".to_string(),
+                    usage: McpUsage::zeroed(),
+                    error: String::new(),
+                },
+            },
+        ];
+        for output in &outputs {
+            let json = serde_json::to_value(output).expect("serialize output");
+            let state = json
+                .get("state")
+                .and_then(|v| v.as_str())
+                .expect("wire state tag");
+            assert!(
+                allowed.iter().any(|v| v == state),
+                "wire state `{state}` 未被 schema enum 覆盖: {allowed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn agent_operation_schema_has_only_portable_integer_types() {
         let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
             .expect("agent operation schema should serialize");
@@ -2481,6 +2621,10 @@ mod tests {
         assert!(body.contains("file, shell, skill, plugin"), "{body}");
         assert!(body.contains("absolute existing workspace"), "{body}");
         assert!(body.contains("poll agent_status"), "{body}");
+        assert!(
+            body.contains("\"enum\":[\"running\",\"done\"]"),
+            "outputSchema 顶层 state 属性必须声明 enum 取值: {body}"
+        );
         assert!(!body.contains("\"name\":\"chat\""), "{body}");
 
         let called = router
