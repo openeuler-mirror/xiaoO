@@ -17,6 +17,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config skills",
             "config hooks",
             "config mcp",
+            "config mcp-server",
             "config lsp",
         ]
         .into_iter()
@@ -53,7 +54,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["list", "test_connections"],
             ),
-            domain("mcp_server", true, false, false, false, &[]),
+            domain(
+                "mcp_server",
+                true,
+                true,
+                false,
+                true,
+                &["inspect", "preflight"],
+            ),
             domain("lsp", true, true, false, true, &["list", "detect"]),
             domain("memory", true, false, false, false, &[]),
             domain("cron", true, false, false, false, &[]),
@@ -185,5 +193,18 @@ mod tests {
         assert!(lsp.test);
         assert!(lsp.actions.iter().any(|action| action == "list"));
         assert!(lsp.actions.iter().any(|action| action == "detect"));
+
+        let mcp_server = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "mcp_server")
+            .expect("MCP Server capability");
+        assert!(mcp_server.runtime_read);
+        assert!(mcp_server.test);
+        assert!(mcp_server.actions.iter().any(|action| action == "inspect"));
+        assert!(mcp_server
+            .actions
+            .iter()
+            .any(|action| action == "preflight"));
     }
 }
