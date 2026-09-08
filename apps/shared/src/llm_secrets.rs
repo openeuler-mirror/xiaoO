@@ -48,9 +48,19 @@ fn llm_secrets_path(config_path: &Path) -> PathBuf {
         .join(LLM_SECRETS_FILE)
 }
 
+/// Resolve one LLM secret for a specific configuration without changing the
+/// process environment used by a running daemon.
+pub fn get_llm_secret(config_path: &Path, env_name: &str) -> Result<String> {
+    load_llm_secrets(&llm_secrets_path(config_path))?
+        .remove(env_name)
+        .or_else(|| std::env::var(env_name).ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("API key environment variable {env_name} not found"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{inject_llm_secrets_into_env, save_llm_secret};
+    use super::{get_llm_secret, inject_llm_secrets_into_env, save_llm_secret};
 
     #[test]
     fn saved_secret_is_injected_from_config_directory() {
@@ -60,6 +70,10 @@ mod tests {
 
         std::env::remove_var(env_name);
         save_llm_secret(&config_path, env_name, "test-secret").expect("save secret");
+        assert_eq!(
+            get_llm_secret(&config_path, env_name).expect("resolve selected config secret"),
+            "test-secret"
+        );
         inject_llm_secrets_into_env(&config_path).expect("inject secret");
 
         assert_eq!(std::env::var(env_name).as_deref(), Ok("test-secret"));

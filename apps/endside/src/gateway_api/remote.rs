@@ -650,7 +650,7 @@ impl GatewayRuntime {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
-            reasoning_effort: state.reasoning_effort,
+            reasoning_effort: Some(state.reasoning_effort),
             llm: Some(super::runtime_request::llm_runtime_config_from_state(state)),
             workspace: None,
             skills: None,

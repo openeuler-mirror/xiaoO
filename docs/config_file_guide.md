@@ -104,6 +104,45 @@ is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 
 **Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
 
+### Native Model Profiles
+
+Use native profiles when more than one model is required. `active_profile`
+selects the startup/default profile; disabled profiles remain in the file but
+cannot be selected by a runtime.
+
+```toml
+[llm]
+active_profile = "qwen"
+
+[llm.profiles.qwen]
+enabled = true
+provider = "openai-compatible"
+model = "qwen3.7-plus"
+api_base = "https://example.com/compatible-mode/v1"
+api_key_env = "QWEN_API_KEY"
+context_window = 128000
+max_tokens = 16384
+reasoning_effort = "off"
+kvcache_enabled = false
+kvcache_debug_enabled = false
+
+[llm.profiles.deepseek]
+enabled = true
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+```
+
+`reasoning_effort` 是 Profile 的默认推理强度。HTTP/daemon 客户端省略单轮请求的
+`reasoning_effort` 时使用此值；显式传入 `off`、`high` 或 `max` 时只覆盖当前请求。
+
+Profile IDs are the keys below `llm.profiles`. When profiles exist,
+`active_profile` is required and must reference an enabled profile.
+Daemon clients can select an enabled profile for a session by sending
+`llm.profile_id` in the runtime open request. The resolved profile ID is stored
+with the session, so subsequent turns keep using it until a client explicitly
+selects another profile.
+
 ### Basic Configuration
 
 ```toml

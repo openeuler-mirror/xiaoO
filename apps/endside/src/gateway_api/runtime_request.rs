@@ -365,7 +365,7 @@ impl GatewayRuntime {
             reply_to_message_id: None,
             root_message_id: None,
             mentions: Vec::new(),
-            reasoning_effort: state.reasoning_effort,
+            reasoning_effort: Some(state.reasoning_effort),
             llm: None,
             workspace: None,
             skills: None,
@@ -405,12 +405,14 @@ fn trim_non_empty(value: String) -> Option<String> {
 
 pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {
     LlmRuntimeConfig {
+        profile_id: None,
         provider: Some(state.agent_config.llm.provider.clone()),
         model: Some(state.agent_config.llm.model.clone()),
         api_base: (!state.agent_config.llm.api_base.trim().is_empty())
             .then(|| state.agent_config.llm.api_base.clone()),
         api_key_env: state.agent_config.llm.api_key_env.clone(),
         api_key: None,
+        reasoning_effort: Some(state.reasoning_effort),
     }
 }
 

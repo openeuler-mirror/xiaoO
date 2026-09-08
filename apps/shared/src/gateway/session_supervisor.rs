@@ -457,6 +457,10 @@ impl SessionSupervisor {
         // must inherit the snapshot and never touch the host source again.
         runtime_input.workspace = None;
         runtime_input.skills = None;
+        let reasoning_effort = effective_reasoning_effort(
+            request.reasoning_effort,
+            resolved_runtime.descriptor.llm.as_ref(),
+        );
         let result = self
             .run_lane_until_terminal(LaneRunInput {
                 agent_id: root_agent_id.clone(),
@@ -464,7 +468,7 @@ impl SessionSupervisor {
                 resolved_runtime: Some(resolved_runtime),
                 user_message: request.text,
                 append_user_message: true,
-                reasoning_effort: request.reasoning_effort,
+                reasoning_effort,
                 loop_event_sink_override,
                 interaction_handle_override,
                 channel_file_sender_override,
@@ -1199,6 +1203,15 @@ impl SessionSupervisor {
     }
 }
 
+fn effective_reasoning_effort(
+    requested: Option<ReasoningEffort>,
+    runtime_llm: Option<&crate::gateway::LlmRuntimeConfig>,
+) -> ReasoningEffort {
+    requested
+        .or_else(|| runtime_llm.and_then(|llm| llm.reasoning_effort))
+        .unwrap_or_default()
+}
+
 fn runtime_input_from_session(
     session: &SessionRecord,
     agent_id: AgentId,
@@ -1384,6 +1397,23 @@ mod tests {
         InMemorySessionStore, SessionRuntimeBuildInput, SessionRuntimeResolveError,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn profile_reasoning_is_default_and_explicit_turn_value_wins() {
+        let runtime_llm = crate::gateway::LlmRuntimeConfig {
+            reasoning_effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            effective_reasoning_effort(None, Some(&runtime_llm)),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            effective_reasoning_effort(Some(ReasoningEffort::Off), Some(&runtime_llm)),
+            ReasoningEffort::Off
+        );
+    }
 
     /// Pins that `SessionSupervisor::new` initializes both sink fields
     /// to `None`, so `run_lane_until_terminal`'s `is_none()` guard

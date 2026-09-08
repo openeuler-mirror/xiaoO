@@ -11,6 +11,53 @@
 
 ## Daemon Startup Parameters
 
+Before starting the daemon, configuration and referenced credentials can be
+validated without opening ports:
+
+```bash
+xiaoo-daemon config validate --config ~/.config/xiaoo/config.toml
+```
+
+校验覆盖所有已启用的 LLM Profile，并检查 Provider、模型、API Base、API Key
+引用、数值范围和配置跨字段约束。命令始终向标准输出打印结构化 JSON；配置无效时
+`valid` 为 `false`，`errors` 包含字段路径和稳定错误码，同时进程返回非零状态。
+
+The command writes a JSON result to stdout. Invalid configurations return
+`valid: false`, the resolved configuration path, and an error list, then exit
+with a non-zero status.
+
+The versioned visual-configuration schema is available without loading a
+configuration file:
+
+```bash
+xiaoo-daemon config schema
+```
+
+Its section and field metadata is the authoritative contract for graphical
+clients. It includes defaults, enum choices, secret references and whether a
+change currently requires a daemon restart.
+
+Provider metadata comes directly from the LLM Provider Registry:
+
+```bash
+xiaoo-daemon config providers
+```
+
+Inspect effective values, their source, Profile/key status, and command-line overrides without
+starting network listeners:
+
+```bash
+xiaoo-daemon config inspect --config ~/.config/xiaoo/config.toml --no-dashboard
+```
+
+The JSON output is safe for management clients: literal tokens, secrets, API keys, authorization
+headers, and arbitrary header values are redacted. Environment-variable names and key availability
+are retained so clients can present actionable setup state without receiving secret values.
+
+The JSON result groups aliases under canonical Provider names and includes the
+protocol family, default API Base, suggested API Key environment variable,
+whether a key is required, and model-catalog support.
+
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |

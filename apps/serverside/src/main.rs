@@ -1,4 +1,7 @@
 mod channels;
+mod config_inspect;
+mod config_schema;
+mod config_validation;
 mod cron;
 mod daemon_config;
 mod daemon_runtime;
@@ -11,6 +14,7 @@ use crate::channels::{
     TelegramPollingMessageHandler, TelegramPollingService,
 };
 use crate::cron::scheduler::CronScheduler;
+use crate::config_inspect::ConfigInspectOverrides;
 use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
@@ -42,6 +46,44 @@ async fn main() -> Result<()> {
         print_usage();
         return Ok(());
     }
+    match cli.action {
+        CliAction::ValidateConfig => return validate_config(cli.config),
+        CliAction::ConfigSchema => {
+            println!("{}", config_schema::config_schema());
+            return Ok(());
+        }
+        CliAction::ConfigProviders => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "providers": xiaoo_api::llm::provider_catalog(),
+                })
+            );
+            return Ok(());
+        }
+        CliAction::ConfigInspect => {
+            let config_path = resolve_config_path(cli.config)?;
+            let report = config_inspect::inspect_config_file(
+                &config_path,
+                &ConfigInspectOverrides {
+                    daemon_host: cli.host,
+                    daemon_port: cli.port,
+                    no_dashboard: cli.no_dashboard,
+                    dashboard_host: cli.dashboard_host,
+                    dashboard_port: cli.dashboard_port,
+                    bearer_token_env: cli.bearer_token_env,
+                },
+            );
+            println!("{}", serde_json::to_string(&report)?);
+            return if report.valid {
+                Ok(())
+            } else {
+                bail!("configuration inspection found validation errors")
+            };
+        }
+        CliAction::Serve => {}
+    }
     run_daemon(
         cli.config,
         cli.mcp_config,
@@ -54,6 +96,17 @@ async fn main() -> Result<()> {
         cli.bearer_token_env,
     )
     .await
+}
+
+fn validate_config(config_path: Option<PathBuf>) -> Result<()> {
+    let config_path = resolve_config_path(config_path)?;
+    let report = config_validation::validate_config_file(&config_path);
+    println!("{}", serde_json::to_string(&report)?);
+    if report.valid {
+        Ok(())
+    } else {
+        bail!("configuration validation failed")
+    }
 }
 
 async fn run_daemon(
@@ -498,7 +551,18 @@ fn init_tracing() {
         .try_init();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliAction {
+    Serve,
+    ValidateConfig,
+    ConfigSchema,
+    ConfigProviders,
+    ConfigInspect,
+}
+
+#[derive(Debug)]
 struct Cli {
+    action: CliAction,
     config: Option<PathBuf>,
     mcp_config: Option<PathBuf>,
     host: String,
@@ -525,12 +589,27 @@ impl Cli {
         let mut no_dashboard = false;
         let mut ready_stdio = false;
         let mut bearer_token_env = None;
-        let remaining = args.into_iter().collect::<Vec<_>>();
+        let mut remaining = args.into_iter().collect::<Vec<_>>();
+        let action = match remaining.first().map(String::as_str) {
+            Some("config") => {
+                let action = match remaining.get(1).map(String::as_str) {
+                    Some("validate") => CliAction::ValidateConfig,
+                    Some("schema") => CliAction::ConfigSchema,
+                    Some("providers") => CliAction::ConfigProviders,
+                    Some("inspect") => CliAction::ConfigInspect,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, or `config inspect`"),
+                };
+                remaining.drain(0..2);
+                action
+            }
+            _ => CliAction::Serve,
+        };
         let mut index = 0;
         while index < remaining.len() {
             match remaining[index].as_str() {
                 "--help" | "-h" => {
                     return Ok(Self {
+                        action,
                         config,
                         mcp_config,
                         host,
@@ -606,6 +685,7 @@ impl Cli {
             index += 1;
         }
         Ok(Self {
+            action,
             config,
             mcp_config,
             host,
@@ -625,6 +705,10 @@ fn print_usage() {
         "Usage: xiaoo-daemon [--config <path>] [--mcp-config <path>] [--host <host>] [--port <port>]\n\
          \x20                  [--dashboard-host <host>] [--dashboard-port <port>]\n\
          \x20                  [--no-dashboard] [--ready-stdio] [--bearer-token-env <name>]\n\n\
+         \x20     xiaoo-daemon config validate [--config <path>]\n\n\
+         \x20     xiaoo-daemon config schema\n\n\
+         \x20     xiaoo-daemon config providers\n\n\
+         \x20     xiaoo-daemon config inspect [--config <path>] [daemon overrides]\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -633,7 +717,7 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, CliAction};
     use std::path::PathBuf;
 
     #[test]
@@ -666,6 +750,67 @@ mod tests {
             Some("XIAOO_CLIENT_DAEMON_TOKEN")
         );
         assert!(!cli.help);
+        assert_eq!(cli.action, CliAction::Serve);
+    }
+
+    #[test]
+    fn parses_config_validate_command() {
+        let cli = Cli::parse(
+            ["config", "validate", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config validate should parse");
+
+        assert_eq!(cli.action, CliAction::ValidateConfig);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_schema_command() {
+        let cli = Cli::parse(["config", "schema"].into_iter().map(str::to_string))
+            .expect("config schema should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigSchema);
+    }
+
+    #[test]
+    fn parses_config_providers_command() {
+        let cli = Cli::parse(["config", "providers"].into_iter().map(str::to_string))
+            .expect("config providers should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigProviders);
+    }
+
+    #[test]
+    fn parses_config_inspect_with_startup_overrides() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "inspect",
+                "--config",
+                "/tmp/demo.toml",
+                "--no-dashboard",
+                "--host",
+                "127.0.0.1",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config inspect should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigInspect);
+        assert!(cli.no_dashboard);
+        assert_eq!(cli.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn rejects_unknown_config_command() {
+        let error = Cli::parse(["config", "unknown"].into_iter().map(str::to_string))
+            .expect_err("unknown config command should fail");
+        assert!(error
+            .to_string()
+            .contains("expected `config validate`, `config schema`, `config providers`, or `config inspect`"));
     }
 
     #[test]

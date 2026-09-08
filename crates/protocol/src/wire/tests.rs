@@ -83,7 +83,7 @@ fn runtime_turn_request_serializes_runtime_id() {
         reply_to_message_id: None,
         root_message_id: None,
         mentions: Vec::new(),
-        reasoning_effort: ReasoningEffort::default(),
+        reasoning_effort: None,
         llm: None,
         workspace: None,
         skills: None,
