@@ -1,5 +1,7 @@
 mod agent_management;
+mod backend_management;
 mod channels;
+mod compact_management;
 mod config_inspect;
 mod config_schema;
 mod config_validation;
@@ -13,6 +15,7 @@ mod management_capabilities;
 mod mcp_management;
 mod mcp_server;
 mod mcp_server_management;
+mod memory_management;
 mod model_management;
 mod role_management;
 mod skill_management;
@@ -279,6 +282,54 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&mcp_server_management::mcp_server_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigMemory => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let home = dirs::home_dir();
+            let config = DaemonConfig::load_with_mcp_config(
+                &config_path,
+                cli.mcp_config.as_deref(),
+                &workspace,
+                home.as_deref(),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string(&memory_management::memory_automation_report(&config).await)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigMemoryQueue => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let action = cli
+                .memory_queue_action
+                .context("config memory-queue requires an action")?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &memory_management::memory_queue_action_report(&config, action).await
+                )?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigCompact => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&compact_management::compact_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigBackend => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&backend_management::backend_report(&config))?
             );
             return Ok(());
         }
@@ -776,6 +827,10 @@ enum CliAction {
     ConfigMcp,
     ConfigMcpServer,
     ConfigLsp,
+    ConfigMemory,
+    ConfigMemoryQueue,
+    ConfigCompact,
+    ConfigBackend,
     ProtocolSchema,
 }
 
@@ -795,6 +850,7 @@ struct Cli {
     agent: Option<String>,
     manifest: Option<PathBuf>,
     allow_effects: bool,
+    memory_queue_action: Option<memory_management::MemoryQueueAction>,
     help: bool,
 }
 
@@ -816,6 +872,7 @@ impl Cli {
         let mut agent = None;
         let mut manifest = None;
         let mut allow_effects = false;
+        let mut memory_queue_action = None;
         let mut remaining = args.into_iter().collect::<Vec<_>>();
         let action = match remaining.first().map(String::as_str) {
             Some("config") => {
@@ -838,7 +895,23 @@ impl Cli {
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    Some("memory") => CliAction::ConfigMemory,
+                    Some("memory-queue") => {
+                        let value = remaining
+                            .get(2)
+                            .context("config memory-queue requires `status`, `retry-failed`, or `clear-failed`")?;
+                        memory_queue_action = Some(match value.as_str() {
+                            "status" => memory_management::MemoryQueueAction::Status,
+                            "retry-failed" => memory_management::MemoryQueueAction::RetryFailed,
+                            "clear-failed" => memory_management::MemoryQueueAction::ClearFailed,
+                            _ => bail!("unknown memory queue action `{value}`; expected `status`, `retry-failed`, or `clear-failed`"),
+                        });
+                        remaining.remove(2);
+                        CliAction::ConfigMemoryQueue
+                    }
+                    Some("compact") => CliAction::ConfigCompact,
+                    Some("backend") => CliAction::ConfigBackend,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, or `config backend`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -868,6 +941,7 @@ impl Cli {
                         agent,
                         manifest,
                         allow_effects,
+                        memory_queue_action,
                         help: true,
                     });
                 }
@@ -976,6 +1050,7 @@ impl Cli {
             agent,
             manifest,
             allow_effects,
+            memory_queue_action,
             help: false,
         })
     }
@@ -1004,6 +1079,10 @@ fn print_usage() {
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
+         \x20     xiaoo-daemon config memory [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
+         \x20     xiaoo-daemon config compact [--config <path>]\n\n\
+         \x20     xiaoo-daemon config backend [--config <path>]\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1302,6 +1381,65 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigMcpServer);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_memory_command() {
+        let cli = Cli::parse(
+            ["config", "memory", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config memory should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigMemory);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_compact_command() {
+        let cli = Cli::parse(
+            ["config", "compact", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config compact should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigCompact);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_backend_command() {
+        let cli = Cli::parse(
+            ["config", "backend", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config backend should parse");
+        assert_eq!(cli.action, CliAction::ConfigBackend);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_memory_queue_action() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "memory-queue",
+                "retry-failed",
+                "--config",
+                "/tmp/demo.toml",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("memory queue action should parse");
+        assert_eq!(cli.action, CliAction::ConfigMemoryQueue);
+        assert_eq!(
+            cli.memory_queue_action,
+            Some(crate::memory_management::MemoryQueueAction::RetryFailed)
+        );
     }
 
     #[test]

@@ -1376,6 +1376,7 @@ impl CoreBackedSessionService {
                 ),
                 retries: 0,
                 next_attempt_ms: 0,
+                failed: false,
             };
             if let Err(error) = automation.enqueue_ingest(ingest).await {
                 tracing::warn!(error = %error, "memory ingest degraded; completed turn preserved");

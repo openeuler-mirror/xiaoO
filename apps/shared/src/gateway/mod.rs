@@ -43,7 +43,8 @@ pub use hosted_runtime_resolver::{
     HostedSessionRuntimeConfig, HostedSessionRuntimeResolver, SubagentRoleConfigEntry,
 };
 pub use memory_automation::{
-    McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationHealth, TurnMemoryAutomation,
+    McpMemoryAutomation, MemoryAutomationConfig, MemoryAutomationError, MemoryAutomationHealth,
+    MemoryAutomationInspection, MemoryQueueStatus, TurnMemoryAutomation,
 };
 pub use progress_updates::ChannelProgressRelayHandle;
 pub(crate) use session_base::SessionHeartbeatRequest;

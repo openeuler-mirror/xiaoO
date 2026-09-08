@@ -24,6 +24,10 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config mcp",
             "config mcp-server",
             "config lsp",
+            "config memory",
+            "config memory-queue",
+            "config compact",
+            "config backend",
         ]
         .into_iter()
         .map(str::to_string)
@@ -83,7 +87,29 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 &["inspect", "preflight"],
             ),
             domain("lsp", true, true, false, true, &["list", "detect"]),
-            domain("memory", true, false, false, false, &[]),
+            domain(
+                "memory",
+                true,
+                true,
+                false,
+                true,
+                &[
+                    "inspect",
+                    "test_connection",
+                    "queue_status",
+                    "retry_failed_queue",
+                    "clear_failed_queue",
+                ],
+            ),
+            domain("compact", true, true, false, true, &["inspect", "validate"]),
+            domain(
+                "backend",
+                true,
+                true,
+                false,
+                true,
+                &["inspect", "preflight"],
+            ),
             domain("cron", true, false, false, false, &[]),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
@@ -258,5 +284,46 @@ mod tests {
             .expect("sandbox capability");
         assert!(sandboxes.runtime_read);
         assert!(sandboxes.actions.iter().any(|action| action == "list"));
+
+        let memory = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "memory")
+            .expect("memory capability");
+        assert!(memory.runtime_read);
+        assert!(memory.test);
+        assert!(memory.actions.iter().any(|action| action == "inspect"));
+        assert!(memory
+            .actions
+            .iter()
+            .any(|action| action == "test_connection"));
+        assert!(memory.actions.iter().any(|action| action == "queue_status"));
+        assert!(memory
+            .actions
+            .iter()
+            .any(|action| action == "retry_failed_queue"));
+        assert!(memory
+            .actions
+            .iter()
+            .any(|action| action == "clear_failed_queue"));
+
+        let compact = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "compact")
+            .expect("compact capability");
+        assert!(compact.runtime_read);
+        assert!(compact.test);
+        assert!(compact.actions.iter().any(|action| action == "inspect"));
+        assert!(compact.actions.iter().any(|action| action == "validate"));
+
+        let backend = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "backend")
+            .expect("backend capability");
+        assert!(backend.runtime_read);
+        assert!(backend.test);
+        assert!(backend.actions.iter().any(|action| action == "preflight"));
     }
 }
