@@ -35,7 +35,7 @@ use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
 use futures_util::future::BoxFuture;
 use std::env;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -140,6 +140,65 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string(&tool_management::tool_catalog(&config, &workspace).await?)?
             );
+            return Ok(());
+        }
+        CliAction::ConfigCustomTools => {
+            let config_path = resolve_config_path(cli.config)?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = DaemonConfig::load_from(&config_path)?;
+            let supported = config
+                .server_operation_backend()
+                .is_none_or(|backend| backend.kind != "e2b");
+            println!(
+                "{}",
+                serde_json::to_string(&xiaoo_shared::custom_tool_support::custom_tool_catalog(
+                    Some(&workspace),
+                    dirs::home_dir().as_deref(),
+                    supported,
+                ))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigRenderCustomTool => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let draft = serde_json::from_str::<
+                xiaoo_shared::custom_tool_support::DeclarativeToolDraft,
+            >(&input)
+            .context("failed to parse custom tool draft JSON from stdin")?;
+            println!(
+                "{}",
+                serde_json::to_string(&xiaoo_shared::custom_tool_support::render_custom_tool(
+                    draft
+                ))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigTestCustomTool => {
+            let config_path = resolve_config_path(cli.config)?;
+            let manifest = cli
+                .manifest
+                .as_deref()
+                .context("config test-custom-tool requires --manifest <path>")?;
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let input = serde_json::from_str(&input)
+                .context("failed to parse custom tool input JSON from stdin")?;
+            let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let config = DaemonConfig::load_from(&config_path)?;
+            let supported = config
+                .server_operation_backend()
+                .is_none_or(|backend| backend.kind != "e2b");
+            let report = xiaoo_shared::custom_tool_support::test_custom_tool(
+                &workspace,
+                dirs::home_dir().as_deref(),
+                manifest,
+                input,
+                supported,
+                cli.allow_effects,
+            )
+            .await;
+            println!("{}", serde_json::to_string(&report)?);
             return Ok(());
         }
         CliAction::ConfigSkills => {
@@ -686,6 +745,9 @@ enum CliAction {
     ConfigModels,
     ConfigRoles,
     ConfigTools,
+    ConfigCustomTools,
+    ConfigRenderCustomTool,
+    ConfigTestCustomTool,
     ConfigSkills,
     ConfigHooks,
     ConfigMcp,
@@ -707,6 +769,8 @@ struct Cli {
     ready_stdio: bool,
     bearer_token_env: Option<String>,
     profile: Option<String>,
+    manifest: Option<PathBuf>,
+    allow_effects: bool,
     help: bool,
 }
 
@@ -725,6 +789,8 @@ impl Cli {
         let mut ready_stdio = false;
         let mut bearer_token_env = None;
         let mut profile = None;
+        let mut manifest = None;
+        let mut allow_effects = false;
         let mut remaining = args.into_iter().collect::<Vec<_>>();
         let action = match remaining.first().map(String::as_str) {
             Some("config") => {
@@ -737,12 +803,15 @@ impl Cli {
                     Some("models") => CliAction::ConfigModels,
                     Some("roles") => CliAction::ConfigRoles,
                     Some("tools") => CliAction::ConfigTools,
+                    Some("custom-tools") => CliAction::ConfigCustomTools,
+                    Some("render-custom-tool") => CliAction::ConfigRenderCustomTool,
+                    Some("test-custom-tool") => CliAction::ConfigTestCustomTool,
                     Some("skills") => CliAction::ConfigSkills,
                     Some("hooks") => CliAction::ConfigHooks,
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, or `config lsp`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -769,6 +838,8 @@ impl Cli {
                         ready_stdio,
                         bearer_token_env,
                         profile,
+                        manifest,
+                        allow_effects,
                         help: true,
                     });
                 }
@@ -840,6 +911,16 @@ impl Cli {
                     }
                     profile = Some(value.clone());
                 }
+                "--manifest" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --manifest")?;
+                    manifest = Some(PathBuf::from(value));
+                }
+                "--allow-effects" => {
+                    allow_effects = true;
+                }
                 other => bail!("unknown argument `{other}`"),
             }
             index += 1;
@@ -856,6 +937,8 @@ impl Cli {
             ready_stdio,
             bearer_token_env,
             profile,
+            manifest,
+            allow_effects,
             help: false,
         })
     }
@@ -874,6 +957,9 @@ fn print_usage() {
          \x20     xiaoo-daemon config models --profile <id> [--config <path>]\n\n\
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
+         \x20     xiaoo-daemon config custom-tools [--config <path>]\n\n\
+         \x20     xiaoo-daemon config render-custom-tool < draft.json\n\n\
+         \x20     xiaoo-daemon config test-custom-tool --manifest <path> [--allow-effects] [--config <path>] < input.json\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
          \x20     xiaoo-daemon config hooks [--config <path>]\n\n\
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
@@ -1033,6 +1119,51 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigTools);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_custom_tools_command() {
+        let cli = Cli::parse(
+            ["config", "custom-tools", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config custom-tools should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigCustomTools);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_render_custom_tool_command() {
+        let cli = Cli::parse(
+            ["config", "render-custom-tool"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config render-custom-tool should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigRenderCustomTool);
+    }
+
+    #[test]
+    fn parses_config_test_custom_tool_command() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "test-custom-tool",
+                "--manifest",
+                "/tmp/echo.toml",
+                "--allow-effects",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config test-custom-tool should parse");
+
+        assert_eq!(cli.action, CliAction::ConfigTestCustomTool);
+        assert_eq!(cli.manifest, Some(PathBuf::from("/tmp/echo.toml")));
+        assert!(cli.allow_effects);
     }
 
     #[test]

@@ -2,6 +2,7 @@ pub mod backend;
 pub mod builtin_agent_roles;
 pub mod channels;
 pub mod cron;
+pub mod custom_tool_support;
 pub mod daemon_protocol;
 pub mod gateway;
 pub mod hook_support;

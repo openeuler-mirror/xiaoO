@@ -37,6 +37,7 @@ rustls-native-certs = "0.8"
 tempfile.workspace = true
 tracing.workspace = true
 regex = "1"
+sha2 = "0.10"
 lazy_static = "1.4"
 
 [[bin]]

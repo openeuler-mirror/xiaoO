@@ -1,9 +1,9 @@
 use agent_types::tool::spec_types::EffectProfile;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeclarativeToolManifest {
     pub name: String,
     pub description: String,
@@ -17,13 +17,13 @@ pub struct DeclarativeToolManifest {
     pub exec: ExecSection,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutputSection {
     #[serde(default = "default_output_description")]
     pub description: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct EffectSection {
     #[serde(default)]
     pub reads_filesystem: bool,
@@ -35,7 +35,7 @@ pub struct EffectSection {
     pub side_effects: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExecSection {
     pub command: String,
     #[serde(default)]
@@ -48,14 +48,14 @@ pub struct ExecSection {
     pub env: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StdinMode {
     Json,
     None,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StdoutMode {
     Text,
@@ -93,7 +93,7 @@ impl LoadedDeclarativeTool {
 }
 
 impl DeclarativeToolManifest {
-    fn validate(&self, path: &Path) -> Result<(), String> {
+    pub(super) fn validate(&self, path: &Path) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err(format!("{} has an empty tool name", path.display()));
         }
@@ -112,6 +112,9 @@ impl DeclarativeToolManifest {
         }
         if self.timeout_ms == 0 {
             return Err(format!("{} has timeout_ms=0", path.display()));
+        }
+        if !self.input_schema.is_table() {
+            return Err(format!("{} input_schema must be a table", path.display()));
         }
         for env_name in &self.exec.env {
             if env_name.trim().is_empty() || env_name.contains('=') {

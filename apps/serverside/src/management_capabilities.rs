@@ -14,6 +14,9 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config models",
             "config roles",
             "config tools",
+            "config custom-tools",
+            "config render-custom-tool",
+            "config test-custom-tool",
             "config skills",
             "config hooks",
             "config mcp",
@@ -44,6 +47,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
             domain("roles", true, false, false, false, &["list"]),
             domain("subagents", true, false, false, false, &["list_roles"]),
             domain("tools", true, false, false, false, &["list"]),
+            domain(
+                "custom_tools",
+                true,
+                true,
+                false,
+                true,
+                &["list", "validate", "render", "test"],
+            ),
             domain("skills", true, false, false, false, &["list"]),
             domain("hooks", true, false, false, false, &["list"]),
             domain(
@@ -162,6 +173,21 @@ mod tests {
         assert!(!skills.runtime_write);
         assert!(!skills.test);
         assert!(skills.actions.iter().any(|action| action == "list"));
+
+        let custom_tools = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "custom_tools")
+            .expect("custom tools capability");
+        assert!(custom_tools.runtime_read);
+        assert!(custom_tools.test);
+        assert!(custom_tools.actions.iter().any(|action| action == "list"));
+        assert!(custom_tools
+            .actions
+            .iter()
+            .any(|action| action == "validate"));
+        assert!(custom_tools.actions.iter().any(|action| action == "render"));
+        assert!(custom_tools.actions.iter().any(|action| action == "test"));
 
         let hooks = capabilities
             .domains
