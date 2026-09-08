@@ -1,5 +1,10 @@
 use crate::backend::BackendCheckpointRef;
 use crate::gateway::{SessionLifecycleStatus, SessionRecord};
+pub use protocol::wire::{
+    RuntimeCheckoutRequest, RuntimeCheckpointRequest, RuntimeCheckpointSnapshotDeleteRequest,
+    RuntimeExecRequest, RuntimePauseRequest, RuntimeReadFileRequest, RuntimeResumeRequest,
+    RuntimeWriteFileRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,19 +35,6 @@ impl RuntimeRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeCheckpointRequest {
-    pub runtime_id: String,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Process identifier used by the daemon's lease guard. `None` for
-    /// legacy / anonymous callers (lease bypass).
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCheckpointResult {
     pub checkpoint_id: String,
     pub runtime: RuntimeRecord,
@@ -56,34 +48,10 @@ pub struct RuntimeCheckpointResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeCheckoutRequest {
-    pub checkpoint_id: String,
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-    #[serde(default)]
-    pub sender_id: Option<String>,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub options: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCheckoutResult {
     pub checkpoint_id: String,
     pub source_runtime_id: String,
     pub runtime: RuntimeRecord,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimePauseRequest {
-    pub runtime_id: String,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,22 +66,8 @@ pub struct RuntimePauseResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeResumeRequest {
-    pub runtime_id: String,
-    #[serde(default)]
-    pub metadata: Value,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeResumeResult {
     pub runtime: RuntimeRecord,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeCheckpointSnapshotDeleteRequest {
-    pub checkpoint_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,22 +84,6 @@ pub struct RuntimeCheckpointSnapshotDeleteResult {
     pub deleted_at_ms: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RuntimeExecRequest {
-    pub runtime_id: String,
-    pub command: String,
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
-    #[serde(default)]
-    pub shell: Option<String>,
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeExecResult {
     pub stdout_base64: String,
@@ -155,25 +93,8 @@ pub struct RuntimeExecResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeReadFileRequest {
-    pub runtime_id: String,
-    pub path: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeReadFileResult {
     pub content_base64: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeWriteFileRequest {
-    pub runtime_id: String,
-    pub path: String,
-    pub content_base64: String,
-    #[serde(default)]
-    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,12 +103,45 @@ pub struct RuntimeWriteFileResult {
     pub created: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointSummary {
+    pub checkpoint_id: String,
+    pub runtime_id: String,
+    pub parent_checkpoint_id: Option<String>,
+    pub created_at_ms: u64,
+    pub metadata: Value,
+    pub name: Option<String>,
+    pub has_provider_snapshot: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeCheckpoint {
     pub checkpoint_id: String,
     pub runtime_id: String,
+    pub parent_checkpoint_id: Option<String>,
+    pub created_at_ms: u64,
+    pub metadata: Value,
+    pub name: Option<String>,
     pub session: SessionRecord,
     pub backend_checkpoint: Option<BackendCheckpointRef>,
+}
+
+impl RuntimeCheckpoint {
+    fn summary(&self) -> RuntimeCheckpointSummary {
+        RuntimeCheckpointSummary {
+            checkpoint_id: self.checkpoint_id.clone(),
+            runtime_id: self.runtime_id.clone(),
+            parent_checkpoint_id: self.parent_checkpoint_id.clone(),
+            created_at_ms: self.created_at_ms,
+            metadata: self.metadata.clone(),
+            name: self.name.clone(),
+            has_provider_snapshot: self
+                .backend_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.provider_snapshot_id.as_ref())
+                .is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -294,6 +248,24 @@ impl InMemoryRuntimeCheckpointStore {
             .filter(|c| c.runtime_id == runtime_id)
             .cloned()
             .collect()
+    }
+
+    pub(crate) async fn list_checkpoint_summaries(&self) -> Vec<RuntimeCheckpointSummary> {
+        let mut checkpoints = self
+            .state
+            .read()
+            .await
+            .checkpoints
+            .values()
+            .map(RuntimeCheckpoint::summary)
+            .collect::<Vec<_>>();
+        checkpoints.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.checkpoint_id.cmp(&right.checkpoint_id))
+        });
+        checkpoints
     }
 
     /// Removes all in-memory tracking for `runtime_id`: its `runtime_heads`

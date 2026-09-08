@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Actions a plugin can request alongside its primary hook result.
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// host (daemon/TUI) after the primary hook result is applied. Actions are
 /// best-effort: failures are logged and skipped, never propagated to the
 /// caller of the hook.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HookAction {
     /// Create (or resume) a session with the given id on the daemon side.

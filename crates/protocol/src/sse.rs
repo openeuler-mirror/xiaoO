@@ -27,6 +27,7 @@
 use agent_types::hook::HookAction;
 use agent_types::interaction::InteractionRequest;
 use agent_types::llm::ChatMessage;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 fn is_zero(value: &u64) -> bool { *value == 0 }
@@ -43,7 +44,7 @@ use crate::plan::TodoSnapshotItem;
 // wire 契约逐字段对齐（serde 表示即文档）。允许 missing_docs 以避免
 // 大量重复字段级注释（"agent_id: 主 Agent 或 Subagent 泳道 id" 等）。
 #[allow(missing_docs)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeSseEvent {
     /// turn 开始（对照 daemon `SseStreamEvent::TurnStart`）。
@@ -145,13 +146,14 @@ pub enum RuntimeSseEvent {
     },
     /// 未知事件类型（向前兼容）。daemon 新增事件类型时，旧客户端经
     /// [`parse_sse_data`] 收到 `Ok(None)` 而非报错。
+    #[schemars(skip)]
     #[serde(other)]
     Unknown,
 }
 
 /// Wire-format mirror of `agent_types::tool::ToolExecutionStatus`，与 daemon
 /// `sse_sink.rs:135-144` 的 `ToolCallStatus` 对齐。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallStatus {
     /// Tool args received, executor about to run.
@@ -162,6 +164,28 @@ pub enum ToolCallStatus {
     Failed,
     /// Tool args were rejected by the policy layer before execution.
     Denied,
+}
+
+impl RuntimeSseEvent {
+    /// Return the stable SSE event name associated with this wire event.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            Self::TurnStart { .. } => "turn_start",
+            Self::TextDelta { .. } => "text_delta",
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::ToolResult { .. } => "tool_result",
+            Self::ToolFileChange { .. } => "tool_file_change",
+            Self::PlanUpdate { .. } => "plan_update",
+            Self::SubagentSpawn { .. } => "subagent_spawn",
+            Self::ToolCall { .. } => "tool_call",
+            Self::LoopEnd { .. } => "loop_end",
+            Self::InteractionRequested { .. } => "interaction_requested",
+            Self::Done { .. } => "done",
+            Self::Error { .. } => "error",
+            Self::Cancelled { .. } => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// 解析一行 SSE `data:` 载荷。

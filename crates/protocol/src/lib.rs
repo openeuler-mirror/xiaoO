@@ -21,5 +21,10 @@
 #![deny(missing_docs)]
 
 pub mod plan;
+pub mod response;
 pub mod sse;
 pub mod wire;
+
+mod contract;
+
+pub use contract::{protocol_contract, PROTOCOL_ARTIFACT_VERSION, PROTOCOL_VERSION};

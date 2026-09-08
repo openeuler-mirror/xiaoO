@@ -235,6 +235,20 @@ pub trait SessionControlPlane: Send + Sync {
         Ok(())
     }
 
+    async fn list_runtimes(&self) -> Result<Vec<crate::RuntimeRecord>, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "list_runtimes".to_string(),
+        })
+    }
+
+    async fn list_runtime_checkpoints(
+        &self,
+    ) -> Result<Vec<crate::RuntimeCheckpointSummary>, SessionServiceError> {
+        Err(SessionServiceError::UnsupportedCapability {
+            capability: "list_runtime_checkpoints".to_string(),
+        })
+    }
+
     async fn checkpoint_runtime(
         &self,
         _request: RuntimeCheckpointRequest,

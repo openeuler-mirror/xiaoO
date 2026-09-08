@@ -22,13 +22,21 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
+use xiaoo_shared::daemon_protocol::response::{
+    DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
+    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCatalogResponse,
+    RuntimeCheckoutResponse, RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse,
+    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeLifecycleStatus,
+    RuntimePauseResponse, RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
+    RuntimeWriteFileResponse,
+};
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
     PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
@@ -369,52 +377,116 @@ fn default_interaction_response(request: &InteractionRequest) -> InteractionResp
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct GatewayHealthResponse {
-    pub status: &'static str,
-    pub version: &'static str,
+fn runtime_record_response(record: xiaoo_shared::RuntimeRecord) -> RuntimeRecordResponse {
+    RuntimeRecordResponse {
+        runtime_id: record.runtime_id,
+        conversation_id: record.conversation_id,
+        sender_id: record.sender_id,
+        status: match record.status {
+            xiaoo_shared::gateway::SessionLifecycleStatus::Idle => RuntimeLifecycleStatus::Idle,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Running => {
+                RuntimeLifecycleStatus::Running
+            }
+            xiaoo_shared::gateway::SessionLifecycleStatus::Paused => RuntimeLifecycleStatus::Paused,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Failed => RuntimeLifecycleStatus::Failed,
+            xiaoo_shared::gateway::SessionLifecycleStatus::Closed => RuntimeLifecycleStatus::Closed,
+        },
+        created_at_ms: record.created_at_ms,
+        updated_at_ms: record.updated_at_ms,
+    }
 }
 
-/// Stable, read-only protocol metadata used by GUI clients before opening a
-/// runtime. Keep this endpoint additive: older clients ignore new fields and
-/// newer clients can fail early when the protocol major version is unknown.
-#[derive(Debug, Serialize)]
-pub struct GatewayCapabilitiesResponse {
-    pub service: &'static str,
-    pub version: &'static str,
-    pub protocol_version: u32,
-    pub minimum_client_protocol_version: u32,
-    pub transport: &'static str,
-    pub runtime_api: Vec<&'static str>,
-    pub sse_events: Vec<&'static str>,
-    pub interaction_kinds: Vec<&'static str>,
-    pub features: GatewayFeatureCapabilities,
-    pub management: crate::management_capabilities::ManagementCapabilities,
+fn runtime_checkpoint_response(
+    result: xiaoo_shared::RuntimeCheckpointResult,
+) -> RuntimeCheckpointResponse {
+    RuntimeCheckpointResponse {
+        checkpoint_id: result.checkpoint_id,
+        runtime: runtime_record_response(result.runtime),
+        parent_checkpoint_id: result.parent_checkpoint_id,
+        created_at_ms: result.created_at_ms,
+        metadata: result.metadata,
+        name: result.name,
+    }
 }
 
-#[derive(Debug, Serialize)]
-pub struct GatewayFeatureCapabilities {
-    pub session_persistence: bool,
-    pub runtime_leases: bool,
-    pub checkpoints: bool,
-    pub file_operations: bool,
-    pub file_change_summary: bool,
-    pub file_change_patch: bool,
-    pub sse_resume: bool,
+fn runtime_checkout_response(
+    result: xiaoo_shared::RuntimeCheckoutResult,
+) -> RuntimeCheckoutResponse {
+    RuntimeCheckoutResponse {
+        checkpoint_id: result.checkpoint_id,
+        source_runtime_id: result.source_runtime_id,
+        runtime: runtime_record_response(result.runtime),
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct GatewayErrorResponse {
-    pub error: String,
+fn runtime_pause_response(result: xiaoo_shared::RuntimePauseResult) -> RuntimePauseResponse {
+    RuntimePauseResponse {
+        runtime: runtime_record_response(result.runtime),
+        checkpoint_id: result.checkpoint_id,
+        created_at_ms: result.created_at_ms,
+        metadata: result.metadata,
+        name: result.name,
+    }
 }
 
-#[derive(Debug, Serialize)]
-struct RuntimeExecInterruptedResponse {
-    error: String,
-    execution_state: String,
-    stdout_base64: String,
-    stderr_base64: String,
-    retryable: bool,
+fn runtime_resume_response(result: xiaoo_shared::RuntimeResumeResult) -> RuntimeResumeResponse {
+    RuntimeResumeResponse {
+        runtime: runtime_record_response(result.runtime),
+    }
+}
+
+fn runtime_checkpoint_snapshot_delete_response(
+    result: xiaoo_shared::RuntimeCheckpointSnapshotDeleteResult,
+) -> RuntimeCheckpointSnapshotDeleteResponse {
+    RuntimeCheckpointSnapshotDeleteResponse {
+        checkpoint_id: result.checkpoint_id,
+        runtime_id: result.runtime_id,
+        provider: result.provider,
+        provider_snapshot_id: result.provider_snapshot_id,
+        provider_snapshot_names: result.provider_snapshot_names,
+        deleted_provider_snapshot: result.deleted_provider_snapshot,
+        deleted_at_ms: result.deleted_at_ms,
+    }
+}
+
+fn runtime_exec_response(result: xiaoo_shared::RuntimeExecResult) -> RuntimeExecResponse {
+    RuntimeExecResponse {
+        stdout_base64: result.stdout_base64,
+        stderr_base64: result.stderr_base64,
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+    }
+}
+
+fn runtime_read_file_response(
+    result: xiaoo_shared::RuntimeReadFileResult,
+) -> RuntimeReadFileResponse {
+    RuntimeReadFileResponse {
+        content_base64: result.content_base64,
+    }
+}
+
+fn runtime_write_file_response(
+    result: xiaoo_shared::RuntimeWriteFileResult,
+) -> RuntimeWriteFileResponse {
+    RuntimeWriteFileResponse {
+        path: result.path,
+        created: result.created,
+    }
+}
+
+fn runtime_checkpoint_catalog_item(
+    checkpoint: xiaoo_shared::RuntimeCheckpointSummary,
+) -> RuntimeCheckpointCatalogItem {
+    RuntimeCheckpointCatalogItem {
+        checkpoint_id: checkpoint.checkpoint_id,
+        runtime_id: checkpoint.runtime_id,
+        parent_checkpoint_id: checkpoint.parent_checkpoint_id,
+        created_at_ms: checkpoint.created_at_ms,
+        metadata: checkpoint.metadata,
+        name: checkpoint.name,
+        has_provider_snapshot: checkpoint.has_provider_snapshot,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -472,6 +544,11 @@ fn create_router_from_state(
 ) -> Router {
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
+            .route("/api/v1/runtimes", get(handle_runtime_catalog))
+            .route(
+                "/api/v1/runtimes/checkpoints",
+                get(handle_runtime_checkpoint_catalog),
+            )
             .route("/api/v1/runtimes/open", post(handle_session_open))
             .route("/api/v1/runtimes/input", post(handle_session_input))
             .route(
@@ -603,19 +680,21 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
 
 async fn health_check() -> Json<GatewayHealthResponse> {
     Json(GatewayHealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+        status: GatewayHealthStatus::Ok,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
 async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
     Json(GatewayCapabilitiesResponse {
-        service: "xiaoo-daemon",
-        version: env!("CARGO_PKG_VERSION"),
-        protocol_version: 1,
-        minimum_client_protocol_version: 1,
-        transport: "http+sse",
+        service: DaemonService::XiaooDaemon,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
+        minimum_client_protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
+        transport: GatewayTransport::HttpSse,
         runtime_api: vec![
+            "list",
+            "list_checkpoints",
             "open",
             "input",
             "interaction",
@@ -632,7 +711,10 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
             "read_file",
             "write_file",
             "export",
-        ],
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         sse_events: vec![
             "turn_start",
             "text_delta",
@@ -647,8 +729,14 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
             "done",
             "error",
             "cancelled",
-        ],
-        interaction_kinds: vec!["confirm", "text_input", "choice"],
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
+        interaction_kinds: ["confirm", "text_input", "choice"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         features: GatewayFeatureCapabilities {
             session_persistence: false,
             runtime_leases: true,
@@ -1100,6 +1188,47 @@ async fn handle_session_detach(
     }
 }
 
+async fn handle_runtime_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match control_plane.list_runtimes().await {
+        Ok(runtimes) => Json(RuntimeCatalogResponse {
+            runtimes: runtimes.into_iter().map(runtime_record_response).collect(),
+        })
+        .into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
+async fn handle_runtime_checkpoint_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match control_plane.list_runtime_checkpoints().await {
+        Ok(checkpoints) => Json(RuntimeCheckpointCatalogResponse {
+            checkpoints: checkpoints
+                .into_iter()
+                .map(runtime_checkpoint_catalog_item)
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
 async fn handle_runtime_checkpoint(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::RuntimeCheckpointRequest>,
@@ -1121,7 +1250,7 @@ async fn handle_runtime_checkpoint(
     }
 
     match control_plane.checkpoint_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkpoint_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1144,7 +1273,7 @@ async fn handle_runtime_checkout(
     // — it doesn't mutate the source session's state, and the returned child
     // session_id can be lease-attached via `open_session`.
     match control_plane.checkout_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkout_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1197,7 +1326,7 @@ async fn handle_runtime_pause(
     }
 
     match control_plane.pause_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_pause_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1224,7 +1353,7 @@ async fn handle_runtime_resume(
     }
 
     match control_plane.resume_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_resume_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1245,7 +1374,7 @@ async fn handle_runtime_checkpoint_snapshot_delete(
     // No lease check: keyed by `checkpoint_id`, not `runtime_id` — admin
     // operation that deletes a remote provider snapshot (e.g. e2b).
     match control_plane.delete_checkpoint_snapshot(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_checkpoint_snapshot_delete_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1271,7 +1400,7 @@ async fn handle_runtime_exec(
     }
 
     match control_plane.exec_runtime(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_exec_response(result)).into_response(),
         Err(xiaoo_shared::gateway::SessionServiceError::RuntimeExecInterrupted {
             message,
             stdout_base64,
@@ -1314,7 +1443,7 @@ async fn handle_runtime_read_file(
     }
 
     match control_plane.read_runtime_file(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_read_file_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }
@@ -1340,7 +1469,7 @@ async fn handle_runtime_write_file(
     }
 
     match control_plane.write_runtime_file(payload).await {
-        Ok(result) => Json(result).into_response(),
+        Ok(result) => Json(runtime_write_file_response(result)).into_response(),
         Err(error) => map_session_error(error),
     }
 }

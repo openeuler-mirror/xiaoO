@@ -8,4 +8,5 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 agent-types = { path = "../agent-types" }

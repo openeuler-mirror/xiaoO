@@ -69,6 +69,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "cron",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2496,6 +2497,7 @@ name = "protocol"
 version = "0.1.0"
 dependencies = [
  "agent-types",
+ "schemars",
  "serde",
  "serde_json",
 ]

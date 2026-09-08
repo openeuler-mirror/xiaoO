@@ -148,6 +148,10 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ProtocolSchema => {
+            println!("{}", xiaoo_shared::daemon_protocol::protocol_contract());
+            return Ok(());
+        }
         CliAction::Serve => {}
     }
     run_daemon(
@@ -370,15 +374,15 @@ async fn run_daemon(
             .context("failed to resolve daemon listener address")?;
         tracing::info!(config = %config_path.display(), %resolved_addr, "starting xiaoo daemon");
         if ready_stdio {
-            let ready = serde_json::json!({
-                "type": "ready",
-                "service": "xiaoo-daemon",
-                "host": resolved_addr.ip().to_string(),
-                "port": resolved_addr.port(),
-                "version": env!("CARGO_PKG_VERSION"),
-                "protocol_version": 1,
-            });
-            println!("{ready}");
+            let ready = xiaoo_shared::daemon_protocol::response::DaemonReadyMessage {
+                r#type: xiaoo_shared::daemon_protocol::response::DaemonReadyMessageType::Ready,
+                service: xiaoo_shared::daemon_protocol::response::DaemonService::XiaooDaemon,
+                host: resolved_addr.ip().to_string(),
+                port: resolved_addr.port(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
+            };
+            println!("{}", serde_json::to_string(&ready)?);
             std::io::stdout()
                 .flush()
                 .context("failed to flush daemon ready message")?;
@@ -629,6 +633,7 @@ enum CliAction {
     ConfigRoles,
     ConfigTools,
     ConfigSkills,
+    ProtocolSchema,
 }
 
 #[derive(Debug)]
@@ -679,6 +684,10 @@ impl Cli {
                 };
                 remaining.drain(0..2);
                 action
+            }
+            Some("protocol") if remaining.get(1).map(String::as_str) == Some("schema") => {
+                remaining.drain(0..2);
+                CliAction::ProtocolSchema
             }
             _ => CliAction::Serve,
         };
@@ -804,6 +813,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config roles [--config <path>]\n\n\
          \x20     xiaoo-daemon config tools [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config skills [--config <path>]\n\n\
+         \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
@@ -970,6 +980,14 @@ mod tests {
 
         assert_eq!(cli.action, CliAction::ConfigSkills);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_protocol_schema_command() {
+        let cli = Cli::parse(["protocol", "schema"].into_iter().map(str::to_string))
+            .expect("protocol schema should parse");
+
+        assert_eq!(cli.action, CliAction::ProtocolSchema);
     }
 
     #[test]
