@@ -160,6 +160,23 @@ pub(crate) fn find_substring_from(haystack: &str, needle: &str, start: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::Input;
+
+    #[test]
+    fn paste_after_click_keeps_leading_char() {
+        // Regression for the exact reported bug: mouse-click the input box
+        // (sets cursor + anchor on an empty input), then paste a path —
+        // the leading "/" was eaten because the second InsertChar saw the
+        // stale anchor as a selection and replaced the first char.
+        let mut input = Input::default();
+        input.set_cursor(0);
+        input.set_anchor(); // click artifact: anchor == cursor == 0
+        paste_into_input(&mut input, "/root/code/atom/xiaoO");
+
+        assert_eq!(input.value(), "/root/code/atom/xiaoO");
+        assert_eq!(input.cursor(), 21);
+        assert!(input.selected_text().is_none());
+    }
 
     #[test]
     fn scroll_offset_from_drag_reaches_bottom_at_last_row() {
