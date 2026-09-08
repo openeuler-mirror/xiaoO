@@ -132,7 +132,7 @@ fn profile_summary(id: &str, active: bool, profile: &LlmProfileConfig) -> Inspec
             .is_some_and(xiaoo_api::llm::ProviderProfile::requires_api_key);
     let key_available = api_key_env
         .as_deref()
-        .and_then(xiaoo_shared::gateway::get_decrypted_api_key)
+        .and_then(|env_name| std::env::var(env_name).ok())
         .is_some_and(|value| !value.trim().is_empty());
     let api_key_status = if key_available {
         "available"

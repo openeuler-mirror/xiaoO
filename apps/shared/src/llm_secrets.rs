@@ -71,8 +71,8 @@ mod tests {
         std::env::remove_var(env_name);
         save_llm_secret(&config_path, env_name, "test-secret").expect("save secret");
         assert_eq!(
-            get_llm_secret(&config_path, env_name).as_deref(),
-            Ok("test-secret")
+            get_llm_secret(&config_path, env_name).expect("resolve selected config secret"),
+            "test-secret"
         );
         inject_llm_secrets_into_env(&config_path).expect("inject secret");
 
