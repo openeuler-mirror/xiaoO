@@ -178,25 +178,54 @@ pub struct ConfiguredRuntimeResolver {
 impl ConfiguredRuntimeResolver {
     pub async fn from_config(config: &DaemonConfig) -> Result<Self> {
         let agent = config.resolve_agent()?;
+        Self::from_config_and_agent(config, agent).await
+    }
+
+    pub async fn from_config_for_agent(config: &DaemonConfig, agent_id: &str) -> Result<Self> {
+        let agent = config.resolve_agent_by_id(agent_id)?;
+        Self::from_config_and_agent(config, agent).await
+    }
+
+    async fn from_config_and_agent(
+        config: &DaemonConfig,
+        agent: ResolvedAgentConfig,
+    ) -> Result<Self> {
         ensure_workspace_exists(&agent.workspace_root)?;
+        let startup_profile = agent
+            .profile_id
+            .as_deref()
+            .map(|id| config.app.llm.profile(id))
+            .transpose()?;
 
         let startup_llm = EffectiveLlmConfig {
-            profile_id: config.app.llm.active_profile.clone(),
-            provider: config.app.llm.provider.clone(),
+            profile_id: agent.profile_id.clone(),
+            provider: startup_profile
+                .map(|profile| profile.provider.clone())
+                .unwrap_or_else(|| config.app.llm.provider.clone()),
             model: agent.model.clone(),
-            api_base: config.app.llm.api_base.clone(),
-            api_key_env: config.app.llm.api_key_env.clone(),
+            api_base: startup_profile
+                .and_then(|profile| profile.api_base.clone())
+                .or_else(|| config.app.llm.api_base.clone()),
+            api_key_env: startup_profile
+                .and_then(|profile| profile.api_key_env.clone())
+                .or_else(|| config.app.llm.api_key_env.clone()),
             api_key: None,
-            context_window: config.app.llm.context_window,
-            max_output_tokens: config.max_output_tokens(),
-            kvcache_enabled: config.app.llm.kvcache_enabled.unwrap_or(false),
-            kvcache_debug_enabled: config.app.llm.kvcache_debug_enabled.unwrap_or(false),
-            reasoning_effort: config
-                .app
-                .llm
-                .active_profile
-                .as_deref()
-                .and_then(|id| config.app.llm.profiles.get(id))
+            context_window: startup_profile
+                .and_then(|profile| profile.context_window)
+                .or(config.app.llm.context_window),
+            max_output_tokens: startup_profile
+                .and_then(|profile| profile.max_tokens)
+                .or(config.app.llm.max_tokens)
+                .unwrap_or(16_384),
+            kvcache_enabled: startup_profile
+                .and_then(|profile| profile.kvcache_enabled)
+                .or(config.app.llm.kvcache_enabled)
+                .unwrap_or(false),
+            kvcache_debug_enabled: startup_profile
+                .and_then(|profile| profile.kvcache_debug_enabled)
+                .or(config.app.llm.kvcache_debug_enabled)
+                .unwrap_or(false),
+            reasoning_effort: startup_profile
                 .map(|profile| profile.reasoning_effort)
                 .unwrap_or_default(),
         };
@@ -362,7 +391,7 @@ impl ConfiguredRuntimeResolver {
         let profile_id = requested_profile_id
             .clone()
             .or(existing_profile_id)
-            .or_else(|| self.llm.active_profile.clone());
+            .or_else(|| self.agent.profile_id.clone());
         let profile = profile_id
             .as_deref()
             .map(|id| {

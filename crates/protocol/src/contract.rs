@@ -9,6 +9,7 @@ use crate::response::{
     RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
     RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeOpenResponse, RuntimePauseResponse,
     RuntimeReadFileResponse, RuntimeResumeResponse, RuntimeWriteFileResponse,
+    SandboxCatalogResponse,
 };
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
@@ -63,6 +64,7 @@ pub fn protocol_contract() -> Value {
             "runtime_write_file_response": schema_for!(RuntimeWriteFileResponse),
             "runtime_catalog_response": schema_for!(RuntimeCatalogResponse),
             "runtime_checkpoint_catalog_response": schema_for!(RuntimeCheckpointCatalogResponse),
+            "sandbox_catalog_response": schema_for!(SandboxCatalogResponse),
         }
     })
 }
@@ -78,9 +80,10 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 32);
+        assert_eq!(schemas.len(), 33);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
+        assert!(schemas.contains_key("sandbox_catalog_response"));
         assert!(schemas.contains_key("runtime_close_request"));
         assert!(schemas.contains_key("runtime_cancel_request"));
         assert!(schemas.contains_key("runtime_heartbeat_request"));

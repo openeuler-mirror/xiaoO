@@ -202,6 +202,79 @@ pub struct RuntimeCatalogResponse {
     pub runtimes: Vec<RuntimeRecordResponse>,
 }
 
+/// Sandbox lifecycle state exposed by the management API.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxLifecycleStatus {
+    /// Provider state is not known.
+    Unknown,
+    /// Sandbox creation is in progress.
+    Creating,
+    /// Sandbox is ready for operations.
+    Active,
+    /// Sandbox pause is in progress.
+    Pausing,
+    /// Sandbox is paused and not currently usable.
+    Paused,
+    /// Sandbox restoration is in progress.
+    Loading,
+    /// Sandbox deletion is in progress.
+    Deleting,
+    /// Sandbox has been deleted.
+    Deleted,
+    /// Sandbox entered a failed state.
+    Failed,
+}
+
+/// Resource allocation currently reported by a sandbox Provider.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SandboxResourceAllocation {
+    /// Allocated virtual CPU count, when reported.
+    pub vcpu_count: Option<u32>,
+    /// Allocated memory in MiB, when reported.
+    pub memory_mb: Option<u64>,
+    /// Allocated disk capacity in MiB, when reported.
+    pub disk_mb: Option<u64>,
+}
+
+/// Stable and secret-free sandbox metadata returned by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SandboxCatalogItem {
+    /// Stable backend identifier managed by the daemon.
+    pub sandbox_id: String,
+    /// Backend Provider kind, such as `local` or `e2b`.
+    pub provider: String,
+    /// Provider-specific instance identifier.
+    pub instance_id: String,
+    /// Current lifecycle state.
+    pub status: SandboxLifecycleStatus,
+    /// Workspace root mounted in the sandbox.
+    pub workspace_root: String,
+    /// Endpoint class only; Provider handles and credentials are never returned.
+    pub endpoint_kind: Option<String>,
+    /// Resource allocation currently reported by the Provider.
+    pub resources: SandboxResourceAllocation,
+    /// Runtime identifiers currently leasing the sandbox.
+    pub runtime_ids: Vec<String>,
+    /// Provider expiration time in Unix milliseconds, when present.
+    pub expires_at_ms: Option<u64>,
+    /// Parent sandbox identifier in the branch lineage.
+    pub parent_sandbox_id: Option<String>,
+    /// Child sandbox identifiers in the branch lineage.
+    pub child_sandbox_ids: Vec<String>,
+    /// Provider snapshot from which this sandbox was restored.
+    pub forked_from_snapshot_id: Option<String>,
+    /// Fork time in Unix milliseconds, when present.
+    pub forked_at_ms: Option<u64>,
+}
+
+/// Response containing all sandboxes currently owned by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SandboxCatalogResponse {
+    /// Sandboxes currently tracked by the daemon.
+    pub sandboxes: Vec<SandboxCatalogItem>,
+}
+
 /// Stable checkpoint metadata returned by the Runtime catalog API.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeCheckpointCatalogItem {

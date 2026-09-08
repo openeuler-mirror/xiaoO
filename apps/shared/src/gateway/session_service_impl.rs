@@ -49,7 +49,7 @@ use super::session_lease::{is_daemon_principal, LeaseAcquireOutcome, SessionLeas
 use super::session_supervisor::SessionSupervisor;
 use crate::backend::{
     BackendCheckoutRequest, BackendCheckpointRequest, BackendCheckpointSnapshotDeleteRequest,
-    BackendError, BackendLease, BackendManager,
+    BackendError, BackendInfo, BackendLease, BackendListFilter, BackendManager,
 };
 use crate::runtime_checkpoint::{InMemoryRuntimeCheckpointStore, RuntimeCheckpoint};
 
@@ -1722,6 +1722,13 @@ impl SessionService for CoreBackedSessionService {
 
 #[async_trait]
 impl SessionControlPlane for CoreBackedSessionService {
+    async fn list_sandboxes(&self) -> Result<Vec<BackendInfo>, SessionServiceError> {
+        Ok(self
+            .backend_manager
+            .list_backends(BackendListFilter::default())
+            .await)
+    }
+
     async fn hibernate_idle_session(
         &self,
         session_id: &str,

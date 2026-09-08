@@ -35,7 +35,8 @@ use xiaoo_shared::daemon_protocol::response::{
     RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
     RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeLifecycleStatus,
     RuntimePauseResponse, RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
-    RuntimeWriteFileResponse,
+    RuntimeWriteFileResponse, SandboxCatalogItem, SandboxCatalogResponse, SandboxLifecycleStatus,
+    SandboxResourceAllocation,
 };
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
@@ -489,6 +490,41 @@ fn runtime_checkpoint_catalog_item(
     }
 }
 
+fn sandbox_catalog_item(sandbox: xiaoo_shared::backend::BackendInfo) -> SandboxCatalogItem {
+    let status = match xiaoo_shared::backend::backend_state_label(sandbox.state) {
+        "unknown" => SandboxLifecycleStatus::Unknown,
+        "creating" => SandboxLifecycleStatus::Creating,
+        "active" => SandboxLifecycleStatus::Active,
+        "pausing" => SandboxLifecycleStatus::Pausing,
+        "paused" => SandboxLifecycleStatus::Paused,
+        "loading" => SandboxLifecycleStatus::Loading,
+        "deleting" => SandboxLifecycleStatus::Deleting,
+        "deleted" => SandboxLifecycleStatus::Deleted,
+        "failed" => SandboxLifecycleStatus::Failed,
+        state => unreachable!("shared returned an unknown backend state: {state}"),
+    };
+    SandboxCatalogItem {
+        sandbox_id: sandbox.backend_id,
+        provider: sandbox.provider,
+        instance_id: sandbox.instance_id,
+        status,
+        workspace_root: sandbox.workspace_root,
+        endpoint_kind: xiaoo_shared::backend::backend_endpoint_kind(sandbox.endpoint)
+            .map(str::to_string),
+        resources: SandboxResourceAllocation {
+            vcpu_count: sandbox.resources.vcpu_count,
+            memory_mb: sandbox.resources.memory_mb,
+            disk_mb: sandbox.resources.disk_mb,
+        },
+        runtime_ids: sandbox.session_ids,
+        expires_at_ms: sandbox.expires_at_ms,
+        parent_sandbox_id: sandbox.lineage.parent_backend_id,
+        child_sandbox_ids: sandbox.lineage.children_backend_ids,
+        forked_from_snapshot_id: sandbox.lineage.forked_from_snapshot_id,
+        forked_at_ms: sandbox.lineage.forked_at_ms,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpBearerAuthConfig {
     token: Arc<str>,
@@ -545,6 +581,7 @@ fn create_router_from_state(
     let protected_runtime_routes = apply_http_bearer_auth(
         Router::new()
             .route("/api/v1/runtimes", get(handle_runtime_catalog))
+            .route("/api/v1/sandboxes", get(handle_sandbox_catalog))
             .route(
                 "/api/v1/runtimes/checkpoints",
                 get(handle_runtime_checkpoint_catalog),
@@ -1207,6 +1244,25 @@ async fn handle_runtime_catalog(State(state): State<Arc<GatewayAppState>>) -> Re
     }
 }
 
+async fn handle_sandbox_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    let Some(control_plane) = state.session_control_plane.as_ref() else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(GatewayErrorResponse {
+                error: "session control plane is not configured".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match control_plane.list_sandboxes().await {
+        Ok(sandboxes) => Json(SandboxCatalogResponse {
+            sandboxes: sandboxes.into_iter().map(sandbox_catalog_item).collect(),
+        })
+        .into_response(),
+        Err(error) => map_session_error(error),
+    }
+}
+
 async fn handle_runtime_checkpoint_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -1680,6 +1736,7 @@ mod tests {
     use tokio::time::{sleep, timeout, Duration};
     use tower::util::ServiceExt;
     use xiaoo_api::events::LoopEventSink;
+    use xiaoo_shared::backend::{BackendInfo, BackendLineageInfo};
     use xiaoo_shared::gateway::{
         AppTurnRequest, AppTurnResult, SessionControlPlane, SessionService, SessionServiceError,
         TurnOutcome,
@@ -1701,6 +1758,73 @@ mod tests {
                 execution_state: xiaoo_api::backend::ExecutionState::RunningOrCompleted,
             })
         }
+    }
+
+    struct SandboxCatalogControlPlane;
+
+    #[async_trait]
+    impl SessionControlPlane for SandboxCatalogControlPlane {
+        async fn list_sandboxes(&self) -> Result<Vec<BackendInfo>, SessionServiceError> {
+            let sandbox = serde_json::from_value(serde_json::json!({
+                "backend_id": "sandbox-1",
+                "provider": "e2b",
+                "instance_id": "instance-private",
+                "state": "active",
+                "workspace_root": "/workspace",
+                "endpoint": {"provider_handle": {"value": {"credential": "must-not-leak"}}},
+                "metadata": {"api_key": "must-not-leak"},
+                "resources": {"vcpu_count": 2, "memory_mb": 4096, "disk_mb": null},
+                "session_id": "runtime-1",
+                "session_ids": ["runtime-1"],
+                "expires_at_ms": 1234,
+                "lineage": BackendLineageInfo::default(),
+            }))
+            .expect("sandbox fixture should deserialize");
+            Ok(vec![sandbox])
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sandbox_catalog_is_authenticated_and_redacted() {
+        let router = create_router_with_control_plane_and_auth(
+            Arc::new(FakeSessionService::new("unused")),
+            Arc::new(SandboxCatalogControlPlane),
+            Some(HttpBearerAuthConfig::new("secret-token")),
+            None,
+        );
+
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sandboxes")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sandboxes")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let text = String::from_utf8(body.to_vec()).expect("response should be UTF-8");
+        assert!(!text.contains("must-not-leak"));
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("response should be JSON");
+        assert_eq!(payload["sandboxes"][0]["endpoint_kind"], "provider_handle");
+        assert_eq!(payload["sandboxes"][0]["runtime_ids"][0], "runtime-1");
     }
 
     #[tokio::test(flavor = "current_thread")]

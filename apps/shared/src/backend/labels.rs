@@ -34,6 +34,16 @@ pub fn backend_endpoint_str(endpoint: Option<BackendEndpoint>) -> Option<String>
     })
 }
 
+/// Return only the endpoint transport class, without Provider handles or addresses.
+pub fn backend_endpoint_kind(endpoint: Option<BackendEndpoint>) -> Option<&'static str> {
+    endpoint.map(|endpoint| match endpoint {
+        BackendEndpoint::Local => "local",
+        BackendEndpoint::Tcp { .. } => "tcp",
+        BackendEndpoint::UnixSocket { .. } => "unix_socket",
+        BackendEndpoint::ProviderHandle { .. } => "provider_handle",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
