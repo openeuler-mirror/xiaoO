@@ -136,6 +136,7 @@ impl SessionDiffTracker {
     ) -> Option<FileChangeDelta> {
         if let Some(previous) = self.tool_file_changes.remove(call_id) {
             self.adjust_session_file_change(
+                call_id,
                 &previous.file_path,
                 previous.additions,
                 previous.deletions,
@@ -147,7 +148,13 @@ impl SessionDiffTracker {
             return None;
         };
 
-        self.adjust_session_file_change(&next.file_path, next.additions, next.deletions, true);
+        self.adjust_session_file_change(
+            call_id,
+            &next.file_path,
+            next.additions,
+            next.deletions,
+            true,
+        );
         self.tool_file_changes
             .insert(call_id.to_string(), next.clone());
         Some(next)
@@ -183,6 +190,32 @@ impl SessionDiffTracker {
             ToolFileBaseline {
                 file_path,
                 absolute_path,
+            },
+        );
+    }
+
+    /// Apply a pre-execution baseline captured synchronously by the
+    /// tool-event sink on the executor thread (see
+    /// [`capture_file_baseline_payload`]). Mirrors the map writes of
+    /// [`SessionDiffTracker::capture_tool_file_baseline`] but uses the
+    /// already-read content instead of reading the file now — by the time
+    /// the UI event loop processes this, the tool has typically already
+    /// modified the file on disk. First-writer-wins: a later (delayed)
+    /// `capture_tool_file_baseline` for the same file keeps this value.
+    pub fn inject_session_file_baseline(
+        &mut self,
+        call_id: &str,
+        payload: &ToolFileBaselinePayload,
+    ) {
+        // First-writer-wins, same semantics as capture_tool_file_baseline.
+        self.session_file_content_baselines
+            .entry(payload.file_path.clone())
+            .or_insert_with(|| payload.content.clone());
+        self.tool_file_baselines.insert(
+            call_id.to_string(),
+            ToolFileBaseline {
+                file_path: payload.file_path.clone(),
+                absolute_path: payload.absolute_path.clone(),
             },
         );
     }
@@ -235,6 +268,10 @@ impl SessionDiffTracker {
             }),
         };
         if let Some(delta) = computed.or(fallback) {
+            // Diagnostic: this branch writes the delta straight into
+            // `session_file_changes` WITHOUT registering `tool_file_changes`,
+            // so a duplicate terminal event for the same call_id would be
+            // treated as a brand-new change and stacked on top of this.
             self.session_file_changes.insert(
                 delta.file_path.clone(),
                 SessionFileChangeStats {
@@ -245,6 +282,18 @@ impl SessionDiffTracker {
             if delta.additions == 0 && delta.deletions == 0 {
                 self.session_file_changes.remove(&delta.file_path);
             }
+            // Register the applied delta under this `call_id` so that a
+            // duplicate terminal event is caught by the
+            // `tool_file_changes.contains_key` guard above instead of
+            // stacking a second, args-estimated delta on top of the
+            // accurate content diff. In local mode the same completion is
+            // delivered through both the tool lifecycle sink and the
+            // agent-loop `on_tool_result` sink; in remote mode the daemon's
+            // `ToolFileChange` delta arrives before its `ToolResult` event.
+            // Mirrors the registration `apply_remote_delta` performs via
+            // `reconcile_tool_file_change`.
+            self.tool_file_changes
+                .insert(call_id.to_string(), delta.clone());
             Some(delta)
         } else {
             self.reconcile_tool_file_change(call_id, None)
@@ -303,6 +352,7 @@ impl SessionDiffTracker {
 
     fn adjust_session_file_change(
         &mut self,
+        _call_id: &str,
         file_path: &str,
         additions: u32,
         deletions: u32,
@@ -324,6 +374,56 @@ impl SessionDiffTracker {
             self.session_file_changes.remove(file_path);
         }
     }
+}
+
+/// Pre-execution file baseline payload: the content of the tool's target
+/// file read synchronously on the tool-executor thread *before the tool
+/// runs* (the `Pending`/`Running` lifecycle events are emitted right
+/// before `invoke_resolved_executor`, see `call_impl.rs`).
+///
+/// In TUI-hosted (local) mode the lifecycle event is merely queued into
+/// the session-update channel and the UI event loop drains it only after
+/// the executor has already finished, so a baseline read at that point
+/// would freeze the *post-execution* content (initial == current,
+/// content-diff 0/0). The tool-event sink reads the file at emit time and
+/// ships this payload across the channel; the UI applies it via
+/// [`SessionDiffTracker::inject_session_file_baseline`].
+#[derive(Debug, Clone)]
+pub struct ToolFileBaselinePayload {
+    /// Raw file path exactly as parsed from the tool args; matches the
+    /// key used by `session_file_content_baselines`.
+    pub file_path: String,
+    /// Workspace-resolved absolute path (used to re-read the file at
+    /// completion time).
+    pub absolute_path: PathBuf,
+    /// File content at capture time. `None` means the file did not exist
+    /// yet (`file_write` creating a new file).
+    pub content: Option<String>,
+}
+
+/// Synchronously capture the file baseline for `tool`/`args_preview`
+/// against `workspace`, without touching any tracker state. Mirror of the
+/// parse/resolve/read logic in
+/// [`SessionDiffTracker::capture_tool_file_baseline`]: returns `None`
+/// when the tool does not target a file or the file is unreadable (in
+/// both cases `on_tool_completed` falls back to args-based estimation).
+pub fn capture_file_baseline_payload(
+    workspace: &Path,
+    tool: &str,
+    args_preview: &str,
+) -> Option<ToolFileBaselinePayload> {
+    let file_path = parse_tool_target_file_path(tool, args_preview)?;
+    let absolute_path = resolve_workspace_file_path(workspace, &file_path);
+    let content = match read_file_baseline(&absolute_path) {
+        FileReadOutcome::Unreadable => return None,
+        FileReadOutcome::Absent => None,
+        FileReadOutcome::Present(content) => Some(content),
+    };
+    Some(ToolFileBaselinePayload {
+        file_path,
+        absolute_path,
+        content,
+    })
 }
 
 pub(crate) fn parse_tool_target_file_path(tool: &str, args_preview: &str) -> Option<String> {
@@ -624,5 +724,55 @@ mod tests {
         assert_eq!(entries[1].file_path, "src/b.rs");
         assert_eq!(entries[1].additions, 2);
         assert_eq!(entries[1].deletions, 0);
+    }
+
+    /// Local-TUI race regression: the Running lifecycle event is queued
+    /// and drained by the UI loop only after the tool already finished.
+    /// The sink captures the true pre-execution content on the executor
+    /// thread and injects it via `inject_session_file_baseline`; the
+    /// later delayed `capture_tool_file_baseline` (which would read the
+    /// already-modified file) must NOT win.
+    #[test]
+    fn injected_pre_execution_baseline_wins_over_delayed_capture() {
+        let (temp, mut tracker) = tracker_in_temp_workspace();
+        let file = temp.path().join("workspace/src/main.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+
+        // 1) Sink-side synchronous capture (BEFORE the tool runs).
+        let payload = capture_file_baseline_payload(
+            temp.path().join("workspace").as_path(),
+            "file_edit",
+            r#"{"file_path":"src/main.rs","old_string":"hi","new_string":"hello"}"#,
+        )
+        .expect("payload");
+        assert_eq!(
+            payload.content.as_deref(),
+            Some("fn main() {\n    println!(\"hi\");\n}\n")
+        );
+
+        // 2) Tool executes and modifies the file.
+        fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+
+        // 3) UI loop drains the injected baseline first...
+        tracker.inject_session_file_baseline("call-1", &payload);
+        // ...then the delayed Running-driven capture, which now reads the
+        // POST-execution content and must be a no-op for this file.
+        tracker.on_tool_running(
+            "call-1",
+            "file_edit",
+            r#"{"file_path":"src/main.rs","old_string":"hi","new_string":"hello"}"#,
+        );
+        // 4) Completion reconciles against the injected pre-execution baseline.
+        let delta = tracker
+            .on_tool_completed(
+                "call-1",
+                "file_edit",
+                r#"{"file_path":"src/main.rs","old_string":"hi","new_string":"hello"}"#,
+                None,
+            )
+            .expect("delta");
+        assert_eq!(delta.additions, 1);
+        assert_eq!(delta.deletions, 1);
     }
 }

@@ -49,6 +49,10 @@ impl App {
 
         self.handle_slash_popup_mouse(mouse_event)?;
         self.handle_file_mention_popup_mouse(mouse_event)?;
+        if self.handle_plan_panel_mouse(mouse_event)? {
+            return Ok(());
+        }
+
         self.handle_transcript_mouse(mouse_event);
         self.handle_input_mouse(mouse_event);
         Ok(())
@@ -142,6 +146,90 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Mouse handling for the sidebar Plan (current task list) panel.
+    ///
+    /// Returns `Ok(true)` when the event was consumed by the panel (wheel
+    /// scroll inside the panel, scrollbar thumb press/drag/release, click on
+    /// panel content), so it must not fall through to the transcript handler.
+    fn handle_plan_panel_mouse(&mut self, mouse_event: MouseEvent) -> Result<bool> {
+        // Continue/release an in-progress thumb drag regardless of the
+        // cursor position, mirroring the transcript scrollbar drag.
+        match mouse_event.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
+                if self.state.plan_panel_scrollbar_dragging() =>
+            {
+                if let Some(area) = self.state.render_state.plan_panel_area {
+                    let track_height = area.height as usize;
+                    let max_scroll = self.state.plan_panel_max_scroll_offset();
+                    if track_height > 0 && max_scroll > 0 {
+                        let rel_y = (mouse_event.row.saturating_sub(area.y) as usize)
+                            .min(track_height.saturating_sub(1));
+                        self.state.set_plan_panel_scroll_offset(scroll_offset_from_drag(
+                            rel_y,
+                            track_height,
+                            max_scroll,
+                        ));
+                    }
+                }
+                return Ok(true);
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self.state.plan_panel_scrollbar_dragging() =>
+            {
+                self.state.set_plan_panel_scrollbar_dragging(false);
+                return Ok(true);
+            }
+            _ => {}
+        }
+
+        let Some(area) = self.state.render_state.plan_panel_area else {
+            return Ok(false);
+        };
+        if !mouse_in_rect(mouse_event.column, mouse_event.row, area) {
+            return Ok(false);
+        }
+
+        // The scrollbar track occupies the rightmost 2 columns of the panel
+        // (the thumb itself is drawn over the right border).
+        let in_scrollbar_zone = mouse_event.column >= area.x + area.width.saturating_sub(2)
+            && mouse_event.column < area.x + area.width;
+
+        match mouse_event.kind {
+            MouseEventKind::ScrollUp => {
+                self.state.plan_panel_scroll_up();
+                Ok(true)
+            }
+            MouseEventKind::ScrollDown => {
+                self.state.plan_panel_scroll_down();
+                Ok(true)
+            }
+            MouseEventKind::Down(MouseButton::Left) if in_scrollbar_zone => {
+                self.state.set_plan_panel_scrollbar_dragging(true);
+                // Jump the thumb to the clicked track position immediately.
+                let track_height = area.height as usize;
+                let max_scroll = self.state.plan_panel_max_scroll_offset();
+                if track_height > 0 && max_scroll > 0 {
+                    let rel_y = (mouse_event.row.saturating_sub(area.y) as usize)
+                        .min(track_height.saturating_sub(1));
+                    self.state.set_plan_panel_scroll_offset(scroll_offset_from_drag(
+                        rel_y,
+                        track_height,
+                        max_scroll,
+                    ));
+                }
+                Ok(true)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Click on plan content: clear any transcript selection (the
+                // click landed outside the transcript content zone) and
+                // swallow the event.
+                self.state.transcript_selection = None;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 

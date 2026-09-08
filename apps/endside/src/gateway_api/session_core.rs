@@ -192,7 +192,10 @@ impl SessionGateway {
                     updates_tx.clone(),
                     Arc::clone(&loop_summary),
                 ))),
-                tool_event_sink: Some(Arc::new(ChannelToolEventSink::new(updates_tx.clone()))),
+                tool_event_sink: Some(Arc::new(ChannelToolEventSink::new(
+                    updates_tx.clone(),
+                    runtime_config.descriptor.workspace_root.clone(),
+                ))),
                 interaction_handle: Some(Arc::new(ChannelInteractionHandle::new(
                     updates_tx.clone(),
                     interaction_rx,
