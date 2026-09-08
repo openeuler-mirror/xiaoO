@@ -175,9 +175,14 @@ impl PluginToolHookerAdaptor {
 
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
-        // Get the first user message as prompt_session (for intent consistency check)
+        // Get the most recent user message as prompt_session (for intent consistency check).
+        // intent 一致性检查需要"当前意图"，而非整个会话的第一条用户消息：多轮对话里
+        // 会话开头通常是寒暄（如 "hi"），取第一条会污染意图判断。用户对 ask_user_question
+        // 之类的回答会作为 tool_result（Tool 角色）写回，不会成为 User 消息，因此取
+        // 最近一条 User 消息不会被这类回答污染，语义上就是"用户最近一次主动输入"。
         let prompt_session = recent_messages
             .iter()
+            .rev()
             .find(|m| m.role == MessageRole::User)
             .and_then(|m| {
                 m.blocks.iter().find_map(|b| match b {
@@ -242,10 +247,53 @@ impl PluginToolHookerAdaptor {
             })
             .collect();
 
+        // 构造交错历史 prompt（prompt_history）：按时间序遍历消息，遇到 User 消息
+        // 开一个新 turn，其后的 ToolResult 归入该 turn 的 actions，直到下一条 User。
+        // 解决多轮会话里"继续"覆盖初始读取/搜索意图导致的 L2 意图一致性漏报。
+        // 与 AgentMoss 接口契约 docs/INTEGRATION_GUIDE.md 第 4 节一致。
+        let mut prompt_history: Vec<Value> = Vec::new();
+        for m in messages.iter() {
+            if m.role == MessageRole::User {
+                let text = m.blocks.iter().find_map(|b| match b {
+                    agent_types::llm::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                }).unwrap_or_default();
+                prompt_history.push(json!({
+                    "text": text,
+                    "actions": Vec::<Value>::new(),
+                }));
+            } else {
+                // 非 User 消息中的 ToolResult 归入当前（最近一个）turn 的 actions
+                for block in &m.blocks {
+                    if let agent_types::llm::ContentBlock::ToolResult {
+                        call_id, tool_name, output, is_error,
+                    } = block
+                    {
+                        if let Some(last) = prompt_history.last_mut() {
+                            if let Some(obj) = last.as_object_mut() {
+                                let mut action = tool_use_map.get(call_id).cloned().unwrap_or_else(|| {
+                                    json!({"action_type": tool_name, "action_detail": ""})
+                                });
+                                if let Some(aobj) = action.as_object_mut() {
+                                    aobj.insert("call_id".to_string(), json!(call_id));
+                                    aobj.insert("output".to_string(), json!(output));
+                                    aobj.insert("is_error".to_string(), json!(is_error));
+                                }
+                                if let Some(arr) = obj.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                                    arr.push(action);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(json!({
             "stage": "pre",
             "session_id": session_id,
             "prompt_session": prompt_session,
+            "prompt_history": prompt_history,
             "action_history": action_history,
             "hooker": self.serialize_hooker_info(runtime),
             "metadata": self.serialize_metadata(metadata),
@@ -1101,86 +1149,6 @@ else:
         assert!(
             elapsed.as_secs() >= 2,
             "应等到 2s 超时才返回，实际耗时 {:?}（疑似子进程未卡住）",
-            elapsed
-        );
-    }
-
-    /// 真实复现客户卡死：经 Rust hooker 调真实 audit.py，audit.py 的 L3 call_llm
-    /// 被 monkeypatch（sitecustomize）永久阻塞（等效 http 超时失效），audit.py 子进程
-    /// 卡死不退出。验证 Rust 侧超时 + kill 兜底能强杀卡死的真实 audit.py 子进程。
-    ///
-    /// 注意：依赖本仓库 plugins/hookers/audit_agent 下的 venv 与 audit.py 存在，
-    /// CI 环境可能没有，故标 #[ignore]，手动 `cargo test -- --ignored` 跑。
-    #[tokio::test]
-    #[ignore]
-    async fn rust_kills_real_hung_audit_py_via_hooker() {
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let audit_py = repo_root.join("plugins/hookers/audit_agent/audit.py");
-        let venv_python =
-            repo_root.join("plugins/hookers/audit_agent/audit_policy_checker/venv/bin/python3");
-        let inject_dir = repo_root.join("plugins/tests/hookers/audit_agent/cases/hang-llm-repro");
-        let cfg_dir = std::env::temp_dir().join("audit_hang_test_cfg");
-        std::fs::create_dir_all(&cfg_dir).unwrap();
-        let cfg = cfg_dir.join("config.json");
-        std::fs::write(
-            &cfg,
-            r#"{"llm":{"api_key":"sk-fake","model":"m","temperature":0.1,"base_url":"http://127.0.0.1:1/api/v1"},"timeout":{"total_timeout":60.0,"prompt1_timeout":30.0,"prompt2_timeout":20.0,"step_interval":0.0},"cache":{"enabled":false,"max_size":1000},"retry":{"max_retries":1,"retry_interval":1.0},"security":{"enabled":true,"heuristic_enabled":true,"logic_rules_enabled":true,"llm_analysis_enabled":true,"rules_path":"","skills_dir":""},"log_level":"INFO"}"#,
-        )
-        .unwrap();
-
-        // command 经 sh -c，前缀设 env：注入 sitecustomize（patch call_llm 永久阻塞）+
-        // 测试 config（开 L3）+ 短 L3 超时 + 隔离 HOME。venv python 跑真实 audit.py。
-        let command = format!(
-            "PYTHONPATH={inject} HOME={home} AUDIT_CONFIG_PATH={cfg} AUDIT_LLM_TIMEOUT=10 {py} {audit}",
-            inject = inject_dir.display(),
-            home = std::env::temp_dir().display(),
-            cfg = cfg.display(),
-            py = venv_python.display(),
-            audit = audit_py.display(),
-        );
-        let adaptor = PluginToolHookerAdaptor::new(
-            HookerId("audit_agent".to_string()),
-            HookPointId("test-agent.Tool.file_write.pre".to_string()),
-            command,
-            Value::Null,
-        );
-        // 会进 L3 的 payload（file_write 非白名单）
-        let payload = json!({
-            "stage": "pre",
-            "session_id": "s",
-            "prompt_session": "写测试文件",
-            "action_history": [],
-            "call": {"call_id": "c", "tool_name": "file_write",
-                     "input": {"file_path": "/tmp/test_hang.txt", "content": "hello"}}
-        });
-
-        // Rust 侧用 5s 超时（比 L3 的 10s 短），验证 Rust 先杀掉卡死的 audit.py。
-        let start = std::time::Instant::now();
-        let result = adaptor
-            .run_plugin_command_with_timeout(&payload, Duration::from_secs(5))
-            .await;
-        let elapsed = start.elapsed();
-
-        match result {
-            Err(ToolExecutionError::Timeout { timeout_ms }) => {
-                assert_eq!(timeout_ms, 5000, "应为 Rust 侧 5s 超时");
-            }
-            other => panic!("expected Timeout(Rust 杀掉卡死 audit.py), got: {:?}", other),
-        }
-        // Rust 超时附近返回（~5s），证明强杀了卡死的真实 audit.py 子进程，未永久阻塞。
-        assert!(
-            elapsed.as_secs() < 15,
-            "Rust 应在 ~5s 超时杀掉 audit.py，实际 {:?}（疑似没杀掉）",
-            elapsed
-        );
-        assert!(
-            elapsed.as_secs() >= 5,
-            "应等到 5s 超时，实际 {:?}（疑似 audit.py 没卡住）",
             elapsed
         );
     }

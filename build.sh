@@ -11,40 +11,69 @@ fi
 
 # Detect if we're in CI mode
 if [ -n "${CI:-}" ]; then
-    echo "Detected CI environment, skipping audit_agent installation prompt"
+    echo "Detected CI environment, skipping agent_moss installation prompt"
     exec cargo build "$@"
 fi
 
 # Detect if stdin is a TTY
 if [ ! -t 0 ]; then
-    echo "Non-interactive mode detected, skipping audit_agent installation prompt"
+    echo "Non-interactive mode detected, skipping agent_moss installation prompt"
     exec cargo build "$@"
 fi
 
-# Interactive mode: ask user if they want to install audit_agent
+# Interactive mode: ask user if they want to install agent_moss
+# NOTE: agent_moss 是 audit_agent 的后继者——判定逻辑已迁出为独立常驻 HTTP 服务
+# （AgentMoss server）。xiaoO 只装一个瘦 bridge 插件（bridge.py）转发到服务。
+# 所以"装 agent_moss"= ①注册 bridge 插件到 xiaoO config + ②确保 AgentMoss 服务在跑。
+# 用户的诉求：选 Y 后必须自动把服务拉起来——探活→没装则问装不装→装了尝试起→起失败终止 build。
 echo ""
 echo "╔═════════════════════════════════════════════════════════════╗"
-echo "║  Security Plugin: audit_agent                               ║"
-echo "║  Provides security audit for tool execution.                ║"
+echo "║  Security Plugin: agent_moss                                ║"
+echo "║  Audit tool execution via the AgentMoss HTTP service.        ║"
 echo "║  - Helps prevent accidental execution of dangerous          ║"
 echo "║    commands (rm -rf, credential leaks, etc.)                ║"
-echo "║  - May increase response latency in your sessions           ║"
-echo "║  - To uninstall later: ./plugins/hookers/uninstall.sh       ║"
+echo "║  - Requires the AgentMoss server running (see below)         ║"
+echo "║  - To uninstall later: ./plugins/hookers/uninstall.sh      ║"
 echo "║                                                             ║"
-echo "║  Install now?                                               ║"
+echo "║  Install now?                                              ║"
 echo "╚═════════════════════════════════════════════════════════════╝"
 echo ""
-read -p "Install audit_agent? [Y/n]: " choice
+read -p "Install agent_moss? [Y/n]: " choice
 
 INSTALL_AUDIT=false
-ENABLE_LLM_ENV=""  # 环境变量值：1=启用，0=禁用
 if [[ "$choice" =~ ^[Nn]$ ]]; then
     # 用户明确选择不安装
     :
 else
     # 默认安装（空输入或 Y/y）
     INSTALL_AUDIT=true
-    # 追问是否启用 LLM 分析
+fi
+
+if [ "$INSTALL_AUDIT" = false ]; then
+    echo ""
+    echo "⚠️  Security Notice:"
+    echo "   Without agent_moss, tool execution lacks security audit."
+    echo "   This may expose your system to potential risks."
+    echo ""
+    echo "   To install later, run:"
+    echo "   ./plugins/hookers/install.sh --non-interactive agent_moss"
+    echo ""
+fi
+
+# ──────────────────────────────────────────────────────────────
+# 第二次问：是否启用 LLM 第三层分析（与老版 audit_agent 一致，两次问的节奏不变）。
+# 关键：偏好落盘到 runtime JSON（~/.config/agentmoss/agent_moss_runtime.json 的
+# layers.L3_llm_analysis），不能用 export 环境变量——env 只在 build.sh 这个 shell
+# 进程内有效，用户在别的终端起服务、或 systemd 起服务都读不到，等于白选。
+# 落盘后，服务不管谁起、何时起，都从同一个 runtime JSON 读到这个偏好。
+# 优先级仍是 env > runtime JSON > settings.json > 默认，env 最高不冲突。
+#
+# 注意：问（读用户输入）紧跟第一次问，保持两次问的节奏；但"落盘 runtime JSON"
+# 推迟到服务块里 agent_moss 确认能 import 之后——没装 agent_moss 时写不了 runtime JSON，
+# 步骤4 会先装，装完再落盘。所以这里只记 ENABLE_LLM_ENV，落盘延后。
+# ──────────────────────────────────────────────────────────────
+ENABLE_LLM_ENV=""  # 1=启用 L3，0=禁用 L3
+if [ "$INSTALL_AUDIT" = true ]; then
     echo ""
     echo "╔═════════════════════════════════════════════════════════════╗"
     echo "║  LLM Analysis (Layer 3)                                     ║"
@@ -65,17 +94,6 @@ else
     fi
 fi
 
-if [ "$INSTALL_AUDIT" = false ]; then
-    echo ""
-    echo "⚠️  Security Notice:"
-    echo "   Without audit_agent, tool execution lacks security audit."
-    echo "   This may expose your system to potential risks."
-    echo ""
-    echo "   To install later, run:"
-    echo "   ./plugins/hookers/install.sh --non-interactive audit_agent"
-    echo ""
-fi
-
 # Run cargo build
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
@@ -89,45 +107,49 @@ if [ $BUILD_EXIT_CODE -ne 0 ]; then
     exit $BUILD_EXIT_CODE
 fi
 
-# After build completes, install audit_agent if user chose to
+# 编译完成后，安装 agent_moss 服务 + 注册插件到 xiaoO config.toml（仅用户选 Y 时）
 if [ "$INSTALL_AUDIT" = true ]; then
     echo ""
     echo "═══════════════════════════════════════════════════════════════"
-    echo "  Installing audit_agent..."
+    echo "  安装 AgentMoss 服务 + 注册插件..."
     echo "═══════════════════════════════════════════════════════════════"
 
-    # 先通过 hookers/install.sh 注册插件（会自动调用 audit_agent/install.sh）
+    # 通过环境变量传递 LLM 偏好给 install.sh
+    # plugins/hookers/install.sh 会自动调用 agent_moss/install.sh
+    export AM_ENABLE_LLM="${ENABLE_LLM_ENV:-}"
     cd "$SCRIPT_DIR/plugins/hookers"
-    AUDIT_ENABLE_LLM="$ENABLE_LLM_ENV" bash install.sh --non-interactive audit_agent
-    INSTALL_EXIT_CODE=$?
-
+    bash install.sh --non-interactive agent_moss
+    REGISTER_EXIT_CODE=$?
     cd "$SCRIPT_DIR"
 
-    if [ $INSTALL_EXIT_CODE -eq 0 ]; then
+    if [ $REGISTER_EXIT_CODE -eq 0 ]; then
         echo ""
-        echo "✅ audit_agent installed successfully."
+        echo "✅ agent_moss installed & service running."
         echo ""
-        if [ "$ENABLE_LLM_ENV" = "1" ]; then
-            echo "LLM analysis is enabled."
-            echo ""
-            echo "To disable LLM analysis later:"
-            echo "  - Set environment variable: export AUDIT_DISABLE_LLM_LAYER3=1"
-            echo "  - Or edit: plugins/hookers/audit_agent/audit_settings.json"
-            echo ""
-        elif [ "$ENABLE_LLM_ENV" = "0" ]; then
-            echo "LLM analysis is disabled."
-            echo ""
-            echo "To enable LLM analysis later:"
-            echo "  - Remove AUDIT_DISABLE_LLM_LAYER3 from environment"
-            echo "  - Or edit: plugins/hookers/audit_agent/audit_settings.json"
-            echo ""
+        # 动态探测实际端口（与 install.sh 步骤5 同源逻辑）：agent-moss server --port 0
+        # findFreePort 从 9090 往上找空闲，同机多实例并存时可能落在 9091+。只认
+        # healthy 且 instance==xiaoo 的服务，避免漂移到同机其他 agent 的 agentmoss。
+        AM_CONSOLE_URL="http://127.0.0.1:9090/console"  # 探测失败兜底
+        for port in 9090 9091 9092 9093 9094 9095; do
+            if curl -sf -m 1 "http://127.0.0.1:${port}/api/v1/health" 2>/dev/null \
+                | grep -q '"instance":"xiaoo"'; then
+                AM_CONSOLE_URL="http://127.0.0.1:${port}/console"
+                break
+            fi
+        done
+        echo "   Policy Console: ${AM_CONSOLE_URL}"
+        if [ "${ENABLE_LLM_ENV:-}" = "0" ]; then
+            echo "   LLM 分析 (L3): 已禁用"
+        else
+            echo "   LLM 分析 (L3): 已启用"
         fi
-        echo "To uninstall later, run:"
-        echo "  ./plugins/hookers/uninstall.sh"
+        echo ""
+        echo "   To uninstall later, run:"
+        echo "     ./plugins/hookers/uninstall.sh"
         echo ""
     else
         echo ""
-        echo "❌ audit_agent installation failed."
+        echo "❌ agent_moss plugin registration failed."
         echo ""
     fi
 else
@@ -136,11 +158,11 @@ else
     echo "╔═════════════════════════════════════════════════════════════╗"
     echo "║  ⚠️  Build Complete - Security Notice                       ║"
     echo "╠═════════════════════════════════════════════════════════════╣"
-    echo "║  audit_agent is NOT installed.                              ║"
+    echo "║  agent_moss is NOT installed.                              ║"
     echo "║  Your tool execution lacks security audit.                  ║"
     echo "║                                                             ║"
     echo "║  To install, run:                                           ║"
-    echo "║  ./plugins/hookers/install.sh --non-interactive audit_agent ║"
+    echo "║  ./plugins/hookers/install.sh --non-interactive agent_moss ║"
     echo "╚═════════════════════════════════════════════════════════════╝"
     echo ""
 fi

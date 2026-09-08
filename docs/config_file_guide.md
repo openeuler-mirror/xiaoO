@@ -333,7 +333,7 @@ db_path = "~/.xiaoo/traces.db"       # SQLite database path (for moirai-sqlite)
 
 ```toml
 [hooker]
-default = "audit_agent"              # Default hooker mode: None, audit_agent, etc.
+default = "agent_moss"              # Default hooker mode: None, agent_moss, etc.
 ```
 
 For detailed hooker configuration and plugin instructions, please refer to [plugins.md](./plugins.md).

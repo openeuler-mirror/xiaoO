@@ -253,7 +253,7 @@ dirs = ["~/.xiaoo/skills"]
 
 # Hooker (common configuration)
 [hooker]
-default = "audit_agent"
+default = "agent_moss"
 
 # TUI-specific configuration
 

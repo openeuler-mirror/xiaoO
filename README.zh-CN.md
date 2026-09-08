@@ -89,7 +89,7 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 ./build.sh --release
 ```
 
-该构建脚本可以安装 `audit_agent` hooker，用于审计工具执行中的高风险操作。插件安装与使用请参考 [docs/plugins.md](./docs/plugins.md)。
+该构建脚本可以安装 `agent_moss` hooker（瘦 bridge 插件，转发到常驻 AgentMoss HTTP 服务审计工具执行中的高风险操作）。插件安装与使用请参考 [docs/plugins.md](./docs/plugins.md)。
 
 ### Docker
 

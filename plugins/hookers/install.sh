@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Examples:"
             echo "  $0                    # Interactive mode"
-            echo "  $0 --non-interactive audit_agent  # Install audit_agent without interaction"
+            echo "  $0 --non-interactive agent_moss  # Install agent_moss without interaction"
             exit 0
             ;;
         *)
