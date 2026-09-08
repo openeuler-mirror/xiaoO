@@ -157,6 +157,13 @@ impl Input {
         // If there's a selection, replace it.
         if self.selected_range().is_some() {
             self.delete_selected();
+        } else {
+            // No (non-empty) selection: drop any stale anchor so the freshly
+            // inserted char does not silently start a new selection. Without
+            // this, a mouse click (which sets anchor == cursor) would make the
+            // SECOND inserted char replace the first — typing "ab" yielded
+            // "b", and pasting "/root/…" dropped the leading "/".
+            self.selection_anchor = None;
         }
         let mut chars: Vec<char> = self.value.chars().collect();
         let cursor = self.cursor.min(chars.len());
@@ -433,6 +440,29 @@ impl From<String> for Input {
 mod tests {
     use super::{EventHandler, Input};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn typing_after_click_keeps_all_chars() {
+        // Regression: a mouse click leaves anchor == cursor (an empty,
+        // invisible selection). insert_char used to keep that anchor, so the
+        // second typed char replaced the first via the selection-replace
+        // path — typing "ab" produced "b".
+        let mut input = Input::default().with_value(String::new());
+        input.set_cursor(0);
+        input.set_anchor(); // click artifact
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        input.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('b'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(input.value(), "ab");
+        assert!(input.selected_text().is_none());
+        assert_eq!(input.cursor(), 2);
+    }
 
     #[test]
     fn backspace_key_deletes_previous_character() {
