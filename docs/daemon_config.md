@@ -54,6 +54,14 @@ The JSON output is safe for management clients: literal tokens, secrets, API key
 headers, and arbitrary header values are redacted. Environment-variable names and key availability
 are retained so clients can present actionable setup state without receiving secret values.
 
+## Management capability negotiation
+
+`GET /api/v1/capabilities` includes a versioned `management` object. Each domain declares whether
+it is configurable, whether live runtime read/write or test operations are implemented, and the
+exact supported action names. GUI clients must use these flags instead of assuming that every
+Schema section already has an online management endpoint. Configuration-only domains remain
+visible without presenting unsupported controls as working actions.
+
 The JSON result groups aliases under canonical Provider names and includes the
 protocol family, default API Base, suggested API Key environment variable,
 whether a key is required, and model-catalog support.

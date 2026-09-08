@@ -2,8 +2,8 @@
 //!
 //! serverside 的 `build_tool_registry` / `build_tool_runtime_services` 与 shared
 //! resolver 内已有逻辑（`hosted_runtime_resolver`）合并为单一实现，对外只
-//! pub 两个入口（[`discover_tool_names`] / [`build_tool_registry`]）与两个
-//! 粗粒度输入结构（[`ToolAssemblyInput`] / [`SubagentRoleSpec`]）。
+//! pub 三个入口（[`discover_tools`] / [`discover_tool_names`] /
+//! [`build_tool_registry`]）与粗粒度输入、目录结构。
 //!
 //! 两条硬约束：
 //! - 入参出参不出现底层细粒度类型：`ToolSource` / `ToolRuntimeServices` /
@@ -17,12 +17,13 @@
 //! 字段），不向应用再导出：serverside 拿到 shared 的 `CoreBackedSessionService`
 //! 后作为值传入字段，unsized coercion 不需要 `use` trait 名。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent_contracts::ToolRegistryBuilder;
 use agent_types::common::ids::{AgentId, ToolName};
+use agent_types::tool::spec_types::EffectProfile;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use lsp::LspServiceRegistry;
 use mcp::McpServerConfig;
@@ -44,6 +45,31 @@ pub struct SubagentRoleSpec {
     pub prompt: Option<String>,
     pub max_turns: Option<u32>,
     pub tools: BTreeMap<String, bool>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolCatalogSource {
+    Builtin,
+    Custom,
+    Mcp,
+}
+
+impl ToolCatalogSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Custom => "custom",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolCatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub source: ToolCatalogSource,
+    pub effect: EffectProfile,
 }
 
 /// 不透明的已绑定控制句柄存储：跨多次工具装配复用同一份控制绑定
@@ -206,18 +232,59 @@ async fn resolve_mcp_tools(
 ///
 /// `async` 是因为 MCP 服务器源需要连接 + 初始化后才能 list_tools
 /// （endside 当前调用点不传 mcp_servers，故实际不触发网络）。
+pub async fn discover_tools(
+    input: &ToolAssemblyInput,
+) -> Result<Vec<ToolCatalogEntry>, ToolAssemblyError> {
+    let mcp_servers = resolve_mcp_tools(input).await?;
+    let has_mcp_tools = mcp_servers
+        .as_ref()
+        .map(|servers| !servers.is_empty())
+        .unwrap_or(false);
+    let services = to_runtime_services(input, mcp_servers);
+    let tool_sources = load_tool_sources_with_services(services);
+    let mut source_kinds = vec![ToolCatalogSource::Builtin];
+    if !input.disable_plugin_tools {
+        source_kinds.push(ToolCatalogSource::Custom);
+    }
+    if has_mcp_tools {
+        source_kinds.push(ToolCatalogSource::Mcp);
+    }
+    if tool_sources.len() != source_kinds.len() {
+        return Err(ToolAssemblyError::Build(
+            "tool source catalog classification is inconsistent".to_string(),
+        ));
+    }
+
+    let mut seen_names = HashSet::new();
+    let mut tools = Vec::new();
+    for (source, source_kind) in tool_sources.iter().zip(source_kinds) {
+        for tool in source.discover() {
+            let name = tool.spec.name().0.clone();
+            if !seen_names.insert(name.clone()) {
+                return Err(ToolAssemblyError::Build(format!(
+                    "duplicate tool name in registry: {name}"
+                )));
+            }
+            tools.push(ToolCatalogEntry {
+                name,
+                description: tool.spec.description().to_string(),
+                source: source_kind,
+                effect: tool.spec.effect_profile().clone(),
+            });
+        }
+    }
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tools)
+}
+
 pub async fn discover_tool_names(
     input: &ToolAssemblyInput,
 ) -> Result<Vec<ToolName>, ToolAssemblyError> {
-    let mcp_servers = resolve_mcp_tools(input).await?;
-    let services = to_runtime_services(input, mcp_servers);
-    let tool_sources = load_tool_sources_with_services(services);
-    let names = tool_sources
-        .iter()
-        .flat_map(|source| source.discover())
-        .map(|tool| tool.spec.name().clone())
-        .collect();
-    Ok(names)
+    Ok(discover_tools(input)
+        .await?
+        .into_iter()
+        .map(|tool| ToolName(tool.name))
+        .collect())
 }
 
 /// 装配工具注册表；可见性过滤用粗粒度参数表达（每 agent 允许的工具名），
@@ -242,4 +309,31 @@ pub async fn build_tool_registry(
         .map_err(|e| ToolAssemblyError::Build(e.to_string()))?;
 
     Ok(Arc::from(registry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discover_tools, ToolAssemblyInput, ToolCatalogSource};
+
+    #[tokio::test]
+    async fn catalog_exposes_builtin_tool_metadata_without_plugin_sources() {
+        let tools = discover_tools(&ToolAssemblyInput {
+            disable_plugin_tools: true,
+            ..ToolAssemblyInput::default()
+        })
+        .await
+        .expect("tool catalog");
+
+        assert!(tools.windows(2).all(|pair| pair[0].name <= pair[1].name));
+        let bash = tools
+            .iter()
+            .find(|tool| tool.name == "bash")
+            .expect("bash tool");
+        assert_eq!(bash.source, ToolCatalogSource::Builtin);
+        assert!(!bash.description.is_empty());
+        assert!(bash.effect.side_effects);
+        assert!(tools
+            .iter()
+            .all(|tool| tool.source == ToolCatalogSource::Builtin));
+    }
 }
