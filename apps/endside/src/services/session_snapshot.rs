@@ -783,6 +783,7 @@ pub fn apply_snapshot(
     state.reasoning_effort = snapshot.reasoning_effort;
     state.session_messages = snapshot.session_messages;
     state.plan_state = snapshot.plan_state.map(Into::into);
+    state.plan_panel.reset_scroll();
     state.restore_session_file_changes(snapshot.session_file_changes);
     state.clear_tool_file_baselines();
     state.input_mode = crate::app_state::InputMode::Editing;

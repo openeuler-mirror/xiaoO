@@ -776,6 +776,20 @@ impl GatewayRuntime {
         // must invalidate the cached layout split. Content-only updates
         // (still `Some`) don't change sidebar visibility, so the cache stays.
         let plan_presence_changed = state.plan_state.is_some() != !update.items.is_empty();
+        // A freshly shown or replaced task list (different title or items
+        // than the previous one) starts scrolled to the top; status-only
+        // updates of the same list keep the user's scroll position (it is
+        // clamped against the new content at render time).
+        let plan_replaced = !update.items.is_empty()
+            && state.plan_state.as_ref().map_or(true, |old| {
+                old.title != update.title
+                    || old.items.len() != update.items.len()
+                    || old
+                        .items
+                        .iter()
+                        .zip(update.items.iter())
+                        .any(|((_, old_content), new_item)| old_content != &new_item.content)
+            });
         state.plan_state = if update.items.is_empty() {
             None
         } else {
@@ -790,6 +804,9 @@ impl GatewayRuntime {
         };
         if plan_presence_changed {
             state.render_state.cached_area = None;
+        }
+        if plan_replaced {
+            state.plan_panel.reset_scroll();
         }
     }
 

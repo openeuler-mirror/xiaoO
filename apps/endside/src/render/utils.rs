@@ -78,7 +78,7 @@ pub(crate) fn truncate_display_width(text: &str, max_width: usize) -> String {
     truncate_display_width_for_mode(text, max_width, use_ascii_terminal_symbols())
 }
 
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     text.chars()
         .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
         .sum()

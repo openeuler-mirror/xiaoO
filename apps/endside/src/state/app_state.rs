@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ratatui::{layout::Rect, text::Line};
+use ratatui::{layout::Rect, text::Line, widgets::ScrollbarState};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use xiaoo_api::chat::ReasoningEffort;
@@ -120,6 +120,82 @@ pub struct ToolToggleRegion {
 pub struct SubagentOpenRegion {
     pub agent_id: String,
     pub rect: Rect,
+}
+
+/// Scroll state for the sidebar "Plan" (current task list) panel.
+///
+/// Mirrors the line-based scroll bookkeeping of `SubagentLaneState`:
+/// `total_lines` / `last_visible_height` are refreshed by every
+/// `render_plan_panel` frame (the panel content is word-wrapped, so the
+/// visual line count depends on the current sidebar width), and
+/// `scroll_offset` is the number of wrapped visual lines skipped from the
+/// top of the panel.
+pub struct PlanPanelState {
+    /// Line-based scroll: wrapped visual lines skipped from the panel top.
+    pub scroll_offset: usize,
+    pub scrollbar_state: ScrollbarState,
+    /// True while the user is dragging the plan panel scrollbar thumb.
+    pub scrollbar_dragging: bool,
+    /// Total wrapped line count of the plan panel (updated each render).
+    pub total_lines: usize,
+    /// Inner height of the plan panel (updated each render).
+    pub last_visible_height: usize,
+}
+
+impl Default for PlanPanelState {
+    fn default() -> Self {
+        Self {
+            scroll_offset: 0,
+            scrollbar_state: ScrollbarState::default(),
+            scrollbar_dragging: false,
+            total_lines: 0,
+            last_visible_height: 0,
+        }
+    }
+}
+
+impl PlanPanelState {
+    pub fn max_scroll_offset(&self) -> usize {
+        self.total_lines
+            .saturating_sub(self.last_visible_height)
+            .min(self.total_lines)
+    }
+
+    pub fn sync_scrollbar_state(&mut self) {
+        let max_scroll = self.max_scroll_offset();
+        let scrollbar_content_length = max_scroll.saturating_add(1);
+        self.scrollbar_state = self
+            .scrollbar_state
+            .content_length(scrollbar_content_length)
+            .viewport_content_length(self.last_visible_height)
+            .position(self.scroll_offset.min(max_scroll));
+    }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.sync_scrollbar_state();
+    }
+
+    pub fn scroll_down(&mut self) {
+        let max = self.max_scroll_offset();
+        if self.scroll_offset < max {
+            self.scroll_offset = (self.scroll_offset + 1).min(max);
+        }
+        self.sync_scrollbar_state();
+    }
+
+    pub fn set_scroll_offset(&mut self, line_offset: usize) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = line_offset.min(max);
+        self.sync_scrollbar_state();
+    }
+
+    /// Reset scroll to the top (new plan snapshot / session switch).
+    pub fn reset_scroll(&mut self) {
+        self.scroll_offset = 0;
+        self.scrollbar_dragging = false;
+        self.sync_scrollbar_state();
+    }
 }
 
 #[derive(Clone)]
@@ -247,6 +323,10 @@ impl TranscriptRenderCache {
 #[derive(Default)]
 pub struct RenderState {
     pub messages_area: Option<Rect>,
+    /// Scrollbar track area of the sidebar Plan panel (outer x/width, inner
+    /// y/height — same convention as `messages_area`). Used for mouse
+    /// hit-testing (wheel scroll + thumb drag). `None` when no plan shows.
+    pub plan_panel_area: Option<Rect>,
     pub theme_toggle_area: Option<Rect>,
     pub api_key_toggle_area: Option<Rect>,
     /// Per-message last-applied `render_revision`. `None` means "not yet
@@ -338,6 +418,8 @@ pub struct AppState {
     pub workspace: PathBuf,
     pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
+    /// Scroll state for the sidebar Plan panel (current task list).
+    pub plan_panel: PlanPanelState,
     pub session_id: String,
     /// Per-process ephemeral UUID sent with every remote RPC; used by the
     /// daemon's attach-lease table to enforce single-writer per session.
@@ -385,6 +467,7 @@ impl AppState {
             workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
+            plan_panel: PlanPanelState::default(),
             session_id: uuid::Uuid::new_v4().to_string(),
             client_id: uuid::Uuid::new_v4().to_string(),
             session_taken_over: false,
@@ -434,6 +517,7 @@ impl AppState {
             workspace: workspace.clone(),
             session_messages: Vec::new(),
             plan_state: None,
+            plan_panel: PlanPanelState::default(),
             session_id: uuid::Uuid::new_v4().to_string(),
             // Fresh per-process UUID: sharing a persisted id would let two
             // TUIs refresh each other's lease and bypass single-writer.
@@ -467,6 +551,7 @@ impl AppState {
         self.api_key_dialog = None;
         self.session_messages.clear();
         self.plan_state = None;
+        self.plan_panel = PlanPanelState::default();
         self.session_id = uuid::Uuid::new_v4().to_string();
         self.session_taken_over = false;
         self.current_snapshot_context = None;
@@ -672,6 +757,30 @@ impl AppState {
         } else {
             self.chat_state.scrollbar_dragging = dragging;
         }
+    }
+
+    pub fn plan_panel_scroll_up(&mut self) {
+        self.plan_panel.scroll_up();
+    }
+
+    pub fn plan_panel_scroll_down(&mut self) {
+        self.plan_panel.scroll_down();
+    }
+
+    pub fn plan_panel_max_scroll_offset(&self) -> usize {
+        self.plan_panel.max_scroll_offset()
+    }
+
+    pub fn set_plan_panel_scroll_offset(&mut self, line_offset: usize) {
+        self.plan_panel.set_scroll_offset(line_offset);
+    }
+
+    pub fn plan_panel_scrollbar_dragging(&self) -> bool {
+        self.plan_panel.scrollbar_dragging
+    }
+
+    pub fn set_plan_panel_scrollbar_dragging(&mut self, dragging: bool) {
+        self.plan_panel.scrollbar_dragging = dragging;
     }
 
     pub fn clear_tool_file_baselines(&mut self) {
@@ -1279,7 +1388,7 @@ pub(crate) fn sandbox_backend_config(
 mod tests {
     use super::{
         current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState,
-        AppState, RuntimeStatusLight,
+        AppState, PlanPanelState, RuntimeStatusLight,
     };
     use crate::backend::GatewayBackendConfig;
     use crate::config::{AgentRoleConfig, Config};
@@ -1558,5 +1667,78 @@ mod tests {
             is_secret: false,
             default_index: Some(0),
         }
+    }
+
+    #[test]
+    fn plan_panel_scroll_clamps_to_content_bounds() {
+        let mut plan_panel = PlanPanelState::default();
+        plan_panel.total_lines = 10;
+        plan_panel.last_visible_height = 4;
+        assert_eq!(plan_panel.max_scroll_offset(), 6);
+
+        for _ in 0..10 {
+            plan_panel.scroll_down();
+        }
+        assert_eq!(plan_panel.scroll_offset, 6, "scroll down must clamp at max");
+
+        for _ in 0..10 {
+            plan_panel.scroll_up();
+        }
+        assert_eq!(plan_panel.scroll_offset, 0, "scroll up must clamp at 0");
+    }
+
+    #[test]
+    fn plan_panel_set_scroll_offset_clamps_and_repositions_thumb() {
+        let mut plan_panel = PlanPanelState::default();
+        plan_panel.total_lines = 12;
+        plan_panel.last_visible_height = 4;
+
+        plan_panel.set_scroll_offset(999);
+        assert_eq!(plan_panel.scroll_offset, 8, "set_scroll_offset must clamp");
+
+        plan_panel.set_scroll_offset(3);
+        assert_eq!(plan_panel.scroll_offset, 3);
+    }
+
+    #[test]
+    fn plan_panel_reset_scroll_returns_to_top() {
+        let mut plan_panel = PlanPanelState::default();
+        plan_panel.total_lines = 20;
+        plan_panel.last_visible_height = 5;
+        plan_panel.scroll_down();
+        plan_panel.scroll_down();
+        assert!(plan_panel.scroll_offset > 0);
+        plan_panel.scrollbar_dragging = true;
+
+        plan_panel.reset_scroll();
+        assert_eq!(plan_panel.scroll_offset, 0);
+        assert!(!plan_panel.scrollbar_dragging);
+    }
+
+    #[test]
+    fn plan_panel_content_shrink_clamps_stale_offset() {
+        // Mirrors the render-time clamp: content shrinks (new plan snapshot
+        // or sidebar resize), so a stale offset must be re-clamped instead
+        // of pointing past the end.
+        let mut plan_panel = PlanPanelState::default();
+        plan_panel.total_lines = 30;
+        plan_panel.last_visible_height = 10;
+        plan_panel.scroll_offset = 15;
+
+        plan_panel.total_lines = 12;
+        plan_panel.last_visible_height = 10;
+        let max = plan_panel.max_scroll_offset();
+        plan_panel.scroll_offset = plan_panel.scroll_offset.min(max);
+        assert_eq!(plan_panel.scroll_offset, 2);
+    }
+
+    #[test]
+    fn plan_panel_not_scrollable_when_content_fits() {
+        let mut plan_panel = PlanPanelState::default();
+        plan_panel.total_lines = 3;
+        plan_panel.last_visible_height = 10;
+        assert_eq!(plan_panel.max_scroll_offset(), 0);
+        plan_panel.scroll_down();
+        assert_eq!(plan_panel.scroll_offset, 0);
     }
 }

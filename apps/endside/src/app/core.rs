@@ -745,17 +745,50 @@ fn discard_redundant_boundary_scrolls(
     event_stream: &mut EventStream,
     pending_event: &mut Option<Event>,
 ) {
+    // Wheel bursts are classified by whichever scrollable region the cursor
+    // is over: the sidebar Plan panel when inside it, otherwise the
+    // transcript. The transcript usually sits pinned to its bottom, so
+    // classifying a plan-panel wheel burst by the transcript boundary would
+    // wrongly drain it and make the plan panel unscrollable.
+    let (scroll_offset, max_scroll) = match handled_event {
+        Event::Mouse(mouse)
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) =>
+        {
+            let over_plan_panel = state
+                .render_state
+                .plan_panel_area
+                .is_some_and(|area| {
+                    mouse.column >= area.x
+                        && mouse.column < area.x.saturating_add(area.width)
+                        && mouse.row >= area.y
+                        && mouse.row < area.y.saturating_add(area.height)
+                });
+            if over_plan_panel {
+                (
+                    state.plan_panel.scroll_offset,
+                    state.plan_panel.max_scroll_offset(),
+                )
+            } else {
+                (
+                    state.active_transcript_scroll_offset(),
+                    state.active_transcript_max_scroll_offset(),
+                )
+            }
+        }
+        _ => (0, 0),
+    };
+
     let boundary_kind = match handled_event {
         Event::Mouse(mouse)
-            if mouse.kind == MouseEventKind::ScrollDown
-                && state.active_transcript_scroll_offset()
-                    >= state.active_transcript_max_scroll_offset() =>
+            if mouse.kind == MouseEventKind::ScrollDown && scroll_offset >= max_scroll =>
         {
             Some(MouseEventKind::ScrollDown)
         }
         Event::Mouse(mouse)
-            if mouse.kind == MouseEventKind::ScrollUp
-                && state.active_transcript_scroll_offset() == 0 =>
+            if mouse.kind == MouseEventKind::ScrollUp && scroll_offset == 0 =>
         {
             Some(MouseEventKind::ScrollUp)
         }
