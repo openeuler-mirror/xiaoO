@@ -4,13 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use axum::response::sse;
 use futures_util::StreamExt;
-pub use protocol::sse::{RuntimeSseEvent as SseStreamEvent, ToolCallStatus};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use xiaoo_api::chat::AgentId;
 use xiaoo_api::events::{
     LoopEndSummary, LoopEventSink, ToolEventSink, ToolLifecycleEvent, ToolResultEvent,
 };
+pub use xiaoo_shared::daemon_protocol::sse::{RuntimeSseEvent as SseStreamEvent, ToolCallStatus};
 use xiaoo_shared::plan::{
     PlanForwarder, SpawnSubagentMetadata, SubagentMetaForwarder, TodoSnapshotUpdate,
 };

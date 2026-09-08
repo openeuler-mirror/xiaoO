@@ -4848,7 +4848,6 @@ dependencies = [
  "governor",
  "mime_guess",
  "prost",
- "protocol",
  "regex",
  "reqwest",
  "rmcp",

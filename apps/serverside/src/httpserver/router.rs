@@ -22,7 +22,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use protocol::response::{
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{oneshot, Mutex};
+use tower_http::cors::CorsLayer;
+use tracing::warn;
+use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
+use xiaoo_shared::daemon_protocol::response::{
     DaemonService, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
     GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCatalogResponse,
     RuntimeCheckoutResponse, RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse,
@@ -31,12 +37,6 @@ use protocol::response::{
     RuntimePauseResponse, RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
     RuntimeWriteFileResponse,
 };
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
-use tower_http::cors::CorsLayer;
-use tracing::warn;
-use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
     PlanComputingLoopSink, PlanForwarder, SubagentMetaComputingLoopSink, SubagentMetaForwarder,
@@ -689,8 +689,8 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
     Json(GatewayCapabilitiesResponse {
         service: DaemonService::XiaooDaemon,
         version: env!("CARGO_PKG_VERSION").to_string(),
-        protocol_version: protocol::PROTOCOL_VERSION,
-        minimum_client_protocol_version: protocol::PROTOCOL_VERSION,
+        protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
+        minimum_client_protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
         transport: GatewayTransport::HttpSse,
         runtime_api: vec![
             "list",

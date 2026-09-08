@@ -1,5 +1,5 @@
 use crate::config_schema::CONFIG_SCHEMA_VERSION;
-use protocol::response::{ManagementCapabilities, ManagementDomainCapability};
+use xiaoo_shared::daemon_protocol::response::{ManagementCapabilities, ManagementDomainCapability};
 
 pub fn management_capabilities() -> ManagementCapabilities {
     ManagementCapabilities {

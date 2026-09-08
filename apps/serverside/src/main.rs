@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         CliAction::ProtocolSchema => {
-            println!("{}", protocol::protocol_contract());
+            println!("{}", xiaoo_shared::daemon_protocol::protocol_contract());
             return Ok(());
         }
         CliAction::Serve => {}
@@ -374,13 +374,13 @@ async fn run_daemon(
             .context("failed to resolve daemon listener address")?;
         tracing::info!(config = %config_path.display(), %resolved_addr, "starting xiaoo daemon");
         if ready_stdio {
-            let ready = protocol::response::DaemonReadyMessage {
-                r#type: protocol::response::DaemonReadyMessageType::Ready,
-                service: protocol::response::DaemonService::XiaooDaemon,
+            let ready = xiaoo_shared::daemon_protocol::response::DaemonReadyMessage {
+                r#type: xiaoo_shared::daemon_protocol::response::DaemonReadyMessageType::Ready,
+                service: xiaoo_shared::daemon_protocol::response::DaemonService::XiaooDaemon,
                 host: resolved_addr.ip().to_string(),
                 port: resolved_addr.port(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                protocol_version: protocol::PROTOCOL_VERSION,
+                protocol_version: xiaoo_shared::daemon_protocol::PROTOCOL_VERSION,
             };
             println!("{}", serde_json::to_string(&ready)?);
             std::io::stdout()
