@@ -29,6 +29,8 @@ const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompts/default_system_prompt.
 pub struct AppConfig {
     pub llm: LlmConfig,
     #[serde(default)]
+    pub vault: VaultConfig,
+    #[serde(default)]
     pub channels: ChannelsConfig,
     #[serde(default)]
     pub http: HttpConfig,
@@ -60,6 +62,14 @@ pub struct AppConfig {
     pub memory_automation: MemoryAutomationConfig,
     #[serde(default)]
     pub mcp_server: McpServerConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VaultConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub use_sdf: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -24,6 +24,7 @@ mod role_management;
 mod skill_management;
 mod tool_management;
 mod trace_management;
+mod vault_management;
 
 use crate::channel_management::ChannelManager;
 use crate::channels::{
@@ -372,6 +373,53 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&trace_management::trace_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigVault => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&vault_management::vault_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigSetSecret => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let environment = cli
+                .environment
+                .as_deref()
+                .context("config set-secret requires --environment <name>")?;
+            vault_management::ensure_environment_is_referenced(&config, environment)?;
+            let mut secret = String::new();
+            std::io::stdin().read_to_string(&mut secret)?;
+            while secret.ends_with(['\n', '\r']) {
+                secret.pop();
+            }
+            if secret.is_empty() {
+                bail!("secret value must not be empty");
+            }
+            xiaoo_shared::llm_secrets::save_llm_secret(&config_path, environment, &secret)?;
+            println!(
+                "{}",
+                serde_json::json!({"schema_version": 1, "updated": true})
+            );
+            return Ok(());
+        }
+        CliAction::ConfigDeleteSecret => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let environment = cli
+                .environment
+                .as_deref()
+                .context("config delete-secret requires --environment <name>")?;
+            vault_management::ensure_environment_is_referenced(&config, environment)?;
+            let removed = xiaoo_shared::llm_secrets::delete_llm_secret(&config_path, environment)?;
+            println!(
+                "{}",
+                serde_json::json!({"schema_version": 1, "removed": removed})
             );
             return Ok(());
         }
@@ -918,6 +966,9 @@ enum CliAction {
     ConfigChannels,
     ConfigHttp,
     ConfigTrace,
+    ConfigVault,
+    ConfigSetSecret,
+    ConfigDeleteSecret,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -940,6 +991,7 @@ struct Cli {
     manifest: Option<PathBuf>,
     allow_effects: bool,
     memory_queue_action: Option<memory_management::MemoryQueueAction>,
+    environment: Option<String>,
     help: bool,
 }
 
@@ -962,6 +1014,7 @@ impl Cli {
         let mut manifest = None;
         let mut allow_effects = false;
         let mut memory_queue_action = None;
+        let mut environment = None;
         let mut remaining = args.into_iter().collect::<Vec<_>>();
         let action = match remaining.first().map(String::as_str) {
             Some("config") => {
@@ -1003,9 +1056,12 @@ impl Cli {
                     Some("channels") => CliAction::ConfigChannels,
                     Some("http") => CliAction::ConfigHttp,
                     Some("trace") => CliAction::ConfigTrace,
+                    Some("vault") => CliAction::ConfigVault,
+                    Some("set-secret") => CliAction::ConfigSetSecret,
+                    Some("delete-secret") => CliAction::ConfigDeleteSecret,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config vault`, `config set-secret`, `config delete-secret`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1036,6 +1092,7 @@ impl Cli {
                         manifest,
                         allow_effects,
                         memory_queue_action,
+                        environment,
                         help: true,
                     });
                 }
@@ -1125,6 +1182,13 @@ impl Cli {
                 "--allow-effects" => {
                     allow_effects = true;
                 }
+                "--environment" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --environment")?;
+                    environment = Some(value.clone());
+                }
                 other => bail!("unknown argument `{other}`"),
             }
             index += 1;
@@ -1145,6 +1209,7 @@ impl Cli {
             manifest,
             allow_effects,
             memory_queue_action,
+            environment,
             help: false,
         })
     }
@@ -1180,6 +1245,9 @@ fn print_usage() {
          \x20     xiaoo-daemon config channels [--config <path>]\n\n\
          \x20     xiaoo-daemon config http [--config <path>] [--host <host>] [--port <port>] [--no-dashboard]\n\n\
          \x20     xiaoo-daemon config trace [--config <path>]\n\n\
+         \x20     xiaoo-daemon config vault [--config <path>]\n\n\
+         \x20     xiaoo-daemon config set-secret --environment <name> [--config <path>] < secret\n\n\
+         \x20     xiaoo-daemon config delete-secret --environment <name> [--config <path>]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1561,6 +1629,46 @@ mod tests {
         .expect("config trace should parse");
         assert_eq!(cli.action, CliAction::ConfigTrace);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_vault_command() {
+        let cli = Cli::parse(
+            ["config", "vault", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config vault should parse");
+        assert_eq!(cli.action, CliAction::ConfigVault);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_secret_commands_without_secret_arguments() {
+        let set = Cli::parse(
+            [
+                "config",
+                "set-secret",
+                "--config",
+                "/tmp/demo.toml",
+                "--environment",
+                "OPENAI_API_KEY",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config set-secret should parse");
+        assert_eq!(set.action, CliAction::ConfigSetSecret);
+        assert_eq!(set.environment.as_deref(), Some("OPENAI_API_KEY"));
+
+        let delete = Cli::parse(
+            ["config", "delete-secret", "--environment", "OPENAI_API_KEY"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config delete-secret should parse");
+        assert_eq!(delete.action, CliAction::ConfigDeleteSecret);
+        assert_eq!(delete.environment.as_deref(), Some("OPENAI_API_KEY"));
     }
 
     #[test]
