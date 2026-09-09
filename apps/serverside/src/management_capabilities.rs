@@ -30,6 +30,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config backend",
             "config channels",
             "config http",
+            "config trace",
             "config cron",
             "config render-cron",
         ]
@@ -131,7 +132,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 &["inspect", "preflight", "runtime_status", "test_connection"],
             ),
             domain("http", true, true, false, true, &["inspect", "preflight"]),
-            domain("trace", true, false, false, false, &[]),
+            domain(
+                "trace",
+                true,
+                true,
+                false,
+                true,
+                &["inspect", "diagnose", "list_recent"],
+            ),
             domain("vault", true, false, false, false, &[]),
             domain(
                 "sessions",
@@ -372,6 +380,16 @@ mod tests {
         assert!(http.test);
         assert!(http.actions.iter().any(|action| action == "inspect"));
         assert!(http.actions.iter().any(|action| action == "preflight"));
+
+        let trace = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "trace")
+            .expect("Trace capability");
+        assert!(trace.runtime_read);
+        assert!(trace.test);
+        assert!(trace.actions.iter().any(|action| action == "inspect"));
+        assert!(trace.actions.iter().any(|action| action == "list_recent"));
 
         let cron = capabilities
             .domains

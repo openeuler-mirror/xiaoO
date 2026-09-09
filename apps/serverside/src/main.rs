@@ -23,6 +23,7 @@ mod model_management;
 mod role_management;
 mod skill_management;
 mod tool_management;
+mod trace_management;
 
 use crate::channel_management::ChannelManager;
 use crate::channels::{
@@ -362,6 +363,15 @@ async fn main() -> Result<()> {
                         bearer_token_env: cli.bearer_token_env,
                     },
                 ))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigTrace => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&trace_management::trace_report(&config))?
             );
             return Ok(());
         }
@@ -907,6 +917,7 @@ enum CliAction {
     ConfigBackend,
     ConfigChannels,
     ConfigHttp,
+    ConfigTrace,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -991,9 +1002,10 @@ impl Cli {
                     Some("backend") => CliAction::ConfigBackend,
                     Some("channels") => CliAction::ConfigChannels,
                     Some("http") => CliAction::ConfigHttp,
+                    Some("trace") => CliAction::ConfigTrace,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config trace`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1167,6 +1179,7 @@ fn print_usage() {
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
          \x20     xiaoo-daemon config channels [--config <path>]\n\n\
          \x20     xiaoo-daemon config http [--config <path>] [--host <host>] [--port <port>] [--no-dashboard]\n\n\
+         \x20     xiaoo-daemon config trace [--config <path>]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1536,6 +1549,18 @@ mod tests {
         assert_eq!(cli.action, CliAction::ConfigHttp);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
         assert!(cli.no_dashboard);
+    }
+
+    #[test]
+    fn parses_config_trace_command() {
+        let cli = Cli::parse(
+            ["config", "trace", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config trace should parse");
+        assert_eq!(cli.action, CliAction::ConfigTrace);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
     }
 
     #[test]
