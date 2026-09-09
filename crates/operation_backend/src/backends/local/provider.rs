@@ -3,9 +3,9 @@ use agent_contracts::backend::{
     BackendControlError, BackendCreateRequest, BackendDeleteOutcome, BackendDeleteRequest,
     BackendEndpoint, BackendId, BackendInspectRequest, BackendInstance, BackendInstanceId,
     BackendInstanceStatus, BackendLifecycle, BackendLifecycleOperation, BackendLifecycleState,
-    BackendLifecycleStateMachine, BackendLoadRequest, BackendPauseRequest, BackendProvider,
-    BackendProviderKind, BackendResourceAllocation, BackendRuntimeCapabilities, BackendSnapshot,
-    OperationBackend,
+    BackendLifecycleStateMachine, BackendLoadRequest, BackendPath, BackendPauseRequest,
+    BackendProvider, BackendProviderKind, BackendResourceAllocation, BackendRuntimeCapabilities,
+    BackendSnapshot, OperationBackend, PathNamespace,
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -101,7 +101,7 @@ impl LocalBackendProvider {
         );
         object.insert(
             LOCAL_METADATA_WORKSPACE_ROOT.to_string(),
-            Value::String(workspace_root.0.clone()),
+            Value::String(workspace_root.native().to_string()),
         );
         Value::Object(object)
     }
@@ -111,7 +111,7 @@ impl LocalBackendProvider {
         options: LocalProviderOptions,
     ) -> Result<Arc<dyn OperationBackend>, BackendControlError> {
         local_backend_with_isolation(
-            PathBuf::from(workspace_root.0.as_str()),
+            PathBuf::from(workspace_root.native()),
             options.home_dir.map(PathBuf::from),
             options.temp_root.map(PathBuf::from),
             options.default_shell,
@@ -175,12 +175,19 @@ impl BackendLifecycle for LocalBackendProvider {
         )?;
         debug_assert_eq!(state, BackendLifecycleState::Active);
         let now = current_time_ms();
+        let id = request
+            .requested_backend_id
+            .unwrap_or_else(|| Self::backend_id(request.session_id.as_str()));
+        let workspace_root = BackendPath::new(
+            id.0.clone(),
+            PathNamespace::Workspace,
+            request.workspace_root.native(),
+            "",
+        );
         Ok(Self::active_instance(
-            request
-                .requested_backend_id
-                .unwrap_or_else(|| Self::backend_id(request.session_id.as_str())),
+            id,
             request.session_id,
-            request.workspace_root,
+            workspace_root,
             request.provider_options,
             request.metadata,
             BackendResourceAllocation {
@@ -206,10 +213,17 @@ impl BackendLifecycle for LocalBackendProvider {
         )?;
         debug_assert_eq!(state, BackendLifecycleState::Active);
         let now = current_time_ms();
+        let id = Self::backend_id(request.session_id.as_str());
+        let workspace_root = BackendPath::new(
+            id.0.clone(),
+            PathNamespace::Workspace,
+            request.workspace_root.native(),
+            "",
+        );
         Ok(Self::active_instance(
-            Self::backend_id(request.session_id.as_str()),
+            id,
             request.session_id,
-            request.workspace_root,
+            workspace_root,
             request.provider_options,
             request.metadata,
             BackendResourceAllocation {
@@ -397,7 +411,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime");
-        let workspace_root = BackendPath(
+        let workspace_root = BackendPath::from_raw(
             std::env::current_dir()
                 .expect("cwd")
                 .to_string_lossy()

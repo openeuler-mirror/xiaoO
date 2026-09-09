@@ -161,5 +161,5 @@ fn backend_path_from_host_path(path: &Path) -> Result<BackendPath, OperationBack
         .ok_or_else(|| OperationBackendBuildError::InvalidConfig {
             message: format!("path is not valid utf-8: {}", path.display()),
         })?;
-    Ok(BackendPath(text.to_string()))
+    Ok(BackendPath::from_raw(text.to_string()))
 }

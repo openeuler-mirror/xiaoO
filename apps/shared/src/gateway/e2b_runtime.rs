@@ -123,7 +123,7 @@ async fn verify_remote_manifest(
     let bytes = backend
         .files()
         .read_bytes(ReadBytesRequest {
-            path: BackendPath(REMOTE_MANIFEST_PATH.to_string()),
+            path: BackendPath::from_raw(REMOTE_MANIFEST_PATH.to_string()),
         })
         .await
         .map_err(|error| SessionServiceError::RuntimeBuild {

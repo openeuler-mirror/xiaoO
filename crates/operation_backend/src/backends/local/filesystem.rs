@@ -238,7 +238,7 @@ mod tests {
         std::fs::create_dir_all(temp.as_path()).unwrap();
         LocalFileSystem::new(Arc::new(LocalBackendState {
             backend_id: "local-test".to_string(),
-            workspace_root: BackendPath(workspace.display().to_string()),
+            workspace_root: BackendPath::from_raw(workspace.display().to_string()),
             workspace_root_host: workspace.clone(),
             temp_root_host: temp.clone(),
             policy: LocalBackendPolicy::test_macos_seatbelt(
@@ -261,7 +261,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(fs.read_bytes(ReadBytesRequest {
-                path: BackendPath(file.display().to_string()),
+                path: BackendPath::from_raw(file.display().to_string()),
             }));
 
         assert!(matches!(
@@ -281,7 +281,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(fs.write_bytes(WriteBytesRequest {
-                path: BackendPath(file.display().to_string()),
+                path: BackendPath::from_raw(file.display().to_string()),
                 content: b"change".to_vec(),
                 mode: WriteMode::Overwrite,
             }));

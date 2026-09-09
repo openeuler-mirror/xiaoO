@@ -45,7 +45,7 @@ async fn compose_backend_repo_map(
         .search()
         .glob(GlobRequest {
             pattern: "*".to_string(),
-            base_dir: Some(BackendPath(workspace_root.display().to_string())),
+            base_dir: Some(BackendPath::from_raw(workspace_root.display().to_string())),
             limit: Some(REPO_MAP_MAX_VISIT),
         })
         .await
@@ -72,7 +72,7 @@ async fn compose_backend_repo_map(
         let remote_path = workspace_root.join(&relative_path);
         let stat = backend
             .files()
-            .stat(&BackendPath(remote_path.display().to_string()))
+            .stat(&BackendPath::from_raw(remote_path.display().to_string()))
             .await
             .map_err(|error| SessionServiceError::RuntimeBuild {
                 message: format!(
@@ -102,7 +102,7 @@ async fn compose_backend_repo_map(
 }
 
 fn relative_backend_path(workspace_root: &Path, candidate: &BackendPath) -> Option<PathBuf> {
-    let candidate = Path::new(&candidate.0);
+    let candidate = Path::new(candidate.native());
     let relative = if candidate.is_absolute() {
         candidate.strip_prefix(workspace_root).ok()?
     } else {
@@ -118,7 +118,7 @@ pub(crate) async fn read_optional_backend_utf8(
     match backend
         .files()
         .read_bytes(ReadBytesRequest {
-            path: BackendPath(path.display().to_string()),
+            path: BackendPath::from_raw(path.display().to_string()),
         })
         .await
     {

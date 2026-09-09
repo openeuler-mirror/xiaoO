@@ -758,7 +758,7 @@ mod linux_bubblewrap_tests {
                 command: command.to_string(),
                 args: vec![],
                 shell: Some("bash".to_string()),
-                cwd: Some(BackendPath(cwd.to_string_lossy().into_owned())),
+                cwd: Some(BackendPath::from_raw(cwd.to_string_lossy().into_owned())),
                 timeout_ms: Some(5_000),
                 ..Default::default()
             })
@@ -828,7 +828,7 @@ mod linux_dynsandbox_tests {
             command: "echo hi".to_string(),
             args: vec![],
             shell: Some("bash".to_string()),
-            cwd: Some(BackendPath("/workspace".to_string())),
+            cwd: Some(BackendPath::from_raw("/workspace".to_string())),
             timeout_ms: Some(1_000),
             ..Default::default()
         };
@@ -930,7 +930,7 @@ mod linux_dynsandbox_tests {
                 command: command.to_string(),
                 args: vec![],
                 shell: Some("bash".to_string()),
-                cwd: Some(BackendPath(cwd.to_string_lossy().into_owned())),
+                cwd: Some(BackendPath::from_raw(cwd.to_string_lossy().into_owned())),
                 timeout_ms: Some(5_000),
                 ..Default::default()
             })
@@ -1026,7 +1026,7 @@ mod linux_dynsandbox_tests {
 
         let exec = LocalExec::new(Arc::new(LocalBackendState {
             backend_id: "test".to_string(),
-            workspace_root: BackendPath("/workspace".to_string()),
+            workspace_root: BackendPath::from_raw("/workspace".to_string()),
             workspace_root_host: std::env::current_dir().expect("current dir"),
             temp_root_host: std::env::temp_dir(),
             ..Default::default()
@@ -1089,7 +1089,7 @@ mod linux_dynsandbox_tests {
         let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let exec = LocalExec::new(Arc::new(LocalBackendState {
             backend_id: "test".to_string(),
-            workspace_root: BackendPath("/workspace".to_string()),
+            workspace_root: BackendPath::from_raw("/workspace".to_string()),
             workspace_root_host: std::env::current_dir().expect("current dir"),
             temp_root_host: std::env::temp_dir(),
             interaction: std::sync::RwLock::new(Some(Arc::new(ScriptedInteraction {
@@ -1187,7 +1187,9 @@ mod pipe_drain_tests {
                     command: command.to_string(),
                     args: vec![],
                     shell: Some("bash".to_string()),
-                    cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                    cwd: Some(BackendPath::from_raw(
+                        workspace.to_string_lossy().into_owned(),
+                    )),
                     timeout_ms: Some(2_000),
                     ..Default::default()
                 })
@@ -1239,7 +1241,9 @@ mod pipe_drain_tests {
                     command: command.to_string(),
                     args: vec![],
                     shell: Some("bash".to_string()),
-                    cwd: Some(BackendPath(workspace.to_string_lossy().into_owned())),
+                    cwd: Some(BackendPath::from_raw(
+                        workspace.to_string_lossy().into_owned(),
+                    )),
                     timeout_ms: Some(5_000),
                     ..Default::default()
                 })

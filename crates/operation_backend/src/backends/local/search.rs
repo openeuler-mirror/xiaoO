@@ -132,7 +132,7 @@ impl OperationSearch for LocalSearch {
 
             match &request.mode {
                 GrepMode::FilesWithMatches => {
-                    entries.push(backend_path.0);
+                    entries.push(backend_path.native().to_string());
                     if request
                         .head_limit
                         .is_some_and(|limit| entries.len() >= limit)
@@ -142,7 +142,7 @@ impl OperationSearch for LocalSearch {
                 }
                 GrepMode::Content => {
                     for line in matched_lines {
-                        entries.push(format!("{}:{}", backend_path.0, line));
+                        entries.push(format!("{}:{}", backend_path.native().to_string(), line));
                         if request
                             .head_limit
                             .is_some_and(|limit| entries.len() >= limit)
@@ -158,7 +158,11 @@ impl OperationSearch for LocalSearch {
                     }
                 }
                 GrepMode::Count => {
-                    entries.push(format!("{}:{}", backend_path.0, matched_lines.len()));
+                    entries.push(format!(
+                        "{}:{}",
+                        backend_path.native().to_string(),
+                        matched_lines.len()
+                    ));
                     if request
                         .head_limit
                         .is_some_and(|limit| entries.len() >= limit)
@@ -233,7 +237,7 @@ mod tests {
         std::fs::create_dir_all(temp.as_path()).unwrap();
         LocalSearch::new(Arc::new(LocalBackendState {
             backend_id: "local-test".to_string(),
-            workspace_root: BackendPath(workspace.display().to_string()),
+            workspace_root: BackendPath::from_raw(workspace.display().to_string()),
             workspace_root_host: workspace.clone(),
             temp_root_host: temp.clone(),
             policy: LocalBackendPolicy::test_macos_seatbelt(
@@ -258,7 +262,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(search.grep(GrepRequest {
-                base_dir: BackendPath(root.join("outside").display().to_string()),
+                base_dir: BackendPath::from_raw(root.join("outside").display().to_string()),
                 query: "secret".to_string(),
                 mode: GrepMode::Content,
                 include: None,

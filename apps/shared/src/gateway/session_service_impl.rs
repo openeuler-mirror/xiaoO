@@ -2065,7 +2065,7 @@ impl SessionControlPlane for CoreBackedSessionService {
                 command: request.command,
                 args: Vec::new(),
                 shell: Some(shell),
-                cwd: request.cwd.map(BackendPath),
+                cwd: request.cwd.map(BackendPath::from_raw),
                 timeout_ms: request.timeout_ms,
                 env,
                 ..Default::default()
@@ -2112,7 +2112,7 @@ impl SessionControlPlane for CoreBackedSessionService {
             .backend()
             .files()
             .read_bytes(ReadBytesRequest {
-                path: BackendPath(request.path),
+                path: BackendPath::from_raw(request.path),
             })
             .await
             .map_err(|error| SessionServiceError::CoreRun {
@@ -2140,7 +2140,7 @@ impl SessionControlPlane for CoreBackedSessionService {
             .backend()
             .files()
             .write_bytes(WriteBytesRequest {
-                path: BackendPath(request.path),
+                path: BackendPath::from_raw(request.path),
                 content,
                 mode: WriteMode::Overwrite,
             })
@@ -2150,7 +2150,7 @@ impl SessionControlPlane for CoreBackedSessionService {
             })?;
 
         Ok(RuntimeWriteFileResult {
-            path: outcome.path.0,
+            path: outcome.path.native().to_string(),
             created: outcome.created,
         })
     }

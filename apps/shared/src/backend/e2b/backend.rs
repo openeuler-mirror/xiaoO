@@ -2,7 +2,7 @@ use agent_contracts::backend::{
     capability::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
-    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
+    BackendPath, OperationBackend, OperationBackendCapabilities, OperationError, PathNamespace,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -146,6 +146,51 @@ impl E2bBackendState {
         Ok(())
     }
 
+    pub(crate) fn tag_backend_path(&self, native_path: &str) -> BackendPath {
+        let candidate = Path::new(native_path);
+        let classify = |root: Option<&BackendPath>, namespace: PathNamespace| {
+            let root = root?;
+            let relative = candidate
+                .strip_prefix(Path::new(root.native()))
+                .ok()?
+                .to_str()?
+                .trim_start_matches('/');
+            Some((
+                namespace,
+                if relative.is_empty() {
+                    "".to_string()
+                } else {
+                    relative.to_string()
+                },
+            ))
+        };
+        let (namespace, relative) = classify(Some(&self.workspace_root), PathNamespace::Workspace)
+            .or_else(|| classify(self.home_dir.as_ref(), PathNamespace::Home))
+            .or_else(|| classify(Some(&self.temp_root), PathNamespace::Temp))
+            .unwrap_or((PathNamespace::Uncategorized, native_path.to_string()));
+        BackendPath::new(
+            self.backend_id.clone(),
+            namespace,
+            native_path.to_string(),
+            relative,
+        )
+    }
+
+    /// Validate that a path belongs to this backend and return its native
+    /// absolute path. Paths created via `BackendPath::from_raw` (legacy /
+    /// CLI) are accepted and attributed on the fly.
+    pub(crate) fn owned_native<'a>(
+        &self,
+        path: &'a BackendPath,
+    ) -> Result<&'a str, OperationError> {
+        if !path.backend_id.is_empty() && path.backend_id != self.backend_id {
+            return Err(OperationError::PermissionDenied {
+                path: path.native().to_string(),
+            });
+        }
+        Ok(path.native())
+    }
+
     pub(crate) fn resolve_backend_path(
         &self,
         raw_path: &str,
@@ -159,14 +204,18 @@ impl E2bBackendState {
                     message: "home_dir is not configured".to_string(),
                 })?;
             let suffix = raw_path.strip_prefix("~/").unwrap_or_default();
-            return normalize_backend_path(Path::new(home_dir.0.as_str()).join(suffix).as_path());
+            let native = Path::new(home_dir.native()).join(suffix);
+            return normalize_backend_path(native.as_path())
+                .map(|path| self.tag_backend_path(path.native()));
         }
 
         let candidate = Path::new(raw_path);
-        if candidate.is_absolute() {
-            return normalize_backend_path(candidate);
-        }
-        normalize_backend_path(Path::new(base.0.as_str()).join(candidate).as_path())
+        let joined = if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            Path::new(base.native()).join(candidate)
+        };
+        normalize_backend_path(joined.as_path()).map(|path| self.tag_backend_path(path.native()))
     }
 
     pub(crate) fn envd_url(&self, path: &str) -> String {
@@ -311,7 +360,7 @@ pub(crate) fn normalize_backend_path(path: &Path) -> Result<BackendPath, Operati
         .ok_or_else(|| OperationError::InvalidPath {
             message: format!("path is not valid utf-8: {}", normalized.display()),
         })?;
-    Ok(BackendPath(text.to_string()))
+    Ok(BackendPath::from_raw(text.to_string()))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -400,4 +449,86 @@ pub(crate) async fn connect_json<T: for<'de> Deserialize<'de>>(
 #[derive(Debug, Deserialize)]
 struct E2bError {
     message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn test_state() -> E2bBackendState {
+        E2bBackendState {
+            backend_id: "e2b:test".to_string(),
+            api_base: "https://api.e2b.test".to_string(),
+            api_key: "test-key".to_string(),
+            sandbox_id: "sandbox-test".to_string(),
+            sandbox_domain: "e2b.test".to_string(),
+            envd_access_token: None,
+            envd_port: 49_983,
+            envd_scheme: "https".to_string(),
+            workspace_root: BackendPath::from_raw("/home/user/workspace".to_string()),
+            home_dir: Some(BackendPath::from_raw("/home/user".to_string())),
+            temp_root: BackendPath::from_raw("/tmp".to_string()),
+            default_shell: None,
+            username: None,
+            envd_file_upload_multipart: false,
+            http: reqwest::Client::new(),
+            lifecycle: Mutex::new(E2bLifecycle::Active),
+        }
+    }
+
+    #[test]
+    fn tag_backend_path_classifies_by_namespace() {
+        let state = test_state();
+
+        let workspace = state.tag_backend_path("/home/user/workspace/src/main.rs");
+        assert_eq!(workspace.backend_id, "e2b:test");
+        assert_eq!(workspace.namespace, PathNamespace::Workspace);
+        assert_eq!(workspace.relative_path, "src/main.rs");
+        assert_eq!(workspace.native(), "/home/user/workspace/src/main.rs");
+
+        let home = state.tag_backend_path("/home/user/.config/app.json");
+        assert_eq!(home.namespace, PathNamespace::Home);
+        assert_eq!(home.relative_path, ".config/app.json");
+
+        let temp = state.tag_backend_path("/tmp/spill.txt");
+        assert_eq!(temp.namespace, PathNamespace::Temp);
+        assert_eq!(temp.relative_path, "spill.txt");
+
+        let outside = state.tag_backend_path("/var/log/syslog");
+        assert_eq!(outside.namespace, PathNamespace::Uncategorized);
+    }
+
+    #[test]
+    fn resolve_and_owned_native_enforce_backend_ownership() {
+        let state = test_state();
+        let base = state.workspace_root.clone();
+
+        let relative = state.resolve_backend_path("src/main.rs", &base).unwrap();
+        assert_eq!(relative.namespace, PathNamespace::Workspace);
+        assert_eq!(relative.relative_path, "src/main.rs");
+
+        let home = state.resolve_backend_path("~/bin/tool", &base).unwrap();
+        assert_eq!(home.namespace, PathNamespace::Home);
+        assert_eq!(home.relative_path, "bin/tool");
+        assert_eq!(home.native(), "/home/user/bin/tool");
+
+        // Own and legacy (unattributed) paths are accepted.
+        assert!(state.owned_native(&relative).is_ok());
+        assert!(state
+            .owned_native(&BackendPath::from_raw("/tmp/legacy"))
+            .is_ok());
+
+        // A path attributed to a different backend is rejected.
+        let foreign = BackendPath::new(
+            "other-backend",
+            PathNamespace::Temp,
+            "/tmp/spill.txt",
+            "spill.txt",
+        );
+        assert!(matches!(
+            state.owned_native(&foreign),
+            Err(OperationError::PermissionDenied { .. })
+        ));
+    }
 }

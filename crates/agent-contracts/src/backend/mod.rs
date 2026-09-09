@@ -26,6 +26,6 @@ pub use permission::{
     SandboxPermissionGrantRequest, SandboxPermissionScope, SandboxPolicyDenial,
 };
 pub use types::{
-    BackendPath, ExportedFileHandle, ExportedFileMeta, ExportedFileReader, PathKind, PathStat,
-    SharedExportedFileHandle,
+    BackendPath, ExportedFileHandle, ExportedFileMeta, ExportedFileReader, PathKind, PathNamespace,
+    PathStat, SharedExportedFileHandle,
 };

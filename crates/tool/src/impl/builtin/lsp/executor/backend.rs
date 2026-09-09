@@ -90,7 +90,7 @@ impl ToolExecutor for LspExecutor {
             .map_err(|e| ToolExecutionError::ExecutionFailed {
                 message: format!("failed to resolve path: {e}"),
             })?;
-        let resolved = resolved_path.0.clone();
+        let resolved = resolved_path.native().to_string();
         let file = PathBuf::from(&resolved);
 
         // ── Explicit content sync ──────────────────────────────────────────────

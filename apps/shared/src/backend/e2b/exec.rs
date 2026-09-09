@@ -93,6 +93,11 @@ impl E2bExec {
             .as_ref()
             .map(|pairs| pairs.iter().cloned().collect())
             .unwrap_or_default();
+        let cwd = request
+            .cwd
+            .as_ref()
+            .map(|path| self.state.owned_native(path).map(str::to_string))
+            .transpose()?;
 
         let (cmd, args) = if let Some(shell) = request.shell {
             if !request.args.is_empty() {
@@ -131,7 +136,7 @@ impl E2bExec {
                 cmd,
                 args,
                 env,
-                cwd: request.cwd.map(|path| path.0),
+                cwd,
                 connect_timeout_ms: Self::connect_timeout_ms(timeout_ms),
             },
             timeout_ms,
@@ -650,9 +655,9 @@ mod tests {
             envd_access_token: None,
             envd_port: 49_983,
             envd_scheme: "https".to_string(),
-            workspace_root: BackendPath("/home/user/workspace".to_string()),
-            home_dir: Some(BackendPath("/home/user".to_string())),
-            temp_root: BackendPath("/tmp".to_string()),
+            workspace_root: BackendPath::from_raw("/home/user/workspace".to_string()),
+            home_dir: Some(BackendPath::from_raw("/home/user".to_string())),
+            temp_root: BackendPath::from_raw("/tmp".to_string()),
             default_shell: default_shell.map(str::to_string),
             username: None,
             envd_file_upload_multipart: false,
@@ -665,7 +670,7 @@ mod tests {
         ExecRequest {
             command: command.to_string(),
             args: Vec::new(),
-            cwd: Some(BackendPath("/home/user/workspace".to_string())),
+            cwd: Some(BackendPath::from_raw("/home/user/workspace".to_string())),
             ..Default::default()
         }
     }

@@ -4,4 +4,4 @@ mod path;
 pub use exported_file::{
     ExportedFileHandle, ExportedFileMeta, ExportedFileReader, SharedExportedFileHandle,
 };
-pub use path::{BackendPath, PathKind, PathStat};
+pub use path::{BackendPath, PathKind, PathNamespace, PathStat};
