@@ -1,5 +1,6 @@
 mod agent_management;
 mod backend_management;
+mod channel_management;
 mod channels;
 mod compact_management;
 mod config_inspect;
@@ -10,6 +11,7 @@ mod cron_management;
 mod daemon_config;
 mod daemon_runtime;
 mod hook_management;
+mod http_management;
 mod httpserver;
 mod lsp_management;
 mod management_capabilities;
@@ -22,6 +24,7 @@ mod role_management;
 mod skill_management;
 mod tool_management;
 
+use crate::channel_management::ChannelManager;
 use crate::channels::{
     build_feishu_runtime, build_telegram_runtime, FeishuConfig, FeishuEventTransport,
     FeishuWebsocketMessageHandler, FeishuWebsocketService, TelegramConfig,
@@ -334,6 +337,34 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigChannels => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&channel_management::channel_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigHttp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&http_management::http_report(
+                    &config,
+                    &ConfigInspectOverrides {
+                        daemon_host: cli.host,
+                        daemon_port: cli.port,
+                        no_dashboard: cli.no_dashboard,
+                        dashboard_host: cli.dashboard_host,
+                        dashboard_port: cli.dashboard_port,
+                        bearer_token_env: cli.bearer_token_env,
+                    },
+                ))?
+            );
+            return Ok(());
+        }
         CliAction::ConfigCron => {
             let config_path = resolve_config_path(cli.config)?;
             let config = DaemonConfig::load_from(&config_path)?;
@@ -463,22 +494,32 @@ async fn run_daemon(
         )?;
         let session_service = app.session_service.clone();
         let session_control_plane = app.session_control_plane.clone();
+        let feishu_config = config.feishu_config()?;
+        let telegram_config = config.telegram_config()?;
+        let channel_manager = Arc::new(ChannelManager::new(
+            feishu_config.clone(),
+            telegram_config.clone(),
+        ));
 
-        if let Some(telegram_config) = config.telegram_polling_config()? {
+        if let Some(telegram_config) = telegram_config.clone().filter(|config| {
+            config.event_transport == crate::channels::TelegramEventTransport::Polling
+        }) {
             spawn_telegram_polling_service(
                 telegram_config,
                 session_service.clone(),
                 interaction_timeout_secs,
+                channel_manager.clone(),
             )
             .context("failed to start telegram polling service")?;
         }
 
-        if let Some(feishu_config) = config.feishu_config()? {
+        if let Some(feishu_config) = feishu_config {
             if feishu_config.event_transport == FeishuEventTransport::Websocket {
                 spawn_feishu_websocket_service(
                     feishu_config,
                     session_service.clone(),
                     interaction_timeout_secs,
+                    channel_manager.clone(),
                 )
                 .context("failed to start Feishu websocket service")?;
             }
@@ -524,6 +565,7 @@ async fn run_daemon(
                 bearer_auth,
                 rate_limit.clone(),
                 cron_scheduler.clone(),
+                channel_manager.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -534,6 +576,7 @@ async fn run_daemon(
                 bearer_auth,
                 rate_limit.clone(),
                 cron_scheduler.clone(),
+                channel_manager.clone(),
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?
@@ -774,10 +817,14 @@ fn spawn_feishu_websocket_service(
     feishu_config: FeishuConfig,
     session_service: Arc<dyn xiaoo_shared::gateway::SessionService>,
     interaction_timeout_secs: u64,
+    channel_manager: Arc<ChannelManager>,
 ) -> Result<()> {
     let runtime = build_feishu_runtime(feishu_config.clone()).map_err(anyhow::Error::new)?;
-    let processor =
-        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let processor = ChannelRuntimeProcessor::with_monitor(
+        session_service,
+        interaction_timeout_secs,
+        channel_manager,
+    );
     let service = FeishuWebsocketService::new(feishu_config).map_err(anyhow::Error::new)?;
     let handler: FeishuWebsocketMessageHandler = Arc::new(move |message| {
         let processor = processor.clone();
@@ -799,10 +846,14 @@ fn spawn_telegram_polling_service(
     telegram_config: TelegramConfig,
     session_service: Arc<dyn xiaoo_shared::gateway::SessionService>,
     interaction_timeout_secs: u64,
+    channel_manager: Arc<ChannelManager>,
 ) -> Result<()> {
     let runtime = build_telegram_runtime(telegram_config.clone()).map_err(anyhow::Error::new)?;
-    let processor =
-        ChannelRuntimeProcessor::with_timeout(session_service, interaction_timeout_secs);
+    let processor = ChannelRuntimeProcessor::with_monitor(
+        session_service,
+        interaction_timeout_secs,
+        channel_manager,
+    );
     let service = TelegramPollingService::new(telegram_config).map_err(anyhow::Error::new)?;
     let handler: TelegramPollingMessageHandler = Arc::new(move |message| {
         let processor = processor.clone();
@@ -854,6 +905,8 @@ enum CliAction {
     ConfigMemoryQueue,
     ConfigCompact,
     ConfigBackend,
+    ConfigChannels,
+    ConfigHttp,
     ConfigCron,
     ConfigRenderCron,
     ProtocolSchema,
@@ -936,9 +989,11 @@ impl Cli {
                     }
                     Some("compact") => CliAction::ConfigCompact,
                     Some("backend") => CliAction::ConfigBackend,
+                    Some("channels") => CliAction::ConfigChannels,
+                    Some("http") => CliAction::ConfigHttp,
                     Some("cron") => CliAction::ConfigCron,
                     Some("render-cron") => CliAction::ConfigRenderCron,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config cron`, or `config render-cron`"),
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config channels`, `config http`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1110,6 +1165,8 @@ fn print_usage() {
          \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
+         \x20     xiaoo-daemon config channels [--config <path>]\n\n\
+         \x20     xiaoo-daemon config http [--config <path>] [--host <host>] [--port <port>] [--no-dashboard]\n\n\
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
@@ -1448,6 +1505,37 @@ mod tests {
         .expect("config backend should parse");
         assert_eq!(cli.action, CliAction::ConfigBackend);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_channels_command() {
+        let cli = Cli::parse(
+            ["config", "channels", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config channels should parse");
+        assert_eq!(cli.action, CliAction::ConfigChannels);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_http_command() {
+        let cli = Cli::parse(
+            [
+                "config",
+                "http",
+                "--config",
+                "/tmp/demo.toml",
+                "--no-dashboard",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config http should parse");
+        assert_eq!(cli.action, CliAction::ConfigHttp);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+        assert!(cli.no_dashboard);
     }
 
     #[test]

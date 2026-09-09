@@ -1,3 +1,4 @@
+use crate::channel_management::ChannelManager;
 use crate::channels::{AdapterResponse, ChannelError, ChannelResult, ChannelRuntime};
 use crate::cron::scheduler::{CronScheduler, TriggerError};
 use crate::httpserver::channel_ingress::GatewayChannelIngressError;
@@ -30,15 +31,15 @@ use tower_http::cors::CorsLayer;
 use tracing::warn;
 use xiaoo_api::interaction::{InteractionHandle, InteractionRequest, InteractionResponse};
 use xiaoo_shared::daemon_protocol::response::{
-    CronCatalogResponse, CronRunResponse, DaemonService, GatewayCapabilitiesResponse,
-    GatewayErrorResponse, GatewayFeatureCapabilities, GatewayHealthResponse, GatewayHealthStatus,
-    GatewayTransport, RuntimeCatalogResponse, RuntimeCheckoutResponse,
-    RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse, RuntimeCheckpointResponse,
-    RuntimeCheckpointSnapshotDeleteResponse, RuntimeExecInterruptedResponse, RuntimeExecResponse,
-    RuntimeExportFormat, RuntimeExportResponse, RuntimeLifecycleStatus, RuntimePauseResponse,
-    RuntimeReadFileResponse, RuntimeRecordResponse, RuntimeResumeResponse,
-    RuntimeWriteFileResponse, SandboxCatalogItem, SandboxCatalogResponse, SandboxLifecycleStatus,
-    SandboxResourceAllocation,
+    ChannelCatalogResponse, CronCatalogResponse, CronRunResponse, DaemonService,
+    GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayFeatureCapabilities,
+    GatewayHealthResponse, GatewayHealthStatus, GatewayTransport, RuntimeCatalogResponse,
+    RuntimeCheckoutResponse, RuntimeCheckpointCatalogItem, RuntimeCheckpointCatalogResponse,
+    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeExportFormat,
+    RuntimeExportResponse, RuntimeLifecycleStatus, RuntimePauseResponse, RuntimeReadFileResponse,
+    RuntimeRecordResponse, RuntimeResumeResponse, RuntimeWriteFileResponse, SandboxCatalogItem,
+    SandboxCatalogResponse, SandboxLifecycleStatus, SandboxResourceAllocation,
 };
 use xiaoo_shared::gateway::{is_daemon_principal, SessionControlPlane, SessionService};
 use xiaoo_shared::plan::{
@@ -57,6 +58,7 @@ pub struct GatewayAppState {
     remote_interactions: Arc<RemoteInteractionStore>,
     action_sink: Option<Arc<xiaoo_shared::gateway::DaemonHookActionSink>>,
     cron_scheduler: Option<Arc<CronScheduler>>,
+    channel_manager: Option<Arc<ChannelManager>>,
     session_diff_trackers: SessionDiffTrackerMap,
 }
 
@@ -85,6 +87,7 @@ impl GatewayAppState {
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
             cron_scheduler: None,
+            channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -116,6 +119,7 @@ impl GatewayAppState {
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
             cron_scheduler: None,
+            channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -143,6 +147,7 @@ impl GatewayAppState {
             remote_interactions: Arc::new(RemoteInteractionStore::default()),
             action_sink: None,
             cron_scheduler: None,
+            channel_manager: None,
             session_diff_trackers: Arc::new(std::sync::RwLock::new(HashMap::new())),
         })
     }
@@ -165,10 +170,26 @@ impl GatewayAppState {
     }
 
     fn set_channel_interaction_timeout(&mut self, interaction_timeout_secs: u64) {
-        self.channel_processor = ChannelRuntimeProcessor::with_timeout(
+        self.channel_processor = match self.channel_manager.as_ref() {
+            Some(manager) => ChannelRuntimeProcessor::with_monitor(
+                self.session_service.clone(),
+                interaction_timeout_secs,
+                manager.clone(),
+            ),
+            None => ChannelRuntimeProcessor::with_timeout(
+                self.session_service.clone(),
+                interaction_timeout_secs,
+            ),
+        };
+    }
+
+    fn set_channel_manager(&mut self, channel_manager: Arc<ChannelManager>) {
+        self.channel_processor = ChannelRuntimeProcessor::with_monitor(
             self.session_service.clone(),
-            interaction_timeout_secs,
+            600,
+            channel_manager.clone(),
         );
+        self.channel_manager = Some(channel_manager);
     }
 
     /// Look up (or lazily create) the per-session [`SessionDiffTracker`].
@@ -573,12 +594,14 @@ pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
     cron_scheduler: Option<Arc<CronScheduler>>,
+    channel_manager: Arc<ChannelManager>,
 ) -> ChannelResult<Router> {
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
         session_control_plane.clone(),
         runtimes,
     )?;
+    state.set_channel_manager(channel_manager);
     state.set_channel_interaction_timeout(interaction_timeout_secs);
     state.set_cron_scheduler(cron_scheduler);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
@@ -627,7 +650,9 @@ fn create_router_from_state(
             )
             .route("/api/v1/runtimes/export", post(handle_session_export))
             .route("/api/v1/cron/jobs", get(handle_cron_catalog))
-            .route("/api/v1/cron/run", post(handle_cron_run)),
+            .route("/api/v1/cron/run", post(handle_cron_run))
+            .route("/api/v1/channels", get(handle_channel_catalog))
+            .route("/api/v1/channels/test", post(handle_channel_test)),
         bearer_auth.clone(),
     );
 
@@ -656,10 +681,12 @@ pub fn create_router_with_control_plane_and_auth(
     bearer_auth: Option<HttpBearerAuthConfig>,
     rate_limit: Option<RateLimitConfig>,
     cron_scheduler: Option<Arc<CronScheduler>>,
+    channel_manager: Arc<ChannelManager>,
 ) -> Router {
     let mut state =
         GatewayAppState::with_control_plane(session_service, session_control_plane.clone());
     state.set_cron_scheduler(cron_scheduler);
+    state.set_channel_manager(channel_manager);
     spawn_diff_tracker_sweep(state.session_diff_trackers.clone(), session_control_plane);
     create_router_from_state(state, bearer_auth, rate_limit)
 }
@@ -1273,6 +1300,53 @@ async fn handle_cron_catalog(State(state): State<Arc<GatewayAppState>>) -> Respo
     .into_response()
 }
 
+async fn handle_channel_catalog(State(state): State<Arc<GatewayAppState>>) -> Response {
+    Json(
+        state
+            .channel_manager
+            .as_ref()
+            .map(|manager| manager.catalog())
+            .unwrap_or(ChannelCatalogResponse {
+                channels: Vec::new(),
+            }),
+    )
+    .into_response()
+}
+
+async fn handle_channel_test(
+    State(state): State<Arc<GatewayAppState>>,
+    Json(payload): Json<xiaoo_shared::daemon_protocol::wire::ChannelTestRequest>,
+) -> Response {
+    if payload.id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GatewayErrorResponse {
+                error: "channel id must not be empty".to_string(),
+            }),
+        )
+            .into_response();
+    }
+    let Some(manager) = state.channel_manager.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(GatewayErrorResponse {
+                error: "no channels are loaded by the active daemon".to_string(),
+            }),
+        )
+            .into_response();
+    };
+    match manager.test_connection(payload.id.trim()).await {
+        Some(response) => Json(response).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(GatewayErrorResponse {
+                error: format!("enabled channel '{}' was not found", payload.id.trim()),
+            }),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_cron_run(
     State(state): State<Arc<GatewayAppState>>,
     Json(payload): Json<xiaoo_shared::daemon_protocol::wire::CronRunRequest>,
@@ -1831,6 +1905,7 @@ mod tests {
         reject_forged_daemon_principal, runtime_export_file_name, GatewayAppState,
         GatewayErrorResponse, HttpBearerAuthConfig,
     };
+    use crate::channel_management::ChannelManager;
     use crate::channels::{
         AdapterResponse, ChannelAdapter, ChannelCapabilities, ChannelMember, ChannelMention,
         ChannelMessage, ChannelMeta, ChannelResult, ChannelRuntime, ChannelTextFormat,
@@ -1914,6 +1989,7 @@ mod tests {
             Some(HttpBearerAuthConfig::new("secret-token")),
             None,
             None,
+            Arc::new(ChannelManager::new(None, None)),
         );
 
         let unauthorized = router
@@ -1958,6 +2034,7 @@ mod tests {
             None,
             None,
             None,
+            Arc::new(ChannelManager::new(None, None)),
         );
 
         let response = router
@@ -2798,6 +2875,7 @@ mod tests {
             None,
             None,
             None,
+            Arc::new(ChannelManager::new(None, None)),
         );
 
         let response = router

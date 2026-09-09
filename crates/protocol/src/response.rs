@@ -204,6 +204,49 @@ pub struct CronRunResponse {
     pub job: CronJobRuntimeResponse,
 }
 
+/// Secret-free live state for one channel loaded by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelRuntimeResponse {
+    /// Channel identifier.
+    pub id: String,
+    /// Active event transport.
+    pub transport: String,
+    /// Whether the channel runtime was loaded successfully.
+    pub loaded: bool,
+    /// Number of parsed inbound messages seen by this daemon process.
+    pub received_count: u64,
+    /// Number of messages processed and replied to successfully.
+    pub success_count: u64,
+    /// Number of messages whose processing failed.
+    pub failure_count: u64,
+    /// Most recent inbound message time in Unix milliseconds.
+    pub last_received_at_ms: Option<u64>,
+    /// Most recent processing completion time in Unix milliseconds.
+    pub last_completed_at_ms: Option<u64>,
+    /// Stable, credential-free category for the most recent failure.
+    pub last_error_kind: Option<String>,
+}
+
+/// Response returned by `GET /api/v1/channels`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelCatalogResponse {
+    /// Enabled channels ordered by identifier.
+    pub channels: Vec<ChannelRuntimeResponse>,
+}
+
+/// Response returned by `POST /api/v1/channels/test`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ChannelTestResponse {
+    /// Channel identifier.
+    pub id: String,
+    /// Whether the Provider accepted the active credentials.
+    pub success: bool,
+    /// Test duration in milliseconds.
+    pub duration_ms: u64,
+    /// Stable, credential-free error category.
+    pub error_kind: Option<String>,
+}
+
 /// Minimum Runtime snapshot required by clients after opening a Runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeOpenSnapshot {

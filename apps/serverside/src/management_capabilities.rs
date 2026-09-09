@@ -28,6 +28,8 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config memory-queue",
             "config compact",
             "config backend",
+            "config channels",
+            "config http",
             "config cron",
             "config render-cron",
         ]
@@ -120,7 +122,15 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["list", "validate", "render", "runtime_status", "run_now"],
             ),
-            domain("channels", true, false, false, false, &[]),
+            domain(
+                "channels",
+                true,
+                true,
+                false,
+                true,
+                &["inspect", "preflight", "runtime_status", "test_connection"],
+            ),
+            domain("http", true, true, false, true, &["inspect", "preflight"]),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
             domain(
@@ -334,6 +344,34 @@ mod tests {
         assert!(backend.runtime_read);
         assert!(backend.test);
         assert!(backend.actions.iter().any(|action| action == "preflight"));
+
+        let channels = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "channels")
+            .expect("channel capability");
+        assert!(channels.runtime_read);
+        assert!(channels.test);
+        assert!(channels.actions.iter().any(|action| action == "inspect"));
+        assert!(channels.actions.iter().any(|action| action == "preflight"));
+        assert!(channels
+            .actions
+            .iter()
+            .any(|action| action == "runtime_status"));
+        assert!(channels
+            .actions
+            .iter()
+            .any(|action| action == "test_connection"));
+
+        let http = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "http")
+            .expect("HTTP capability");
+        assert!(http.runtime_read);
+        assert!(http.test);
+        assert!(http.actions.iter().any(|action| action == "inspect"));
+        assert!(http.actions.iter().any(|action| action == "preflight"));
 
         let cron = capabilities
             .domains

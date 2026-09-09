@@ -4,20 +4,21 @@ use schemars::schema_for;
 use serde_json::{json, Value};
 
 use crate::response::{
-    CronCatalogResponse, CronRunResponse, DaemonReadyMessage, GatewayCapabilitiesResponse,
-    GatewayErrorResponse, GatewayHealthResponse, RuntimeCatalogResponse, RuntimeCheckoutResponse,
-    RuntimeCheckpointCatalogResponse, RuntimeCheckpointResponse,
-    RuntimeCheckpointSnapshotDeleteResponse, RuntimeExecInterruptedResponse, RuntimeExecResponse,
-    RuntimeExportResponse, RuntimeOpenResponse, RuntimePauseResponse, RuntimeReadFileResponse,
-    RuntimeResumeResponse, RuntimeWriteFileResponse, SandboxCatalogResponse,
+    ChannelCatalogResponse, ChannelTestResponse, CronCatalogResponse, CronRunResponse,
+    DaemonReadyMessage, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayHealthResponse,
+    RuntimeCatalogResponse, RuntimeCheckoutResponse, RuntimeCheckpointCatalogResponse,
+    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
+    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeExportResponse,
+    RuntimeOpenResponse, RuntimePauseResponse, RuntimeReadFileResponse, RuntimeResumeResponse,
+    RuntimeWriteFileResponse, SandboxCatalogResponse,
 };
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
-    CronRunRequest, RuntimeCancelRequest, RuntimeCheckoutRequest, RuntimeCheckpointRequest,
-    RuntimeCheckpointSnapshotDeleteRequest, RuntimeCloseRequest, RuntimeDetachRequest,
-    RuntimeExecRequest, RuntimeExportRequest, RuntimeHeartbeatRequest, RuntimeInteractionRequest,
-    RuntimeOpenRequest, RuntimePauseRequest, RuntimeReadFileRequest, RuntimeResumeRequest,
-    RuntimeTurnRequest, RuntimeWriteFileRequest,
+    ChannelTestRequest, CronRunRequest, RuntimeCancelRequest, RuntimeCheckoutRequest,
+    RuntimeCheckpointRequest, RuntimeCheckpointSnapshotDeleteRequest, RuntimeCloseRequest,
+    RuntimeDetachRequest, RuntimeExecRequest, RuntimeExportRequest, RuntimeHeartbeatRequest,
+    RuntimeInteractionRequest, RuntimeOpenRequest, RuntimePauseRequest, RuntimeReadFileRequest,
+    RuntimeResumeRequest, RuntimeTurnRequest, RuntimeWriteFileRequest,
 };
 
 /// Current daemon wire protocol version.
@@ -49,6 +50,7 @@ pub fn protocol_contract() -> Value {
             "runtime_write_file_request": schema_for!(RuntimeWriteFileRequest),
             "runtime_export_request": schema_for!(RuntimeExportRequest),
             "cron_run_request": schema_for!(CronRunRequest),
+            "channel_test_request": schema_for!(ChannelTestRequest),
             "runtime_sse_event": schema_for!(RuntimeSseEvent),
             "daemon_ready_message": schema_for!(DaemonReadyMessage),
             "gateway_health_response": schema_for!(GatewayHealthResponse),
@@ -70,6 +72,8 @@ pub fn protocol_contract() -> Value {
             "sandbox_catalog_response": schema_for!(SandboxCatalogResponse),
             "cron_catalog_response": schema_for!(CronCatalogResponse),
             "cron_run_response": schema_for!(CronRunResponse),
+            "channel_catalog_response": schema_for!(ChannelCatalogResponse),
+            "channel_test_response": schema_for!(ChannelTestResponse),
         }
     })
 }
@@ -85,7 +89,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 38);
+        assert_eq!(schemas.len(), 41);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("sandbox_catalog_response"));
@@ -124,5 +128,8 @@ mod tests {
         assert!(schemas.contains_key("cron_run_request"));
         assert!(schemas.contains_key("cron_catalog_response"));
         assert!(schemas.contains_key("cron_run_response"));
+        assert!(schemas.contains_key("channel_test_request"));
+        assert!(schemas.contains_key("channel_catalog_response"));
+        assert!(schemas.contains_key("channel_test_response"));
     }
 }

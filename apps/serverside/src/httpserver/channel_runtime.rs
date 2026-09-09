@@ -1,3 +1,4 @@
+use crate::channel_management::{channel_error_kind, ChannelManager};
 use crate::channels::{
     ChannelAdapter, ChannelError, ChannelOutboundAttachment, ChannelOutboundAttachmentKind,
     ChannelRuntime,
@@ -35,6 +36,7 @@ pub struct ChannelRuntimeProcessor {
     gateway_service: Arc<GatewayService>,
     pending_interactions: Arc<PendingInteractionStore>,
     interaction_timeout_secs: u64,
+    channel_manager: Option<Arc<ChannelManager>>,
 }
 
 impl ChannelRuntimeProcessor {
@@ -50,10 +52,40 @@ impl ChannelRuntimeProcessor {
             gateway_service: Arc::new(GatewayService::new(session_service)),
             pending_interactions: Arc::new(PendingInteractionStore::new()),
             interaction_timeout_secs,
+            channel_manager: None,
         }
     }
 
+    pub fn with_monitor(
+        session_service: Arc<dyn SessionService>,
+        interaction_timeout_secs: u64,
+        channel_manager: Arc<ChannelManager>,
+    ) -> Self {
+        let mut processor = Self::with_timeout(session_service, interaction_timeout_secs);
+        processor.channel_manager = Some(channel_manager);
+        processor
+    }
+
     pub async fn process_message(
+        &self,
+        runtime: ChannelRuntime,
+        message: crate::channels::ChannelMessage,
+    ) -> Result<(), ChannelMessageProcessingError> {
+        let channel_id = runtime.channel_id.clone();
+        if let Some(manager) = self.channel_manager.as_ref() {
+            manager.record_received(&channel_id);
+        }
+        let result = self.process_message_inner(runtime, message).await;
+        if let Some(manager) = self.channel_manager.as_ref() {
+            match &result {
+                Ok(()) => manager.record_success(&channel_id),
+                Err(error) => manager.record_failure(&channel_id, processing_error_kind(error)),
+            }
+        }
+        result
+    }
+
+    async fn process_message_inner(
         &self,
         runtime: ChannelRuntime,
         message: crate::channels::ChannelMessage,
@@ -155,6 +187,14 @@ impl ChannelRuntimeProcessor {
         }
 
         Ok(())
+    }
+}
+
+fn processing_error_kind(error: &ChannelMessageProcessingError) -> &'static str {
+    match error {
+        ChannelMessageProcessingError::ChannelIngress(_) => "invalid_event",
+        ChannelMessageProcessingError::Gateway(_) => "gateway",
+        ChannelMessageProcessingError::Channel(error) => channel_error_kind(error),
     }
 }
 

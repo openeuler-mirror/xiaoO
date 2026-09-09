@@ -5,5 +5,6 @@ pub mod types;
 pub mod websocket;
 
 pub use channel::{capabilities, meta, FeishuAdapter};
+pub(crate) use client::FeishuClient;
 pub use types::{FeishuConfig, FeishuEventTransport};
 pub use websocket::{FeishuWebsocketMessageHandler, FeishuWebsocketService};
