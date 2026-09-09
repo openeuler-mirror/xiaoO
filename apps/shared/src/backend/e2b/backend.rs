@@ -183,11 +183,7 @@ impl E2bBackendState {
         &self,
         path: &'a BackendPath,
     ) -> Result<&'a str, OperationError> {
-        if !path.backend_id.is_empty() && path.backend_id != self.backend_id {
-            return Err(OperationError::PermissionDenied {
-                path: path.native().to_string(),
-            });
-        }
+        path.assert_owned_by(&self.backend_id)?;
         Ok(path.native())
     }
 

@@ -230,7 +230,7 @@ impl OperationFileSystem for E2bFileSystem {
         let text = String::from_utf8_lossy(output.stdout.as_slice())
             .trim()
             .to_string();
-        Ok(BackendPath::from_raw(text))
+        Ok(self.state.tag_backend_path(&text))
     }
 }
 

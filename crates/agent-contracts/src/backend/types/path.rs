@@ -1,3 +1,4 @@
+use crate::backend::OperationError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::time::SystemTime;
@@ -76,6 +77,17 @@ impl BackendPath {
     /// The canonical absolute path inside the owning backend.
     pub fn native(&self) -> &str {
         self.native_path.as_str()
+    }
+    /// Validate that this path is owned by `backend_id`. Unattributed paths
+    /// (legacy / raw) are accepted so the backend can adopt them; a path that
+    /// is attributed to a different backend is rejected.
+    pub fn assert_owned_by(&self, backend_id: &str) -> Result<(), OperationError> {
+        if !self.backend_id.is_empty() && self.backend_id != backend_id {
+            return Err(OperationError::PermissionDenied {
+                path: self.native_path.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Rebuild this path under the same namespace with a new native path.
@@ -237,5 +249,31 @@ mod tests {
         assert_eq!(value["native_path"], "/tmp/xiaoo-bash-output-abc");
         let back: BackendPath = serde_json::from_str(&json).unwrap();
         assert_eq!(back, path);
+    }
+
+    #[test]
+    fn owned_by_accepts_own_and_raw_paths_rejects_foreign() {
+        assert!(BackendPath::from_raw("/tmp/spill.txt")
+            .assert_owned_by("backend-a")
+            .is_ok());
+
+        let own = BackendPath::new(
+            "backend-a",
+            PathNamespace::Temp,
+            "/tmp/spill.txt",
+            "spill.txt",
+        );
+        assert!(own.assert_owned_by("backend-a").is_ok());
+
+        let foreign = BackendPath::new(
+            "backend-b",
+            PathNamespace::Temp,
+            "/tmp/spill.txt",
+            "spill.txt",
+        );
+        assert!(matches!(
+            foreign.assert_owned_by("backend-a"),
+            Err(OperationError::PermissionDenied { .. })
+        ));
     }
 }

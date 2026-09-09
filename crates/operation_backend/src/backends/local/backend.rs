@@ -115,11 +115,7 @@ impl LocalBackendState {
         path: &BackendPath,
     ) -> Result<PathBuf, OperationError> {
         let native = normalize_absolute_host_path(Path::new(path.native()))?;
-        if !path.backend_id.is_empty() && path.backend_id != self.backend_id {
-            return Err(OperationError::PermissionDenied {
-                path: native.to_string_lossy().into_owned(),
-            });
-        }
+        path.assert_owned_by(&self.backend_id)?;
         Ok(native)
     }
 
