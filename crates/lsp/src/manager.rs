@@ -176,6 +176,20 @@ impl LspServerManager {
         let _ = self.prepare_file(file).await;
     }
 
+    pub async fn test_startup(&mut self, server_id: &str, root: &Path) -> Result<(), LspError> {
+        let config = self
+            .configs
+            .iter()
+            .find(|config| config.id == server_id)
+            .cloned()
+            .ok_or_else(|| LspError::StartupFailed(format!("unknown LSP server `{server_id}`")))?;
+        let mut instance =
+            LspServerInstance::new(config, root.to_path_buf(), Arc::clone(&self.env));
+        let result = instance.ensure_started().await;
+        instance.shutdown().await;
+        result
+    }
+
     /// Open `file` with explicitly provided content, bypassing the internal
     /// `read_file()` call in `prepare_file`.
     ///

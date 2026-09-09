@@ -294,6 +294,35 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigInstallLsp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let server = cli
+                .server
+                .context("config install-lsp requires --server <id>")?;
+            println!(
+                "{}",
+                serde_json::to_string(&lsp_management::install_lsp(&config, &server).await)?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigTestLsp => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            let server = cli
+                .server
+                .context("config test-lsp requires --server <id>")?;
+            let workspace = cli
+                .workspace
+                .unwrap_or(std::env::current_dir().context("failed to resolve current directory")?);
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &lsp_management::test_lsp(&config, &server, &workspace).await
+                )?
+            );
+            return Ok(());
+        }
         CliAction::ConfigMcpServer => {
             let config_path = resolve_config_path(cli.config)?;
             let config = DaemonConfig::load_from(&config_path)?;
@@ -972,6 +1001,8 @@ enum CliAction {
     ConfigMcp,
     ConfigMcpServer,
     ConfigLsp,
+    ConfigInstallLsp,
+    ConfigTestLsp,
     ConfigMemory,
     ConfigMemoryQueue,
     ConfigCompact,
@@ -1002,6 +1033,8 @@ struct Cli {
     profile: Option<String>,
     agent: Option<String>,
     hooker: Option<String>,
+    server: Option<String>,
+    workspace: Option<PathBuf>,
     manifest: Option<PathBuf>,
     allow_effects: bool,
     memory_queue_action: Option<memory_management::MemoryQueueAction>,
@@ -1026,6 +1059,8 @@ impl Cli {
         let mut profile = None;
         let mut agent = None;
         let mut hooker = None;
+        let mut server = None;
+        let mut workspace = None;
         let mut manifest = None;
         let mut allow_effects = false;
         let mut memory_queue_action = None;
@@ -1053,6 +1088,8 @@ impl Cli {
                     Some("mcp") => CliAction::ConfigMcp,
                     Some("mcp-server") => CliAction::ConfigMcpServer,
                     Some("lsp") => CliAction::ConfigLsp,
+                    Some("install-lsp") => CliAction::ConfigInstallLsp,
+                    Some("test-lsp") => CliAction::ConfigTestLsp,
                     Some("memory") => CliAction::ConfigMemory,
                     Some("memory-queue") => {
                         let value = remaining
@@ -1106,6 +1143,8 @@ impl Cli {
                         profile,
                         agent,
                         hooker,
+                        server,
+                        workspace,
                         manifest,
                         allow_effects,
                         memory_queue_action,
@@ -1197,6 +1236,21 @@ impl Cli {
                     }
                     hooker = Some(value.clone());
                 }
+                "--server" => {
+                    index += 1;
+                    let value = remaining.get(index).context("missing value for --server")?;
+                    if value.trim().is_empty() {
+                        bail!("--server must not be empty");
+                    }
+                    server = Some(value.clone());
+                }
+                "--workspace" => {
+                    index += 1;
+                    let value = remaining
+                        .get(index)
+                        .context("missing value for --workspace")?;
+                    workspace = Some(PathBuf::from(value));
+                }
                 "--manifest" => {
                     index += 1;
                     let value = remaining
@@ -1232,6 +1286,8 @@ impl Cli {
             profile,
             agent,
             hooker,
+            server,
+            workspace,
             manifest,
             allow_effects,
             memory_queue_action,
@@ -1265,6 +1321,8 @@ fn print_usage() {
          \x20     xiaoo-daemon config mcp [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config mcp-server [--config <path>]\n\n\
          \x20     xiaoo-daemon config lsp [--config <path>]\n\n\
+         \x20     xiaoo-daemon config install-lsp --server <id> [--config <path>]\n\n\
+         \x20     xiaoo-daemon config test-lsp --server <id> [--workspace <path>] [--config <path>]\n\n\
          \x20     xiaoo-daemon config memory [--config <path>] [--mcp-config <path>]\n\n\
          \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
@@ -1588,6 +1646,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_config_lsp_action_commands() {
+        let install = Cli::parse(
+            ["config", "install-lsp", "--server", "gopls"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config install-lsp should parse");
+        assert_eq!(install.action, CliAction::ConfigInstallLsp);
+        assert_eq!(install.server.as_deref(), Some("gopls"));
+
+        let test = Cli::parse(
+            [
+                "config",
+                "test-lsp",
+                "--server",
+                "rust-analyzer",
+                "--workspace",
+                "/tmp/workspace",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("config test-lsp should parse");
+        assert_eq!(test.action, CliAction::ConfigTestLsp);
+        assert_eq!(test.server.as_deref(), Some("rust-analyzer"));
+        assert_eq!(test.workspace, Some(PathBuf::from("/tmp/workspace")));
+    }
+
+    #[test]
     fn parses_config_mcp_server_command() {
         let cli = Cli::parse(
             ["config", "mcp-server", "--config", "/tmp/demo.toml"]
@@ -1773,7 +1860,10 @@ mod tests {
     fn rejects_unknown_config_command() {
         let error = Cli::parse(["config", "unknown"].into_iter().map(str::to_string))
             .expect_err("unknown config command should fail");
-        assert!(error.to_string().contains("`config test-model`"));
+        assert_eq!(
+            error.to_string(),
+            "unknown config command; run `xiaoo-daemon --help` for the current command list"
+        );
     }
 
     #[test]
