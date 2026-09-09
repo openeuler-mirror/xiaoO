@@ -164,24 +164,27 @@ impl GrepExecutor {
                         search_target: ".".to_string(),
                     }),
                     Some(PathKind::File) => {
-                        let resolved_path = Path::new(resolved.0.as_str());
+                        let resolved_path = Path::new(resolved.native());
                         let parent = resolved_path
                             .parent()
                             .and_then(|value| value.to_str())
                             .ok_or_else(|| {
                                 format!(
                                     "Failed to resolve parent directory for file path: {}",
-                                    resolved.0
+                                    resolved.native()
                                 )
                             })?;
                         let file_name = resolved_path
                             .file_name()
                             .and_then(|value| value.to_str())
                             .ok_or_else(|| {
-                                format!("Failed to resolve file name for path: {}", resolved.0)
+                                format!(
+                                    "Failed to resolve file name for path: {}",
+                                    resolved.native()
+                                )
                             })?;
                         Ok(ResolvedSearchTarget {
-                            cwd: BackendPath(parent.to_string()),
+                            cwd: BackendPath::from_raw(parent.to_string()),
                             search_target: file_name.to_string(),
                         })
                     }

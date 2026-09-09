@@ -90,7 +90,7 @@ impl LspEnv for LocalLspEnv {
         self.backend
             .paths()
             .home_dir()
-            .map(|p| PathBuf::from(p.0.as_str()))
+            .map(|p| PathBuf::from(p.native()))
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join(".local")
             .join("share")

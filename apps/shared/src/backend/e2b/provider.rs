@@ -162,7 +162,7 @@ pub(crate) async fn create_backend(
         .as_deref()
         .map(backend_path)
         .transpose()?
-        .or_else(|| Some(BackendPath(DEFAULT_HOME_DIR.to_string())));
+        .or_else(|| Some(BackendPath::from_raw(DEFAULT_HOME_DIR.to_string())));
     let temp_root = backend_path(options.temp_root.as_deref().unwrap_or(DEFAULT_TEMP_ROOT))?;
     let envd_port = options.envd_port.unwrap_or(DEFAULT_ENVD_PORT);
     let envd_scheme = options
@@ -715,8 +715,8 @@ async fn ensure_remote_roots(state: &Arc<E2bBackendState>) -> Result<(), Operati
     let exec = E2bExec::new(Arc::clone(state));
     let script = format!(
         "mkdir -p {} {} {}",
-        super::backend::shell_quote(state.workspace_root.0.as_str()),
-        super::backend::shell_quote(state.temp_root.0.as_str()),
+        super::backend::shell_quote(state.workspace_root.native()),
+        super::backend::shell_quote(state.temp_root.native()),
         super::backend::shell_quote("/home/user/.xiaoo")
     );
     let output = retry_workspace_initialization(
@@ -972,7 +972,7 @@ mod tests {
         .await
         .expect("create live E2B backend");
         let backend = created.backend;
-        let smoke_path = BackendPath(format!("{DEFAULT_WORKSPACE_ROOT}/grep-smoke.py"));
+        let smoke_path = BackendPath::from_raw(format!("{DEFAULT_WORKSPACE_ROOT}/grep-smoke.py"));
 
         let smoke_result: Result<String, String> = async {
             backend
@@ -996,7 +996,7 @@ mod tests {
                         r"W\s*=".to_string(),
                         "grep-smoke.py".to_string(),
                     ],
-                    cwd: Some(BackendPath(DEFAULT_WORKSPACE_ROOT.to_string())),
+                    cwd: Some(BackendPath::from_raw(DEFAULT_WORKSPACE_ROOT.to_string())),
                     timeout_ms: Some(30_000),
                     ..Default::default()
                 })

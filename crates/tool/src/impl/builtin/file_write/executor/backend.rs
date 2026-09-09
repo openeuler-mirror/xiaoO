@@ -79,10 +79,10 @@ impl FileWriteExecutor {
     }
 
     fn parent_backend_path(path: &BackendPath) -> Option<BackendPath> {
-        Path::new(path.0.as_str())
+        Path::new(path.native())
             .parent()
             .and_then(|parent| parent.to_str())
-            .map(|parent| BackendPath(parent.to_string()))
+            .map(|parent| BackendPath::from_raw(parent.to_string()))
     }
 }
 
@@ -213,7 +213,7 @@ impl ToolExecutor for FileWriteExecutor {
             message: format!("Failed to write file: {}", e),
         })?;
 
-        let resolved_path = Path::new(resolved.0.as_str());
+        let resolved_path = Path::new(resolved.native());
         if let Some(ref lsp) = lsp {
             spawn_touch_file(lsp, resolved_path);
         }

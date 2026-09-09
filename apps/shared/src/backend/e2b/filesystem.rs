@@ -34,14 +34,15 @@ impl E2bFileSystem {
         }
     }
     async fn upload_raw(&self, path: &BackendPath, content: Vec<u8>) -> Result<(), OperationError> {
+        let native = self.state.owned_native(path)?;
         let request = self
             .state
             .envd_request(Method::POST, "/files")
-            .query(&[("path", path.0.as_str())])
+            .query(&[("path", native)])
             .header(ACCEPT, "application/json");
         let response = if self.state.envd_file_upload_multipart {
             use reqwest::multipart::{Form, Part};
-            let name = path.0.rsplit('/').next().unwrap_or("file").to_string();
+            let name = native.rsplit('/').next().unwrap_or("file").to_string();
             request
                 .multipart(Form::new().part("file", Part::bytes(content).file_name(name)))
                 .send()
@@ -53,7 +54,7 @@ impl E2bFileSystem {
         }
         .await
         .map_err(|error| OperationError::Transport {
-            message: format!("failed to upload e2b file {}: {error}", path.0),
+            message: format!("failed to upload e2b file {}: {error}", native),
         })?;
 
         if response.status().is_success() {
@@ -90,10 +91,11 @@ impl ExportedFileHandle for E2bExportedFileHandle {
 impl OperationFileSystem for E2bFileSystem {
     async fn stat(&self, path: &BackendPath) -> Result<PathStat, OperationError> {
         self.state.ensure_active()?;
+        let native = self.state.owned_native(path)?;
         let response: Result<StatResponse, OperationError> = connect_json(
             &self.state,
             "/filesystem.Filesystem/Stat",
-            json!({ "path": path.0 }),
+            json!({ "path": native }),
         )
         .await;
 
@@ -111,20 +113,21 @@ impl OperationFileSystem for E2bFileSystem {
 
     async fn read_bytes(&self, request: ReadBytesRequest) -> Result<Vec<u8>, OperationError> {
         self.state.ensure_active()?;
+        let native = self.state.owned_native(&request.path)?;
         let response = self
             .state
             .envd_request(Method::GET, "/files")
-            .query(&[("path", request.path.0.as_str())])
+            .query(&[("path", native)])
             .header(ACCEPT, "application/octet-stream")
             .send()
             .await
             .map_err(|error| OperationError::Transport {
-                message: format!("failed to download e2b file {}: {error}", request.path.0),
+                message: format!("failed to download e2b file {}: {error}", native),
             })?;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Err(OperationError::NotFound {
-                path: request.path.0,
+                path: request.path.native().to_string(),
             });
         }
         if !response.status().is_success() {
@@ -145,11 +148,12 @@ impl OperationFileSystem for E2bFileSystem {
         request: WriteBytesRequest,
     ) -> Result<WriteBytesOutcome, OperationError> {
         self.state.ensure_active()?;
+        let native = self.state.owned_native(&request.path)?;
         if matches!(request.mode, WriteMode::Create) {
             let stat = self.stat(&request.path).await?;
             if stat.exists {
                 return Err(OperationError::AlreadyExists {
-                    path: request.path.0,
+                    path: native.to_string(),
                 });
             }
         }
@@ -166,10 +170,10 @@ impl OperationFileSystem for E2bFileSystem {
                     })
                     .await?;
                 self.upload_raw(&temp_path, request.content).await?;
-                let destination = shell_quote(request.path.0.as_str());
+                let destination = shell_quote(native);
                 let script = format!(
                     "parent=$(dirname {destination}) && mkdir -p \"$parent\" && mv -f {} {destination}",
-                    shell_quote(temp_path.0.as_str()),
+                    shell_quote(temp_path.native()),
                 );
                 let output = self.exec.run_shell_script(script.as_str(), None).await?;
                 if output.exit_code != Some(0) {
@@ -190,7 +194,8 @@ impl OperationFileSystem for E2bFileSystem {
     }
 
     async fn create_dir_all(&self, path: &BackendPath) -> Result<(), OperationError> {
-        let script = format!("mkdir -p {}", shell_quote(path.0.as_str()));
+        let native = self.state.owned_native(path)?;
+        let script = format!("mkdir -p {}", shell_quote(native));
         let output = self.exec.run_shell_script(script.as_str(), None).await?;
         if output.exit_code == Some(0) {
             return Ok(());
@@ -204,7 +209,8 @@ impl OperationFileSystem for E2bFileSystem {
         let parent = request
             .preferred_parent
             .unwrap_or_else(|| self.state.temp_root.clone());
-        let quoted_parent = shell_quote(parent.0.as_str());
+        let native = self.state.owned_native(&parent)?;
+        let quoted_parent = shell_quote(native);
         let prefix = shell_quote(request.prefix.as_deref().unwrap_or("tmp-"));
         let suffix = shell_quote(request.suffix.as_deref().unwrap_or(""));
         let creation = match request.kind {
@@ -213,7 +219,7 @@ impl OperationFileSystem for E2bFileSystem {
         };
         let script = format!(
             "mkdir -p {quoted_parent}\nprefix={prefix}\nsuffix={suffix}\nwhile true; do\n  path=\"{parent}/$prefix$(date +%s%N)-$RANDOM$suffix\"\n  if [ ! -e \"$path\" ]; then\n    {creation}\n    printf '%s' \"$path\"\n    exit 0\n  fi\ndone",
-            parent = parent.0,
+            parent = native,
         );
         let output = self.exec.run_shell_script(script.as_str(), None).await?;
         if output.exit_code != Some(0) {
@@ -224,7 +230,7 @@ impl OperationFileSystem for E2bFileSystem {
         let text = String::from_utf8_lossy(output.stdout.as_slice())
             .trim()
             .to_string();
-        Ok(BackendPath(text))
+        Ok(self.state.tag_backend_path(&text))
     }
 }
 
@@ -234,21 +240,22 @@ impl OperationExport for E2bFileSystem {
         &self,
         request: ExportFileRequest,
     ) -> Result<SharedExportedFileHandle, OperationError> {
+        self.state.owned_native(&request.path)?;
         let stat = self.stat(&request.path).await?;
         if !stat.exists {
             return Err(OperationError::NotFound {
-                path: request.path.0.clone(),
+                path: request.path.native().to_string(),
             });
         }
         if stat.kind != Some(PathKind::File) {
             return Err(OperationError::NotFile {
-                path: request.path.0.clone(),
+                path: request.path.native().to_string(),
             });
         }
         let file_name = request.preferred_name.unwrap_or_else(|| {
             request
                 .path
-                .0
+                .native()
                 .rsplit('/')
                 .next()
                 .unwrap_or("exported-file")

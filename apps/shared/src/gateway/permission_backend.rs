@@ -752,7 +752,7 @@ fn runtime_bubblewrap_denial(
     let control = control?;
     let stderr = String::from_utf8_lossy(result.stderr.as_slice());
     for candidate in bubblewrap_path_candidates_from_stderr(stderr.as_ref(), command) {
-        let path = BackendPath(candidate.path);
+        let path = BackendPath::from_raw(candidate.path);
         match control.sandbox_denial_for_path(&path, candidate.capability, "bash") {
             Ok(Some(denial)) => return Some(denial),
             Ok(None) => {}
@@ -1171,7 +1171,7 @@ mod tests {
                 command: format!("cat {}", shell_quote(secret.as_path())),
                 args: vec![],
                 shell: Some("/bin/bash".to_string()),
-                cwd: Some(BackendPath(workspace.display().to_string())),
+                cwd: Some(BackendPath::from_raw(workspace.display().to_string())),
                 timeout_ms: Some(5000),
                 ..Default::default()
             })
@@ -1282,7 +1282,7 @@ mod tests {
             capability: SandboxPermissionCapability,
             operation: &str,
         ) -> Result<Option<SandboxPolicyDenial>, OperationError> {
-            assert_eq!(path.0, self.expected_path);
+            assert_eq!(path.native(), self.expected_path);
             assert_eq!(capability, self.expected_capability);
             assert_eq!(operation, "bash");
             Ok(self.denial.clone())

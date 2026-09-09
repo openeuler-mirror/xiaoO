@@ -31,6 +31,7 @@ impl OperationSearch for E2bSearch {
         let base_dir = request
             .base_dir
             .unwrap_or_else(|| self.exec.state().workspace_root.clone());
+        let base = self.exec.state().owned_native(&base_dir)?;
         let pattern = Pattern::new(request.pattern.as_str()).map_err(|error| {
             OperationError::InvalidPath {
                 message: format!("invalid glob pattern: {error}"),
@@ -38,7 +39,7 @@ impl OperationSearch for E2bSearch {
         })?;
         let script = format!(
             "if [ -d {base} ]; then find {base} -mindepth 1 -print; fi",
-            base = shell_quote(base_dir.0.as_str()),
+            base = shell_quote(base),
         );
         let output = self.exec.run_shell_script(script.as_str(), None).await?;
         if output.exit_code != Some(0) {
@@ -53,19 +54,19 @@ impl OperationSearch for E2bSearch {
             .filter_map(|line| {
                 let path = Path::new(line);
                 let relative = path
-                    .strip_prefix(base_dir.0.as_str())
+                    .strip_prefix(base)
                     .ok()
                     .and_then(|value| value.to_str())
                     .unwrap_or("")
                     .trim_start_matches('/');
                 if pattern.matches(relative) || pattern.matches_path(path) {
-                    Some(BackendPath(line.to_string()))
+                    Some(BackendPath::from_raw(line.to_string()))
                 } else {
                     None
                 }
             })
             .collect::<Vec<_>>();
-        paths.sort_by(|a, b| a.0.cmp(&b.0));
+        paths.sort_by(|a, b| a.native().cmp(b.native()));
         if let Some(limit) = request.limit {
             paths.truncate(limit);
         }
@@ -73,6 +74,7 @@ impl OperationSearch for E2bSearch {
     }
 
     async fn grep(&self, request: GrepRequest) -> Result<GrepResult, OperationError> {
+        let base = self.exec.state().owned_native(&request.base_dir)?;
         let mut cmd = vec!["grep -r -H".to_string()];
 
         match &request.mode {
@@ -91,7 +93,7 @@ impl OperationSearch for E2bSearch {
 
         cmd.push("--".to_string());
         cmd.push(shell_quote(&request.query));
-        cmd.push(shell_quote(request.base_dir.0.as_str()));
+        cmd.push(shell_quote(base));
 
         let output = self
             .exec

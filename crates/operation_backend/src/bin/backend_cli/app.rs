@@ -101,10 +101,10 @@ async fn handle_request(
                     base: base.into_contract(),
                 })
                 .await?;
-            Ok(json!({ "path": resolved.0 }))
+            Ok(json!({ "path": resolved.native().to_string() }))
         }
         BackendCliRequest::Stat { path } => {
-            let backend_path = BackendPath(path.clone());
+            let backend_path = BackendPath::from_raw(path.clone());
             let stat = backend.files().stat(&backend_path).await?;
             Ok(path_stat_json(path.as_str(), &stat))
         }
@@ -112,7 +112,7 @@ async fn handle_request(
             let bytes = backend
                 .files()
                 .read_bytes(ReadBytesRequest {
-                    path: BackendPath(path.clone()),
+                    path: BackendPath::from_raw(path.clone()),
                 })
                 .await?;
             Ok(json!({
@@ -128,18 +128,18 @@ async fn handle_request(
             let outcome = backend
                 .files()
                 .write_bytes(WriteBytesRequest {
-                    path: BackendPath(path),
+                    path: BackendPath::from_raw(path),
                     content: content.into_bytes(),
                     mode: mode.into_contract(),
                 })
                 .await?;
             Ok(json!({
-                "path": outcome.path.0,
+                "path": outcome.path.native().to_string(),
                 "created": outcome.created
             }))
         }
         BackendCliRequest::CreateDirAll { path } => {
-            let backend_path = BackendPath(path.clone());
+            let backend_path = BackendPath::from_raw(path.clone());
             backend.files().create_dir_all(&backend_path).await?;
             Ok(json!({ "path": path, "created": true }))
         }
@@ -152,12 +152,12 @@ async fn handle_request(
                 .search()
                 .glob(GlobRequest {
                     pattern,
-                    base_dir: Some(BackendPath(base_dir)),
+                    base_dir: Some(BackendPath::from_raw(base_dir)),
                     limit,
                 })
                 .await?;
             Ok(json!({
-                "entries": entries.into_iter().map(|entry| entry.0).collect::<Vec<_>>()
+                "entries": entries.into_iter().map(|entry| entry.native().to_string()).collect::<Vec<_>>()
             }))
         }
         BackendCliRequest::Grep {
@@ -171,7 +171,7 @@ async fn handle_request(
                 .search()
                 .grep(GrepRequest {
                     query,
-                    base_dir: BackendPath(base_dir),
+                    base_dir: BackendPath::from_raw(base_dir),
                     include,
                     mode: mode.into_contract(),
                     head_limit,
@@ -191,12 +191,12 @@ async fn handle_request(
                 .files()
                 .temp_path(TempPathRequest {
                     kind: kind.into_contract(),
-                    preferred_parent: preferred_parent.map(BackendPath),
+                    preferred_parent: preferred_parent.map(BackendPath::from_raw),
                     prefix,
                     suffix,
                 })
                 .await?;
-            Ok(json!({ "path": path.0 }))
+            Ok(json!({ "path": path.native() }))
         }
         BackendCliRequest::ExportFile {
             path,
@@ -205,7 +205,7 @@ async fn handle_request(
             let exported = backend
                 .export()
                 .export_file(ExportFileRequest {
-                    path: BackendPath(path),
+                    path: BackendPath::from_raw(path),
                     preferred_name,
                 })
                 .await?;
@@ -224,7 +224,7 @@ async fn handle_request(
                     command,
                     args,
                     shell,
-                    cwd: cwd.map(BackendPath),
+                    cwd: cwd.map(BackendPath::from_raw),
                     timeout_ms,
                     ..Default::default()
                 })
@@ -416,7 +416,7 @@ impl ResolveBaseInput {
         match self {
             ResolveBaseInput::WorkspaceRoot => ResolveBase::WorkspaceRoot,
             ResolveBaseInput::HomeDir => ResolveBase::HomeDir,
-            ResolveBaseInput::Explicit(path) => ResolveBase::Explicit(BackendPath(path)),
+            ResolveBaseInput::Explicit(path) => ResolveBase::Explicit(BackendPath::from_raw(path)),
         }
     }
 }

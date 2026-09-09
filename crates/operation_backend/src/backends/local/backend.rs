@@ -7,7 +7,7 @@ use agent_contracts::backend::{
         OperationExec, OperationExport, OperationFileSystem, OperationPathResolver, OperationSearch,
     },
     BackendPath, OperationBackend, OperationBackendCapabilities, OperationError,
-    OperationPermissionControl, PathKind, PathStat, SandboxPermissionGrantId,
+    OperationPermissionControl, PathKind, PathNamespace, PathStat, SandboxPermissionGrantId,
     SandboxPermissionGrantRequest,
 };
 use agent_contracts::InteractionHandle;
@@ -64,10 +64,20 @@ impl LocalOperationBackend {
             });
 
         let workspace_root_host = home_dir_host.clone().unwrap_or_else(std::env::temp_dir);
-        let workspace_root = BackendPath(workspace_root_host.to_string_lossy().into_owned());
-        let home_dir = home_dir_host
-            .as_ref()
-            .map(|p| BackendPath(p.to_string_lossy().into_owned()));
+        let workspace_root = BackendPath::new(
+            "lsp-local",
+            PathNamespace::Workspace,
+            workspace_root_host.to_string_lossy().into_owned(),
+            "",
+        );
+        let home_dir = home_dir_host.as_ref().map(|p| {
+            BackendPath::new(
+                "lsp-local",
+                PathNamespace::Home,
+                p.to_string_lossy().into_owned(),
+                "",
+            )
+        });
 
         Self::new(Arc::new(LocalBackendState {
             backend_id: "lsp-local".to_string(),
@@ -104,7 +114,39 @@ impl LocalBackendState {
         &self,
         path: &BackendPath,
     ) -> Result<PathBuf, OperationError> {
-        normalize_absolute_host_path(Path::new(path.0.as_str()))
+        let native = normalize_absolute_host_path(Path::new(path.native()))?;
+        path.assert_owned_by(&self.backend_id)?;
+        Ok(native)
+    }
+
+    pub(crate) fn classify_host_path(&self, normalized: &Path) -> (PathNamespace, String) {
+        let roots: [(&Path, PathNamespace); 3] = [
+            (self.workspace_root_host.as_path(), PathNamespace::Workspace),
+            (
+                self.home_dir_host
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("")),
+                PathNamespace::Home,
+            ),
+            (self.temp_root_host.as_path(), PathNamespace::Temp),
+        ];
+        for (root, namespace) in roots {
+            if root.as_os_str().is_empty() {
+                continue;
+            }
+            if let Ok(relative) = normalized.strip_prefix(root) {
+                let relative = relative
+                    .to_str()
+                    .unwrap_or_default()
+                    .trim_start_matches('/')
+                    .to_owned();
+                return (namespace, relative);
+            }
+        }
+        (
+            PathNamespace::Uncategorized,
+            normalized.to_string_lossy().into_owned(),
+        )
     }
 
     pub(crate) fn host_path_to_backend(&self, path: &Path) -> Result<BackendPath, OperationError> {
@@ -114,7 +156,13 @@ impl LocalBackendState {
             .ok_or_else(|| OperationError::InvalidPath {
                 message: format!("path is not valid utf-8: {}", normalized.display()),
             })?;
-        Ok(BackendPath(text.to_string()))
+        let (namespace, relative) = self.classify_host_path(normalized.as_path());
+        Ok(BackendPath::new(
+            self.backend_id.clone(),
+            namespace,
+            text,
+            relative,
+        ))
     }
 
     pub(crate) fn resolve_host_path(
@@ -341,10 +389,11 @@ mod tests {
 
     fn test_state(home_dir_host: Option<PathBuf>) -> LocalBackendState {
         let workspace_root_host = std::env::current_dir().expect("current dir");
-        let workspace_root = BackendPath(workspace_root_host.to_string_lossy().into_owned());
+        let workspace_root =
+            BackendPath::from_raw(workspace_root_host.to_string_lossy().into_owned());
         let home_dir = home_dir_host
             .as_ref()
-            .map(|path| BackendPath(path.to_string_lossy().into_owned()));
+            .map(|path| BackendPath::from_raw(path.to_string_lossy().into_owned()));
 
         LocalBackendState {
             backend_id: "test".to_string(),

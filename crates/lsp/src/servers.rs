@@ -67,7 +67,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
         ));
     }
     let bin_dir = env.global_bin_dir();
-    let bin_dir_bp = BackendPath(bin_dir.to_string_lossy().into_owned());
+    let bin_dir_bp = BackendPath::from_raw(bin_dir.to_string_lossy().into_owned());
     env.backend()
         .files()
         .create_dir_all(&bin_dir_bp)
@@ -197,7 +197,7 @@ async fn try_auto_install(config: &ServerConfig, env: &dyn LspEnv) -> Result<Pat
             }
             // cargo install --root puts the binary in <root>/bin/<name>
             let in_root_bin = bin_dir.join("bin").join(config.command);
-            let in_root_bin_bp = BackendPath(in_root_bin.to_string_lossy().into_owned());
+            let in_root_bin_bp = BackendPath::from_raw(in_root_bin.to_string_lossy().into_owned());
             if env
                 .backend()
                 .files()
@@ -303,7 +303,7 @@ pub async fn find_root(file: &Path, markers: &[&str], env: &dyn LspEnv) -> PathB
         for ancestor in parent.ancestors() {
             for marker in markers {
                 let candidate = ancestor.join(marker);
-                let bp = BackendPath(candidate.to_string_lossy().into_owned());
+                let bp = BackendPath::from_raw(candidate.to_string_lossy().into_owned());
                 if env
                     .backend()
                     .files()
@@ -324,7 +324,7 @@ pub async fn find_root(file: &Path, markers: &[&str], env: &dyn LspEnv) -> PathB
 
 /// Read a file's text content via the backend. Returns empty string on error.
 pub async fn read_file(file: &Path, env: &dyn LspEnv) -> String {
-    let bp = BackendPath(file.to_string_lossy().into_owned());
+    let bp = BackendPath::from_raw(file.to_string_lossy().into_owned());
     env.backend()
         .files()
         .read_bytes(ReadBytesRequest { path: bp })

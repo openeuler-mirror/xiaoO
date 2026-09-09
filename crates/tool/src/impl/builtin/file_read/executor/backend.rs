@@ -174,7 +174,7 @@ impl FileReadExecutor {
                     "file_read write_pdf_part",
                     DEFAULT_FS_TIMEOUT_MS,
                     backend.files().write_bytes(WriteBytesRequest {
-                        path: BackendPath(output_path),
+                        path: BackendPath::from_raw(output_path),
                         content,
                         mode: WriteMode::Create,
                     }),

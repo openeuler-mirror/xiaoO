@@ -3,6 +3,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use agent_contracts::backend::capability::exec::ExecRequest;
+use agent_contracts::backend::capability::filesystem::{
+    TempPathKind, TempPathRequest, WriteBytesRequest, WriteMode,
+};
 use agent_contracts::backend::BackendPath;
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::tool::{ToolExecutor, ToolSpecView};
@@ -56,12 +59,13 @@ impl BashExecutor {
         Ok(Some((resolved, stat)))
     }
 
-    fn format_output(
+    async fn format_output(
+        backend: &dyn agent_contracts::backend::OperationBackend,
         result: &agent_contracts::backend::capability::exec::ExecResult,
-        spill_dir: Option<&std::path::Path>,
+        session: &str,
     ) -> BashOutput {
-        let (stdout, stdout_truncated) = window_stream(&result.stdout, spill_dir);
-        let (stderr, stderr_truncated) = window_stream(&result.stderr, spill_dir);
+        let (stdout, stdout_truncated) = window_stream(backend, session, &result.stdout).await;
+        let (stderr, stderr_truncated) = window_stream(backend, session, &result.stderr).await;
 
         BashOutput {
             stdout,
@@ -74,7 +78,14 @@ impl BashExecutor {
     }
 }
 
-fn window_stream(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> (String, bool) {
+const SPILL_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+const SPILL_SESSION_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+
+async fn window_stream(
+    backend: &dyn agent_contracts::backend::OperationBackend,
+    session: &str,
+    bytes: &[u8],
+) -> (String, bool) {
     let normalize = |slice: &[u8]| String::from_utf8_lossy(slice).replace("\r\n", "\n");
     if bytes.len() <= MAX_OUTPUT_BYTES_PER_STREAM {
         return (normalize(bytes), false);
@@ -84,7 +95,7 @@ fn window_stream(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> (String, 
     let elided = bytes.len() - head_bytes - tail_bytes;
     let head = normalize(&bytes[..head_bytes]);
     let tail = normalize(&bytes[bytes.len() - tail_bytes..]);
-    let retrieval = match spill_full_output(bytes, spill_dir) {
+    let retrieval = match spill_full_output(backend, session, bytes).await {
         Some(path) => format!(
             "the FULL output is saved at {path} — `grep`/`sed -n` it or read it to retrieve any region"
         ),
@@ -100,70 +111,104 @@ fn window_stream(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> (String, 
     (format!("{head}{marker}{tail}"), true)
 }
 
-const SPILL_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
-const SPILL_SESSION_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
-
-fn spill_full_output(bytes: &[u8], spill_dir: Option<&std::path::Path>) -> Option<String> {
-    use std::hash::{Hash, Hasher};
-    let dir = spill_dir?;
-    if let Some(root) = dir.parent() {
-        sweep_stale_spills(root);
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    std::fs::create_dir_all(dir).ok()?;
-    let path = dir.join(format!("{:016x}.txt", hasher.finish()));
-    std::fs::write(&path, bytes).ok()?;
-    enforce_session_budget(dir, SPILL_SESSION_BUDGET_BYTES, &path);
-    Some(path.to_string_lossy().into_owned())
+async fn spill_full_output(
+    backend: &dyn agent_contracts::backend::OperationBackend,
+    session: &str,
+    bytes: &[u8],
+) -> Option<BackendPath> {
+    let temp = backend
+        .files()
+        .temp_path(TempPathRequest {
+            kind: TempPathKind::File,
+            preferred_parent: None,
+            prefix: Some(format!(".xiaoo-bash-output-{}-", sanitize_session(session))),
+            suffix: Some(".txt".to_string()),
+        })
+        .await
+        .ok()?;
+    backend
+        .files()
+        .write_bytes(WriteBytesRequest {
+            path: temp.clone(),
+            content: bytes.to_vec(),
+            mode: WriteMode::Overwrite,
+        })
+        .await
+        .ok()?;
+    reclaim_host_spills(temp.native(), session);
+    Some(temp)
 }
 
-fn sweep_stale_spills(root: &std::path::Path) {
+/// Best-effort reclamation of spill files that live on the host (local
+/// backend). E2B spill paths are sandbox paths that do not exist on the host,
+/// so this is a no-op there and their `/tmp` contents are reclaimed when the
+/// sandbox is destroyed. All errors are swallowed: cleanup must never block or
+/// fail the bash result.
+fn reclaim_host_spills(native_path: &str, session: &str) {
+    let path = std::path::Path::new(native_path);
+    if !path.try_exists().unwrap_or(false) {
+        return;
+    }
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    sweep_stale_spills(dir);
+    let prefix = format!(".xiaoo-bash-output-{}-", sanitize_session(session));
+    if let Some(keep) = path.file_name() {
+        enforce_session_budget(dir, &prefix, keep, SPILL_SESSION_BUDGET_BYTES);
+    }
+}
+
+fn sweep_stale_spills(dir: &std::path::Path) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let now = std::time::SystemTime::now();
-        let Ok(sessions) = std::fs::read_dir(root) else {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
-        for session in sessions.flatten() {
-            let dir = session.path();
-            let Ok(files) = std::fs::read_dir(&dir) else {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if !name.starts_with(".xiaoo-bash-output-") {
                 continue;
-            };
-            let mut remaining = 0usize;
-            for f in files.flatten() {
-                let stale = f
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| now.duration_since(t).ok())
-                    .map(|age| age > SPILL_TTL)
-                    .unwrap_or(false);
-                if stale {
-                    let _ = std::fs::remove_file(f.path());
-                } else {
-                    remaining += 1;
-                }
             }
-            if remaining == 0 {
-                let _ = std::fs::remove_dir(&dir);
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .map(|age| age > SPILL_TTL)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     });
 }
 
-fn enforce_session_budget(dir: &std::path::Path, budget: u64, keep: &std::path::Path) {
+fn enforce_session_budget(
+    dir: &std::path::Path,
+    prefix: &str,
+    keep: &std::ffi::OsStr,
+    budget: u64,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = entries
         .flatten()
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            if !meta.is_file() {
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(prefix))
+        })
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
                 return None;
             }
-            Some((meta.modified().ok()?, meta.len(), e.path()))
+            Some((metadata.modified().ok()?, metadata.len(), entry.path()))
         })
         .collect();
     let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
@@ -175,7 +220,7 @@ fn enforce_session_budget(dir: &std::path::Path, budget: u64, keep: &std::path::
         if total <= budget {
             break;
         }
-        if path == keep {
+        if path.file_name().is_some_and(|name| name == keep) {
             continue;
         }
         if std::fs::remove_file(&path).is_ok() {
@@ -202,19 +247,14 @@ fn sanitize_session(session: &str) -> String {
     }
 }
 
-fn bash_spill_dir(runtime: &dyn RuntimeView) -> std::path::PathBuf {
+fn bash_spill_session(runtime: &dyn RuntimeView) -> String {
     let metadata = runtime.agent_context().metadata();
     let session = metadata
         .session_id
         .clone()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| metadata.agent_id.clone());
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".xiaoo")
-        .join("bash-output")
-        .join(sanitize_session(&session))
+    sanitize_session(&session)
 }
 
 impl Default for BashExecutor {
@@ -329,8 +369,8 @@ impl ToolExecutor for BashExecutor {
             }
         })?;
 
-        let spill_dir = bash_spill_dir(runtime);
-        let output = Self::format_output(&result, Some(spill_dir.as_path()));
+        let session = bash_spill_session(runtime);
+        let output = Self::format_output(&*backend, &result, &session).await;
 
         let serialized =
             serde_json::to_string(&output).map_err(|e| ToolExecutionError::ExecutionFailed {
@@ -346,14 +386,71 @@ impl ToolExecutor for BashExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agent_contracts::backend::capability::filesystem::ReadBytesRequest;
+    use agent_contracts::backend::{OperationError, PathNamespace};
+
+    #[tokio::test]
+    async fn overflow_spills_via_backend_and_stays_readable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let backend = operation_backend::local_backend(temp.path().to_path_buf(), None, None, None)
+            .expect("local backend");
+
+        // Exceed the per-stream window so the full output must be spilled.
+        let bytes = vec![b'x'; MAX_OUTPUT_BYTES_PER_STREAM + 10_000];
+        let (text, truncated) = window_stream(&*backend, "test-session", &bytes).await;
+        assert!(truncated);
+
+        // The model is told where the full output lives, so it can read it back.
+        let marker = "the FULL output is saved at ";
+        let start = text
+            .find(marker)
+            .unwrap_or_else(|| panic!("expected spill marker in: {text}"))
+            + marker.len();
+        let spill = text[start..]
+            .split('—')
+            .next()
+            .expect("spill path in message")
+            .trim();
+        assert!(!spill.is_empty());
+
+        let full = backend
+            .files()
+            .read_bytes(ReadBytesRequest {
+                path: BackendPath::from_raw(spill.to_string()),
+            })
+            .await
+            .expect("spill file readable through the backend");
+        assert_eq!(
+            full, bytes,
+            "full output must round-trip through the backend"
+        );
+
+        // A path claiming a different backend must be rejected so cross-backend
+        // paths can never be interpreted inside this one.
+        let foreign = BackendPath::new(
+            "some-other-backend",
+            PathNamespace::Temp,
+            spill.to_string(),
+            "spill.txt",
+        );
+        let denied = backend
+            .files()
+            .read_bytes(ReadBytesRequest { path: foreign })
+            .await;
+        assert!(
+            matches!(denied, Err(OperationError::PermissionDenied { .. })),
+            "expected PermissionDenied, got {denied:?}"
+        );
+    }
+
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
     fn make_spill(dir: &Path, name: &str, size: u64, mtime: SystemTime) -> PathBuf {
         let path = dir.join(name);
-        let f = std::fs::File::create(&path).expect("create spill");
-        f.set_len(size).expect("set_len");
-        f.set_modified(mtime).expect("set_modified");
+        let file = std::fs::File::create(&path).expect("create spill");
+        file.set_len(size).expect("set_len");
+        file.set_modified(mtime).expect("set_modified");
         path
     }
 
@@ -361,14 +458,40 @@ mod tests {
     fn budget_evicts_oldest_first_keeping_freshest() {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = SystemTime::now();
-        let old = make_spill(dir.path(), "old.txt", 60, now - Duration::from_secs(30));
-        let mid = make_spill(dir.path(), "mid.txt", 60, now - Duration::from_secs(20));
-        let fresh = make_spill(dir.path(), "fresh.txt", 60, now - Duration::from_secs(10));
+        make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-1.txt",
+            60,
+            now - Duration::from_secs(30),
+        );
+        make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-2.txt",
+            60,
+            now - Duration::from_secs(20),
+        );
+        let fresh = make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-3.txt",
+            60,
+            now - Duration::from_secs(10),
+        );
 
-        enforce_session_budget(dir.path(), 100, &fresh);
+        enforce_session_budget(
+            dir.path(),
+            ".xiaoo-bash-output-s-",
+            std::ffi::OsStr::new(".xiaoo-bash-output-s-3.txt"),
+            100,
+        );
 
-        assert!(!old.exists(), "oldest spill should be evicted");
-        assert!(!mid.exists(), "next-oldest spill should be evicted");
+        assert!(
+            !dir.path().join(".xiaoo-bash-output-s-1.txt").exists(),
+            "oldest spill should be evicted"
+        );
+        assert!(
+            !dir.path().join(".xiaoo-bash-output-s-2.txt").exists(),
+            "next-oldest spill should be evicted"
+        );
         assert!(fresh.exists(), "freshest spill must survive");
     }
 
@@ -376,20 +499,40 @@ mod tests {
     fn budget_never_evicts_kept_file_even_when_oldest() {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = SystemTime::now();
-        let keep = make_spill(dir.path(), "keep.txt", 60, now - Duration::from_secs(30));
-        let a = make_spill(dir.path(), "a.txt", 60, now - Duration::from_secs(20));
-        let b = make_spill(dir.path(), "b.txt", 60, now - Duration::from_secs(10));
+        let keep = make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-1.txt",
+            60,
+            now - Duration::from_secs(30),
+        );
+        make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-2.txt",
+            60,
+            now - Duration::from_secs(20),
+        );
+        make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-3.txt",
+            60,
+            now - Duration::from_secs(10),
+        );
 
-        enforce_session_budget(dir.path(), 100, &keep);
+        enforce_session_budget(
+            dir.path(),
+            ".xiaoo-bash-output-s-",
+            std::ffi::OsStr::new(".xiaoo-bash-output-s-1.txt"),
+            100,
+        );
 
         assert!(keep.exists(), "kept file must never be evicted");
         assert!(
-            !a.exists(),
-            "non-kept spill should be evicted to honor budget"
+            !dir.path().join(".xiaoo-bash-output-s-2.txt").exists(),
+            "non-kept spill should be evicted to honour budget"
         );
         assert!(
-            !b.exists(),
-            "non-kept spill should be evicted to honor budget"
+            !dir.path().join(".xiaoo-bash-output-s-3.txt").exists(),
+            "non-kept spill should be evicted to honour budget"
         );
     }
 
@@ -397,12 +540,27 @@ mod tests {
     fn budget_under_limit_is_noop() {
         let dir = tempfile::tempdir().expect("tempdir");
         let now = SystemTime::now();
-        let a = make_spill(dir.path(), "a.txt", 30, now);
-        let b = make_spill(dir.path(), "b.txt", 30, now);
+        let spill = make_spill(
+            dir.path(),
+            ".xiaoo-bash-output-s-1.txt",
+            30,
+            now - Duration::from_secs(20),
+        );
 
-        enforce_session_budget(dir.path(), 100, &a);
+        enforce_session_budget(
+            dir.path(),
+            ".xiaoo-bash-output-s-",
+            std::ffi::OsStr::new(".xiaoo-bash-output-s-1.txt"),
+            100,
+        );
 
-        assert!(a.exists(), "nothing should be evicted under budget");
-        assert!(b.exists(), "nothing should be evicted under budget");
+        assert!(spill.exists(), "no files should be evicted under budget");
+    }
+
+    #[test]
+    fn reclaim_skips_non_host_paths() {
+        // A sandbox-style path (e.g. E2B) does not exist on the host, so the
+        // reclaimer must be a no-op and never inspect the filesystem.
+        reclaim_host_spills("/tmp/.xiaoo-bash-output-e2b-1.txt", "e2b");
     }
 }

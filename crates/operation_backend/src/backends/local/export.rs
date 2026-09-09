@@ -84,7 +84,7 @@ mod tests {
         std::fs::create_dir_all(temp.as_path()).unwrap();
         LocalExport::new(Arc::new(LocalBackendState {
             backend_id: "local-test".to_string(),
-            workspace_root: BackendPath(workspace.display().to_string()),
+            workspace_root: BackendPath::from_raw(workspace.display().to_string()),
             workspace_root_host: workspace.clone(),
             temp_root_host: temp.clone(),
             policy: LocalBackendPolicy::test_macos_seatbelt(
@@ -111,7 +111,7 @@ mod tests {
             .build()
             .unwrap()
             .block_on(export.export_file(ExportFileRequest {
-                path: BackendPath(file.display().to_string()),
+                path: BackendPath::from_raw(file.display().to_string()),
                 preferred_name: None,
             }));
 

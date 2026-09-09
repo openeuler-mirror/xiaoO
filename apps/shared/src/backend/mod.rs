@@ -328,7 +328,7 @@ async fn build_backend(input: BuildBackendInput) -> Result<BackendInstanceEntry,
             requested_backend_id: Some(input.backend_id),
             session_id: input.session_id_for_instance,
             conversation_id: None,
-            workspace_root: BackendPath(input.workspace_root_text.clone()),
+            workspace_root: BackendPath::from_raw(input.workspace_root_text.clone()),
             provider_options: input.config.options.clone(),
             resource_limits: input.resource_limits,
             metadata: input.metadata,
@@ -408,7 +408,7 @@ impl BackendInstanceEntry {
             provider: self.instance.provider.0.clone(),
             instance_id: self.instance.instance_id.0.clone(),
             state: self.instance.state,
-            workspace_root: self.instance.workspace_root.0.clone(),
+            workspace_root: self.instance.workspace_root.native().to_string(),
             endpoint: self.instance.endpoint.clone(),
             metadata: self.instance.metadata.clone(),
             resources: self.instance.resources,
@@ -636,7 +636,7 @@ mod tests {
             .backend()
             .files()
             .write_bytes(WriteBytesRequest {
-                path: BackendPath(
+                path: BackendPath::from_raw(
                     workspace
                         .path()
                         .join("dirty.txt")
@@ -671,7 +671,9 @@ mod tests {
                 command: "printf ok".to_string(),
                 args: Vec::new(),
                 shell: Some("/bin/sh".to_string()),
-                cwd: Some(BackendPath(workspace.path().to_string_lossy().to_string())),
+                cwd: Some(BackendPath::from_raw(
+                    workspace.path().to_string_lossy().to_string(),
+                )),
                 timeout_ms: Some(5_000),
                 ..Default::default()
             })
