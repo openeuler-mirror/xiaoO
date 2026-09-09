@@ -191,7 +191,7 @@ fn optional_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
     })
 }
 
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize)]
 struct AgentOperationOutput {
     operation_id: String,
     session_id: String,
@@ -219,6 +219,80 @@ enum AgentOperationDetail {
         /// Never `null`, so the schema can declare a plain scalar `string`.
         error: String,
     },
+}
+
+/// Schema-only mirror of `AgentOperationOutput` that flattens every wire field
+/// to a top-level property. Workflow tools (n8n, Dify) surface only root-level
+/// `properties` and ignore discriminated-union branches, so without this the
+/// `state`, `reply`, `snapshot` etc. fields are invisible to their parameter
+/// auto-detection. The wire format is unchanged: all fields are still emitted by
+/// the flattened `AgentOperationDetail` tag on the real struct. Fields that only
+/// appear in one state are declared optional (not in `required`) so strict
+/// validators do not demand them on every response.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[schemars(rename = "AgentOperationOutput")]
+struct AgentOperationOutputSchema {
+    operation_id: String,
+    session_id: String,
+    created: bool,
+    /// "running" until the operation finishes, "done" afterwards.
+    #[schemars(schema_with = "operation_state_schema")]
+    state: String,
+    /// Present only while `state` is "running": minimum wait before the next poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nonnegative_integer_schema")]
+    poll_after_ms: Option<u64>,
+    /// Present only while `state` is "running": latest root-agent turn snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_snapshot_schema")]
+    snapshot: Option<AgentRunningSnapshot>,
+    /// Present only when `state` is "done": the complete result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    reply: Option<String>,
+    /// Present only when `state` is "done": complete, max_turns_reached,
+    /// budget_exhausted, cancelled, or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    outcome: Option<String>,
+    /// Present only when `state` is "done": token accounting for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_usage_schema")]
+    usage: Option<McpUsage>,
+    /// Present only when `state` is "done": sanitized error string, empty on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    error: Option<String>,
+}
+
+fn operation_state_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "enum": ["running", "done"]
+    })
+}
+
+fn optional_snapshot_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    gen.subschema_for::<AgentRunningSnapshot>()
+}
+
+fn optional_usage_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    gen.subschema_for::<McpUsage>()
+}
+
+impl JsonSchema for AgentOperationOutput {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AgentOperationOutput".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        "AgentOperationOutput".into()
+    }
+
+    fn json_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <AgentOperationOutputSchema as JsonSchema>::json_schema(gen)
+    }
 }
 
 struct AgentOperationRegistry {
@@ -1727,6 +1801,146 @@ mod tests {
     }
 
     #[test]
+    fn agent_operation_schema_exposes_state_as_top_level_property() {
+        let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
+            .expect("agent operation schema should serialize");
+        let schema_text = schema.to_string();
+
+        let properties = schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .expect("顶层 properties 必须存在");
+        let actual: std::collections::BTreeSet<&str> =
+            properties.keys().map(|k| k.as_str()).collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "created",
+            "error",
+            "operation_id",
+            "outcome",
+            "poll_after_ms",
+            "reply",
+            "session_id",
+            "snapshot",
+            "state",
+            "usage",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual, expected, "顶层属性必须与集合完全一致: {schema_text}");
+
+        let state = properties.get("state").expect("state 顶层属性");
+        assert_eq!(state.get("type").and_then(|v| v.as_str()), Some("string"));
+        let variants: Vec<&str> = state
+            .get("enum")
+            .and_then(|v| v.as_array())
+            .expect("state 必须声明 enum 取值")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(variants, vec!["running", "done"]);
+
+        let required: Vec<&str> = schema
+            .pointer("/required")
+            .and_then(|v| v.as_array())
+            .expect("required 列表")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            required.contains(&"state"),
+            "state 必须是必填字段: {schema_text}"
+        );
+        // 仅 done 才存在的字段不得出现在 required 里。
+        for optional in ["reply", "outcome", "usage", "error"] {
+            assert!(
+                !required.contains(&optional),
+                "{optional} 仅 done 时存在，不能是必填字段: {schema_text}"
+            );
+        }
+        // 仅 running 才存在的字段不得出现在 required 里。
+        for optional in ["poll_after_ms", "snapshot"] {
+            assert!(
+                !required.contains(&optional),
+                "{optional} 仅 running 时存在，不能是必填字段: {schema_text}"
+            );
+        }
+
+        // 可选字段仍必须是标量/引用类型，不能因 Option 引入 null 或 anyOf。
+        assert_eq!(
+            properties
+                .get("reply")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("string"),
+            "reply 必须是标量 string: {schema_text}"
+        );
+        assert!(properties
+            .get("usage")
+            .and_then(|v| v.get("$ref"))
+            .is_some());
+        assert!(properties
+            .get("snapshot")
+            .and_then(|v| v.get("$ref"))
+            .is_some());
+    }
+
+    #[test]
+    fn agent_operation_schema_state_enum_matches_serialized_tag() {
+        // 影子 schema 的 state enum 是手写的，必须与 AgentOperationDetail
+        // 的 serde tag 实际输出保持一致：逐变体序列化，校验 wire 上的
+        // `state` 值都落在 schema enum 里。
+        let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
+            .expect("agent operation schema should serialize");
+        let allowed: Vec<String> = schema
+            .pointer("/properties/state/enum")
+            .and_then(|v| v.as_array())
+            .expect("state enum")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        assert!(!allowed.is_empty());
+
+        let outputs = [
+            AgentOperationOutput {
+                operation_id: "op".to_string(),
+                session_id: "session".to_string(),
+                created: true,
+                detail: AgentOperationDetail::Running {
+                    poll_after_ms: 1_000,
+                    snapshot: AgentRunningSnapshot {
+                        phase: AgentOperationPhase::Queued,
+                        current_turn: 0,
+                        last_text: String::new(),
+                        updated_at_ms: 0,
+                    },
+                },
+            },
+            AgentOperationOutput {
+                operation_id: "op".to_string(),
+                session_id: "session".to_string(),
+                created: false,
+                detail: AgentOperationDetail::Done {
+                    reply: "done reply".to_string(),
+                    outcome: "complete".to_string(),
+                    usage: McpUsage::zeroed(),
+                    error: String::new(),
+                },
+            },
+        ];
+        for output in &outputs {
+            let json = serde_json::to_value(output).expect("serialize output");
+            let state = json
+                .get("state")
+                .and_then(|v| v.as_str())
+                .expect("wire state tag");
+            assert!(
+                allowed.iter().any(|v| v == state),
+                "wire state `{state}` 未被 schema enum 覆盖: {allowed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn agent_operation_schema_has_only_portable_integer_types() {
         let schema = serde_json::to_value(schemars::schema_for!(AgentOperationOutput))
             .expect("agent operation schema should serialize");
@@ -1759,7 +1973,12 @@ mod tests {
             !schema_text.contains("anyOf"),
             "schema 仍含 anyOf: {schema_text}"
         );
-        // The top-level `oneOf` discriminates the running/done states and is expected.
+        // All fields are now flattened to top-level properties; there must be
+        // no `oneOf` branch left for workflow tools to miss.
+        assert!(
+            !schema_text.contains("oneOf"),
+            "schema 仍含 oneOf: {schema_text}"
+        );
 
         // Field level: current_turn / last_text must be scalar.
         let snapshot_props = schema
@@ -1775,11 +1994,12 @@ mod tests {
                 "{field} 必须是标量 type `{expected}`: {field_schema}"
             );
         }
-        // Done branch: error is scalar string; usage is a direct McpUsage object reference.
-        let done_props = schema
-            .pointer("/oneOf/1/properties")
-            .expect("done branch properties present");
-        let error_schema = done_props
+        // Flattened top-level: error is scalar string; usage is a direct
+        // McpUsage object reference.
+        let top_props = schema
+            .pointer("/properties")
+            .expect("top-level properties present");
+        let error_schema = top_props
             .get("error")
             .unwrap_or_else(|| panic!("missing error schema: {schema_text}"));
         assert_eq!(
@@ -1787,7 +2007,7 @@ mod tests {
             Some("string"),
             "error 必须是标量 string: {error_schema}"
         );
-        let usage_schema = done_props
+        let usage_schema = top_props
             .get("usage")
             .unwrap_or_else(|| panic!("missing usage schema: {schema_text}"));
         assert!(
@@ -2481,6 +2701,10 @@ mod tests {
         assert!(body.contains("file, shell, skill, plugin"), "{body}");
         assert!(body.contains("absolute existing workspace"), "{body}");
         assert!(body.contains("poll agent_status"), "{body}");
+        assert!(
+            body.contains("\"enum\":[\"running\",\"done\"]"),
+            "outputSchema 顶层 state 属性必须声明 enum 取值: {body}"
+        );
         assert!(!body.contains("\"name\":\"chat\""), "{body}");
 
         let called = router
