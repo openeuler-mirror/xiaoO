@@ -20,6 +20,7 @@ pub struct SkillDirectorySummary {
 #[derive(Debug, Serialize)]
 pub struct SkillSummary {
     pub id: String,
+    pub enabled: bool,
     pub description: String,
     pub location: Option<String>,
     pub context: String,
@@ -37,7 +38,10 @@ pub fn skill_catalog(config: &DaemonConfig, workspace: &Path) -> SkillCatalogRep
         .into_iter()
         .map(|path| resolve_directory(path, workspace))
         .collect();
-    let registry = FileSkillRegistry::new(&skills_config);
+    let disabled = skills_config.disabled.clone();
+    let mut discovery_config = skills_config.clone();
+    discovery_config.disabled.clear();
+    let registry = FileSkillRegistry::new(&discovery_config);
     let skills = registry
         .list_skills()
         .into_iter()
@@ -45,6 +49,7 @@ pub fn skill_catalog(config: &DaemonConfig, workspace: &Path) -> SkillCatalogRep
             let skill = registry.get_skill(&summary.skill_id)?;
             Some(SkillSummary {
                 id: summary.skill_id,
+                enabled: !disabled.contains(skill.skill_id()),
                 description: summary.description,
                 location: skill.location().map(|path| path.display().to_string()),
                 context: format!("{:?}", skill.context()).to_lowercase(),
@@ -98,7 +103,7 @@ mod tests {
         .expect("skill");
         std::fs::write(
             &config_path,
-            "[llm]\nactive_profile = \"local\"\n\n[llm.profiles.local]\nprovider = \"ollama\"\nmodel = \"qwen3\"\n",
+            "[llm]\nactive_profile = \"local\"\n\n[llm.profiles.local]\nprovider = \"ollama\"\nmodel = \"qwen3\"\n\n[skills]\ndisabled = [\"reviewer\"]\n",
         )
         .expect("config");
         let config = DaemonConfig::load_from(&config_path).expect("load config");
@@ -112,6 +117,7 @@ mod tests {
             .find(|skill| skill.id == "reviewer")
             .expect("reviewer");
         assert_eq!(reviewer.description, "Review code");
+        assert!(!reviewer.enabled);
         assert!(!reviewer.user_invocable);
         assert_eq!(reviewer.context, "inline");
     }

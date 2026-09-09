@@ -88,6 +88,7 @@ pub fn config_schema() -> Value {
             section("skills", "Skills", "object", &[
                 field("dirs", "path_array", false),
                 field("allow_scripts", "boolean", false),
+                field("disabled", "string_array", false),
             ]),
             section("hooker", "Hooks", "object", &[
                 enum_field("default", &["all", "none"]),

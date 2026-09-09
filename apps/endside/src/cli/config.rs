@@ -35,6 +35,9 @@ pub struct SkillsSection {
     pub dirs: Option<Vec<String>>,
     /// Allow skills to include script files (.sh, .bash, etc.).
     pub allow_scripts: Option<bool>,
+    /// Skill IDs that should remain installed but not be loaded.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

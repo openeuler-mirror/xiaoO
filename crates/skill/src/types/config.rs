@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct SkillsConfig {
     pub skills_dirs: Vec<PathBuf>,
     pub allow_scripts: bool,
+    pub disabled: HashSet<String>,
     /// Enable security audit on skill directories before loading. Default: false.
     pub audit_enabled: bool,
     pub prompt_injection_mode: PromptInjectionMode,
@@ -16,6 +18,7 @@ impl Default for SkillsConfig {
         Self {
             skills_dirs: Vec::new(),
             allow_scripts: false,
+            disabled: HashSet::new(),
             audit_enabled: false,
             prompt_injection_mode: PromptInjectionMode::Compact,
             prompt_budget_ratio: 0.01,

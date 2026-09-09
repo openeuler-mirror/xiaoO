@@ -184,6 +184,8 @@ pub struct SkillsSection {
     pub dirs: Option<Vec<String>>,
     #[serde(default)]
     pub allow_scripts: Option<bool>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 impl Default for AgentsConfig {
@@ -352,6 +354,11 @@ impl Config {
                 .as_ref()
                 .and_then(|skills| skills.allow_scripts)
                 .unwrap_or(false),
+            disabled: self
+                .skills
+                .as_ref()
+                .map(|skills| skills.disabled.iter().cloned().collect())
+                .unwrap_or_default(),
             ..ResolvedSkillsConfig::default()
         }
     }

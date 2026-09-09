@@ -263,6 +263,8 @@ pub struct SkillsSection {
     pub dirs: Option<Vec<String>>,
     #[serde(default)]
     pub allow_scripts: Option<bool>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -887,6 +889,12 @@ impl DaemonConfig {
                 .as_ref()
                 .and_then(|skills| skills.allow_scripts)
                 .unwrap_or(false),
+            disabled: self
+                .app
+                .skills
+                .as_ref()
+                .map(|skills| skills.disabled.iter().cloned().collect())
+                .unwrap_or_default(),
             ..SkillsConfig::default()
         }
     }
