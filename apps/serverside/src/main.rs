@@ -6,6 +6,7 @@ mod config_inspect;
 mod config_schema;
 mod config_validation;
 mod cron;
+mod cron_management;
 mod daemon_config;
 mod daemon_runtime;
 mod hook_management;
@@ -333,6 +334,26 @@ async fn main() -> Result<()> {
             );
             return Ok(());
         }
+        CliAction::ConfigCron => {
+            let config_path = resolve_config_path(cli.config)?;
+            let config = DaemonConfig::load_from(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string(&cron_management::cron_report(&config))?
+            );
+            return Ok(());
+        }
+        CliAction::ConfigRenderCron => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let draft = serde_json::from_str::<cron_management::CronJobsDraft>(&input)
+                .context("failed to parse Cron jobs draft JSON from stdin")?;
+            println!(
+                "{}",
+                serde_json::to_string(&cron_management::render_cron_jobs(draft))?
+            );
+            return Ok(());
+        }
         CliAction::ProtocolSchema => {
             println!("{}", xiaoo_shared::daemon_protocol::protocol_contract());
             return Ok(());
@@ -502,6 +523,7 @@ async fn run_daemon(
                 session_control_plane.clone(),
                 bearer_auth,
                 rate_limit.clone(),
+                cron_scheduler.clone(),
             )
         } else {
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
@@ -511,6 +533,7 @@ async fn run_daemon(
                 interaction_timeout_secs,
                 bearer_auth,
                 rate_limit.clone(),
+                cron_scheduler.clone(),
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?
@@ -831,6 +854,8 @@ enum CliAction {
     ConfigMemoryQueue,
     ConfigCompact,
     ConfigBackend,
+    ConfigCron,
+    ConfigRenderCron,
     ProtocolSchema,
 }
 
@@ -911,7 +936,9 @@ impl Cli {
                     }
                     Some("compact") => CliAction::ConfigCompact,
                     Some("backend") => CliAction::ConfigBackend,
-                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, or `config backend`"),
+                    Some("cron") => CliAction::ConfigCron,
+                    Some("render-cron") => CliAction::ConfigRenderCron,
+                    _ => bail!("unknown config command; expected `config validate`, `config schema`, `config providers`, `config inspect`, `config test-model`, `config models`, `config roles`, `config agents`, `config test-agent`, `config tools`, `config custom-tools`, `config render-custom-tool`, `config test-custom-tool`, `config skills`, `config hooks`, `config mcp`, `config mcp-server`, `config lsp`, `config memory`, `config memory-queue`, `config compact`, `config backend`, `config cron`, or `config render-cron`"),
                 };
                 remaining.drain(0..2);
                 action
@@ -1083,6 +1110,8 @@ fn print_usage() {
          \x20     xiaoo-daemon config memory-queue <status|retry-failed|clear-failed> [--config <path>]\n\n\
          \x20     xiaoo-daemon config compact [--config <path>]\n\n\
          \x20     xiaoo-daemon config backend [--config <path>]\n\n\
+         \x20     xiaoo-daemon config cron [--config <path>]\n\n\
+         \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
          Defaults: --host 0.0.0.0 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
@@ -1419,6 +1448,25 @@ mod tests {
         .expect("config backend should parse");
         assert_eq!(cli.action, CliAction::ConfigBackend);
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_cron_command() {
+        let cli = Cli::parse(
+            ["config", "cron", "--config", "/tmp/demo.toml"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("config cron should parse");
+        assert_eq!(cli.action, CliAction::ConfigCron);
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/demo.toml")));
+    }
+
+    #[test]
+    fn parses_config_render_cron_command() {
+        let cli = Cli::parse(["config", "render-cron"].into_iter().map(str::to_string))
+            .expect("config render-cron should parse");
+        assert_eq!(cli.action, CliAction::ConfigRenderCron);
     }
 
     #[test]

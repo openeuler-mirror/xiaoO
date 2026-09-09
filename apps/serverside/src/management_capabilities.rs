@@ -28,6 +28,8 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config memory-queue",
             "config compact",
             "config backend",
+            "config cron",
+            "config render-cron",
         ]
         .into_iter()
         .map(str::to_string)
@@ -110,7 +112,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 true,
                 &["inspect", "preflight"],
             ),
-            domain("cron", true, false, false, false, &[]),
+            domain(
+                "cron",
+                true,
+                true,
+                true,
+                true,
+                &["list", "validate", "render", "runtime_status", "run_now"],
+            ),
             domain("channels", true, false, false, false, &[]),
             domain("trace", true, false, false, false, &[]),
             domain("vault", true, false, false, false, &[]),
@@ -325,5 +334,15 @@ mod tests {
         assert!(backend.runtime_read);
         assert!(backend.test);
         assert!(backend.actions.iter().any(|action| action == "preflight"));
+
+        let cron = capabilities
+            .domains
+            .iter()
+            .find(|domain| domain.id == "cron")
+            .expect("Cron capability");
+        assert!(cron.runtime_read);
+        assert!(cron.runtime_write);
+        assert!(cron.actions.iter().any(|action| action == "runtime_status"));
+        assert!(cron.actions.iter().any(|action| action == "run_now"));
     }
 }

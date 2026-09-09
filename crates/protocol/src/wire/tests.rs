@@ -152,3 +152,12 @@ fn runtime_turn_request_accepts_minimal_json_omitting_all_optional_fields() {
     assert!(request.client_id.is_none());
     assert_eq!(request.chain_depth, 0);
 }
+
+#[test]
+fn cron_run_request_has_one_authoritative_job_name() {
+    let request = CronRunRequest {
+        name: "daily-review".to_string(),
+    };
+    let value = serde_json::to_value(request).expect("Cron request should serialize");
+    assert_eq!(value, serde_json::json!({"name": "daily-review"}));
+}

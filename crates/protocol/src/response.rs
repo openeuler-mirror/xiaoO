@@ -143,6 +143,67 @@ pub struct GatewayErrorResponse {
     pub error: String,
 }
 
+/// Outcome of the most recent Cron job execution.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronRunOutcome {
+    /// The job completed successfully.
+    Succeeded,
+    /// The job exhausted all retry attempts.
+    Failed,
+    /// The daemon stopped while the job was running.
+    Cancelled,
+}
+
+/// Secret-free live state for one enabled Cron job.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronJobRuntimeResponse {
+    /// Unique Cron job name.
+    pub name: String,
+    /// Whether an execution is currently active or waiting for a concurrency permit.
+    pub running: bool,
+    /// Next scheduled execution time in Unix milliseconds.
+    pub next_run_ms: Option<u64>,
+    /// Number of accepted scheduled and manual triggers.
+    pub trigger_count: u64,
+    /// Number of successful executions.
+    pub success_count: u64,
+    /// Number of permanently failed executions.
+    pub failure_count: u64,
+    /// Start time of the most recent completed execution in Unix milliseconds.
+    pub last_started_at_ms: Option<u64>,
+    /// Completion time of the most recent completed execution in Unix milliseconds.
+    pub last_completed_at_ms: Option<u64>,
+    /// Outcome of the most recent completed execution.
+    pub last_outcome: Option<CronRunOutcome>,
+    /// Session identifier created for the most recent successful execution.
+    pub last_session_id: Option<String>,
+    /// Agent reply from the most recent successful execution.
+    pub last_reply: Option<String>,
+    /// Error from the most recent failed execution.
+    pub last_error: Option<String>,
+    /// Token count reported by the most recent successful execution.
+    pub last_total_tokens: Option<u64>,
+    /// End-to-end duration of the most recent completed execution.
+    pub last_duration_ms: Option<u64>,
+}
+
+/// Response returned by `GET /api/v1/cron/jobs`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronCatalogResponse {
+    /// Whether the active daemon has at least one enabled Cron job loaded.
+    pub available: bool,
+    /// Enabled jobs ordered by name.
+    pub jobs: Vec<CronJobRuntimeResponse>,
+}
+
+/// Response returned after accepting a manual Cron trigger.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CronRunResponse {
+    /// Live job state immediately after the trigger was accepted.
+    pub job: CronJobRuntimeResponse,
+}
+
 /// Minimum Runtime snapshot required by clients after opening a Runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RuntimeOpenSnapshot {
@@ -412,4 +473,25 @@ pub struct RuntimeWriteFileResponse {
     pub path: String,
     /// Whether the operation created a new file.
     pub created: bool,
+}
+
+/// Runtime export payload format.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeExportFormat {
+    /// Complete, sanitized xiaoO Runtime session JSON.
+    XiaooRuntimeSessionJson,
+}
+
+/// Response returned after exporting a Runtime session.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RuntimeExportResponse {
+    /// Exported Runtime identifier.
+    pub runtime_id: String,
+    /// Export payload format.
+    pub format: RuntimeExportFormat,
+    /// Suggested output file name.
+    pub file_name: String,
+    /// Sanitized Runtime session document.
+    pub content: Value,
 }

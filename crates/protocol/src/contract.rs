@@ -4,20 +4,20 @@ use schemars::schema_for;
 use serde_json::{json, Value};
 
 use crate::response::{
-    DaemonReadyMessage, GatewayCapabilitiesResponse, GatewayErrorResponse, GatewayHealthResponse,
-    RuntimeCatalogResponse, RuntimeCheckoutResponse, RuntimeCheckpointCatalogResponse,
-    RuntimeCheckpointResponse, RuntimeCheckpointSnapshotDeleteResponse,
-    RuntimeExecInterruptedResponse, RuntimeExecResponse, RuntimeOpenResponse, RuntimePauseResponse,
-    RuntimeReadFileResponse, RuntimeResumeResponse, RuntimeWriteFileResponse,
-    SandboxCatalogResponse,
+    CronCatalogResponse, CronRunResponse, DaemonReadyMessage, GatewayCapabilitiesResponse,
+    GatewayErrorResponse, GatewayHealthResponse, RuntimeCatalogResponse, RuntimeCheckoutResponse,
+    RuntimeCheckpointCatalogResponse, RuntimeCheckpointResponse,
+    RuntimeCheckpointSnapshotDeleteResponse, RuntimeExecInterruptedResponse, RuntimeExecResponse,
+    RuntimeExportResponse, RuntimeOpenResponse, RuntimePauseResponse, RuntimeReadFileResponse,
+    RuntimeResumeResponse, RuntimeWriteFileResponse, SandboxCatalogResponse,
 };
 use crate::sse::RuntimeSseEvent;
 use crate::wire::{
-    RuntimeCancelRequest, RuntimeCheckoutRequest, RuntimeCheckpointRequest,
+    CronRunRequest, RuntimeCancelRequest, RuntimeCheckoutRequest, RuntimeCheckpointRequest,
     RuntimeCheckpointSnapshotDeleteRequest, RuntimeCloseRequest, RuntimeDetachRequest,
-    RuntimeExecRequest, RuntimeHeartbeatRequest, RuntimeInteractionRequest, RuntimeOpenRequest,
-    RuntimePauseRequest, RuntimeReadFileRequest, RuntimeResumeRequest, RuntimeTurnRequest,
-    RuntimeWriteFileRequest,
+    RuntimeExecRequest, RuntimeExportRequest, RuntimeHeartbeatRequest, RuntimeInteractionRequest,
+    RuntimeOpenRequest, RuntimePauseRequest, RuntimeReadFileRequest, RuntimeResumeRequest,
+    RuntimeTurnRequest, RuntimeWriteFileRequest,
 };
 
 /// Current daemon wire protocol version.
@@ -47,6 +47,8 @@ pub fn protocol_contract() -> Value {
             "runtime_exec_request": schema_for!(RuntimeExecRequest),
             "runtime_read_file_request": schema_for!(RuntimeReadFileRequest),
             "runtime_write_file_request": schema_for!(RuntimeWriteFileRequest),
+            "runtime_export_request": schema_for!(RuntimeExportRequest),
+            "cron_run_request": schema_for!(CronRunRequest),
             "runtime_sse_event": schema_for!(RuntimeSseEvent),
             "daemon_ready_message": schema_for!(DaemonReadyMessage),
             "gateway_health_response": schema_for!(GatewayHealthResponse),
@@ -62,9 +64,12 @@ pub fn protocol_contract() -> Value {
             "runtime_exec_interrupted_response": schema_for!(RuntimeExecInterruptedResponse),
             "runtime_read_file_response": schema_for!(RuntimeReadFileResponse),
             "runtime_write_file_response": schema_for!(RuntimeWriteFileResponse),
+            "runtime_export_response": schema_for!(RuntimeExportResponse),
             "runtime_catalog_response": schema_for!(RuntimeCatalogResponse),
             "runtime_checkpoint_catalog_response": schema_for!(RuntimeCheckpointCatalogResponse),
             "sandbox_catalog_response": schema_for!(SandboxCatalogResponse),
+            "cron_catalog_response": schema_for!(CronCatalogResponse),
+            "cron_run_response": schema_for!(CronRunResponse),
         }
     })
 }
@@ -80,7 +85,7 @@ mod tests {
         assert_eq!(contract["protocol_version"], PROTOCOL_VERSION);
 
         let schemas = contract["schemas"].as_object().expect("schemas object");
-        assert_eq!(schemas.len(), 33);
+        assert_eq!(schemas.len(), 38);
         assert!(schemas.contains_key("runtime_open_request"));
         assert!(schemas.contains_key("runtime_turn_request"));
         assert!(schemas.contains_key("sandbox_catalog_response"));
@@ -97,6 +102,7 @@ mod tests {
         assert!(schemas.contains_key("runtime_exec_request"));
         assert!(schemas.contains_key("runtime_read_file_request"));
         assert!(schemas.contains_key("runtime_write_file_request"));
+        assert!(schemas.contains_key("runtime_export_request"));
         assert!(schemas.contains_key("runtime_sse_event"));
         assert!(schemas.contains_key("daemon_ready_message"));
         assert!(schemas.contains_key("gateway_health_response"));
@@ -112,7 +118,11 @@ mod tests {
         assert!(schemas.contains_key("runtime_exec_interrupted_response"));
         assert!(schemas.contains_key("runtime_read_file_response"));
         assert!(schemas.contains_key("runtime_write_file_response"));
+        assert!(schemas.contains_key("runtime_export_response"));
         assert!(schemas.contains_key("runtime_catalog_response"));
         assert!(schemas.contains_key("runtime_checkpoint_catalog_response"));
+        assert!(schemas.contains_key("cron_run_request"));
+        assert!(schemas.contains_key("cron_catalog_response"));
+        assert!(schemas.contains_key("cron_run_response"));
     }
 }
