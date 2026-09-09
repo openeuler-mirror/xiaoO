@@ -221,12 +221,14 @@ enum AgentOperationDetail {
     },
 }
 
-/// Schema-only mirror of `AgentOperationOutput` that additionally declares the
-/// `state` discriminator as a top-level property. Workflow tools (n8n, Dify)
-/// surface only root-level `properties` and ignore `oneOf` branches, so without
-/// this the `state` field is invisible to their parameter auto-detection. The
-/// wire format is unchanged: `state` is still emitted by the flattened
-/// `AgentOperationDetail` tag.
+/// Schema-only mirror of `AgentOperationOutput` that flattens every wire field
+/// to a top-level property. Workflow tools (n8n, Dify) surface only root-level
+/// `properties` and ignore discriminated-union branches, so without this the
+/// `state`, `reply`, `snapshot` etc. fields are invisible to their parameter
+/// auto-detection. The wire format is unchanged: all fields are still emitted by
+/// the flattened `AgentOperationDetail` tag on the real struct. Fields that only
+/// appear in one state are declared optional (not in `required`) so strict
+/// validators do not demand them on every response.
 #[allow(dead_code)]
 #[derive(JsonSchema)]
 #[schemars(rename = "AgentOperationOutput")]
@@ -237,8 +239,31 @@ struct AgentOperationOutputSchema {
     /// "running" until the operation finishes, "done" afterwards.
     #[schemars(schema_with = "operation_state_schema")]
     state: String,
-    #[serde(flatten)]
-    detail: AgentOperationDetail,
+    /// Present only while `state` is "running": minimum wait before the next poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "nonnegative_integer_schema")]
+    poll_after_ms: Option<u64>,
+    /// Present only while `state` is "running": latest root-agent turn snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_snapshot_schema")]
+    snapshot: Option<AgentRunningSnapshot>,
+    /// Present only when `state` is "done": the complete result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    reply: Option<String>,
+    /// Present only when `state` is "done": complete, max_turns_reached,
+    /// budget_exhausted, cancelled, or failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    outcome: Option<String>,
+    /// Present only when `state` is "done": token accounting for this turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_usage_schema")]
+    usage: Option<McpUsage>,
+    /// Present only when `state` is "done": sanitized error string, empty on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "optional_string_schema")]
+    error: Option<String>,
 }
 
 fn operation_state_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -246,6 +271,14 @@ fn operation_state_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema
         "type": "string",
         "enum": ["running", "done"]
     })
+}
+
+fn optional_snapshot_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    gen.subschema_for::<AgentRunningSnapshot>()
+}
+
+fn optional_usage_schema(gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    gen.subschema_for::<McpUsage>()
 }
 
 impl JsonSchema for AgentOperationOutput {
@@ -1779,8 +1812,20 @@ mod tests {
             .expect("顶层 properties 必须存在");
         let actual: std::collections::BTreeSet<&str> =
             properties.keys().map(|k| k.as_str()).collect();
-        let expected: std::collections::BTreeSet<&str> =
-            ["created", "operation_id", "session_id", "state"].into_iter().collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "created",
+            "error",
+            "operation_id",
+            "outcome",
+            "poll_after_ms",
+            "reply",
+            "session_id",
+            "snapshot",
+            "state",
+            "usage",
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(actual, expected, "顶层属性必须与集合完全一致: {schema_text}");
 
         let state = properties.get("state").expect("state 顶层属性");
@@ -1805,9 +1850,38 @@ mod tests {
             required.contains(&"state"),
             "state 必须是必填字段: {schema_text}"
         );
+        // 仅 done 才存在的字段不得出现在 required 里。
+        for optional in ["reply", "outcome", "usage", "error"] {
+            assert!(
+                !required.contains(&optional),
+                "{optional} 仅 done 时存在，不能是必填字段: {schema_text}"
+            );
+        }
+        // 仅 running 才存在的字段不得出现在 required 里。
+        for optional in ["poll_after_ms", "snapshot"] {
+            assert!(
+                !required.contains(&optional),
+                "{optional} 仅 running 时存在，不能是必填字段: {schema_text}"
+            );
+        }
 
-        assert!(schema.pointer("/oneOf/0/properties/snapshot").is_some());
-        assert!(schema.pointer("/oneOf/1/properties/reply").is_some());
+        // 可选字段仍必须是标量/引用类型，不能因 Option 引入 null 或 anyOf。
+        assert_eq!(
+            properties
+                .get("reply")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
+            Some("string"),
+            "reply 必须是标量 string: {schema_text}"
+        );
+        assert!(properties
+            .get("usage")
+            .and_then(|v| v.get("$ref"))
+            .is_some());
+        assert!(properties
+            .get("snapshot")
+            .and_then(|v| v.get("$ref"))
+            .is_some());
     }
 
     #[test]
@@ -1899,7 +1973,12 @@ mod tests {
             !schema_text.contains("anyOf"),
             "schema 仍含 anyOf: {schema_text}"
         );
-        // The top-level `oneOf` discriminates the running/done states and is expected.
+        // All fields are now flattened to top-level properties; there must be
+        // no `oneOf` branch left for workflow tools to miss.
+        assert!(
+            !schema_text.contains("oneOf"),
+            "schema 仍含 oneOf: {schema_text}"
+        );
 
         // Field level: current_turn / last_text must be scalar.
         let snapshot_props = schema
@@ -1915,11 +1994,12 @@ mod tests {
                 "{field} 必须是标量 type `{expected}`: {field_schema}"
             );
         }
-        // Done branch: error is scalar string; usage is a direct McpUsage object reference.
-        let done_props = schema
-            .pointer("/oneOf/1/properties")
-            .expect("done branch properties present");
-        let error_schema = done_props
+        // Flattened top-level: error is scalar string; usage is a direct
+        // McpUsage object reference.
+        let top_props = schema
+            .pointer("/properties")
+            .expect("top-level properties present");
+        let error_schema = top_props
             .get("error")
             .unwrap_or_else(|| panic!("missing error schema: {schema_text}"));
         assert_eq!(
@@ -1927,7 +2007,7 @@ mod tests {
             Some("string"),
             "error 必须是标量 string: {error_schema}"
         );
-        let usage_schema = done_props
+        let usage_schema = top_props
             .get("usage")
             .unwrap_or_else(|| panic!("missing usage schema: {schema_text}"));
         assert!(
