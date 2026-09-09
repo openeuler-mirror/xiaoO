@@ -68,7 +68,7 @@ impl LspEnv for LocalLspEnv {
             .backend
             .paths()
             .home_dir()
-            .map(|path| PathBuf::from(path.0.as_str()).join(".local/bin"));
+            .map(|path| PathBuf::from(path.native()).join(".local/bin"));
         std::env::split_paths(&path_var)
             .chain([extra.clone(), extra.join("bin")])
             .chain(user_bin)
