@@ -15,7 +15,10 @@ pub mod session_diff;
 pub mod skills_support;
 
 pub mod trace_support {
-    pub use trace::{default_trace_db_path, inspect_trace_database, TraceDiagnosticSummary};
+    pub use trace::{
+        default_trace_db_path, inspect_recent_hook_executions, inspect_trace_database,
+        HookExecutionDiagnosticSummary, TraceDiagnosticSummary,
+    };
 }
 
 #[cfg(feature = "test-support")]

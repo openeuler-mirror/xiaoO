@@ -11,6 +11,17 @@ pub struct TraceDiagnosticSummary {
     pub root_span_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HookExecutionDiagnosticSummary {
+    pub trace_id: String,
+    pub hooker_id: String,
+    pub hook_point: String,
+    pub category: String,
+    pub outcome: String,
+    pub start_time_ms: i64,
+    pub end_time_ms: Option<i64>,
+}
+
 pub fn default_trace_db_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -56,9 +67,60 @@ pub fn inspect_trace_database(
         .map_err(|_| "failed to decode trace metadata".to_string())
 }
 
+/// Read recent Hook execution metadata without returning invocation payloads or arbitrary extras.
+pub fn inspect_recent_hook_executions(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<HookExecutionDiagnosticSummary>, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "trace database path is not valid UTF-8".to_string())?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "failed to open trace database for reading".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT trace_id, \
+             json_extract(extras, '$.hooker_id'), \
+             json_extract(extras, '$.hook_point'), \
+             json_extract(extras, '$.hook_kind'), \
+             json_extract(extras, '$.outcome'), start_time, end_time \
+             FROM spans WHERE span_type = 'HOOK' \
+             AND json_type(extras, '$.hooker_id') = 'text' \
+             AND json_type(extras, '$.hook_point') = 'text' \
+             ORDER BY start_time DESC LIMIT ?1",
+        )
+        .map_err(|_| "trace database schema is unavailable".to_string())?;
+    let rows = statement
+        .query_map([limit.min(100) as i64], |row| {
+            Ok(HookExecutionDiagnosticSummary {
+                trace_id: row.get(0)?,
+                hooker_id: row.get(1)?,
+                hook_point: row.get(2)?,
+                category: row
+                    .get::<_, Option<String>>(3)?
+                    .unwrap_or_else(|| "unknown".to_string()),
+                outcome: row
+                    .get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| "running".to_string())
+                    .to_ascii_lowercase(),
+                start_time_ms: row.get(5)?,
+                end_time_ms: row.get(6)?,
+            })
+        })
+        .map_err(|_| "failed to query trace database".to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "failed to decode hook execution metadata".to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{inspect_trace_database, TraceDiagnosticSummary};
+    use super::{
+        inspect_recent_hook_executions, inspect_trace_database, HookExecutionDiagnosticSummary,
+        TraceDiagnosticSummary,
+    };
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -94,5 +156,33 @@ mod tests {
         let path = temp.path().join("missing.db");
         assert!(inspect_trace_database(&path, 20).is_err());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn reads_only_allowlisted_hook_execution_metadata() {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("trace.db");
+        let connection = Connection::open(&path).expect("database");
+        connection
+            .execute_batch(
+                "CREATE TABLE spans (span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT, span_type TEXT NOT NULL, start_time INTEGER NOT NULL, last_updated_at INTEGER NOT NULL, end_time INTEGER, extras TEXT NOT NULL, created_at INTEGER NOT NULL);\
+                 INSERT INTO spans VALUES ('hook-1', 'trace-1', 'root-1', 'HOOK', 120, 180, 180, '{\"hooker_id\":\"audit\",\"hook_point\":\"agent.Tool.bash.pre\",\"hook_kind\":\"tool_pre\",\"outcome\":\"Ok\",\"secret\":\"never-return\"}', 120);\
+                 INSERT INTO spans VALUES ('tool-1', 'trace-1', 'root-1', 'TOOL_CALL', 100, 200, 200, '{}', 100);",
+            )
+            .expect("fixture");
+        drop(connection);
+
+        assert_eq!(
+            inspect_recent_hook_executions(&path, 20).expect("hook diagnostics"),
+            vec![HookExecutionDiagnosticSummary {
+                trace_id: "trace-1".to_string(),
+                hooker_id: "audit".to_string(),
+                hook_point: "agent.Tool.bash.pre".to_string(),
+                category: "tool_pre".to_string(),
+                outcome: "ok".to_string(),
+                start_time_ms: 120,
+                end_time_ms: Some(180),
+            }]
+        );
     }
 }

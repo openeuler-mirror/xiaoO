@@ -21,6 +21,7 @@ pub fn management_capabilities() -> ManagementCapabilities {
             "config test-custom-tool",
             "config skills",
             "config hooks",
+            "config test-hook",
             "config mcp",
             "config mcp-server",
             "config lsp",
@@ -77,7 +78,14 @@ pub fn management_capabilities() -> ManagementCapabilities {
                 &["list", "validate", "render", "test"],
             ),
             domain("skills", true, false, false, false, &["list"]),
-            domain("hooks", true, false, false, false, &["list"]),
+            domain(
+                "hooks",
+                true,
+                false,
+                true,
+                true,
+                &["list", "test", "recent_executions"],
+            ),
             domain(
                 "mcp_client",
                 true,
