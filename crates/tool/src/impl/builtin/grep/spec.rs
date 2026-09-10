@@ -66,7 +66,7 @@ impl GrepToolSpec {
                 },
                 "head_limit": {
                     "type": "number",
-                    "description": "Limit output to first N lines/entries. Defaults to 250 when unspecified. Pass 0 for unlimited."
+                    "description": "Limit output to first N lines/entries. Defaults to 250 when unspecified. Hard-capped at 2000: values above 2000, and 0 (unlimited), are silently capped at 2000 with a `truncated` flag in the output metadata when the cap is hit. Prefer narrowing `path`/`glob` to reduce the match count rather than raising this; use `offset` to page through large result sets."
                 },
                 "offset": {
                     "type": "number",
@@ -91,10 +91,10 @@ impl GrepToolSpec {
         Self {
             id: ToolId("builtin_grep".to_string()),
             name: ToolName("grep".to_string()),
-            description: "Search file contents using ripgrep (rg)".to_string(),
+            description: "Search file contents using ripgrep (rg). Prefer narrowing the search via `path`/`glob` over raising `head_limit` — output is hard-capped at 2000 entries to bound disk and memory, and large match sets are usually a signal to refine the pattern.".to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
-                description: "Output from GrepTool".to_string(),
+                description: "Output from GrepTool. Fields: `mode`, `num_files`/`num_lines`/`num_matches` (aggregate counts of the SHOWN subset only — not totals when `partial: true`), `filenames`/`content` (the shown subset), `applied_limit` (the cap value, present iff the result was truncated), `applied_offset` (skip count, present iff > 0), `partial` (true iff the result was capped at `applied_limit`; in that case, aggregate fields reflect only the shown subset and the caller should NOT treat them as totals — use `offset` to page or narrow `path`/`glob` to reduce matches).".to_string(),
             },
             effect_profile: EffectProfile {
                 reads_filesystem: true,

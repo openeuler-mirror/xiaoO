@@ -254,10 +254,14 @@ impl PluginToolHookerAdaptor {
         let mut prompt_history: Vec<Value> = Vec::new();
         for m in messages.iter() {
             if m.role == MessageRole::User {
-                let text = m.blocks.iter().find_map(|b| match b {
-                    agent_types::llm::ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                }).unwrap_or_default();
+                let text = m
+                    .blocks
+                    .iter()
+                    .find_map(|b| match b {
+                        agent_types::llm::ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 prompt_history.push(json!({
                     "text": text,
                     "actions": Vec::<Value>::new(),
@@ -266,20 +270,25 @@ impl PluginToolHookerAdaptor {
                 // 非 User 消息中的 ToolResult 归入当前（最近一个）turn 的 actions
                 for block in &m.blocks {
                     if let agent_types::llm::ContentBlock::ToolResult {
-                        call_id, tool_name, output, is_error,
+                        call_id,
+                        tool_name,
+                        output,
+                        is_error,
                     } = block
                     {
                         if let Some(last) = prompt_history.last_mut() {
                             if let Some(obj) = last.as_object_mut() {
-                                let mut action = tool_use_map.get(call_id).cloned().unwrap_or_else(|| {
-                                    json!({"action_type": tool_name, "action_detail": ""})
-                                });
+                                let mut action = tool_use_map.get(call_id).cloned().unwrap_or_else(
+                                    || json!({"action_type": tool_name, "action_detail": ""}),
+                                );
                                 if let Some(aobj) = action.as_object_mut() {
                                     aobj.insert("call_id".to_string(), json!(call_id));
                                     aobj.insert("output".to_string(), json!(output));
                                     aobj.insert("is_error".to_string(), json!(is_error));
                                 }
-                                if let Some(arr) = obj.get_mut("actions").and_then(|a| a.as_array_mut()) {
+                                if let Some(arr) =
+                                    obj.get_mut("actions").and_then(|a| a.as_array_mut())
+                                {
                                     arr.push(action);
                                 }
                             }
