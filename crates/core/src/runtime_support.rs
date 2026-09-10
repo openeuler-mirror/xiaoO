@@ -46,14 +46,9 @@ impl NoopInteractionHandle {
 #[async_trait]
 impl InteractionHandle for NoopInteractionHandle {
     async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
-        match request {
-            InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-            InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-                value: None,
-                display_value: None,
-            },
-            InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
-        }
+        // No interaction backend: answer deny-style so a tool call routed
+        // here records a result instead of blocking forever.
+        InteractionResponse::unanswered(request)
     }
 }
 

@@ -50,3 +50,23 @@ pub enum InteractionResponse {
         value: Option<String>,
     },
 }
+
+impl InteractionResponse {
+    /// Deny-style response for a request whose interaction will never
+    /// receive a real answer (turn cancelled while a tool waited on
+    /// `ask`, prompt channel closed, no interaction backend available):
+    /// `Confirm` is denied and `TextInput` / `Choice` carry no value, so
+    /// the pending tool call can record a result and wind down instead
+    /// of blocking forever. Distinct from timeout-style responses, which
+    /// carry a sentinel value explaining the timeout to the model.
+    pub fn unanswered(request: &InteractionRequest) -> Self {
+        match request {
+            InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+            InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+                value: None,
+                display_value: None,
+            },
+            InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
+        }
+    }
+}

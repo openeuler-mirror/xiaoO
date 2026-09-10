@@ -318,7 +318,8 @@ impl GatewayRuntime {
                 "/api/v1/runtimes/open",
                 &open_request,
             )
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
             self.remote_session_open = true;
         }
 
@@ -401,7 +402,7 @@ impl GatewayRuntime {
         if result.is_ok() {
             self.remote_session_open = false;
         }
-        result
+        result.map_err(|error| error.to_string())
     }
 
     /// `POST /api/v1/runtimes/detach` — release this TUI's attach lease on
@@ -429,6 +430,7 @@ impl GatewayRuntime {
             },
         )
         .await
+        .map_err(|error| error.to_string())
     }
 
     /// Detach bounded by [`EXIT_RPC_TIMEOUT`] so an unreachable daemon cannot
@@ -582,17 +584,49 @@ impl GatewayRuntime {
         let client = self.http_client.clone();
         let client_id = self.client_id.clone();
         tokio::spawn(async move {
-            let _ = post_json(
-                &client,
-                &remote,
-                token.as_deref(),
-                "/api/v1/runtimes/cancel",
-                &RuntimeCancelRequest {
-                    session_id,
-                    client_id: Some(client_id),
-                },
-            )
-            .await;
+            // The cancel RPC is the ONLY signal that reaches the daemon-side
+            // agent loop (the local token clone is meaningless in remote
+            // mode), and the TUI already renders the turn as cancelled the
+            // moment Esc is pressed — so a lost/delayed POST silently turns
+            // the session outcome into "complete". Retry transient failures
+            // (transport errors, 5xx, 429); a definitive 4xx rejection is
+            // logged and surfaced, never retried.
+            let mut attempt = 1u32;
+            loop {
+                let result = post_json(
+                    &client,
+                    &remote,
+                    token.as_deref(),
+                    "/api/v1/runtimes/cancel",
+                    &RuntimeCancelRequest {
+                        session_id: session_id.clone(),
+                        client_id: Some(client_id.clone()),
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => return,
+                    Err(error) => {
+                        if attempt >= CANCEL_RPC_MAX_ATTEMPTS || is_permanent_rpc_error(&error) {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                attempt,
+                                error = %error,
+                                "cancel turn RPC failed; daemon-side turn may complete instead of cancelling"
+                            );
+                            return;
+                        }
+                        tracing::debug!(
+                            session_id = %session_id,
+                            attempt,
+                            error = %error,
+                            "cancel turn RPC failed with a transient error; retrying"
+                        );
+                        attempt += 1;
+                        tokio::time::sleep(CANCEL_RPC_RETRY_DELAY).await;
+                    }
+                }
+            }
         });
     }
 
@@ -897,7 +931,7 @@ async fn handle_remote_event(
                     continue;
                 }
                 let response = map_response(&request, result)
-                    .unwrap_or_else(|| default_interaction_response(&request));
+                    .unwrap_or_else(|| InteractionResponse::unanswered(&request));
                 let _ = post_json(
                     client,
                     remote,
@@ -969,13 +1003,54 @@ fn resolve_bearer_token(env_name: Option<&str>) -> Result<Option<String>, String
     Ok(Some(value))
 }
 
+/// Structured error for [`post_json`]: distinguishes a definitive daemon
+/// rejection (HTTP status preserved) from transient transport failures, so
+/// callers like the cancel-RPC retry loop can classify without re-parsing
+/// formatted strings. `Display` keeps the historical message shapes
+/// (`error.to_string()` for transport, `HTTP POST {path} timed out after
+/// {timeout:?}`, `HTTP {status} {body}`) so logs and caller-facing strings
+/// stay stable.
+#[derive(Debug)]
+enum PostJsonError {
+    /// The request failed before a response arrived (connection refused,
+    /// DNS, TLS, ...). Transient — worth retrying.
+    Transport(String),
+    /// [`POST_JSON_SAFETY_TIMEOUT`] fired before a response arrived.
+    /// Transient — worth retrying.
+    Timeout {
+        path: String,
+        timeout: std::time::Duration,
+    },
+    /// The daemon answered with a non-success status. Most 4xx are
+    /// permanent rejections; 5xx, 429 (rate limit) and 408 (request
+    /// timeout) are transient.
+    Http {
+        status: StatusCode,
+        body: String,
+    },
+}
+
+impl std::fmt::Display for PostJsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(message) => f.write_str(message),
+            Self::Timeout { path, timeout } => {
+                write!(f, "HTTP POST {path} timed out after {timeout:?}")
+            }
+            Self::Http { status, body } => write!(f, "HTTP {status} {body}"),
+        }
+    }
+}
+
+impl std::error::Error for PostJsonError {}
+
 async fn post_json<T: Serialize + ?Sized>(
     client: &reqwest::Client,
     remote: &RemoteRuntimeConfig,
     token: Option<&str>,
     path: &str,
     body: &T,
-) -> Result<(), String> {
+) -> Result<(), PostJsonError> {
     let mut request = client
         .post(format!("{}{}", remote.base_url, path))
         .json(body);
@@ -987,11 +1062,12 @@ async fn post_json<T: Serialize + ?Sized>(
     // first; this is the last line of defense.
     let response = match tokio::time::timeout(POST_JSON_SAFETY_TIMEOUT, request.send()).await {
         Ok(Ok(response)) => response,
-        Ok(Err(error)) => return Err(error.to_string()),
+        Ok(Err(error)) => return Err(PostJsonError::Transport(error.to_string())),
         Err(_) => {
-            return Err(format!(
-                "HTTP POST {path} timed out after {POST_JSON_SAFETY_TIMEOUT:?}"
-            ))
+            return Err(PostJsonError::Timeout {
+                path: path.to_string(),
+                timeout: POST_JSON_SAFETY_TIMEOUT,
+            })
         }
     };
     if response.status().is_success() {
@@ -999,7 +1075,26 @@ async fn post_json<T: Serialize + ?Sized>(
     } else {
         let status = response.status();
         let body = read_response_text_bounded(response).await;
-        Err(format!("HTTP {status} {body}"))
+        Err(PostJsonError::Http { status, body })
+    }
+}
+
+/// Max attempts for the fire-and-forget cancel RPC in
+/// `GatewayRuntime::cancel_remote_turn` (1 initial + 2 retries).
+const CANCEL_RPC_MAX_ATTEMPTS: u32 = 3;
+/// Delay between cancel RPC retries.
+const CANCEL_RPC_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a `post_json` error is a definitive daemon rejection that retrying
+/// cannot change: any 4xx except 429 (rate limit) and 408 (request timeout —
+/// the standard remedy is to repeat the request). Transport errors, timeouts
+/// and 5xx are transient.
+fn is_permanent_rpc_error(error: &PostJsonError) -> bool {
+    match error {
+        PostJsonError::Transport(_) | PostJsonError::Timeout { .. } => false,
+        PostJsonError::Http { status, .. } => {
+            status.is_client_error() && status.as_u16() != 429 && status.as_u16() != 408
+        }
     }
 }
 
@@ -1273,21 +1368,12 @@ fn map_response(
     }
 }
 
-fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
-    match request {
-        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-            value: None,
-            display_value: None,
-        },
-        InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use tokio::sync::watch;
+
+    use reqwest::StatusCode;
 
     use crate::app_state::AppState;
     use crate::gateway::MemoryAutomationHealth;
@@ -1496,5 +1582,72 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn permanent_rpc_error_classification() {
+        use super::{is_permanent_rpc_error, PostJsonError, POST_JSON_SAFETY_TIMEOUT};
+        // Transport errors are transient — worth retrying.
+        assert!(!is_permanent_rpc_error(&PostJsonError::Transport(
+            "connection refused".to_string()
+        )));
+        assert!(!is_permanent_rpc_error(&PostJsonError::Timeout {
+            path: "/api/v1/runtimes/cancel".to_string(),
+            timeout: POST_JSON_SAFETY_TIMEOUT,
+        }));
+        // 5xx are transient.
+        assert!(!is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::BAD_GATEWAY,
+            body: "upstream unavailable".to_string(),
+        }));
+        // Rate limiting and request timeouts are transient.
+        assert!(!is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: String::new(),
+        }));
+        assert!(!is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::REQUEST_TIMEOUT,
+            body: String::new(),
+        }));
+        // Definitive 4xx rejections are permanent — retrying cannot help.
+        assert!(is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::NOT_FOUND,
+            body: "{\"error\":\"session not found: s1\"}".to_string(),
+        }));
+        assert!(is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::CONFLICT,
+            body: "session attached by another client".to_string(),
+        }));
+        assert!(is_permanent_rpc_error(&PostJsonError::Http {
+            status: StatusCode::UNAUTHORIZED,
+            body: String::new(),
+        }));
+    }
+
+    /// `PostJsonError`'s `Display` shapes feed logs and caller-facing
+    /// strings; lock them so a refactor cannot silently change them.
+    #[test]
+    fn post_json_error_display_shapes() {
+        use super::PostJsonError;
+        assert_eq!(
+            PostJsonError::Transport("connection refused".to_string()).to_string(),
+            "connection refused"
+        );
+        assert_eq!(
+            PostJsonError::Timeout {
+                path: "/api/v1/runtimes/cancel".to_string(),
+                timeout: std::time::Duration::from_secs(10),
+            }
+            .to_string(),
+            "HTTP POST /api/v1/runtimes/cancel timed out after 10s"
+        );
+        assert_eq!(
+            PostJsonError::Http {
+                status: StatusCode::NOT_FOUND,
+                body: "{\"error\":\"session not found: s1\"}".to_string(),
+            }
+            .to_string(),
+            "HTTP 404 Not Found {\"error\":\"session not found: s1\"}"
+        );
     }
 }
