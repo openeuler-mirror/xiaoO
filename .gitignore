@@ -16,10 +16,6 @@ __pycache__/
 .env
 .xiaoo
 
-**/tests/
-!plugins/tests/
-!crates/mcp/tests/
-!crates/tool/tests/
 
 .claude/
 .vscode/
