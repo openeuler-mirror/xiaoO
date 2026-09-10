@@ -5,7 +5,6 @@ members = [
     "apps/serverside",
     "apps/vault",
     "crates/llm-client",
-    "crates/llm-client-cli",
     "crates/agent-types",
     "crates/agent-contracts",
     "crates/agent-llm",

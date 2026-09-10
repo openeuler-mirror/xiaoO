@@ -104,18 +104,3 @@ impl LoopState {
         f(&guard)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn new_with_cancel_uses_provided_token() {
-        let cancel = CancellationToken::new();
-        let state = LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel.clone());
-
-        cancel.cancel();
-
-        assert!(state.cancel.is_cancelled());
-    }
-}

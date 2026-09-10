@@ -1788,20 +1788,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "llm-client-cli"
-version = "0.1.0"
-dependencies = [
- "agent-contracts",
- "agent-llm",
- "clap",
- "llm-client",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
