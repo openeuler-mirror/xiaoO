@@ -7,7 +7,9 @@ use agent_contracts::backend::OperationBackend;
 use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use agent_types::common::ids::AgentId;
 use agent_types::events::{LoopEndSummary, ToolResultEvent};
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::ReasoningEffort;
+use async_trait::async_trait;
 use memory::{MemoryManager, MemorySnapshot};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -92,6 +94,24 @@ impl SessionWorker {
             .cancellation_token
             .clone()
             .unwrap_or_else(CancellationToken::new);
+        // Root lanes with an external cancel token wrap their interaction
+        // handle so a parked `ask` (e.g. the bash tool blocked on a
+        // dyn-sandbox AUTH_REQ permission prompt, or `ask_user_question`)
+        // unparks the moment the turn is cancelled. Without this, the agent
+        // loop sits inside `InteractionHandle::ask` — which never observes
+        // the cancel token — so an Esc-cancelled turn only reached
+        // `decide()` (and the `cancelled` session outcome) after the
+        // interaction timed out (default 600 s) or never at all.
+        if is_root_lane {
+            if let (Some(handle), Some(turn_cancel)) = (
+                resolved.bindings.interaction_handle.clone(),
+                input.cancellation_token.clone(),
+            ) {
+                resolved.bindings.interaction_handle = Some(Arc::new(
+                    CancelAwareInteractionHandle::new(handle, turn_cancel),
+                ));
+            }
+        }
         let mut loop_state = input
             .loop_state
             .clone()
@@ -266,6 +286,54 @@ pub(crate) fn merge_loop_event_sinks(
     }
 }
 
+/// Turn-cancellation-aware decorator around an [`InteractionHandle`].
+///
+/// The agent loop only observes its cancel token at `llm_call` entry and in
+/// `decide()`; tool execution futures (including a bash command parked on a
+/// sandbox permission prompt via `ask`) never see it. Wrapping the root
+/// lane's interaction handle makes any in-flight `ask` resolve as soon as
+/// the turn's cancel token fires: the pending entry is released via
+/// `abort_pending` and a deny-style response is returned so the tool call
+/// finishes, letting the loop reach `decide()` and terminate with
+/// `AgentOutcome::Cancelled` promptly.
+struct CancelAwareInteractionHandle {
+    inner: Arc<dyn InteractionHandle>,
+    cancel: CancellationToken,
+}
+
+impl CancelAwareInteractionHandle {
+    fn new(inner: Arc<dyn InteractionHandle>, cancel: CancellationToken) -> Self {
+        Self { inner, cancel }
+    }
+}
+
+#[async_trait]
+impl InteractionHandle for CancelAwareInteractionHandle {
+    async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                // Drop-then-abort mirrors the supervisor's subagent
+                // interaction timeout path: `inner.ask` is cancelled by the
+                // `select!`, and any external pending state it registered
+                // (e.g. an SSE interaction store entry) is released so a
+                // late user reply is not swallowed by a stale entry.
+                self.inner.abort_pending(request).await;
+                InteractionResponse::unanswered(request)
+            }
+            response = self.inner.ask(request) => response,
+        }
+    }
+
+    fn has_builtin_timeout(&self) -> bool {
+        self.inner.has_builtin_timeout()
+    }
+
+    async fn abort_pending(&self, request: &InteractionRequest) {
+        self.inner.abort_pending(request).await;
+    }
+}
+
 impl From<AppRuntimeFactoryError> for SessionServiceError {
     fn from(value: AppRuntimeFactoryError) -> Self {
         Self::RuntimeBuild {
@@ -279,4 +347,133 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_types::interaction::{InteractionRequest, InteractionResponse};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Test handle whose `ask` parks until a response is delivered through an
+    /// internal channel (or the channel closes), mirroring handles that block
+    /// on external user input (SSE interaction store, TUI prompt channel).
+    #[derive(Default)]
+    struct ParkingInteractionHandle {
+        abort_pending_calls: AtomicUsize,
+        answered: AtomicBool,
+    }
+
+    impl ParkingInteractionHandle {
+        fn ask_signal(&self) -> &AtomicBool {
+            &self.answered
+        }
+    }
+
+    #[async_trait]
+    impl InteractionHandle for ParkingInteractionHandle {
+        async fn ask(&self, _request: &InteractionRequest) -> InteractionResponse {
+            // Park until the test flips `answered`; a buggy wrapper that
+            // neither cancels nor forwards would hang the test (tokio test
+            // timeout).
+            while !self.answered.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            InteractionResponse::Confirmed { allowed: true }
+        }
+
+        async fn abort_pending(&self, _request: &InteractionRequest) {
+            self.abort_pending_calls.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn choice_request() -> InteractionRequest {
+        InteractionRequest::Choice {
+            prompt: "allow?".to_string(),
+            options: vec!["Allow".to_string(), "Deny".to_string()],
+            allow_custom_input: false,
+            source: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_unparks_pending_ask_with_deny_response_and_aborts() {
+        let inner = Arc::new(ParkingInteractionHandle::default());
+        let token = CancellationToken::new();
+        let wrapper = Arc::new(CancelAwareInteractionHandle::new(
+            Arc::clone(&inner) as Arc<dyn InteractionHandle>,
+            token.clone(),
+        ));
+
+        let ask = {
+            let wrapper = Arc::clone(&wrapper);
+            let request = choice_request();
+            tokio::spawn(async move { wrapper.ask(&request).await })
+        };
+        // Give the ask a chance to park.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        token.cancel();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), ask)
+            .await
+            .expect("ask must unpark after cancel")
+            .expect("ask task must not panic");
+
+        assert!(
+            matches!(response, InteractionResponse::Choice { value: None }),
+            "cancelled ask must resolve deny-style, got {response:?}"
+        );
+        assert_eq!(
+            inner.abort_pending_calls.load(Ordering::SeqCst),
+            1,
+            "wrapper must release the inner pending entry on cancel"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_token_short_circuits_ask() {
+        let inner = Arc::new(ParkingInteractionHandle::default());
+        let token = CancellationToken::new();
+        token.cancel();
+        let wrapper = CancelAwareInteractionHandle::new(
+            Arc::clone(&inner) as Arc<dyn InteractionHandle>,
+            token,
+        );
+
+        let request = choice_request();
+        let response = wrapper.ask(&request).await;
+        assert!(matches!(
+            response,
+            InteractionResponse::Choice { value: None }
+        ));
+        assert_eq!(inner.abort_pending_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn inner_response_passes_through_when_not_cancelled() {
+        let inner = Arc::new(ParkingInteractionHandle::default());
+        let wrapper = Arc::new(CancelAwareInteractionHandle::new(
+            Arc::clone(&inner) as Arc<dyn InteractionHandle>,
+            CancellationToken::new(),
+        ));
+
+        let ask = {
+            let wrapper = Arc::clone(&wrapper);
+            let request = choice_request();
+            tokio::spawn(async move { wrapper.ask(&request).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        // The inner handle answers (allowed=true) without any cancellation.
+        inner.ask_signal().store(true, Ordering::SeqCst);
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), ask)
+            .await
+            .expect("ask must complete when the inner handle answers")
+            .expect("ask task must not panic");
+        assert!(matches!(
+            response,
+            InteractionResponse::Confirmed { allowed: true }
+        ));
+        assert_eq!(inner.abort_pending_calls.load(Ordering::SeqCst), 0);
+    }
 }

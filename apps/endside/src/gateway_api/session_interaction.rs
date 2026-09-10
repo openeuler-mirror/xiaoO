@@ -140,13 +140,8 @@ impl InteractionHandle for ChannelInteractionHandle {
             break;
         }
 
-        match request {
-            InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-            InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-                value: None,
-                display_value: None,
-            },
-            InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
-        }
+        // Prompt channel closed or the user dismissed the prompt: give the
+        // pending tool call a deny-style result so it can wind down.
+        InteractionResponse::unanswered(request)
     }
 }

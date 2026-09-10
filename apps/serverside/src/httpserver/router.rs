@@ -386,7 +386,10 @@ impl InteractionHandle for RemoteSseInteractionHandle {
 
         match rx.await {
             Ok(response) => response,
-            Err(_) => default_interaction_response(request),
+            // Pending entry aborted (e.g. the turn was cancelled): the
+            // `Sender` was dropped without a reply, so the pending tool call
+            // gets a deny-style result and can wind down.
+            Err(_) => InteractionResponse::unanswered(request),
         }
     }
 
@@ -395,17 +398,6 @@ impl InteractionHandle for RemoteSseInteractionHandle {
     /// instead of being silently swallowed by a stale `Sender`.
     async fn abort_pending(&self, _request: &InteractionRequest) {
         self.store.cancel(&self.session_id).await;
-    }
-}
-
-fn default_interaction_response(request: &InteractionRequest) -> InteractionResponse {
-    match request {
-        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
-        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
-            value: None,
-            display_value: None,
-        },
-        InteractionRequest::Choice { .. } => InteractionResponse::Choice { value: None },
     }
 }
 

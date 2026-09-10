@@ -1201,6 +1201,12 @@ impl CoreBackedSessionService {
         cancellation_token: Option<tokio_util::sync::CancellationToken>,
         tool_event_sink: Option<Arc<dyn agent_contracts::ToolEventSink>>,
     ) -> Result<AppTurnResult, SessionServiceError> {
+        // Stamp request handling BEFORE any await (resolution can take
+        // seconds — backend leasing, MCP init): the session actor compares
+        // this against a cancel that arrived while no turn was active, so
+        // the cancel applies exactly to turns submitted before it (see
+        // `SessionActor::idle_cancel_at`).
+        let turn_submitted_at = std::time::Instant::now();
         let hooks_enabled = !matches!(
             (
                 request.entry.kind.as_ref(),
@@ -1217,7 +1223,17 @@ impl CoreBackedSessionService {
             .runtime_resolver
             .resolve(&runtime_input, existing.as_ref())
             .await?;
-        resolved.bindings.cancel_token = cancellation_token;
+        // Preserve a resolver-provided cancel token when this call carries
+        // none. The local TUI path (`SessionGateway::spawn_turn` → plain
+        // `run_turn`, no cancellation_token argument) wires the TUI's
+        // Esc-cancel token into the resolver's static
+        // `SessionRuntimeBindings::cancel_token`; unconditionally overwriting
+        // it with `None` here severed the TUI from the backend turn — the
+        // session actor would fall back to a fresh token the TUI could never
+        // fire, so Esc never produced an `AgentOutcome::Cancelled`. An
+        // explicit caller-provided `Some(_)` still wins.
+        resolved.bindings.cancel_token =
+            cancellation_token.or(resolved.bindings.cancel_token.take());
         if let Some(tool_event_sink) = tool_event_sink {
             resolved.bindings.tool_event_sink = Some(tool_event_sink);
         }
@@ -1320,6 +1336,7 @@ impl CoreBackedSessionService {
                 event_sink,
                 interaction_handle,
                 channel_file_sender,
+                turn_submitted_at,
             )
             .await;
 
@@ -2352,7 +2369,7 @@ mod tests {
     use crate::backend::GatewayBackendConfig;
     use crate::gateway::{
         AppBootstrap, GatewayEntryContext, InMemorySessionStore, SessionInput, SessionInputKind,
-        SessionRuntimeBindings, SessionRuntimeDescriptor, ORPHAN_SESSION_THRESHOLD_MS,
+        SessionRuntimeBindings, SessionRuntimeDescriptor, TurnOutcome, ORPHAN_SESSION_THRESHOLD_MS,
         STALE_LEASE_THRESHOLD_MS,
     };
     use agent_contracts::backend::BackendLifecycleState;
@@ -2559,6 +2576,9 @@ mod tests {
         workspace_root: std::path::PathBuf,
         backend_options: Value,
         llm_provider: Arc<LlmProviderWrapper>,
+        /// Mirrors the local TUI wiring: `SessionGateway::spawn_turn` injects
+        /// the TUI's Esc-cancel token into the resolver's static bindings.
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     }
 
     #[async_trait]
@@ -2594,7 +2614,10 @@ mod tests {
                 llm_provider: Arc::clone(&self.llm_provider),
                 tool_registry: None,
                 skill_registry: None,
-                bindings: SessionRuntimeBindings::default(),
+                bindings: SessionRuntimeBindings {
+                    cancel_token: self.cancel_token.clone(),
+                    ..SessionRuntimeBindings::default()
+                },
                 compression_pipeline: None,
                 trace: json!({}),
                 hooker: Default::default(),
@@ -2624,6 +2647,27 @@ mod tests {
             None,
             None,
         ))
+    }
+
+    /// Resolver decorator that parks in `resolve` before delegating, letting
+    /// tests submit a cancel while a turn is still inside `run_turn_inner`'s
+    /// resolution phase (submitted, but not yet queued in the session
+    /// actor).
+    struct DelayedResolver {
+        inner: StubRuntimeResolver,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl SessionRuntimeResolver for DelayedResolver {
+        async fn resolve(
+            &self,
+            request: &SessionRuntimeBuildInput,
+            existing: Option<&SessionRecord>,
+        ) -> Result<ResolvedSessionRuntime, SessionRuntimeResolveError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.resolve(request, existing).await
+        }
     }
 
     struct ReplyingLlmProvider {
@@ -2801,6 +2845,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
+            cancel_token: None,
         });
         let automation = Arc::new(FailingRecallAutomation {
             context_messages: 2,
@@ -2866,6 +2911,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             store.clone(),
@@ -2914,6 +2960,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             store,
@@ -2954,6 +3001,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             store.clone(),
@@ -3072,6 +3120,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             store,
@@ -3111,6 +3160,198 @@ mod tests {
         assert_eq!(receipt.accepted_kind, SessionInputKind::CancelActiveTurn);
     }
 
+    /// The local TUI path wires its Esc-cancel token into the resolver's
+    /// static `SessionRuntimeBindings::cancel_token` and calls plain
+    /// `run_turn` (no cancellation_token argument). `run_turn_inner` must
+    /// preserve that resolver-provided token — a pre-cancelled token must
+    /// drive the agent loop out through `AgentOutcome::Cancelled` (observed
+    /// here as `TurnOutcome::Cancelled`), not run the turn to completion.
+    #[tokio::test]
+    async fn resolver_bound_cancel_token_reaches_agent_loop() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+            cancel_token: Some(token),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let result = dependencies
+            .session_service
+            .run_turn(test_open_request("s-resolver-cancel").into_turn_request("hi".to_string()))
+            .await
+            .expect("turn should complete");
+
+        assert_eq!(result.outcome, TurnOutcome::Cancelled);
+    }
+
+    /// An explicit caller-provided cancellation token (e.g. the MCP server
+    /// path via `run_turn_with_interaction`) must win over a resolver-bound
+    /// token: the pre-cancelled caller token drives the loop to
+    /// `TurnOutcome::Cancelled` even though the resolver's own token stays
+    /// un-cancelled.
+    #[tokio::test]
+    async fn caller_cancel_token_overrides_resolver_bound_token() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        // Resolver-bound token never fires: proves the caller's token won.
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: stub_llm_provider(),
+            cancel_token: Some(tokio_util::sync::CancellationToken::new()),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        let caller_token = tokio_util::sync::CancellationToken::new();
+        caller_token.cancel();
+        let result = dependencies
+            .session_service
+            .run_turn_with_interaction(
+                test_open_request("s-caller-cancel").into_turn_request("hi".to_string()),
+                None,
+                None,
+                None,
+                Some(caller_token),
+                None,
+            )
+            .await
+            .expect("turn should complete");
+
+        assert_eq!(result.outcome, TurnOutcome::Cancelled);
+    }
+
+    /// A `CancelActiveTurn` that arrives while the session is truly idle
+    /// (no active turn, none queued — e.g. Esc landed just after the turn
+    /// had already finished) must NOT poison the user's NEXT message: the
+    /// actor only applies an idle cancel to turns submitted before it, so
+    /// the fresh turn runs to completion instead of being swallowed with a
+    /// spurious `cancelled` outcome.
+    #[tokio::test]
+    async fn cancel_while_session_idle_does_not_cancel_later_turn() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        let seen_requests = Arc::new(StdMutex::new(Vec::new()));
+        let resolver = Arc::new(StubRuntimeResolver {
+            workspace_root: workspace.path().to_path_buf(),
+            backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+            llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
+            cancel_token: None,
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(test_open_request("s-idle-cancel"))
+            .await
+            .expect("open session");
+
+        // Session is idle (no active turn, nothing queued): the cancel is
+        // remembered with its arrival time but applies to nothing.
+        let receipt = dependencies
+            .session_control_plane
+            .submit_input("s-idle-cancel", SessionInput::CancelActiveTurn)
+            .await
+            .expect("cancel should be accepted");
+        assert_eq!(receipt.accepted_kind, SessionInputKind::CancelActiveTurn);
+
+        // A turn submitted afterwards is a fresh user action: it must run
+        // normally, not inherit the stale cancel.
+        let result = dependencies
+            .session_service
+            .run_turn(test_open_request("s-idle-cancel").into_turn_request("hi".to_string()))
+            .await
+            .expect("turn should complete");
+        assert_eq!(result.outcome, TurnOutcome::Complete);
+    }
+
+    /// The startup race the idle-cancel latch exists for: Esc's cancel RPC
+    /// lands while the turn is still in flight inside `run_turn_inner`
+    /// (resolution has not finished, so the actor has no active turn and
+    /// nothing queued yet). The turn — submitted BEFORE the cancel — must
+    /// still exit `TurnOutcome::Cancelled` instead of running to
+    /// completion.
+    #[tokio::test]
+    async fn cancel_racing_turn_startup_cancels_in_flight_turn() {
+        let workspace = TempDir::new().expect("workspace");
+        let store = Arc::new(InMemorySessionStore::default());
+        // Slow resolver so the cancel can be submitted while the turn is
+        // parked in `run_turn_inner`'s resolution phase.
+        let resolver = Arc::new(DelayedResolver {
+            inner: StubRuntimeResolver {
+                workspace_root: workspace.path().to_path_buf(),
+                backend_options: json!({
+                    "temp_root": workspace.path().to_string_lossy().to_string()
+                }),
+                llm_provider: stub_llm_provider(),
+                cancel_token: None,
+            },
+            delay: std::time::Duration::from_millis(300),
+        });
+        let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
+            store,
+            resolver,
+            HookerRegistryConfig::default(),
+            Arc::new(BackendManager::new()),
+        )
+        .expect("dependencies");
+
+        dependencies
+            .session_control_plane
+            .open_session(test_open_request("s-race-cancel"))
+            .await
+            .expect("open session");
+
+        // Submit the turn first: it stamps its submission time, then parks
+        // in the resolver's delay.
+        let service = Arc::clone(&dependencies.session_service);
+        let turn = tokio::spawn(async move {
+            service
+                .run_turn(test_open_request("s-race-cancel").into_turn_request("hi".to_string()))
+                .await
+                .expect("turn should complete")
+        });
+        // Give the spawned task a scheduling slot so its submission is
+        // stamped before the cancel is recorded.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Esc while the turn is in flight: the actor sees no active turn
+        // and records the cancel's arrival time.
+        let receipt = dependencies
+            .session_control_plane
+            .submit_input("s-race-cancel", SessionInput::CancelActiveTurn)
+            .await
+            .expect("cancel should be accepted");
+        assert_eq!(receipt.accepted_kind, SessionInputKind::CancelActiveTurn);
+
+        // The turn was submitted before the cancel: it starts with its
+        // cancel token already fired and terminates `Cancelled`.
+        let result = turn.await.expect("turn task must not panic");
+        assert_eq!(result.outcome, TurnOutcome::Cancelled);
+    }
+
     #[tokio::test]
     async fn force_close_session_removes_session_record() {
         let workspace = TempDir::new().expect("workspace");
@@ -3119,6 +3360,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
             store,
@@ -3171,6 +3413,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let backend_manager = Arc::new(BackendManager::new());
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
@@ -3218,6 +3461,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(
             &store,
@@ -3271,6 +3515,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(
             &store,
@@ -3305,6 +3550,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(
             &store,
@@ -3343,6 +3589,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let backend_manager = Arc::new(BackendManager::new());
         let dependencies = AppBootstrap::from_session_components_with_hooks_and_backend_manager(
@@ -3402,6 +3649,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
             .await;
@@ -3440,6 +3688,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(&store, &resolver, "runtime-1", SessionLifecycleStatus::Idle)
             .await;
@@ -3485,6 +3734,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let parent = save_session_without_backend(
             &store,
@@ -3553,6 +3803,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         save_session_without_backend(
             &store,
@@ -3595,6 +3846,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let mut parent = save_session_without_backend(
             &store,
@@ -3650,6 +3902,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let parent = save_session_without_backend(
             &store,
@@ -3765,6 +4018,7 @@ mod tests {
             workspace_root: workspace.to_path_buf(),
             backend_options: json!({"temp_root": workspace.to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         })
     }
 
@@ -4473,6 +4727,7 @@ mod tests {
             workspace_root: workspace.path().to_path_buf(),
             backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
             llm_provider: stub_llm_provider(),
+            cancel_token: None,
         });
         let invocations = Arc::new(StdMutex::new(Vec::new()));
         let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());

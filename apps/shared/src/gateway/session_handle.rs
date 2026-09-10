@@ -6,6 +6,7 @@ use agent_contracts::{ChannelFileSender, InteractionHandle, LoopEventSink};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +56,10 @@ pub(crate) enum SessionCommand {
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        /// When the service started handling this turn (stamped in
+        /// `run_turn_inner` before runtime resolution). Compared against
+        /// [`SessionActor::idle_cancel_at`] at turn start.
+        submitted_at: Instant,
         reply: oneshot::Sender<Result<AppTurnResult, SessionServiceError>>,
     },
     Snapshot {
@@ -83,6 +88,7 @@ struct RunTurnCommand {
     event_sink: Option<Arc<dyn LoopEventSink>>,
     interaction_handle: Option<Arc<dyn InteractionHandle>>,
     channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+    submitted_at: Instant,
     reply: oneshot::Sender<Result<AppTurnResult, SessionServiceError>>,
 }
 
@@ -125,6 +131,7 @@ impl SessionHandle {
             active_turn: None,
             active_done_rx: None,
             phase: SessionPhase::Idle,
+            idle_cancel_at: None,
             close_reply: None,
             lease_table,
             closing: closing.clone(),
@@ -166,6 +173,11 @@ impl SessionHandle {
         let _ = self.tx.try_send(SessionCommand::Nop);
     }
 
+    /// Queue a root turn on the session actor. `submitted_at` must be
+    /// stamped by the service when it starts handling the request (before
+    /// runtime resolution — see `run_turn_inner`), so a cancel that arrives
+    /// while no turn is active can be attributed to exactly the turns that
+    /// were submitted before it (see [`SessionActor::idle_cancel_at`]).
     pub(crate) async fn run_turn(
         &self,
         request: AppTurnRequest,
@@ -173,6 +185,7 @@ impl SessionHandle {
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
+        submitted_at: Instant,
     ) -> Result<AppTurnResult, SessionServiceError> {
         self.try_increment_queue_depth()?;
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -182,6 +195,7 @@ impl SessionHandle {
             event_sink,
             interaction_handle,
             channel_file_sender,
+            submitted_at,
             reply: reply_tx,
         };
 
@@ -313,6 +327,17 @@ struct SessionActor {
     active_turn: Option<ActiveTurn>,
     active_done_rx: Option<oneshot::Receiver<()>>,
     phase: SessionPhase,
+    /// When the most recent `CancelActiveTurn` arrived while no turn was
+    /// active — the cancel raced turn startup (the turn was still queued,
+    /// or in flight inside `run_turn_inner`'s resolution) or landed just
+    /// after `ActiveDone`. A turn that starts later is cancelled upfront
+    /// only when it was submitted BEFORE this instant; a turn submitted
+    /// afterwards is a fresh user action and must not inherit the cancel.
+    /// The timestamp comparison (instead of a bare "cancel the next turn"
+    /// flag) is what keeps a stale cancel — Esc pressed just as the turn
+    /// finished — from silently swallowing the user's next message, while
+    /// still closing the startup race the receipt alone cannot.
+    idle_cancel_at: Option<Instant>,
     close_reply: Option<oneshot::Sender<Result<SessionRecord, SessionServiceError>>>,
     /// Shared attach-lease table. Consulted at pop-time to fail-fast any
     /// queued turn whose `client_id` is no longer the current lease holder
@@ -397,6 +422,7 @@ impl SessionActor {
                 event_sink,
                 interaction_handle,
                 channel_file_sender,
+                submitted_at,
                 reply,
             } => {
                 if matches!(
@@ -417,6 +443,7 @@ impl SessionActor {
                     event_sink,
                     interaction_handle,
                     channel_file_sender,
+                    submitted_at,
                     reply,
                 });
                 self.publish_status(self.active_turn.as_ref().map(|turn| turn.turn_id))
@@ -428,6 +455,15 @@ impl SessionActor {
             SessionCommand::CancelActiveTurn { reply } => {
                 if let Some(active) = self.active_turn.as_ref() {
                     active.cancel.cancel();
+                } else {
+                    // No active turn: remember WHEN the cancel arrived (see
+                    // `idle_cancel_at`). The next turn that starts is
+                    // cancelled upfront only if it was submitted before this
+                    // instant — closing the race where Esc's cancel RPC lands
+                    // between the turn being submitted and the actor starting
+                    // it — while a turn submitted afterwards (the user's next
+                    // message after a stale Esc) stays unaffected.
+                    self.idle_cancel_at = Some(Instant::now());
                 }
                 let _ = reply.send(Ok(SessionSubmitReceipt {
                     session_id: self.session_id.clone(),
@@ -585,6 +621,18 @@ impl SessionActor {
             .cancel_token
             .clone()
             .unwrap_or_else(CancellationToken::new);
+        // A cancel that arrived while no turn was active applies to the turn
+        // starting now only when this turn was submitted before that cancel:
+        // the loop then observes the cancelled token at `llm_call` entry and
+        // exits through `LoopDecision::ReturnCancelled`, so the session
+        // outcome is "cancelled" rather than the turn running to completion.
+        // A turn submitted after the cancel is a fresh user action and must
+        // run normally.
+        if let Some(cancelled_at) = self.idle_cancel_at {
+            if cancelled_at > turn.submitted_at {
+                cancel.cancel();
+            }
+        }
         let (done_tx, done_rx) = oneshot::channel();
         let supervisor = self.supervisor.clone();
         let cancel_for_task = cancel.clone();
