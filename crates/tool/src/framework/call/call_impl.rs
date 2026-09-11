@@ -3,6 +3,7 @@ mod lifecycle;
 mod results;
 mod state;
 #[cfg(test)]
+#[path = "../../../../../tests/unit/tool/framework/call/call_impl_test.rs"]
 mod tests;
 mod trace;
 

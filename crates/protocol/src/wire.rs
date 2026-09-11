@@ -510,5 +510,5 @@ pub type RuntimeHeartbeatRequest = SessionHeartbeatRequest;
 pub type RuntimeDetachRequest = SessionDetachRequest;
 
 #[cfg(test)]
-#[path = "wire/tests.rs"]
+#[path = "../../../tests/unit/protocol/wire_test.rs"]
 mod tests;

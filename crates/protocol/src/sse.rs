@@ -209,5 +209,5 @@ pub fn parse_sse_data(data: &str) -> Result<Option<RuntimeSseEvent>, serde_json:
 }
 
 #[cfg(test)]
-#[path = "sse/tests.rs"]
+#[path = "../../../tests/unit/protocol/sse_test.rs"]
 mod tests;
