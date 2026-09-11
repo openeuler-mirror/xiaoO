@@ -5,7 +5,7 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
-use crate::app_state::{AppState, InputMode, TranscriptRenderCache};
+use crate::app_state::{AppState, InputMode, TranscriptRenderCache, WideTableScrollRegion};
 use crate::interaction_prompt::PromptFocus;
 use crate::provider_service::copy_to_clipboard;
 use crate::render::find_substring_from;
@@ -367,6 +367,15 @@ impl App {
                 self.state.transcript_selection = None;
                 self.state.active_transcript_scroll_down();
             }
+            // Shift+wheel commonly arrives as ScrollLeft/ScrollRight; when the
+            // pointer hovers a windowed (wide) markdown table, pan it
+            // horizontally instead of scrolling the transcript.
+            MouseEventKind::ScrollLeft => {
+                self.pan_hovered_wide_table(mouse_event.column, mouse_event.row, false);
+            }
+            MouseEventKind::ScrollRight => {
+                self.pan_hovered_wide_table(mouse_event.column, mouse_event.row, true);
+            }
             MouseEventKind::Down(MouseButton::Left) if in_scrollbar_zone => {
                 self.state.set_active_transcript_scrollbar_dragging(true);
             }
@@ -491,13 +500,54 @@ impl App {
             _ => {}
         }
     }
+
+    /// Pan the wide markdown table under the pointer, if any, by one step in
+    /// the wheel's direction. `right` is true for a rightward pan.
+    ///
+    /// The step is derived from the hovered table's own render viewport
+    /// (`WideTableScrollRegion::viewport_width`) rather than the outer message
+    /// area, so tables rendered into a narrower window (e.g. indented tool
+    /// output) still move by a third of what the user actually sees.
+    fn pan_hovered_wide_table(&mut self, column: u16, row: u16, right: bool) {
+        let Some(region) = wide_table_at(&self.state.render_state.wide_table_regions, column, row)
+        else {
+            return;
+        };
+        let step = AppState::table_horiz_scroll_step(region.viewport_width);
+        self.state
+            .scroll_wide_table(&region, if right { step } else { -step });
+    }
 }
 
+/// Topmost visible wide table containing `(column, row)`, if any. Regions are
+/// collected in visual order (top to bottom), so the first hit is the one the
+/// user sees under the pointer.
+fn wide_table_at(
+    regions: &[WideTableScrollRegion],
+    column: u16,
+    row: u16,
+) -> Option<WideTableScrollRegion> {
+    regions
+        .iter()
+        .find(|region| mouse_in_rect(column, row, region.rect))
+        .copied()
+}
+
+/// Message at `message_index` in the transcript currently on screen (the
+/// active subagent lane, else the main chat). Mirrors the list selection in
+/// `render::transcript::render_chat`: a stack entry whose lane no longer
+/// exists falls back to the main chat, so a hit region is always resolved
+/// against the same list it was built from.
 fn active_message_mut(
     state: &mut AppState,
     message_index: usize,
 ) -> Option<&mut crate::chat::Message> {
-    if let Some(agent_id) = state.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+    if let Some(agent_id) = state
+        .chat_state
+        .active_subagent_id()
+        .filter(|agent_id| state.chat_state.subagent_lanes.contains_key(*agent_id))
+        .map(ToOwned::to_owned)
+    {
         return state
             .chat_state
             .subagent_lanes
@@ -679,11 +729,59 @@ fn input_char_index_at(
 mod tests {
     use super::input_char_index_at;
     use super::mouse_to_line_col;
-    use crate::app_state::CachedMessageRender;
+    use super::wide_table_at;
+    use crate::app_state::{CachedMessageRender, WideTableScrollRegion};
     use crate::render::{build_transcript_cache, wrap_line_to_visual_lines};
     use crate::selection::TranscriptSelection;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
+
+    /// Wide-table hit region occupying rows `y..y+height` of a full-width area.
+    fn wide_region(
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        viewport_width: usize,
+    ) -> WideTableScrollRegion {
+        WideTableScrollRegion {
+            message_index: 0,
+            rect: Rect::new(x, y, width, height),
+            viewport_width,
+            max_offset: 60,
+        }
+    }
+
+    #[test]
+    fn wide_table_at_finds_the_table_under_the_pointer() {
+        let regions = vec![wide_region(0, 5, 40, 6, 40), wide_region(0, 20, 40, 4, 40)];
+
+        // Inside the first table (its first and last row).
+        assert_eq!(wide_table_at(&regions, 0, 5).map(|r| r.rect.y), Some(5));
+        assert_eq!(wide_table_at(&regions, 39, 10).map(|r| r.rect.y), Some(5));
+        // Inside the second one.
+        assert_eq!(wide_table_at(&regions, 12, 20).map(|r| r.rect.y), Some(20));
+        assert_eq!(wide_table_at(&regions, 12, 23).map(|r| r.rect.y), Some(20));
+        // Between the two, past the right edge, past the bottom edge: no hit.
+        assert!(wide_table_at(&regions, 12, 15).is_none());
+        assert!(wide_table_at(&regions, 40, 6).is_none());
+        assert!(wide_table_at(&regions, 12, 24).is_none());
+    }
+
+    #[test]
+    fn wide_table_at_prefers_the_topmost_overlapping_region() {
+        // Regions are collected top-to-bottom; an overlap must resolve to the
+        // one drawn on top (the first pushed).
+        let regions = vec![wide_region(0, 5, 40, 10, 40), wide_region(0, 8, 40, 10, 40)];
+        assert_eq!(wide_table_at(&regions, 3, 9).map(|r| r.rect.y), Some(5));
+    }
+
+    #[test]
+    fn wide_table_at_degenerate_zero_width_region_never_hits() {
+        let regions = vec![wide_region(0, 5, 0, 0, 0)];
+        assert!(wide_table_at(&regions, 0, 5).is_none());
+        assert!(wide_table_at(&[], 0, 5).is_none());
+    }
 
     fn cached(lines: Vec<Line<'static>>, width: u16) -> CachedMessageRender {
         let wrapped_lines: Vec<Vec<Line<'static>>> = lines
@@ -692,6 +790,7 @@ mod tests {
             .collect();
         CachedMessageRender {
             width,
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
             wrapped_lines: Some(wrapped_lines),

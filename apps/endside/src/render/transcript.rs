@@ -13,11 +13,12 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::App;
 use crate::app_state::{
     CachedMessageRender, MessageVisualBlock, SubagentOpenRegion, SubagentOpenTarget,
-    ToolToggleRegion, TranscriptRenderCache,
+    ToolToggleRegion, TranscriptRenderCache, WideTableScrollRegion,
 };
 use crate::chat::{Message, MessageRole, ToolExecutionStatus, ToolMessageState};
 use crate::markdown::{
-    contains_markdown_table, render_markdown, render_markdown_incremental, MarkdownIncrementalState,
+    contains_markdown_table, render_markdown_incremental, render_markdown_with_horiz,
+    MarkdownIncrementalState, WideTableRegion,
 };
 use crate::theme::Theme;
 
@@ -157,10 +158,12 @@ impl App {
                     } else {
                         None
                     };
+                    let table_horiz_offset = message.table_horiz_offset;
                     let (rendered, new_markdown_state) = render_message_entry(
                         message,
                         &theme,
                         inner_area.width,
+                        table_horiz_offset,
                         is_active_stream_message,
                         chat_is_loading,
                         &loading_animation,
@@ -342,7 +345,47 @@ impl App {
 
         self.state.render_state.tool_toggle_regions.clear();
         self.state.render_state.subagent_open_regions.clear();
+        self.state.render_state.wide_table_regions.clear();
+        self.state.render_state.wide_table_keyboard_target = None;
+        // Aggregate the visible portions of windowed (wide) tables. Regions
+        // are pushed in visual order (top → bottom); the first one becomes
+        // the keyboard target for ←/→.
         for block in &transcript_cache.message_blocks {
+            for wt in &block.wide_tables {
+                let start_local = block
+                    .logical_to_visual_offset
+                    .get(wt.start_line)
+                    .copied()
+                    .unwrap_or(block.visual_lines.len());
+                let end_local = block
+                    .logical_to_visual_offset
+                    .get(wt.start_line + wt.line_count)
+                    .copied()
+                    .unwrap_or(block.visual_lines.len());
+                let start_global = block.start_visual_row + start_local;
+                let end_global = block.start_visual_row + end_local;
+                if end_global <= scroll_offset || start_global >= scroll_end {
+                    continue;
+                }
+                let visible_start = start_global.max(scroll_offset);
+                let visible_end = end_global.min(scroll_end);
+                let region = WideTableScrollRegion {
+                    message_index: block.message_index,
+                    rect: Rect {
+                        x: inner_area.x,
+                        y: inner_area.y + (visible_start - scroll_offset) as u16,
+                        width: inner_area.width,
+                        height: (visible_end - visible_start) as u16,
+                    },
+                    viewport_width: wt.viewport_width,
+                    max_offset: wt.natural_width.saturating_sub(wt.viewport_width),
+                };
+                if self.state.render_state.wide_table_keyboard_target.is_none() {
+                    self.state.render_state.wide_table_keyboard_target = Some(region);
+                }
+                self.state.render_state.wide_table_regions.push(region);
+            }
+
             if let Some(open_target) = &block.subagent_open_target {
                 let open_row = block
                     .start_visual_row
@@ -451,6 +494,7 @@ fn render_message_entry(
     message: &Message,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     is_active_stream_message: bool,
     chat_is_loading: bool,
     loading_animation: &str,
@@ -466,9 +510,18 @@ fn render_message_entry(
             ToolExecutionStatus::Failed => theme.error,
         };
         let timestamp = message.timestamp.format("%H:%M:%S").to_string();
+        let mut wide_tables: Vec<WideTableRegion> = Vec::new();
         let lines = if is_subagent_tool(&tool.tool) {
             tool_toggle_row_offset = Some(if tool.expanded { 1 } else { 0 });
-            let mut lines = render_subagent_tool_lines(tool, &timestamp, tool_color, theme, width);
+            let mut lines = render_subagent_tool_lines(
+                tool,
+                &timestamp,
+                tool_color,
+                theme,
+                width,
+                table_horiz_offset,
+                &mut wide_tables,
+            );
             if tool.tool == "spawn_subagent" && tool.expanded {
                 if let Some(agent_id) = parse_spawn_subagent_agent_id(&tool.detail) {
                     if let Some(row_offset) = lines
@@ -486,7 +539,15 @@ fn render_message_entry(
             lines
         } else {
             tool_toggle_row_offset = Some(if tool.expanded { 2 } else { 1 });
-            render_tool_message_lines(message, tool, tool_color, theme, width)
+            render_tool_message_lines(
+                message,
+                tool,
+                tool_color,
+                theme,
+                width,
+                table_horiz_offset,
+                &mut wide_tables,
+            )
         };
         let wrapped_lines: Vec<Vec<Line<'static>>> = lines
             .iter()
@@ -495,6 +556,7 @@ fn render_message_entry(
         return (
             CachedMessageRender {
                 width,
+                wide_tables,
                 tool_toggle_row_offset,
                 subagent_open_target,
                 wrapped_lines: Some(wrapped_lines),
@@ -514,6 +576,7 @@ fn render_message_entry(
         return (
             CachedMessageRender {
                 width,
+                wide_tables: Vec::new(),
                 tool_toggle_row_offset,
                 subagent_open_target,
                 wrapped_lines: Some(wrapped_lines),
@@ -524,11 +587,12 @@ fn render_message_entry(
         );
     }
 
-    let (lines, wrapped_lines, new_markdown_state, frozen_prefix_line_count) =
+    let (lines, wrapped_lines, new_markdown_state, frozen_prefix_line_count, wide_tables) =
         render_standard_message_lines(
             message,
             theme,
             width,
+            table_horiz_offset,
             is_active_stream_message,
             chat_is_loading,
             loading_animation,
@@ -538,6 +602,7 @@ fn render_message_entry(
     (
         CachedMessageRender {
             width,
+            wide_tables,
             tool_toggle_row_offset,
             subagent_open_target,
             wrapped_lines: Some(wrapped_lines),
@@ -575,6 +640,10 @@ pub(crate) fn build_transcript_cache(
 
     for (message_index, render_opt) in renders.into_iter().enumerate() {
         let block = if let Some(render) = render_opt {
+            // Wide-table metadata for this render (moved out early: the
+            // incremental branch needs it AFTER the prev block's frozen
+            // tables have been trimmed).
+            let render_wide_tables = render.wide_tables;
             if let Some(freeze_n) = render.frozen_prefix_line_count {
                 // Incremental streaming: move the frozen prefix (`freeze_n`
                 // logical lines) from the previous tick's block, then append
@@ -587,6 +656,7 @@ pub(crate) fn build_transcript_cache(
                         mut lines,
                         mut logical_to_visual_offset,
                         mut visual_lines,
+                        wide_tables: mut prev_wide,
                         ..
                     }) => {
                         debug_assert!(
@@ -623,6 +693,16 @@ pub(crate) fn build_transcript_cache(
                         }
                         lines.extend(suffix_lines);
 
+                        // Keep the wide tables entirely inside the frozen
+                        // prefix (start + count <= freeze_n); any table at or
+                        // beyond the suffix boundary was re-rendered this tick
+                        // and comes from `render_wide_tables`. Wide tables
+                        // never straddle the freeze boundary (a trailing
+                        // pipe-delimited table is rolled back wholesale, a
+                        // complete table is frozen wholesale).
+                        prev_wide.retain(|wt| wt.start_line + wt.line_count <= freeze_n);
+                        prev_wide.extend(render_wide_tables);
+
                         MessageVisualBlock {
                             message_index,
                             start_visual_row: absolute_visual_row,
@@ -630,6 +710,7 @@ pub(crate) fn build_transcript_cache(
                             lines,
                             visual_lines,
                             logical_to_visual_offset,
+                            wide_tables: prev_wide,
                             tool_toggle_row_offset: None,
                             subagent_open_target: None,
                         }
@@ -671,6 +752,7 @@ pub(crate) fn build_transcript_cache(
                             lines: suffix_lines,
                             visual_lines: vl,
                             logical_to_visual_offset: l2v,
+                            wide_tables: render_wide_tables,
                             tool_toggle_row_offset: None,
                             subagent_open_target: None,
                         }
@@ -686,6 +768,7 @@ pub(crate) fn build_transcript_cache(
                         .map(|line| wrap_line_to_visual_lines(line, render.width))
                         .collect::<Vec<_>>()
                 });
+                let wide_tables = render_wide_tables;
 
                 // Per-logical-line visual row offset within this block; needed
                 // both to convert `tool_toggle_row_offset` /
@@ -729,6 +812,7 @@ pub(crate) fn build_transcript_cache(
                     lines,
                     visual_lines,
                     logical_to_visual_offset,
+                    wide_tables,
                     tool_toggle_row_offset,
                     subagent_open_target,
                 }
@@ -759,6 +843,7 @@ pub(crate) fn build_transcript_cache(
                         lines: Vec::new(),
                         visual_lines: Vec::new(),
                         logical_to_visual_offset: Vec::new(),
+                        wide_tables: Vec::new(),
                         tool_toggle_row_offset: None,
                         subagent_open_target: None,
                     }
@@ -1051,10 +1136,21 @@ fn render_tool_message_lines(
     tool_color: ratatui::style::Color,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) -> Vec<Line<'static>> {
     if tool.tool == "file_edit" {
         if let Some(edit) = parse_file_edit_args(&tool.args_preview) {
-            return render_file_edit_tool_lines(message, tool, &edit, tool_color, theme, width);
+            return render_file_edit_tool_lines(
+                message,
+                tool,
+                &edit,
+                tool_color,
+                theme,
+                width,
+                table_horiz_offset,
+                wide_tables,
+            );
         }
     }
 
@@ -1132,10 +1228,15 @@ fn render_tool_message_lines(
                     detail_text,
                     theme,
                     width,
+                    table_horiz_offset,
                     theme.foreground,
+                    wide_tables,
                 );
             }
             apply_expanded_tool_panel(&mut lines, theme, width);
+            for wt in wide_tables.iter_mut() {
+                wt.start_line += 1;
+            }
             lines.push(Line::raw(""));
             return lines;
         }
@@ -1162,10 +1263,21 @@ fn render_tool_message_lines(
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ));
-        append_tool_output_detail_lines(&mut lines, detail_text, theme, width, theme.foreground);
+        append_tool_output_detail_lines(
+            &mut lines,
+            detail_text,
+            theme,
+            width,
+            table_horiz_offset,
+            theme.foreground,
+            wide_tables,
+        );
     }
     if tool.expanded {
         apply_expanded_tool_panel(&mut lines, theme, width);
+        for wt in wide_tables.iter_mut() {
+            wt.start_line += 1;
+        }
     }
     lines.push(Line::raw(""));
     lines
@@ -1334,6 +1446,8 @@ fn render_file_edit_tool_lines(
     tool_color: Color,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) -> Vec<Line<'static>> {
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
@@ -1395,12 +1509,23 @@ fn render_file_edit_tool_lines(
                     .fg(theme.error)
                     .add_modifier(Modifier::BOLD),
             ));
-            append_tool_output_detail_lines(&mut lines, detail_text, theme, width, theme.error);
+            append_tool_output_detail_lines(
+                &mut lines,
+                detail_text,
+                theme,
+                width,
+                table_horiz_offset,
+                theme.error,
+                wide_tables,
+            );
         }
     }
 
     if tool.expanded {
         apply_expanded_tool_panel(&mut lines, theme, width);
+        for wt in wide_tables.iter_mut() {
+            wt.start_line += 1;
+        }
     }
     lines.push(Line::raw(""));
     lines
@@ -1939,6 +2064,7 @@ fn render_standard_message_lines(
     message: &Message,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     is_active_stream_message: bool,
     chat_is_loading: bool,
     loading_animation: &str,
@@ -1948,6 +2074,7 @@ fn render_standard_message_lines(
     Vec<Vec<Line<'static>>>,
     Option<MarkdownIncrementalState>,
     Option<usize>,
+    Vec<WideTableRegion>,
 ) {
     #[cfg(debug_assertions)]
     let _start = std::time::Instant::now();
@@ -2044,12 +2171,32 @@ fn render_standard_message_lines(
     // to "Thought". After that, subsequent content ticks reuse the state and
     // move the (now static) prefix.
     let mut new_markdown_state = None;
+    let mut markdown_wide_tables: Vec<WideTableRegion> = Vec::new();
     let (md_lines, md_wrapped, md_move_count) = match message.role {
         MessageRole::Assistant if !message.content.is_empty() => {
-            let result = render_markdown_incremental(usable_prev, &message.content, theme, width);
+            let result = render_markdown_incremental(
+                usable_prev,
+                &message.content,
+                theme,
+                width,
+                table_horiz_offset,
+            );
             let mut new_state = result.new_state;
             new_state.set_thinking_len(thinking_len);
             new_markdown_state = Some(new_state);
+            // Rebase wide-table regions (relative to the complete markdown
+            // output) onto the full message block: the `1` role header line
+            // plus the thinking block (header + body + trailing blank when
+            // present) precede the markdown.
+            let header_prefix = 1 + thinking_block_lines;
+            markdown_wide_tables = result
+                .wide_tables
+                .into_iter()
+                .map(|mut wt| {
+                    wt.start_line += header_prefix;
+                    wt
+                })
+                .collect();
             (
                 result.lines,
                 result.wrapped,
@@ -2164,7 +2311,13 @@ fn render_standard_message_lines(
             );
         }
     }
-    (lines, wrapped, new_markdown_state, frozen_prefix_line_count)
+    (
+        lines,
+        wrapped,
+        new_markdown_state,
+        frozen_prefix_line_count,
+        markdown_wide_tables,
+    )
 }
 
 /// Restyle the characters in `col_start..col_end` (char indices) within a
@@ -2240,6 +2393,8 @@ fn render_subagent_tool_lines(
     tool_color: ratatui::style::Color,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) -> Vec<Line<'static>> {
     let title = match tool.tool.as_str() {
         "spawn_subagent" => "Spawn Subagent",
@@ -2295,12 +2450,29 @@ fn render_subagent_tool_lines(
     }
 
     match tool.tool.as_str() {
-        "spawn_subagent" => render_spawn_subagent_detail_lines(tool, theme, width, &mut lines),
-        "join_subagent" => render_join_subagent_detail_lines(tool, theme, width, &mut lines),
+        "spawn_subagent" => render_spawn_subagent_detail_lines(
+            tool,
+            theme,
+            width,
+            table_horiz_offset,
+            &mut lines,
+            wide_tables,
+        ),
+        "join_subagent" => render_join_subagent_detail_lines(
+            tool,
+            theme,
+            width,
+            table_horiz_offset,
+            &mut lines,
+            wide_tables,
+        ),
         _ => {}
     }
 
     apply_expanded_tool_panel(&mut lines, theme, width);
+    for wt in wide_tables.iter_mut() {
+        wt.start_line += 1;
+    }
     lines
 }
 
@@ -2308,7 +2480,9 @@ fn render_spawn_subagent_detail_lines(
     tool: &ToolMessageState,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     lines: &mut Vec<Line<'static>>,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) {
     if let Some(agent_id) = parse_spawn_subagent_agent_id(&tool.detail) {
         lines.push(Line::styled(
@@ -2341,14 +2515,16 @@ fn render_spawn_subagent_detail_lines(
         return;
     }
 
-    append_fallback_tool_output(tool, theme, width, lines);
+    append_fallback_tool_output(tool, theme, width, table_horiz_offset, lines, wide_tables);
 }
 
 fn render_join_subagent_detail_lines(
     tool: &ToolMessageState,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     lines: &mut Vec<Line<'static>>,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) {
     if let Some(terminal) = parse_join_subagent_terminal(&tool.detail) {
         lines.push(Line::styled(
@@ -2377,7 +2553,15 @@ fn render_join_subagent_detail_lines(
                     .fg(theme.muted)
                     .add_modifier(Modifier::BOLD),
             ));
-            append_tool_output_detail_lines(lines, &reply, theme, width, theme.foreground);
+            append_tool_output_detail_lines(
+                lines,
+                &reply,
+                theme,
+                width,
+                table_horiz_offset,
+                theme.foreground,
+                wide_tables,
+            );
         }
         if let Some(error) = terminal.error {
             lines.push(Line::styled(
@@ -2386,19 +2570,29 @@ fn render_join_subagent_detail_lines(
                     .fg(theme.error)
                     .add_modifier(Modifier::BOLD),
             ));
-            append_tool_output_detail_lines(lines, &error, theme, width, theme.error);
+            append_tool_output_detail_lines(
+                lines,
+                &error,
+                theme,
+                width,
+                table_horiz_offset,
+                theme.error,
+                wide_tables,
+            );
         }
         return;
     }
 
-    append_fallback_tool_output(tool, theme, width, lines);
+    append_fallback_tool_output(tool, theme, width, table_horiz_offset, lines, wide_tables);
 }
 
 fn append_fallback_tool_output(
     tool: &ToolMessageState,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     lines: &mut Vec<Line<'static>>,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) {
     let detail_text = render_tool_detail_text(&tool.detail);
     let detail_text = detail_text.trim();
@@ -2418,7 +2612,15 @@ fn append_fallback_tool_output(
             .fg(theme.muted)
             .add_modifier(Modifier::BOLD),
     ));
-    append_tool_output_detail_lines(lines, detail_text, theme, width, theme.foreground);
+    append_tool_output_detail_lines(
+        lines,
+        detail_text,
+        theme,
+        width,
+        table_horiz_offset,
+        theme.foreground,
+        wide_tables,
+    );
 }
 
 fn append_tool_output_detail_lines(
@@ -2426,19 +2628,31 @@ fn append_tool_output_detail_lines(
     detail_text: &str,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
     fallback_color: Color,
+    wide_tables: &mut Vec<WideTableRegion>,
 ) {
     const OUTPUT_INDENT: &str = "    ";
 
     if contains_markdown_table(detail_text) {
         let content_width = width.saturating_sub(OUTPUT_INDENT.len() as u16).max(1);
-        for line in render_markdown(detail_text, theme, content_width) {
+        let (rendered, table_regions) =
+            render_markdown_with_horiz(detail_text, theme, content_width, table_horiz_offset);
+        let region_base = lines.len();
+        for line in rendered {
             lines.push(prefix_line(
                 line,
                 OUTPUT_INDENT,
                 Style::default().fg(theme.muted),
             ));
         }
+        // Rebase the wide tables (indexed relative to the markdown output)
+        // onto `lines`, which already held `region_base` lines before the
+        // markdown rows were appended.
+        wide_tables.extend(table_regions.into_iter().map(|mut wt| {
+            wt.start_line += region_base;
+            wt
+        }));
         return;
     }
 
@@ -2507,7 +2721,7 @@ mod tests {
         diff_change_counts, expanded_tool_background, highlight_line_selection, line_display_width,
         parse_file_edit_args, parse_join_subagent_terminal, parse_spawn_subagent_agent_id,
         render_file_edit_tool_lines, render_message_entry, render_tool_message_lines,
-        wrap_line_to_visual_lines,
+        wrap_line_to_visual_lines, WideTableRegion,
     };
     use crate::app_state::CachedMessageRender;
     use crate::app_state::{MessageVisualBlock, TranscriptRenderCache};
@@ -2535,6 +2749,7 @@ mod tests {
             .collect();
         let render = CachedMessageRender {
             width: wrap_width,
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
             wrapped_lines: Some(wrapped_lines),
@@ -2735,7 +2950,8 @@ mod tests {
             .expect("tool message should carry tool state");
         tool.expanded = true;
 
-        let lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let lines =
+            render_tool_message_lines(&message, &tool, Color::Green, &theme, 80, 0, &mut vec![]);
         let text = lines
             .iter()
             .map(|line| {
@@ -2776,7 +2992,8 @@ mod tests {
             .as_ref()
             .expect("tool message should carry tool state");
 
-        let lines = render_tool_message_lines(&message, tool, Color::Green, &theme, 80);
+        let lines =
+            render_tool_message_lines(&message, tool, Color::Green, &theme, 80, 0, &mut vec![]);
         let rendered_text = rendered_lines_text(&lines);
 
         assert!(rendered_text.contains("bash: cargo test -p xiaoo-endside  done"));
@@ -2812,7 +3029,8 @@ mod tests {
             .expect("tool message should carry tool state");
         tool.expanded = true;
 
-        let lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let lines =
+            render_tool_message_lines(&message, &tool, Color::Green, &theme, 80, 0, &mut vec![]);
         let rendered_text = rendered_lines_text(&lines);
 
         assert!(rendered_text.contains("Command"));
@@ -2848,11 +3066,13 @@ mod tests {
             .clone()
             .expect("tool message should carry tool state");
 
-        let collapsed_lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let collapsed_lines =
+            render_tool_message_lines(&message, &tool, Color::Green, &theme, 80, 0, &mut vec![]);
         assert!(collapsed_lines.iter().all(|line| line.style.bg.is_none()));
 
         tool.expanded = true;
-        let expanded_lines = render_tool_message_lines(&message, &tool, Color::Green, &theme, 80);
+        let expanded_lines =
+            render_tool_message_lines(&message, &tool, Color::Green, &theme, 80, 0, &mut vec![]);
         let bg = Some(expanded_tool_background(&theme));
         assert_ne!(bg, Some(theme.background));
         assert_ne!(bg, Some(theme.assistant_message_bg));
@@ -2912,7 +3132,7 @@ mod tests {
         });
 
         let (collapsed, _state) =
-            render_message_entry(&message, &theme, 80, false, false, "", None);
+            render_message_entry(&message, &theme, 80, 0, false, false, "", None);
         assert_eq!(collapsed.tool_toggle_row_offset, Some(1));
 
         message
@@ -2920,7 +3140,8 @@ mod tests {
             .as_mut()
             .expect("tool state should exist")
             .expanded = true;
-        let (expanded, _state) = render_message_entry(&message, &theme, 80, false, false, "", None);
+        let (expanded, _state) =
+            render_message_entry(&message, &theme, 80, 0, false, false, "", None);
         assert_eq!(expanded.tool_toggle_row_offset, Some(2));
     }
 
@@ -2967,8 +3188,16 @@ mod tests {
             .as_ref()
             .expect("tool message should carry tool state");
 
-        let lines =
-            render_file_edit_tool_lines(&message, tool, &edit, Color::Green, &Theme::detect(), 80);
+        let lines = render_file_edit_tool_lines(
+            &message,
+            tool,
+            &edit,
+            Color::Green,
+            &Theme::detect(),
+            80,
+            0,
+            &mut vec![],
+        );
         let rendered_text = lines
             .iter()
             .map(|line| {
@@ -3018,6 +3247,7 @@ mod tests {
         };
         CachedMessageRender {
             width,
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
             wrapped_lines,
@@ -3575,6 +3805,7 @@ mod tests {
             lines: prev_lines,
             visual_lines: prev_visuals,
             logical_to_visual_offset: prev_l2v.clone(),
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
         };
@@ -3602,6 +3833,7 @@ mod tests {
             .collect();
         let render = CachedMessageRender {
             width,
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
             wrapped_lines: Some(suffix_wrapped),
@@ -3672,6 +3904,7 @@ mod tests {
             lines: prev_lines.clone(),
             visual_lines: prev_visuals.clone(),
             logical_to_visual_offset: prev_l2v.clone(),
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
         };
@@ -3694,6 +3927,7 @@ mod tests {
         let suffix_visual_count: usize = suffix_wrapped[0].len();
         let render = CachedMessageRender {
             width,
+            wide_tables: Vec::new(),
             tool_toggle_row_offset: None,
             subagent_open_target: None,
             wrapped_lines: Some(suffix_wrapped),
@@ -3722,6 +3956,172 @@ mod tests {
         assert_eq!(
             block.visual_lines.len(),
             prefix_visual_count + suffix_visual_count
+        );
+    }
+
+    /// The incremental block-move path must merge wide-table metadata like it
+    /// merges `lines`/`visual_lines`: wide tables fully contained in the moved
+    /// frozen prefix are retained, partially-frozen tables are dropped (the
+    /// suffix re-renders their surviving part), and the suffix's freshly
+    /// rendered tables are appended — all with `start_line` coordinates already
+    /// rebased onto the full message block.
+    #[test]
+    fn build_transcript_cache_incremental_merges_wide_tables() {
+        let width: u16 = 80;
+
+        // Prev block: 6 logical lines, one visual line each.
+        let prev_lines: Vec<Line<'static>> = (0..6).map(|i| Line::from(format!("p{i}"))).collect();
+        let prev_visuals: Vec<Line<'static>> = prev_lines.clone();
+        let prev_l2v: Vec<usize> = (0..6).collect();
+        let prev_block = MessageVisualBlock {
+            message_index: 0,
+            start_visual_row: 0,
+            logical_line_start: 0,
+            lines: prev_lines,
+            visual_lines: prev_visuals,
+            logical_to_visual_offset: prev_l2v,
+            wide_tables: vec![
+                WideTableRegion {
+                    // Fully inside the frozen prefix (start 1 + count 2 <= freeze_n 4).
+                    start_line: 1,
+                    line_count: 2,
+                    natural_width: 40,
+                    horiz_offset: 0,
+                    viewport_width: 20,
+                },
+                // Spans past freeze_n (start 2 + count 3 > 4): not fully frozen.
+                WideTableRegion {
+                    start_line: 2,
+                    line_count: 3,
+                    natural_width: 40,
+                    horiz_offset: 0,
+                    viewport_width: 20,
+                },
+            ],
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+        };
+        let prev_cache = TranscriptRenderCache {
+            message_blocks: vec![prev_block],
+            logical_line_visual_starts: vec![0, 1, 2, 3, 4, 5],
+            line_texts: (0..6).map(|i| format!("p{i}")).collect(),
+            line_is_header: vec![true, false, false, false, false, false],
+            visual_line_backgrounds: vec![None; 6],
+            total_lines: 6,
+        };
+
+        // This tick: frozen prefix = first 4 lines; suffix = 3 new lines.
+        let suffix_lines: Vec<Line<'static>> =
+            vec![Line::from("s0"), Line::from("s1"), Line::from("s2")];
+        let suffix_wrapped: Vec<Vec<Line<'static>>> = suffix_lines
+            .iter()
+            .map(|l| wrap_line_to_visual_lines(l, width))
+            .collect();
+        let render = CachedMessageRender {
+            width,
+            wide_tables: vec![WideTableRegion {
+                // A table opened in the suffix; rebased onto the full block:
+                // first suffix line sits at block index 4, so this starts at 5.
+                start_line: 5,
+                line_count: 3,
+                natural_width: 50,
+                horiz_offset: 8,
+                viewport_width: 20,
+            }],
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            wrapped_lines: Some(suffix_wrapped),
+            lines: suffix_lines,
+            frozen_prefix_line_count: Some(4),
+        };
+
+        let new_cache = build_transcript_cache(Some(prev_cache), vec![Some(render)]);
+        let block = &new_cache.message_blocks[0];
+
+        assert_eq!(block.lines.len(), 7, "prefix(4) + suffix(3)");
+        assert_eq!(
+            block.wide_tables,
+            vec![
+                WideTableRegion {
+                    start_line: 1,
+                    line_count: 2,
+                    natural_width: 40,
+                    horiz_offset: 0,
+                    viewport_width: 20,
+                },
+                WideTableRegion {
+                    start_line: 5,
+                    line_count: 3,
+                    natural_width: 50,
+                    horiz_offset: 8,
+                    viewport_width: 20,
+                },
+            ],
+            "fully-frozen table retained; partially-frozen dropped; suffix table appended"
+        );
+        assert_eq!(
+            block.logical_to_visual_offset,
+            vec![0, 1, 2, 3, 4, 5, 6],
+            "l2v continues from frozen prefix into suffix"
+        );
+    }
+
+    /// End-to-end: a wide markdown table rendered through `render_message_entry`
+    /// lands in `CachedMessageRender.wide_tables` with a `start_line` rebased
+    /// past the role header + thinking block, survives a full `build_transcript_cache`
+    /// pass unchanged, and stays windowed (each logical row <= viewport).
+    #[test]
+    fn wide_table_metadata_flows_through_message_render_and_cache() {
+        let theme = Theme::detect();
+        let content = "| A | B |\n| --- | --- |\n| a-very-long-value | another-long-value |";
+        let mut message = Message::assistant_streaming();
+        message.is_streaming = false;
+        message.thinking_content = "think".to_string();
+        message.content = content.to_string();
+
+        // Wide-enough viewport: no metadata, full content visible.
+        let (wide_enough, _state) =
+            render_message_entry(&message, &theme, 80, 0, false, false, "", None);
+        assert!(wide_enough.wide_tables.is_empty());
+
+        // Narrow viewport: table is windowed; start_line rebased past header +
+        // thinking block (1 header + 1 thinking header + 1 body + 1 blank = 4).
+        let (render, _state) =
+            render_message_entry(&message, &theme, 20, 0, false, false, "", None);
+        assert_eq!(render.wide_tables.len(), 1);
+        let wt = render.wide_tables[0];
+        assert_eq!(wt.start_line, 4);
+        assert!(wt.natural_width > 20);
+        assert_eq!(wt.viewport_width, 20);
+        assert_eq!(wt.horiz_offset, 0);
+        // Every logical line of the windowed table (incl. hint) fits the viewport.
+        for row in wt.start_line..(wt.start_line + wt.line_count) {
+            assert!(
+                line_display_width(&render.lines[row]) <= 20,
+                "windowed row {row} exceeds viewport"
+            );
+        }
+
+        // A huge offset clamps to the rightmost window.
+        let (render_max, _state) =
+            render_message_entry(&message, &theme, 20, 1000, false, false, "", None);
+        let wt_max = render_max.wide_tables[0];
+        assert_eq!(
+            wt_max.horiz_offset,
+            wt_max.natural_width - wt_max.viewport_width,
+            "offset must clamp to the rightmost window"
+        );
+
+        // Building the cache carries the metadata into the block unchanged.
+        let expected_line_4 = rendered_line_text(&render.lines[4]);
+        let cache = build_transcript_cache(None, vec![Some(render)]);
+        let block = &cache.message_blocks[0];
+        assert_eq!(block.wide_tables.len(), 1);
+        assert_eq!(block.wide_tables[0].start_line, 4);
+        assert_eq!(
+            rendered_line_text(&block.lines[4]),
+            expected_line_4,
+            "block logical lines must be identical to the render's"
         );
     }
 }

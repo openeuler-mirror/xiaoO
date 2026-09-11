@@ -944,6 +944,7 @@ impl SavedMessage {
             tool_state: self.tool_state.map(Into::into),
             completion_check_state: self.completion_check_state,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 }

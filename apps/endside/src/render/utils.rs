@@ -64,6 +64,9 @@ fn sanitize_terminal_text_for_mode(text: &str, ascii_mode: bool) -> String {
             '—' | '–' => output.push('-'),
             '…' => output.push_str("..."),
             '─' => output.push('-'),
+            // Scroll-affordance arrows on the wide-table hint line.
+            '◀' => output.push('<'),
+            '▶' => output.push('>'),
             '⠋' | '⠼' | '⠇' => output.push('|'),
             '⠙' | '⠴' | '⠏' => output.push('/'),
             '⠹' | '⠦' => output.push('-'),
@@ -189,6 +192,16 @@ mod tests {
         assert_eq!(
             sanitize_terminal_text_for_mode("▎ ✅ ◔ ⟡ │ • → …", true),
             "| [x] [-] * | * -> ..."
+        );
+    }
+
+    #[test]
+    fn sanitize_terminal_text_downgrades_wide_table_scroll_arrows() {
+        // The wide-table hint line (`◀…▶ cols a-b/n Alt+←/→`) must be measurable
+        // in its rendered form: every glyph it uses has an ASCII expansion.
+        assert_eq!(
+            sanitize_terminal_text_for_mode("◀…▶ Alt+←/→", true),
+            "<...> Alt+<-/->"
         );
     }
 

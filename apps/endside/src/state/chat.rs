@@ -108,6 +108,17 @@ pub struct Message {
     pub tool_state: Option<ToolMessageState>,
     pub completion_check_state: Option<CompletionCheckMessageState>,
     pub render_revision: u64,
+    /// Horizontal display-column window start applied to this message's wide
+    /// markdown tables (see `render::markdown::render_markdown_with_horiz`).
+    ///
+    /// Stored on the message rather than in an index-keyed side table so the
+    /// window travels with the message: deleting turns, switching between the
+    /// main transcript and subagent lanes, and session resets can all move or
+    /// replace messages without leaving a stale offset behind.
+    ///
+    /// All wide tables of one message share this one window (v1); each table
+    /// re-clamps it against its own natural width at render time.
+    pub table_horiz_offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,6 +141,7 @@ impl Message {
             tool_state: None,
             completion_check_state: None,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 
@@ -143,6 +155,7 @@ impl Message {
             tool_state: None,
             completion_check_state: None,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 
@@ -156,6 +169,7 @@ impl Message {
             tool_state: None,
             completion_check_state: None,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 
@@ -169,6 +183,7 @@ impl Message {
             tool_state: None,
             completion_check_state: None,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 
@@ -194,6 +209,7 @@ impl Message {
             }),
             completion_check_state: None,
             render_revision: 0,
+            table_horiz_offset: 0,
         }
     }
 
