@@ -6,7 +6,9 @@ use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_shared::session_diff::SessionDiffTracker;
 
 use crate::backend::GatewayBackendConfig;
-use crate::chat::{default_provider_list, merge_config_provider, ChatState, TodoMessageState};
+use crate::chat::{
+    default_provider_list, merge_config_provider, ChatState, Message, TodoMessageState,
+};
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::file_mention::{
     file_mention_candidates, file_mention_token, FileMentionCandidate, FileMentionToken,
@@ -15,7 +17,7 @@ use crate::input::file_mention::{
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
-use crate::render::markdown::MarkdownIncrementalState;
+use crate::render::markdown::{MarkdownIncrementalState, WideTableRegion};
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
 use crate::services::input_history::load_input_history;
@@ -116,6 +118,26 @@ pub struct ToolToggleRegion {
     pub rect: Rect,
 }
 
+/// A wide markdown table that is (at least partially) visible this frame.
+/// Derived in `render_chat` from each block's `wide_tables` metadata and used
+/// for mouse hit-testing (Shift+wheel) and as the keyboard scroll target.
+#[derive(Debug, Clone, Copy)]
+pub struct WideTableScrollRegion {
+    /// Owning message index within the transcript currently on screen (main
+    /// chat or the active subagent lane). The window itself lives on
+    /// `Message::table_horiz_offset`.
+    pub message_index: usize,
+    /// On-screen rectangle of the visible portion of the table.
+    pub rect: Rect,
+    /// Render viewport width (terminal columns) the window was clipped to.
+    /// Used for the horizontal scroll step so it matches the window actually
+    /// rendered instead of the outer message-area width.
+    pub viewport_width: usize,
+    /// Maximum `table_horiz_offset` (`natural_width - viewport_width`); a
+    /// scroll clamps to `[0, max_offset]`.
+    pub max_offset: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct SubagentOpenRegion {
     pub agent_id: String,
@@ -209,6 +231,9 @@ pub struct CachedMessageRender {
     pub width: u16,
     pub lines: Vec<Line<'static>>,
     pub wrapped_lines: Option<Vec<Vec<Line<'static>>>>,
+    /// Wide markdown tables (message-logical-line start, window metadata).
+    /// Empty for messages without any wide table.
+    pub wide_tables: Vec<WideTableRegion>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
     /// `Some(n)` for the active streaming assistant message rendered via the
@@ -235,6 +260,9 @@ pub struct MessageVisualBlock {
     pub lines: Vec<Line<'static>>,
     pub visual_lines: Vec<Line<'static>>,
     pub logical_to_visual_offset: Vec<usize>,
+    /// Wide markdown tables, `start_line` rebased to this block's logical
+    /// lines. Survives zero-clone moves alongside `lines`/`visual_lines`.
+    pub wide_tables: Vec<WideTableRegion>,
     pub tool_toggle_row_offset: Option<usize>,
     pub subagent_open_target: Option<SubagentOpenTarget>,
 }
@@ -353,6 +381,11 @@ pub struct RenderState {
     pub transcript_cache: Option<TranscriptRenderCache>,
     pub tool_toggle_regions: Vec<ToolToggleRegion>,
     pub subagent_open_regions: Vec<SubagentOpenRegion>,
+    /// Visible wide tables this frame (mouse hit-testing for horizontal
+    /// scroll). Rebuilt every frame from `transcript_cache` blocks.
+    pub wide_table_regions: Vec<WideTableScrollRegion>,
+    /// Topmost visible wide table; the keyboard target for ←/→.
+    pub wide_table_keyboard_target: Option<WideTableScrollRegion>,
     pub slash_popup_inner: Option<Rect>,
     pub file_mention_popup_inner: Option<Rect>,
     pub file_mention_view_start: usize,
@@ -692,6 +725,8 @@ impl AppState {
         self.render_state.transcript_cache = None;
         self.render_state.tool_toggle_regions.clear();
         self.render_state.subagent_open_regions.clear();
+        self.render_state.wide_table_regions.clear();
+        self.render_state.wide_table_keyboard_target = None;
         self.render_state.active_transcript_key = None;
     }
 
@@ -756,6 +791,82 @@ impl AppState {
             }
         } else {
             self.chat_state.scrollbar_dragging = dragging;
+        }
+    }
+
+    /// Number of display columns one horizontal scroll step moves a wide
+    /// table: `max(8, viewport_width / 3)`. `viewport_width` is the width the
+    /// target table was actually windowed to (its render viewport), not the
+    /// outer message area, so the step matches what is on screen.
+    pub fn table_horiz_scroll_step(viewport_width: usize) -> i64 {
+        std::cmp::max(8, viewport_width / 3) as i64
+    }
+
+    /// Move the horizontal window of the message owning `region` by `delta`
+    /// display columns (positive = right), clamped to `[0, region.max_offset]`.
+    /// Marks the message render-dirty so it re-renders at the new window.
+    /// Returns whether the window actually moved.
+    ///
+    /// The stored window is first re-based into this table's clamped range:
+    /// several wide tables in one message share a single window, so the stored
+    /// value can exceed the natural maximum of the table being scrolled. Using
+    /// the clamped value as the starting point keeps panning monotone instead
+    /// of jumping left on the first step.
+    pub fn scroll_wide_table(&mut self, region: &WideTableScrollRegion, delta: i64) -> bool {
+        let max_offset = region.max_offset as i64;
+        self.with_rendered_message_mut(region.message_index, |message| {
+            let current = message.table_horiz_offset.min(region.max_offset);
+            let new_offset = (current as i64 + delta).clamp(0, max_offset) as usize;
+            if new_offset == current {
+                return false;
+            }
+            message.table_horiz_offset = new_offset;
+            message.mark_render_dirty();
+            true
+        })
+        .unwrap_or(false)
+    }
+
+    /// Keyboard-directed horizontal scroll of the topmost visible wide table.
+    /// `direction` is -1 (left) or +1 (right); the step comes from
+    /// [`AppState::table_horiz_scroll_step`]. Returns whether the window moved.
+    pub fn scroll_active_wide_table(&mut self, direction: i64) -> bool {
+        let Some(region) = self.render_state.wide_table_keyboard_target else {
+            return false;
+        };
+        let step = Self::table_horiz_scroll_step(region.viewport_width);
+        self.scroll_wide_table(&region, direction.saturating_mul(step))
+    }
+
+    /// Subagent lane currently rendered as the transcript, if any.
+    ///
+    /// Mirrors the list selection in `render::transcript::render_chat`: a
+    /// stack entry whose lane no longer exists falls back to the main chat,
+    /// so callers never address a lane that is not on screen.
+    fn active_rendered_agent_id(&self) -> Option<String> {
+        self.chat_state
+            .active_subagent_id()
+            .filter(|agent_id| self.chat_state.subagent_lanes.contains_key(*agent_id))
+            .map(ToOwned::to_owned)
+    }
+
+    /// Run `f` on the message at `message_index` in the transcript currently
+    /// on screen (the active subagent lane, else the main chat). Returns
+    /// `None` when that transcript has no such message.
+    fn with_rendered_message_mut<R>(
+        &mut self,
+        message_index: usize,
+        f: impl FnOnce(&mut Message) -> R,
+    ) -> Option<R> {
+        if let Some(agent_id) = self.active_rendered_agent_id() {
+            self.chat_state
+                .subagent_lanes
+                .get_mut(&agent_id)?
+                .messages
+                .get_mut(message_index)
+                .map(f)
+        } else {
+            self.chat_state.messages.get_mut(message_index).map(f)
         }
     }
 
@@ -1388,7 +1499,7 @@ pub(crate) fn sandbox_backend_config(
 mod tests {
     use super::{
         current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState,
-        AppState, PlanPanelState, RuntimeStatusLight,
+        AppState, PlanPanelState, RuntimeStatusLight, WideTableScrollRegion,
     };
     use crate::backend::GatewayBackendConfig;
     use crate::config::{AgentRoleConfig, Config};
@@ -1740,5 +1851,253 @@ mod tests {
         assert_eq!(plan_panel.max_scroll_offset(), 0);
         plan_panel.scroll_down();
         assert_eq!(plan_panel.scroll_offset, 0);
+    }
+
+    /// Build a wide-table hit region for `message_index` with `viewport_width`
+    /// columns and `natural_width` total columns.
+    fn wide_region(
+        message_index: usize,
+        viewport_width: usize,
+        natural_width: usize,
+    ) -> WideTableScrollRegion {
+        WideTableScrollRegion {
+            message_index,
+            rect: ratatui::layout::Rect::new(0, 0, viewport_width as u16, 6),
+            viewport_width,
+            max_offset: natural_width.saturating_sub(viewport_width),
+        }
+    }
+
+    #[test]
+    fn scroll_wide_table_clamps_to_boundaries_and_marks_message_dirty() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system("table message".to_string()));
+        let message_index = state.chat_state.messages.len() - 1;
+        let revision_before = state.chat_state.messages[message_index].render_revision;
+
+        let region = wide_region(message_index, 20, 60); // max_offset 40
+
+        // Scrolling left past the left edge is a no-op.
+        assert!(!state.scroll_wide_table(&region, -100));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            0
+        );
+        assert_eq!(
+            state.chat_state.messages[message_index].render_revision, revision_before,
+            "no-op scroll must not dirty the message"
+        );
+
+        // Right scroll moves the window and dirties the message.
+        assert!(state.scroll_wide_table(&region, 30));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            30
+        );
+        assert_ne!(
+            state.chat_state.messages[message_index].render_revision, revision_before,
+            "moved window must mark the message dirty"
+        );
+
+        // Right scroll beyond the max clamps to `max_offset`.
+        let revision_after = state.chat_state.messages[message_index].render_revision;
+        assert!(state.scroll_wide_table(&region, 100));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            40
+        );
+        assert_ne!(
+            state.chat_state.messages[message_index].render_revision,
+            revision_after
+        );
+
+        // Once at the right edge, further right scrolling is a no-op.
+        let revision_final = state.chat_state.messages[message_index].render_revision;
+        assert!(!state.scroll_wide_table(&region, 1));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            40
+        );
+        assert_eq!(
+            state.chat_state.messages[message_index].render_revision, revision_final,
+            "clamped no-op must not dirty the message"
+        );
+    }
+
+    /// The window lives on the message, so deleting an earlier message must not
+    /// re-attach it to whatever ended up at the same index.
+    #[test]
+    fn wide_table_window_travels_with_its_message_across_deletion() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        // The initial chat state may already carry a system message; anchor on
+        // the index of the message this test pushes.
+        let owner_index = state.chat_state.messages.len();
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::user("first"));
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system("table owner"));
+        let owner_index = owner_index + 1;
+
+        assert!(state.scroll_wide_table(&wide_region(owner_index, 20, 60), 30));
+        assert_eq!(
+            state.chat_state.messages[owner_index].table_horiz_offset,
+            30
+        );
+
+        // Delete the earlier message: the owner shifts down, the *other*
+        // message now occupies the old index.
+        state.chat_state.messages.remove(owner_index - 1);
+
+        assert_eq!(
+            state.chat_state.messages[owner_index - 1].content,
+            "table owner",
+            "sanity: the owner moved to the deleted message's index"
+        );
+        assert_eq!(
+            state.chat_state.messages[owner_index - 1].table_horiz_offset,
+            30,
+            "the window must follow its message to the new index"
+        );
+    }
+
+    /// A window can be left on a message that is no longer rendered (deleted or
+    /// on another transcript); scrolling must then be a no-op rather than
+    /// panicking or addressing the wrong list.
+    #[test]
+    fn scroll_wide_table_on_a_missing_message_is_a_no_op() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        let missing = state.chat_state.messages.len() + 5;
+        assert!(!state.scroll_wide_table(&wide_region(missing, 20, 60), 10));
+    }
+
+    /// Several wide tables in one message share one window; a table narrower
+    /// than the shared window must pan from *its own* clamped start instead of
+    /// jumping left on the first step.
+    #[test]
+    fn scroll_wide_table_rebases_a_shared_window_into_the_targets_range() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system("two tables".to_string()));
+        let message_index = state.chat_state.messages.len() - 1;
+
+        // Wide table A pushes the shared window to 60.
+        let wide = wide_region(message_index, 20, 80); // max_offset 60
+        assert!(state.scroll_wide_table(&wide, 60));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            60
+        );
+
+        // Narrower table B (max_offset 20) is already showing its rightmost
+        // window at 60; one step left must land at 20 - step, not 60 - step.
+        let narrow = wide_region(message_index, 20, 40); // max_offset 20
+        assert!(state.scroll_wide_table(&narrow, -8));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            12
+        );
+    }
+
+    #[test]
+    fn scroll_active_wide_table_pans_topmost_target_with_step() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system("wide table".to_string()));
+        let message_index = state.chat_state.messages.len() - 1;
+        // Viewport 36 -> step = max(8, 36/3) = 12.
+        state.render_state.wide_table_keyboard_target = Some(wide_region(message_index, 36, 80)); // max_offset 44
+
+        assert!(state.scroll_active_wide_table(1));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            12
+        );
+
+        assert!(state.scroll_active_wide_table(1));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            24
+        );
+
+        assert!(state.scroll_active_wide_table(-1));
+        assert_eq!(
+            state.chat_state.messages[message_index].table_horiz_offset,
+            12
+        );
+
+        // No target -> no-op (falls through to the input box / navigation).
+        state.render_state.wide_table_keyboard_target = None;
+        assert!(!state.scroll_active_wide_table(1));
+    }
+
+    /// The keyboard target of a subagent lane must scroll the *lane's* message,
+    /// never the main transcript's message at the same index.
+    #[test]
+    fn scroll_active_wide_table_addresses_the_active_subagent_lane() {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        state
+            .chat_state
+            .messages
+            .push(crate::chat::Message::system("main owner".to_string()));
+        state.chat_state.ensure_subagent_lane(
+            "agent-1".to_string(),
+            None,
+            "Title".to_string(),
+            "Description".to_string(),
+            "Goal".to_string(),
+        );
+        state
+            .chat_state
+            .subagent_lanes
+            .get_mut("agent-1")
+            .expect("lane inserted above")
+            .messages
+            .push(crate::chat::Message::system("lane owner".to_string()));
+        assert!(state.chat_state.enter_subagent_view("agent-1"));
+
+        state.render_state.wide_table_keyboard_target = Some(wide_region(0, 20, 60));
+        assert!(state.scroll_active_wide_table(1));
+
+        assert_eq!(
+            state
+                .chat_state
+                .subagent_lanes
+                .get("agent-1")
+                .expect("lane exists")
+                .messages[0]
+                .table_horiz_offset,
+            8,
+            "lane message must receive the scroll"
+        );
+        assert_eq!(
+            state.chat_state.messages[0].table_horiz_offset, 0,
+            "main transcript message at the same index must stay untouched"
+        );
+    }
+
+    #[test]
+    fn table_horiz_scroll_step_uses_the_table_viewport() {
+        assert_eq!(AppState::table_horiz_scroll_step(0), 8);
+        assert_eq!(AppState::table_horiz_scroll_step(21), 8);
+        assert_eq!(AppState::table_horiz_scroll_step(24), 8);
+        assert_eq!(AppState::table_horiz_scroll_step(36), 12);
+        assert_eq!(AppState::table_horiz_scroll_step(120), 40);
     }
 }

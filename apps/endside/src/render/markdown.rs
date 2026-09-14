@@ -19,6 +19,30 @@ struct MarkdownTable {
     rows: Vec<Vec<String>>,
 }
 
+/// A markdown table whose natural width exceeds the render viewport and
+/// was therefore windowed to the display-column slice
+/// `[horiz_offset, horiz_offset + viewport_width)` so every rendered line
+/// stays within the viewport and cell text is never ellipsised.
+///
+/// Rendered by [`render_table`]; surfaced to the transcript layer via
+/// [`render_markdown_with_horiz`] so wide tables can be panned horizontally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideTableRegion {
+    /// Rendered logical-line index (0-based, within the markdown output)
+    /// where this wide table begins.
+    pub start_line: usize,
+    /// Number of rendered logical lines the table occupies, including its
+    /// trailing hint line.
+    pub line_count: usize,
+    /// Full natural display width of the table (terminal columns).
+    pub natural_width: usize,
+    /// Display-column window start used when rendering the table.
+    pub horiz_offset: usize,
+    /// Render viewport width (terminal columns) the window was clipped to.
+    /// `natural_width - viewport_width` is the maximum `horiz_offset`.
+    pub viewport_width: usize,
+}
+
 /// Mutable state carried across lines by the markdown line parser.
 ///
 /// Only `in_code_block`, `code_language`, and `show_code_language_label`
@@ -37,6 +61,9 @@ struct MarkdownParseState {
 struct MarkdownParseOutcome {
     lines: Vec<Line<'static>>,
     state: MarkdownParseState,
+    /// Windowed wide tables discovered while parsing, in render order.
+    /// `start_line` is relative to `lines`.
+    wide_tables: Vec<WideTableRegion>,
 }
 
 /// Core line-oriented markdown state machine, parameterised by the
@@ -53,8 +80,10 @@ fn parse_markdown_lines(
     mut state: MarkdownParseState,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
 ) -> MarkdownParseOutcome {
     let mut lines = Vec::new();
+    let mut wide_tables = Vec::new();
     let mut line_index = 0;
 
     while line_index < raw_lines.len() {
@@ -96,7 +125,18 @@ fn parse_markdown_lines(
         }
 
         if let Some((table, consumed)) = parse_table_block(&raw_lines[line_index..]) {
-            lines.extend(render_table(&table, theme, width));
+            let table_start = lines.len();
+            let (table_lines, wide) = render_table(&table, theme, width, table_horiz_offset);
+            lines.extend(table_lines);
+            if let Some((natural_width, horiz_offset)) = wide {
+                wide_tables.push(WideTableRegion {
+                    start_line: table_start,
+                    line_count: lines.len() - table_start,
+                    natural_width,
+                    horiz_offset,
+                    viewport_width: width as usize,
+                });
+            }
             line_index += consumed;
             continue;
         }
@@ -186,16 +226,53 @@ fn parse_markdown_lines(
         line_index += 1;
     }
 
-    MarkdownParseOutcome { lines, state }
+    MarkdownParseOutcome {
+        lines,
+        state,
+        wide_tables,
+    }
 }
 
+/// Retained as a compatibility wrapper with the original signature (window
+/// start 0 — the leftmost window). Only exercised by tests now that callers
+/// use [`render_markdown_with_horiz`] / [`render_markdown_incremental`].
+#[allow(dead_code)]
 pub fn render_markdown(text: &str, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+    render_markdown_with_horiz(text, theme, width, 0).0
+}
+
+/// Render markdown with an optional horizontal window for wide tables.
+///
+/// Wide tables (natural width > `width`) are rendered at their natural
+/// column widths and then sliced to the display-column window
+/// `[table_horiz_offset, table_horiz_offset + width)`; every returned
+/// logical line stays within `width` columns and **no cell text is
+/// ellipsised**. Narrow tables render exactly as before. The returned
+/// `wide_tables` describe the windowed tables for the transcript layer to
+/// make them horizontally scrollable.
+///
+/// [`render_markdown`] is a thin wrapper keeping its original signature
+/// (window start 0 — the leftmost window), so existing callers and
+/// regression tests are unaffected.
+pub fn render_markdown_with_horiz(
+    text: &str,
+    theme: &Theme,
+    width: u16,
+    table_horiz_offset: usize,
+) -> (Vec<Line<'static>>, Vec<WideTableRegion>) {
     if text.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let raw_lines: Vec<&str> = text.lines().collect();
-    parse_markdown_lines(&raw_lines, MarkdownParseState::default(), theme, width).lines
+    let outcome = parse_markdown_lines(
+        &raw_lines,
+        MarkdownParseState::default(),
+        theme,
+        width,
+        table_horiz_offset,
+    );
+    (outcome.lines, outcome.wide_tables)
 }
 
 /// Frozen incremental-render state for one streaming markdown message.
@@ -238,6 +315,10 @@ pub struct MarkdownIncrementalState {
     /// Width and theme fingerprint; a change invalidates the cache.
     width: u16,
     theme: Theme,
+    /// Horizontal window start used for wide tables in the frozen prefix. A
+    /// change means the frozen lines were rendered at a different window, so
+    /// the incremental cache is invalidated (full re-render this tick).
+    table_horiz_offset: usize,
     /// `message.thinking_content.len()` (byte length) when this state was
     /// built. The thinking block sits above the markdown in the frozen
     /// prefix; a length change means the prefix line count is misaligned,
@@ -279,6 +360,10 @@ pub struct MarkdownIncrementResult {
     /// the complete markdown output.
     pub lines: Vec<Line<'static>>,
     pub wrapped: Vec<Vec<Line<'static>>>,
+    /// Wide tables in this result's `lines`. `start_line` is relative to the
+    /// FULL markdown output (frozen prefix + `lines`), so the caller can
+    /// rebase them straight onto the message block.
+    pub wide_tables: Vec<WideTableRegion>,
     /// `Some(n)` when the incremental path applied: move `n` frozen
     /// markdown lines from the previous block as the prefix. `None` for
     /// the full fallback (use `lines` as the complete output).
@@ -298,12 +383,14 @@ pub fn render_markdown_incremental(
     content: &str,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
 ) -> MarkdownIncrementResult {
     // Fast path: no content.
     if content.is_empty() {
         return MarkdownIncrementResult {
             lines: Vec::new(),
             wrapped: Vec::new(),
+            wide_tables: Vec::new(),
             frozen_markdown_move_count: None,
             new_state: MarkdownIncrementalState {
                 frozen_content: String::new(),
@@ -311,22 +398,31 @@ pub fn render_markdown_incremental(
                 frozen_markdown_line_count: 0,
                 width,
                 theme: *theme,
+                table_horiz_offset,
                 thinking_len: 0,
             },
         };
     }
 
-    // Validate cache. Any mismatch → full rebuild.
+    // Validate cache. Any mismatch (including a horizontal window change) →
+    // full rebuild.
     let can_increment = match &prev {
-        Some(p) => p.width == width && p.theme == *theme && content.starts_with(&p.frozen_content),
+        Some(p) => {
+            p.width == width
+                && p.theme == *theme
+                && p.table_horiz_offset == table_horiz_offset
+                && content.starts_with(&p.frozen_content)
+        }
         None => false,
     };
 
     if !can_increment {
-        let (lines, wrapped, state) = render_markdown_full(content, theme, width);
+        let (lines, wrapped, state, wide_tables) =
+            render_markdown_full(content, theme, width, table_horiz_offset);
         return MarkdownIncrementResult {
             lines,
             wrapped,
+            wide_tables,
             frozen_markdown_move_count: None,
             new_state: state,
         };
@@ -349,7 +445,13 @@ pub fn render_markdown_incremental(
     // table, not as separate plain lines. The frozen prefix (already in
     // the previous tick's block) is NOT re-emitted here — eliminating the
     // O(frozen) clone that made the prior implementation O(n²) total.
-    let full_outcome = parse_markdown_lines(&all_remainder_lines, prev.state.clone(), theme, width);
+    let full_outcome = parse_markdown_lines(
+        &all_remainder_lines,
+        prev.state.clone(),
+        theme,
+        width,
+        table_horiz_offset,
+    );
     let suffix_lines = full_outcome.lines;
     let suffix_wrapped: Vec<Vec<Line<'static>>> = suffix_lines
         .iter()
@@ -365,10 +467,17 @@ pub fn render_markdown_incremental(
         MarkdownParseOutcome {
             lines: Vec::new(),
             state: prev.state.clone(),
+            wide_tables: Vec::new(),
         }
     } else {
         let trimmed_lines: Vec<&str> = trimmed_complete.lines().collect();
-        parse_markdown_lines(&trimmed_lines, prev.state.clone(), theme, width)
+        parse_markdown_lines(
+            &trimmed_lines,
+            prev.state.clone(),
+            theme,
+            width,
+            table_horiz_offset,
+        )
     };
 
     let new_frozen_count = prev.frozen_markdown_line_count + frozen_outcome.lines.len();
@@ -381,12 +490,26 @@ pub fn render_markdown_incremental(
         frozen_markdown_line_count: new_frozen_count,
         width,
         theme: *theme,
+        table_horiz_offset,
         thinking_len: prev.thinking_len,
     };
+
+    // Rebase suffix wide-table start lines onto the full markdown output:
+    // the suffix's first rendered line sits immediately after the frozen
+    // prefix (`prev.frozen_markdown_line_count` logical lines).
+    let suffix_wide_tables: Vec<WideTableRegion> = full_outcome
+        .wide_tables
+        .iter()
+        .map(|wt| WideTableRegion {
+            start_line: wt.start_line + prev.frozen_markdown_line_count,
+            ..*wt
+        })
+        .collect();
 
     MarkdownIncrementResult {
         lines: suffix_lines,
         wrapped: suffix_wrapped,
+        wide_tables: suffix_wide_tables,
         frozen_markdown_move_count: Some(prev.frozen_markdown_line_count),
         new_state,
     }
@@ -418,12 +541,15 @@ fn render_markdown_full(
     content: &str,
     theme: &Theme,
     width: u16,
+    table_horiz_offset: usize,
 ) -> (
     Vec<Line<'static>>,
     Vec<Vec<Line<'static>>>,
     MarkdownIncrementalState,
+    Vec<WideTableRegion>,
 ) {
-    let logical_lines = render_markdown(content, theme, width);
+    let (logical_lines, wide_tables) =
+        render_markdown_with_horiz(content, theme, width, table_horiz_offset);
     let wrapped_lines: Vec<Vec<Line<'static>>> = logical_lines
         .iter()
         .map(|line| super::transcript::wrap_line_to_visual_lines(line, width))
@@ -445,8 +571,13 @@ fn render_markdown_full(
         (0, MarkdownParseState::default())
     } else {
         let frozen_lines: Vec<&str> = frozen_content.lines().collect();
-        let outcome =
-            parse_markdown_lines(&frozen_lines, MarkdownParseState::default(), theme, width);
+        let outcome = parse_markdown_lines(
+            &frozen_lines,
+            MarkdownParseState::default(),
+            theme,
+            width,
+            table_horiz_offset,
+        );
         (outcome.lines.len(), outcome.state)
     };
 
@@ -459,8 +590,10 @@ fn render_markdown_full(
             frozen_markdown_line_count: frozen_count,
             width,
             theme: *theme,
+            table_horiz_offset,
             thinking_len: 0,
         },
+        wide_tables,
     )
 }
 
@@ -613,13 +746,23 @@ fn is_escaped(chars: &[char], index: usize) -> bool {
     slash_count % 2 == 1
 }
 
-fn render_table(table: &MarkdownTable, theme: &Theme, width: u16) -> Vec<Line<'static>> {
+/// Render a markdown table. Columns use their natural display width; when the
+/// table is wider than `width` it is windowed to
+/// `[table_horiz_offset, table_horiz_offset + width)` and a muted hint line
+/// is appended. Returns the rendered lines plus, for wide tables,
+/// `(natural_width, clamped_offset)` so the caller can record the window.
+fn render_table(
+    table: &MarkdownTable,
+    theme: &Theme,
+    width: u16,
+    table_horiz_offset: usize,
+) -> (Vec<Line<'static>>, Option<(usize, usize)>) {
     if table.header.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
 
     let column_count = table.header.len();
-    let column_widths = table_column_widths(&table.header, &table.rows, width, theme);
+    let column_widths = table_column_widths(&table.header, &table.rows, theme);
     let border_style = Style::default().fg(theme.muted).bg(theme.background);
 
     let mut rendered = Vec::new();
@@ -664,47 +807,164 @@ fn render_table(table: &MarkdownTable, theme: &Theme, width: u16) -> Vec<Line<'s
         &column_widths,
         border_style,
     ));
-    rendered
+
+    // Natural (un-windowed) total display width of the table.
+    let natural_width = line_display_width(&rendered[0]);
+    let viewport = width as usize;
+    if natural_width <= viewport {
+        return (rendered, None);
+    }
+
+    // Wide table: window every line to `[offset, offset + viewport)`.
+    let max_offset = natural_width.saturating_sub(viewport);
+    let offset = table_horiz_offset.min(max_offset);
+    let mut lines: Vec<Line<'static>> = rendered
+        .into_iter()
+        .map(|line| slice_line_by_display_columns(&line, offset, offset + viewport))
+        .map(|line| pad_line_to_display_columns(line, viewport))
+        .collect();
+    lines.push(render_table_hint_line(
+        theme,
+        natural_width,
+        offset,
+        offset + viewport,
+        viewport,
+    ));
+    (lines, Some((natural_width, offset)))
 }
 
-fn table_column_widths(
-    header: &[String],
-    body: &[Vec<String>],
-    width: u16,
-    theme: &Theme,
-) -> Vec<usize> {
+fn table_column_widths(header: &[String], body: &[Vec<String>], theme: &Theme) -> Vec<usize> {
     let column_count = header.len();
     let mut widths = vec![3; column_count];
     for row in std::iter::once(header).chain(body.iter().map(Vec::as_slice)) {
         for (idx, cell) in row.iter().enumerate().take(column_count) {
-            widths[idx] = widths[idx].max(inline_display_width(cell, theme).min(30));
+            widths[idx] = widths[idx].max(inline_display_width(cell, theme));
         }
     }
-
-    let available_width = width as usize;
-    let fixed_width = column_count + 1 + (column_count * 2);
-    let max_content_width = available_width.saturating_sub(fixed_width);
-    if max_content_width == 0 {
-        return vec![1; column_count];
-    }
-
-    while widths.iter().sum::<usize>() > max_content_width {
-        if let Some((idx, max_width)) = widths
-            .iter()
-            .copied()
-            .enumerate()
-            .max_by_key(|(_, width)| *width)
-        {
-            if max_width <= 1 {
-                break;
-            }
-            widths[idx] -= 1;
-        } else {
-            break;
-        }
-    }
-
     widths
+}
+
+/// Muted hint line appended after every windowed (wide) table, mirroring the
+/// scroll affordances (◀…▶), the visible column range and the total width —
+/// e.g. `◀…▶  cols 3-12/18  Alt+←/→`. Downgraded to ASCII where the terminal
+/// needs it.
+fn render_table_hint_line(
+    theme: &Theme,
+    natural_width: usize,
+    window_start: usize,
+    window_end: usize,
+    viewport: usize,
+) -> Line<'static> {
+    let window_end_shown = window_end.min(natural_width);
+    // Pick the most informative hint that still fits the viewport. The full
+    // form explains both mouse and keyboard affordances; narrower viewports
+    // fall back to shorter spellings, and finally to an empty line, so the
+    // hint itself never overflows the window it annotates.
+    //
+    // Candidates are measured *after* `sanitize_terminal_text`, because the
+    // ASCII downgrade expands glyphs (`…` -> `...`, `←` -> `<-`); measuring
+    // the source text would let a downgraded hint exceed the viewport.
+    let variants = [
+        format!(
+            "  {}  cols {}-{}/{}  {} or Shift+wheel",
+            "◀…▶",
+            window_start + 1,
+            window_end_shown,
+            natural_width,
+            "Alt+←/→"
+        ),
+        format!(
+            "  {}  cols {}-{}/{}  {}",
+            "◀…▶",
+            window_start + 1,
+            window_end_shown,
+            natural_width,
+            "Alt+←/→"
+        ),
+        format!(
+            "{} cols {}-{}/{}",
+            "◀…▶",
+            window_start + 1,
+            window_end_shown,
+            natural_width
+        ),
+        format!("{}  …/{}", "◀…▶", natural_width),
+    ];
+    let text = variants
+        .into_iter()
+        .map(|candidate| sanitize_terminal_text(&candidate))
+        .find(|sanitized| display_width(sanitized) <= viewport)
+        .unwrap_or_default();
+    Line::styled(
+        text,
+        Style::default()
+            .fg(theme.muted)
+            .add_modifier(Modifier::ITALIC),
+    )
+}
+
+/// Slice a styled `Line` to the display-column window `[start, end)`,
+/// preserving span styles. The result is never wider than `end - start`
+/// columns and, crucially, keeps the source's column grid: a character that
+/// straddles the *left* boundary is replaced by as many spaces as its
+/// remaining columns, so every following glyph stays in its original column.
+///
+/// Dropping such a character instead would shift the whole row left by its
+/// width while the width-1 border rows stay put, leaving the table's vertical
+/// borders misaligned (a double-width CJK/emoji glyph straddling the window
+/// start is enough to trigger it). A character straddling the *right* boundary
+/// is dropped: the trailing pad added by [`pad_line_to_display_columns`]
+/// restores a uniform right edge.
+fn slice_line_by_display_columns(line: &Line<'_>, start: usize, end: usize) -> Line<'static> {
+    if end <= start {
+        return Line::from(String::new());
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut column = 0usize;
+    for span in &line.spans {
+        let mut segment = String::new();
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            let next_column = column + width;
+            if next_column <= start {
+                // Entirely left of the window.
+            } else if column >= start && next_column <= end {
+                segment.push(ch);
+            } else if column < start {
+                // Straddles the left boundary: keep its visible columns as
+                // blanks so the remaining glyphs do not slide left.
+                segment.push_str(&" ".repeat(next_column - start));
+            }
+            // Straddling the right boundary: dropped, padded later.
+            column = next_column;
+        }
+        if !segment.is_empty() {
+            spans.push(Span::styled(segment, span.style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Right-pad a `Line` to exactly `target` display columns with plain spaces.
+///
+/// Wide-table windowing feeds every line through
+/// [`slice_line_by_display_columns`], which drops characters that straddle the
+/// window boundary. With full-width (CJK) cell content the sliced line can end
+/// one display column short of the viewport (the trailing pad/border is
+/// dropped while the border lines, made of width-1 runes, keep a full row),
+/// so the right edge becomes jagged and the table border no longer reads as a
+/// single vertical line. Padding to the full window width restores a uniform
+/// cut at the right edge, matching how ASCII-only wide tables already look.
+fn pad_line_to_display_columns(line: Line<'static>, target: usize) -> Line<'static> {
+    let width = line_display_width(&line);
+    let padding = target.saturating_sub(width);
+    if padding == 0 {
+        return line;
+    }
+    let mut spans = line.spans;
+    spans.push(Span::raw(" ".repeat(padding)));
+    Line::from(spans)
 }
 
 fn render_table_border(
@@ -1067,15 +1327,375 @@ mod tests {
 
     #[test]
     fn table_rendering_truncates_to_available_width() {
-        let lines = render_markdown(
+        // A table wider than the viewport is no longer squeezed or ellipsised:
+        // columns keep their natural width, every rendered line is windowed to
+        // the viewport, the wide-table metadata is reported and a muted hint
+        // row is appended so the table can be panned horizontally.
+        let (lines, wide) = render_markdown_with_horiz(
             "| Column A | Column B |\n| --- | --- |\n| a very long value | another long value |",
             &test_theme(),
             24,
+            0,
         );
         let text = lines.iter().map(line_text).collect::<Vec<_>>();
 
         assert!(text.iter().all(|line| display_width(line) <= 24));
-        assert!(text.iter().any(|line| line.contains('…')));
+        // Cell content is never ellipsised by the window; the trailing hint
+        // row's `…` is a decorative scroll affordance (◀…▶), not truncation.
+        assert!(text
+            .iter()
+            .take(text.len() - 1)
+            .all(|line| !line.contains('…')));
+        assert_eq!(wide.len(), 1);
+        assert!(wide[0].natural_width > 24);
+        assert_eq!(wide[0].horiz_offset, 0);
+        assert_eq!(wide[0].viewport_width, 24);
+        // The trailing hint row mirrors the scroll affordance + window.
+        assert!(text.last().unwrap().contains("cols"));
+        assert!(text.last().unwrap().contains('/'));
+    }
+
+    #[test]
+    fn wide_table_renders_in_full_when_viewport_is_sufficient() {
+        // A viewport wide enough to hold the natural table shows the full
+        // content with no omission and no wide-table metadata.
+        let long_cell = "c".repeat(120);
+        let content = format!("| A | B |\n| --- | --- |\n| {long_cell} | tail |");
+        let (lines, wide) = render_markdown_with_horiz(&content, &test_theme(), 160, 0);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert!(wide.is_empty());
+        assert!(text.iter().all(|line| display_width(line) <= 160));
+        assert!(text.join("\n").contains(&long_cell));
+        assert!(!text.join("\n").contains('…'));
+    }
+
+    #[test]
+    fn different_horiz_offsets_produce_different_windows() {
+        let content =
+            "| Left | Middle | Right |\n| --- | --- | --- |\n| 11111 | 2222222222222222 | 33333 |";
+        let (l0, _w0) = render_markdown_with_horiz(content, &test_theme(), 20, 0);
+        let (l8, _w8) = render_markdown_with_horiz(content, &test_theme(), 20, 8);
+        let (lmax, wmax) = render_markdown_with_horiz(content, &test_theme(), 20, 1000);
+        let t0 = l0.iter().map(line_text).collect::<Vec<_>>();
+        let t8 = l8.iter().map(line_text).collect::<Vec<_>>();
+        let tmax = lmax.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(wmax.len(), 1);
+        assert_eq!(t0.len(), t8.len());
+        // Moving the window by 8 columns changes the visible slice.
+        assert_ne!(t0[1], t8[1]);
+        assert_ne!(t0[3], t8[3]);
+        // Every windowed line (including the hint row) stays in the viewport.
+        assert!(t0.iter().all(|l| display_width(l) <= 20));
+        assert!(t8.iter().all(|l| display_width(l) <= 20));
+        assert!(tmax.iter().all(|l| display_width(l) <= 20));
+        // The window start shifts the visible content: the leftmost window
+        // shows the left cell, the offset-8 window shows the middle cell,
+        // and the huge (clamped-to-max) offset reveals the right-hand cell.
+        assert!(t0[1].contains("Left"));
+        assert!(t8[1].contains("Middle"));
+        assert!(tmax[3].contains("33333"));
+    }
+
+    #[test]
+    fn horiz_window_slices_by_display_columns_and_keeps_styles() {
+        use ratatui::style::Color;
+        let bold = Style::default().fg(Color::Red);
+        // 你 (w2) 好 (w2) y (w1) o (w1) 📁 (w2) u (w1) x (w1)
+        let line = Line::from(vec![
+            Span::styled("你", bold),
+            Span::styled("好yo", Style::default()),
+            Span::styled("📁ux", bold),
+        ]);
+        let sliced = slice_line_by_display_columns(&line, 2, 8);
+        let text = line_text(&sliced);
+        // Window [2,8): keeps 好(2-4) y(4-5) o(5-6) 📁(6-8); 你 and u/x fall
+        // outside/straddle the boundary and are dropped.
+        assert_eq!(text, "好yo📁");
+        assert!(display_width(&text) <= 6);
+        assert_eq!(sliced.spans[0].content, "好yo");
+        assert!(sliced.spans[0].style.fg.is_none());
+        assert_eq!(sliced.spans[1].content, "📁");
+        assert_eq!(sliced.spans[1].style.fg, Some(Color::Red));
+    }
+
+    /// Display column each border/junction glyph of a rendered table row sits
+    /// at. A correctly windowed table has the same set for every row (that is
+    /// what makes the vertical borders read as straight lines).
+    fn border_glyph_columns(text: &str) -> Vec<usize> {
+        const GLYPHS: &str =
+            "\u{2502}\u{250c}\u{2510}\u{2514}\u{2518}\u{251c}\u{2524}\u{252c}\u{2534}\u{253c}";
+        let mut columns = Vec::new();
+        let mut column = 0usize;
+        for ch in text.chars() {
+            if GLYPHS.contains(ch) {
+                columns.push(column);
+            }
+            column += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+        columns
+    }
+
+    #[test]
+    fn wide_cjk_table_window_keeps_uniform_right_edge() {
+        // Regression: windowing a wide CJK table used to end the data row one
+        // display column short of the viewport. A full-width character filled
+        // the last columns so the trailing pad and the cell border (both
+        // width-1) were dropped, while the border lines (made of width-1
+        // runes) stayed full width — leaving a jagged right edge. Every
+        // windowed line must fill the viewport exactly so the cut is uniform.
+        let content = "| 名字 | 描述 |\n| --- | --- |\n| 小明 | 一个比较长的中文字符串用来测试 |";
+        let viewport = 40u16;
+        let (lines, wide) = render_markdown_with_horiz(content, &test_theme(), viewport, 0);
+        assert_eq!(wide.len(), 1);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+        // All table lines (excluding the trailing hint row) fill the viewport.
+        for (idx, t) in text.iter().enumerate().take(text.len() - 1) {
+            assert_eq!(
+                display_width(t),
+                viewport as usize,
+                "table line {idx} must fill the viewport"
+            );
+        }
+        // The data row (previously 1 column short) must be exactly viewport wide.
+        assert_eq!(display_width(&text[3]), viewport as usize);
+    }
+
+    #[test]
+    fn slice_keeps_the_column_grid_when_a_wide_glyph_straddles_the_left_edge() {
+        // 你 (cols 0-2) 好 (2-4) y (4-5) o (5-6).
+        let line = Line::from("你好yo");
+        // Window [1,6): 你 straddles the left edge, so its one visible column
+        // becomes a blank instead of being dropped — 好 must stay in column 1.
+        assert_eq!(
+            line_text(&slice_line_by_display_columns(&line, 1, 6)),
+            " 好yo"
+        );
+        // Dropping it (the pre-fix behaviour) would have produced "好yo",
+        // sliding 好 to column 0 and misaligning the row against the width-1
+        // border rows.
+        assert_eq!(
+            line_text(&slice_line_by_display_columns(&line, 2, 6)),
+            "好yo"
+        );
+        // A wide glyph straddling the *right* edge is still dropped, and the
+        // pad restores the uniform right edge.
+        let clipped = slice_line_by_display_columns(&line, 0, 3);
+        assert_eq!(line_text(&clipped), "你");
+        let padded = pad_line_to_display_columns(clipped, 3);
+        assert_eq!(display_width(&line_text(&padded)), 3);
+    }
+
+    #[test]
+    fn wide_table_windows_keep_the_column_grid_at_every_reachable_offset() {
+        // Regression: a double-width (CJK/emoji) glyph straddling the window
+        // start was dropped instead of replaced by blanks, shifting every
+        // later glyph of that row one column left while the width-1 border
+        // rows stayed put. Padding the right edge only equalized line
+        // *lengths*, so the borders stayed jagged (e.g. viewport 40 with the
+        // first -> step of 13, or viewport 25 at the rightmost window).
+        //
+        // Invariant checked here: at every offset the arrows/wheel can reach,
+        // every row of the windowed table puts its border glyphs in the same
+        // display columns, and every row is exactly viewport wide.
+        let long: String = "中文内容测试".repeat(10);
+        let tables = [
+            format!("| 名字 | 描述 |\n| --- | --- |\n| 小明 | {long} |"),
+            format!("| A | B |\n| --- | --- |\n| {long} | tail |"),
+            format!("| 📁 | 说明 |\n| --- | --- |\n| x | {long} |"),
+        ];
+        let theme = test_theme();
+        for content in &tables {
+            for viewport in [20u16, 25, 30, 40, 60, 80, 120] {
+                let (_, wide) = render_markdown_with_horiz(content, &theme, viewport, 0);
+                assert_eq!(wide.len(), 1, "viewport {viewport} should window");
+                let max_offset = wide[0].natural_width - viewport as usize;
+                let step = std::cmp::max(8usize, viewport as usize / 3);
+
+                // Exactly the offsets the app reaches: 0, step, 2*step, ... and
+                // the clamped rightmost window.
+                let mut offsets = vec![0usize];
+                let mut offset = step;
+                while offset < max_offset {
+                    offsets.push(offset);
+                    offset += step;
+                }
+                offsets.push(max_offset);
+
+                for offset in offsets {
+                    let (lines, _) = render_markdown_with_horiz(content, &theme, viewport, offset);
+                    let text: Vec<String> = lines.iter().map(|l| line_text(l)).collect();
+                    let rows = &text[..text.len() - 1]; // drop the hint row
+                    let expected = border_glyph_columns(&rows[0]);
+                    for (idx, row) in rows.iter().enumerate() {
+                        assert_eq!(
+                            display_width(row),
+                            viewport as usize,
+                            "viewport {viewport} offset {offset}: row {idx} width"
+                        );
+                        assert_eq!(
+                            border_glyph_columns(row),
+                            expected,
+                            "viewport {viewport} offset {offset}: row {idx} border \
+                             columns drifted from the top border row\nrow0: {:?}\nrow{idx}: {row:?}",
+                            rows[0]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pad_line_to_display_columns_pads_up_to_target_and_noops_when_larger() {
+        // Padding is monotone: it only ever adds columns up to `target`; a
+        // target no larger than the current width must leave the line
+        // untouched (saturating, never truncates).
+        let line = Line::from(vec![Span::raw("你好o")]); // display width 5
+        assert_eq!(
+            line_text(&pad_line_to_display_columns(line.clone(), 8)),
+            "你好o   "
+        );
+        assert_eq!(
+            line_text(&pad_line_to_display_columns(line.clone(), 5)),
+            "你好o"
+        );
+        assert_eq!(
+            line_text(&pad_line_to_display_columns(line.clone(), 3)),
+            "你好o"
+        );
+        assert_eq!(
+            line_text(&pad_line_to_display_columns(line.clone(), 0)),
+            "你好o"
+        );
+    }
+
+    #[test]
+    fn table_exactly_viewport_width_is_not_windowed() {
+        // Exact-fit boundary: natural_width == viewport must keep the full
+        // table with its real corners (┐/┘), no windowing and no hint row.
+        let content = "| A | B |\n| --- | --- |\n| 1 | 2 |";
+        let viewport = 13u16; // matches the natural width of this table
+        let (lines, wide) = render_markdown_with_horiz(content, &test_theme(), viewport, 0);
+        assert!(wide.is_empty());
+        let text = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(text.len(), 5);
+        assert!(text[0].contains('┐'));
+        assert!(text[4].contains('┘'));
+        for t in &text {
+            assert!(display_width(t) <= viewport as usize);
+        }
+    }
+
+    #[test]
+    fn wide_table_narrow_viewport_never_overflows_or_panics() {
+        // Degenerate narrow viewports must neither panic nor overflow: every
+        // table line stays exactly viewport-wide (uniform right edge), and
+        // the wide-table metadata is reported so panning stays possible.
+        let content = "| 名称 | 状态 |\n| --- | --- |\n| 小明 | 一个比较长的中文字符串用来测试 |";
+        for viewport in [1u16, 2, 3, 4, 6, 8] {
+            let (lines, wide) = render_markdown_with_horiz(content, &test_theme(), viewport, 0);
+            assert_eq!(
+                wide.len(),
+                1,
+                "viewport {viewport} should trigger windowing"
+            );
+            let text = lines.iter().map(line_text).collect::<Vec<_>>();
+            assert!(text.len() >= 2);
+            // All table lines (excluding the trailing hint row) fit exactly.
+            for (idx, t) in text.iter().enumerate().take(text.len() - 1) {
+                assert_eq!(
+                    display_width(t),
+                    viewport as usize,
+                    "viewport {viewport} table line {idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_table_hint_never_overflows_its_viewport() {
+        // The hint is measured *after* the ASCII downgrade and falls back to an
+        // empty line, so it can never be wider than the window it annotates —
+        // including the degenerate widths where no spelling fits.
+        let long: String = "中文内容测试".repeat(10); // 60 CJK chars -> natural width 131
+        let content = format!("| 名称 | 状态 |\n| --- | --- |\n| 小明 | {long} |");
+        for viewport in [1u16, 2, 3, 4, 5, 8, 12, 20, 24, 30, 40, 60, 80] {
+            let (lines, wide) = render_markdown_with_horiz(&content, &test_theme(), viewport, 0);
+            assert_eq!(wide.len(), 1, "viewport {viewport} should window");
+            let hint = line_text(lines.last().expect("hint row"));
+            assert!(
+                display_width(&sanitize_terminal_text(&hint)) <= viewport as usize,
+                "viewport {viewport}: hint {hint:?} overflows"
+            );
+        }
+    }
+
+    #[test]
+    fn hint_line_only_appears_for_wide_tables() {
+        let narrow = "| Name | Status |\n| --- | --- |\n| xiaoO | ready |";
+        let (lines_narrow, wide_narrow) = render_markdown_with_horiz(narrow, &test_theme(), 40, 0);
+        assert!(wide_narrow.is_empty());
+        assert!(!line_text(lines_narrow.last().unwrap()).contains("cols"));
+
+        let wide =
+            "| Name | A very long header column |\n| --- | --- |\n| xiaoO | another long value |";
+        let (lines_wide, wide_meta) = render_markdown_with_horiz(wide, &test_theme(), 20, 0);
+        assert_eq!(wide_meta.len(), 1);
+        assert_eq!(lines_wide.len(), 6); // 5 table lines + 1 hint
+        let hint = line_text(lines_wide.last().unwrap());
+        assert!(hint.contains("cols"));
+        assert!(hint.contains('/'));
+        assert!(!hint.contains("列"), "hint must be English: {hint:?}");
+        // Compare against the *downgraded* arrows: on Windows/WSL terminals the
+        // hint renders as `<...>` instead of `◀…▶`.
+        assert!(hint.contains(&sanitize_terminal_text("◀")));
+        assert!(hint.contains(&sanitize_terminal_text("▶")));
+    }
+
+    #[test]
+    fn incremental_wide_table_metadata_matches_full() {
+        let content = "| A | B |\n| --- | --- |\n| some-long-value-here | tail |\nDone.";
+        let theme = test_theme();
+        let (_, full_wide) = render_markdown_with_horiz(content, &theme, 20, 0);
+
+        let mut state: Option<MarkdownIncrementalState> = None;
+        let mut accumulated: Vec<Line<'static>> = Vec::new();
+        let mut wide_accum: Vec<WideTableRegion> = Vec::new();
+        for (_start, end) in chunk_spans(content.len(), 7) {
+            let result = render_markdown_incremental(state, &content[..end], &theme, 20, 0);
+            state = Some(result.new_state);
+            match result.frozen_markdown_move_count {
+                None => {
+                    accumulated = result.lines;
+                    wide_accum = result.wide_tables;
+                }
+                Some(frozen_n) => {
+                    // Mirrors build_transcript_cache: keep tables fully below
+                    // the frozen boundary, append the suffix's new tables.
+                    accumulated.truncate(frozen_n);
+                    accumulated.extend(result.lines);
+                    wide_accum.retain(|wt| wt.start_line + wt.line_count <= frozen_n);
+                    wide_accum.extend(result.wide_tables);
+                }
+            }
+
+            let expected_lines = render_markdown(&content[..end], &theme, 20);
+            let expected_wide = render_markdown_with_horiz(&content[..end], &theme, 20, 0).1;
+            assert_eq!(
+                accumulated.iter().map(line_text).collect::<Vec<_>>(),
+                expected_lines.iter().map(line_text).collect::<Vec<_>>(),
+                "lines mismatch at prefix {:?}",
+                &content[..end]
+            );
+            assert_eq!(
+                wide_accum,
+                expected_wide,
+                "wide-table metadata mismatch at prefix {:?}",
+                &content[..end]
+            );
+        }
+        assert_eq!(wide_accum, full_wide);
     }
 
     #[test]
@@ -1136,7 +1756,7 @@ mod tests {
             let mut state: Option<MarkdownIncrementalState> = None;
             let mut accumulated: Vec<Line<'static>> = Vec::new();
             for (_start, end) in chunk_spans(content.len(), split) {
-                let result = render_markdown_incremental(state, &content[..end], &theme, width);
+                let result = render_markdown_incremental(state, &content[..end], &theme, width, 0);
                 state = Some(result.new_state);
                 match result.frozen_markdown_move_count {
                     None => accumulated = result.lines,
@@ -1213,13 +1833,13 @@ mod tests {
     #[test]
     fn incremental_handles_empty_and_single_line() {
         let theme = test_theme();
-        let result = render_markdown_incremental(None, "", &theme, 40);
+        let result = render_markdown_incremental(None, "", &theme, 40, 0);
         assert!(result.lines.is_empty());
 
         // "single line" starts with the empty frozen prefix, so the
         // incremental path applies with 0 frozen lines → suffix == full.
         let result2 =
-            render_markdown_incremental(Some(result.new_state), "single line", &theme, 40);
+            render_markdown_incremental(Some(result.new_state), "single line", &theme, 40, 0);
         let full = render_markdown("single line", &theme, 40);
         assert_eq!(
             result2.lines.iter().map(line_text).collect::<Vec<_>>(),
@@ -1234,7 +1854,7 @@ mod tests {
         let content = "# H\n\n```\ncode\n```\n\n- a\n- b\n\ntail";
         let theme = test_theme();
         let width = 30;
-        let result = render_markdown_incremental(None, content, &theme, width);
+        let result = render_markdown_incremental(None, content, &theme, width, 0);
         let full = render_markdown(content, &theme, width);
         assert_eq!(
             result.lines.iter().map(line_text).collect::<Vec<_>>(),
@@ -1281,7 +1901,7 @@ mod tests {
             acc.push_str(line);
             acc_lines += 1;
             let t0 = std::time::Instant::now();
-            let result = render_markdown_incremental(state, &acc, &theme, width);
+            let result = render_markdown_incremental(state, &acc, &theme, width, 0);
             state = Some(result.new_state);
             incremental_elapsed += t0.elapsed();
         }

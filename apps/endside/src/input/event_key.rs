@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::app::App;
 use crate::app_state::{
-    current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, InputMode,
-    SandboxDialog,
+    current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, AppState,
+    InputMode, SandboxDialog,
 };
 use crate::cron_dialog::CronDialogMode;
 use crate::gateway::SessionStore;
@@ -360,6 +360,16 @@ impl App {
     }
 
     async fn handle_editing_mode_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Alt+Left/Alt+Right: pan the topmost visible wide markdown table
+        // horizontally instead of moving the input caret. Unmodified Left/Right
+        // keep their normal meaning (caret movement; Left also leaves the
+        // subagent view), and the key falls through when no table is targeted
+        // or the window is already at its boundary. Checked before the
+        // subagent-view match so the table stays pannable in that view too.
+        if handle_wide_table_pan_key(&mut self.state, &key) {
+            return Ok(());
+        }
+
         if self.state.is_subagent_view_active() {
             match key.code {
                 KeyCode::Esc => {
@@ -1809,6 +1819,33 @@ fn is_leave_subagent_view_key(key: &KeyEvent) -> bool {
     key.code == KeyCode::Left && key.modifiers.is_empty()
 }
 
+/// `Alt+←` / `Alt+→`: pan the wide markdown table that is currently the
+/// keyboard target, returning the direction (-1 left, +1 right).
+///
+/// Deliberately *not* bound to bare `←`/`→`: those must keep moving the input
+/// caret, and bare `←` also leaves the subagent view. Requiring ALT keeps the
+/// table affordance off the primary editing/navigation keys.
+fn wide_table_pan_direction(key: &KeyEvent) -> Option<i64> {
+    if key.modifiers != event::KeyModifiers::ALT {
+        return None;
+    }
+    match key.code {
+        KeyCode::Left => Some(-1),
+        KeyCode::Right => Some(1),
+        _ => None,
+    }
+}
+
+/// Apply an [`wide_table_pan_direction`] key. Returns `true` when a wide table
+/// was targeted and the window actually moved, so the caller can consume the
+/// key and skip the normal caret handling.
+fn handle_wide_table_pan_key(state: &mut AppState, key: &KeyEvent) -> bool {
+    let Some(direction) = wide_table_pan_direction(key) else {
+        return false;
+    };
+    state.scroll_active_wide_table(direction)
+}
+
 fn is_named_slash_command(trimmed: &str, command: &str) -> bool {
     let Some(first) = trimmed.split_whitespace().next() else {
         return false;
@@ -1985,6 +2022,54 @@ mod tests {
             KeyCode::Up,
             event::KeyModifiers::SHIFT
         )));
+    }
+
+    #[test]
+    fn alt_left_and_right_pan_the_wide_table() {
+        assert_eq!(
+            wide_table_pan_direction(&KeyEvent::new(KeyCode::Left, event::KeyModifiers::ALT)),
+            Some(-1)
+        );
+        assert_eq!(
+            wide_table_pan_direction(&KeyEvent::new(KeyCode::Right, event::KeyModifiers::ALT)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn unmodified_arrows_never_pan_the_wide_table() {
+        // Bare Left/Right must stay on the caret and on "leave subagent view":
+        // they are the primary editing keys and must not depend on whether a
+        // wide table happens to be on screen.
+        for modifiers in [
+            event::KeyModifiers::empty(),
+            event::KeyModifiers::SHIFT,
+            event::KeyModifiers::CONTROL,
+            event::KeyModifiers::ALT | event::KeyModifiers::SHIFT,
+        ] {
+            assert_eq!(
+                wide_table_pan_direction(&KeyEvent::new(KeyCode::Left, modifiers)),
+                None,
+                "modifiers {modifiers:?} must not pan"
+            );
+            assert_eq!(
+                wide_table_pan_direction(&KeyEvent::new(KeyCode::Right, modifiers)),
+                None,
+                "modifiers {modifiers:?} must not pan"
+            );
+        }
+    }
+
+    #[test]
+    fn alt_arrows_on_unrelated_keys_do_not_pan() {
+        assert_eq!(
+            wide_table_pan_direction(&KeyEvent::new(KeyCode::Up, event::KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            wide_table_pan_direction(&KeyEvent::new(KeyCode::Char('h'), event::KeyModifiers::ALT)),
+            None
+        );
     }
 
     #[test]
