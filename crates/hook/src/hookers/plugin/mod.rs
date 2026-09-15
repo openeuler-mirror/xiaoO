@@ -8,6 +8,7 @@ mod session;
 mod tool;
 
 #[cfg(test)]
+#[path = "../../../../../tests/unit/hook/hookers/plugin/test_support.rs"]
 mod test_support;
 
 pub(crate) use builder::build_plugin_hookers;
