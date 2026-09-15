@@ -10,9 +10,7 @@ use agent_types::common::ids::{AgentId, ToolName};
 use agent_types::hook::HookerRegistryConfig;
 use agent_types::tool::{ToolRegistryConfig, ToolVisibilityConfig};
 use async_trait::async_trait;
-use llm_client::{
-    create_llm_provider, LlmProviderConfig, LlmProviderWrapper,
-};
+use llm_client::{create_llm_provider, LlmProviderConfig, LlmProviderWrapper};
 use lsp::LspServiceRegistry;
 use serde_json::Value;
 use skill::{FileSkillRegistry, SkillsConfig};
