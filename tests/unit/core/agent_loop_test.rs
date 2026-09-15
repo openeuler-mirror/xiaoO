@@ -26,8 +26,8 @@ use tool::EmptyToolRegistry;
 
 use crate::runtime_support::{EmptySkillRegistry, NoopRuntimeView};
 
-include!("basics_test.rs");
-include!("runtime_test.rs");
-include!("tools_test.rs");
-include!("streaming_test.rs");
-include!("truncation_test.rs");
+include!("agent_loop/basics_test.rs");
+include!("agent_loop/runtime_test.rs");
+include!("agent_loop/tools_test.rs");
+include!("agent_loop/streaming_test.rs");
+include!("agent_loop/truncation_test.rs");

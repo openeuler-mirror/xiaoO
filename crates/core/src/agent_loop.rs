@@ -2894,5 +2894,5 @@ fn current_turn_estimated_input_tokens(ctx: &LoopContext<'_>) -> usize {
 }
 
 #[cfg(test)]
-#[path = "../tests/agent_loop/mod.rs"]
+#[path = "../../../tests/unit/core/agent_loop_test.rs"]
 mod basics_test;
