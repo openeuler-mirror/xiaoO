@@ -63,17 +63,5 @@ impl ToolSource for BuiltinToolSource {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_read_state_is_isolated_between_sources() {
-        let first = BuiltinToolSource::new(ToolRuntimeServices::default());
-        let second = BuiltinToolSource::new(ToolRuntimeServices::default());
-
-        assert!(!Arc::ptr_eq(
-            &first.file_read_state,
-            &second.file_read_state
-        ));
-    }
-}
+#[path = "../../../../../tests/unit/tool/impl/builtin/tool_source_test.rs"]
+mod tests;
