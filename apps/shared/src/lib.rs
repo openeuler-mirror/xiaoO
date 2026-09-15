@@ -22,6 +22,7 @@ pub mod trace_support {
 }
 
 #[cfg(feature = "test-support")]
+#[path = "../../../tests/unit/shared/testing.rs"]
 pub mod testing;
 
 pub use runtime_checkpoint::{

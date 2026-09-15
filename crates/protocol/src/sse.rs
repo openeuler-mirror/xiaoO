@@ -30,7 +30,9 @@ use agent_types::llm::ChatMessage;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-fn is_zero(value: &u64) -> bool { *value == 0 }
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
 
 use crate::plan::TodoSnapshotItem;
 

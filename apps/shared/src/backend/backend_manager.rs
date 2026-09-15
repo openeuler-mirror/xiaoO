@@ -180,14 +180,6 @@ impl BackendManager {
         &self.registry
     }
 
-    /// Introspection handle for the sandbox pool counter, used by the limit /
-    /// reconciliation tests to seed and assert pool state directly (real
-    /// e2b sandboxes need provider credentials unavailable in CI).
-    #[cfg(test)]
-    pub(crate) fn sandbox_counter(&self) -> &SandboxCounter {
-        &self.sandbox_counter
-    }
-
     /// Whether a backend of this `kind` participates in the shared sandbox
     /// counter / registry. Local backends are never counted.
     pub(crate) fn is_counted_kind(kind: &str) -> bool {
@@ -1311,3 +1303,7 @@ impl BackendManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/shared/backend/backend_manager_test.rs"]
+mod tests;

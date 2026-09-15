@@ -1,16 +1,14 @@
 mod header;
 pub(crate) mod interaction_prompt;
 pub(crate) mod markdown;
-pub(crate) mod overlay;pub(crate) mod provider_dialog;
+pub(crate) mod overlay;
+pub(crate) mod provider_dialog;
 mod root;
 mod session_diff;
 pub(crate) mod status_panel;
 pub(crate) mod theme;
-mod transcript;
+pub(crate) mod transcript;
 mod utils;
 
 pub(crate) use transcript::wrap_line_to_visual_lines;
 pub(crate) use utils::{find_substring_from, paste_into_input, scroll_offset_from_drag};
-
-#[cfg(test)]
-pub(crate) use transcript::build_transcript_cache;

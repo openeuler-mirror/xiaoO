@@ -50,13 +50,6 @@ impl PluginHookerCore {
         &self.definition
     }
 
-    /// Replace the hook point. Used by adaptor unit tests to point a shared
-    /// `adaptor_for` helper at the specific hook point under test.
-    #[cfg(test)]
-    pub(crate) fn set_hook_point(&mut self, hook_point: HookPointId) {
-        self.hook_point = hook_point;
-    }
-
     /// Build the `hooker` info block emitted in every plugin payload: the
     /// hooker id, its hook point, the command to run, and the ambient agent
     /// id (read from the runtime's agent context).
@@ -245,3 +238,7 @@ pub(crate) async fn run_plugin_subprocess<E>(
         ))
     })
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/unit/hook/hookers/plugin/core_test.rs"]
+mod tests;

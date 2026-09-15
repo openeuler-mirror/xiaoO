@@ -18,6 +18,7 @@ mod webfetch;
 mod websearch;
 
 #[cfg(test)]
+#[path = "../../../../../tests/unit/tool/impl/builtin/test_support.rs"]
 mod test_support;
 
 use agent_contracts::backend::capability::filesystem::WriteMode;

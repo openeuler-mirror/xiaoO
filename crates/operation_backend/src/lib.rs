@@ -14,3 +14,7 @@ pub use builder::OperationBackendBuilderImpl;
 /// daemon-level singletons that need file / exec operations independently
 /// of any per-session backend.
 pub use backends::local::lsp_backend::local_lsp_backend;
+
+#[cfg(test)]
+#[path = "../../../tests/unit/operation_backend/test_support.rs"]
+pub(crate) mod test_support;

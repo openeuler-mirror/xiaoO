@@ -114,4 +114,5 @@ impl Default for TokenEstimator {
 }
 
 #[cfg(test)]
-include!("../tests/token_estimator/token_estimator_test.rs");
+#[path = "../../../tests/unit/core/token_estimator_test.rs"]
+mod tests;

@@ -125,4 +125,5 @@ pub fn build_context_manager(
 }
 
 #[cfg(test)]
-include!("../tests/defaults/compact_test.rs");
+#[path = "../../../tests/unit/compact/defaults_test.rs"]
+mod tests;
