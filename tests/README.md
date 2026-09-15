@@ -2,10 +2,6 @@
 
 功能源码文件不再承载测试代码，全部测试收归本目录，按 unit / system 两类分目录存放。
 
-> **当前状态：目录骨架已建立，存量迁移待开展。** 存量测试（约 231 个源码文件
-> 内嵌的 `#[cfg(test)]` 测试）将分批迁入本目录；每批迁移前后以
-> `cargo test --workspace -- --list` 的清单与计数比对，保证不丢测试。
-
 ## 目录结构
 
 | 目录 | 内容 | 接入方式 |
@@ -70,6 +66,6 @@ cargo test --workspace -- --list  # 仅列出全部测试（基线核对用）
 ## 门禁
 
 - `scripts/check-tests-hygiene.sh`：测试卫生门禁——src 中禁止 `#[test]`、
-  至多一行 `#[cfg(test)] #[path]` 声明（白名单 seam 除外）、`tests/` 下含
+  至多一行 `#[cfg(test)] #[path]` 声明（seam 与多声明白名单除外）、`tests/` 下含
   `#[test]` 的文件必须以 `_test.rs` 结尾。扫描范围由 workspace members 动态推导，
-  `plugins/` 天然排除。暂未接入 `scripts/ci.sh`，存量迁移完成后启用。
+  `plugins/` 天然排除。暂未接入 `scripts/ci.sh`，可手工运行。

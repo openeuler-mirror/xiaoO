@@ -30,6 +30,12 @@
 #   SEAM_WHITELIST      src 中保留原位的双版本 seam：cfg(test)/cfg(not(test)) 同名
 #                       函数成对共存，测试版本被生产代码路径在测试构建下调用，
 #                       无法外移。格式："相对仓库根路径:符号名"，一条登记覆盖两个版本。
+#   MULTI_DECL_WHITELIST 一文件多 test 门控 mod 声明的例外（功能文件按职责
+#                       拆分后各主题测试各得一个测试文件的核准场景，如
+#                       command_spec.rs 的 bubblewrap/dynsandbox 两个主题测试）。
+#                       格式："相对仓库根路径"。
+#                       例外文件中每个声明仍须为合规形式（单门控 + 单 #[path] +
+#                       mod 声明，目标在仓库根 tests/ 下）。
 #   TEST_NAME_WHITELIST tests/ 下含 #[test] 但因辅助职责不按 _test.rs 命名的文件。
 #                       格式："相对仓库根路径"。不含 #[test] 的辅助文件天然豁免，无需登记。
 #
@@ -111,6 +117,11 @@ fi
 SEAM_WHITELIST=(
     "apps/shared/src/gateway/memory_automation.rs:lock_wait_timeout"
 )
+MULTI_DECL_WHITELIST=(
+    # command_spec.rs 拆分后 bubblewrap/dynsandbox 两个主题测试各得一个
+    # _test.rs（不合并），源文件因此有 2 个 #[path] 声明。
+    "crates/operation_backend/src/backends/local/exec/command_spec.rs"
+)
 TEST_NAME_WHITELIST=(
     # 暂无
 )
@@ -124,6 +135,7 @@ XIAOO_SCAN_ROOT="$ROOT_DIR" \
 XIAOO_SRC_DIRS="$(printf '%s\n' "${SRC_DIRS[@]}")" \
 XIAOO_TEST_DIRS="$(printf '%s\n' "${TEST_DIRS[@]}")" \
 XIAOO_SEAM_WHITELIST="$(printf '%s\n' "${SEAM_WHITELIST[@]}")" \
+XIAOO_MULTI_DECL_WHITELIST="$(printf '%s\n' "${MULTI_DECL_WHITELIST[@]}")" \
 XIAOO_TEST_NAME_WHITELIST="$(printf '%s\n' "${TEST_NAME_WHITELIST[@]}")" \
 python3 - <<'PYEOF' || fail=1
 import os
@@ -134,6 +146,7 @@ ROOT = os.environ["XIAOO_SCAN_ROOT"]
 SRC_DIRS = [d for d in os.environ["XIAOO_SRC_DIRS"].splitlines() if d]
 TEST_DIRS = [d for d in os.environ["XIAOO_TEST_DIRS"].splitlines() if d]
 SEAM_WL = {e for e in os.environ["XIAOO_SEAM_WHITELIST"].splitlines() if e}
+MULTI_DECL_WL = {e for e in os.environ["XIAOO_MULTI_DECL_WHITELIST"].splitlines() if e}
 NAME_WL = {e for e in os.environ["XIAOO_TEST_NAME_WHITELIST"].splitlines() if e}
 
 # 单个外层属性 #[...]（属性值内不含 ]；#[path] 的值、cfg 谓词均满足）
@@ -142,8 +155,10 @@ ATTR_RE = re.compile(r'#\[[^]]*\]')
 CFG_ATTR_RE = re.compile(r'#\[\s*cfg\s*\((.*)\)\s*\]')
 # 谓词中的裸词 test：前后不得是标识符字符或引号。
 # 排除 "test-support" 等字符串字面量（test 前是引号）；cfg(test)/cfg(all(test, unix))/
-# cfg(not(test)) 等裸词形式均命中（test 前是 ( 或逗号或空格，后是 ) 或逗号或空格）。
-BARE_TEST_RE = re.compile(r'(?<![\w"(])test(?![\w"])')
+# cfg(any(…, test))/cfg(not(test)) 等裸词形式均命中（all/not 等组合中 test 前是
+# "(" 或逗号或空格，后是 ")" 或逗号或空格）。
+# lookbehind 不得排除 "("，否则 cfg(all(test, …)) 变体漏检（fail-open）。
+BARE_TEST_RE = re.compile(r'(?<![\w"])test(?![\w"])')
 # 测试属性：#[test] / #[test ] / #[tokio::test] / #[tokio::test(...)]
 TEST_ATTR_RE = re.compile(r'#\[\s*(?:tokio::)?test\s*[\](]')
 # mod 声明（无 body）：mod NAME; / pub mod NAME; / pub(crate) mod NAME;
@@ -266,8 +281,10 @@ def scan_src(path):
             handle(pending, stripped, lineno)
             pending = []
 
-    # 每文件至多 1 个 test 门控 mod 声明（杜绝多测试模块回潮）
-    if len(decls) > 1:
+    # 每文件至多 1 个 test 门控 mod 声明（杜绝多测试模块回潮）；
+    # MULTI_DECL_WHITELIST 例外（核准的主题拆分场景，
+    # 各声明仍须为合规形式——上面 handle() 已逐条校验）。
+    if len(decls) > 1 and rel not in MULTI_DECL_WL:
         locs = ", ".join("%d:%s" % (l, m) for l, m in decls)
         cfg_violations.append(
             (decls[0][0], "同文件 %d 个 test 门控 mod 声明（至多 1 个）：%s"
