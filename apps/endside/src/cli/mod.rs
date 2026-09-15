@@ -1,5 +1,7 @@
+pub mod attach;
 pub mod config;
 pub mod entry;
+pub mod skills;
 
 use std::sync::{Arc, Mutex};
 

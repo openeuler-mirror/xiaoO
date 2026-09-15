@@ -10,7 +10,7 @@ Open-source intelligence hub for AgentOS.
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://gitcode.com/openeuler/xiaoO)
+[![Version](https://img.shields.io/badge/version-v0.2.0-red.svg)](https://gitcode.com/openeuler/xiaoO)
 
 ## What is xiaoO?
 

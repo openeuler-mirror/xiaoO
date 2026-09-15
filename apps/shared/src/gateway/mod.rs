@@ -8,6 +8,7 @@ pub mod hosted_runtime_resolver;
 pub mod llm_assembly;
 pub mod memory_automation;
 #[cfg(test)]
+#[path = "../../../../tests/unit/shared/gateway/memory_automation_test.rs"]
 mod memory_automation_test;
 pub mod pending_interaction;
 pub mod permission_backend;

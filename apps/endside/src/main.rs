@@ -243,10 +243,10 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
     if !validation_errors.is_empty() {
         for error in &validation_errors {
             eprintln!("! Config Error: {}", error);
-            eprintln!("Program startup failed due to invalid configuration.");
-            eprintln!("Please fix the configuration in: {}", config_path.display());
-            std::process::exit(1);
         }
+        eprintln!("Program startup failed due to invalid configuration.");
+        eprintln!("Please fix the configuration in: {}", config_path.display());
+        std::process::exit(1);
     }
 
     enable_raw_mode().context("failed to enable terminal raw mode")?;

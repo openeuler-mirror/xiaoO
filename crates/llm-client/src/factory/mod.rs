@@ -1,6 +1,7 @@
 mod config;
 mod create;
 #[cfg(test)]
+#[path = "../../../../tests/unit/llm-client/factory_test.rs"]
 mod tests;
 mod trace;
 mod wrapper;

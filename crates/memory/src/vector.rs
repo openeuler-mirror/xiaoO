@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn vec_bytes_roundtrip() {
-        let v = vec![1.0_f32, -2.5, 3.14, 0.0, f32::MAX];
+        let v = vec![1.0_f32, -2.5, std::f32::consts::PI, 0.0, f32::MAX];
         assert_eq!(bytes_to_vec(&vec_to_bytes(&v)), v);
     }
 
