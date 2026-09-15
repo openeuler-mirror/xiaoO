@@ -757,15 +757,12 @@ fn discard_redundant_boundary_scrolls(
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
             ) =>
         {
-            let over_plan_panel = state
-                .render_state
-                .plan_panel_area
-                .is_some_and(|area| {
-                    mouse.column >= area.x
-                        && mouse.column < area.x.saturating_add(area.width)
-                        && mouse.row >= area.y
-                        && mouse.row < area.y.saturating_add(area.height)
-                });
+            let over_plan_panel = state.render_state.plan_panel_area.is_some_and(|area| {
+                mouse.column >= area.x
+                    && mouse.column < area.x.saturating_add(area.width)
+                    && mouse.row >= area.y
+                    && mouse.row < area.y.saturating_add(area.height)
+            });
             if over_plan_panel {
                 (
                     state.plan_panel.scroll_offset,
@@ -787,9 +784,7 @@ fn discard_redundant_boundary_scrolls(
         {
             Some(MouseEventKind::ScrollDown)
         }
-        Event::Mouse(mouse)
-            if mouse.kind == MouseEventKind::ScrollUp && scroll_offset == 0 =>
-        {
+        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp && scroll_offset == 0 => {
             Some(MouseEventKind::ScrollUp)
         }
         _ => None,
