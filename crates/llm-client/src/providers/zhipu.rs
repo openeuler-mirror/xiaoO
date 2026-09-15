@@ -12,11 +12,7 @@ pub(crate) struct ZhipuProvider {
 }
 
 impl ZhipuProvider {
-    pub(crate) fn new(
-        api_key: String,
-        api_base: String,
-        model: String,
-    ) -> Self {
+    pub(crate) fn new(api_key: String, api_base: String, model: String) -> Self {
         Self {
             inner: OpenAiFamilyProvider::new(
                 api_key,
