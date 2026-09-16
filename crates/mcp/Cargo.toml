@@ -21,3 +21,11 @@ axum.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
+[[test]]
+name = "mcp_streamable_http"
+path = "../../tests/system/mcp/streamable_http_test.rs"
+
+[[test]]
+name = "mcp_stdio_handshake"
+path = "../../tests/system/mcp/stdio_handshake_test.rs"

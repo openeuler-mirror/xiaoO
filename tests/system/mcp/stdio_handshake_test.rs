@@ -44,7 +44,12 @@ async fn stdio_initialize_list_and_call() {
     }
 
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("tests")
+        .join("system")
+        .join("mcp")
+        .join("fixtures")
         .join("mock_server.py");
 
     let config = mock_server_config(script);
@@ -81,7 +86,12 @@ async fn init_mcp_tools_surfaces_mock_server() {
     }
 
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("tests")
+        .join("system")
+        .join("mcp")
+        .join("fixtures")
         .join("mock_server.py");
     let config = mock_server_config(script);
 
