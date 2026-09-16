@@ -9,7 +9,7 @@ use crate::app_state::{
 };
 use crate::cron_dialog::CronDialogMode;
 use crate::gateway::SessionStore;
-use crate::input::EventHandler;
+use crate::input::{handle_input_key, is_chord, EventHandler};
 use crate::interaction_prompt::{PromptFocus, PromptResolution};
 use crate::mcp_service::render_mcp_overview;
 use crate::provider_dialog::{DialogFocus, ProviderDialog};
@@ -91,13 +91,13 @@ impl App {
         // Terminal-independent X11 copy keys; Ctrl+Shift+C is intercepted
         // by most terminals, and some bind plain Ctrl+Insert as well, so
         // both variants are accepted.
-        if key.code == KeyCode::Insert && key.modifiers.intersects(event::KeyModifiers::CONTROL) {
+        if is_copy_chord(&key) {
             self.copy_active_selection();
             return Ok(());
         }
 
         // Ctrl+X: cut selected input text.
-        if key.code == KeyCode::Char('x') && key.modifiers.contains(event::KeyModifiers::CONTROL) {
+        if is_cut_chord(&key) {
             if let Some(text) = self.state.chat_state.input.delete_selected() {
                 if let Err(e) = copy_to_clipboard(&text) {
                     tracing::warn!("copy_to_clipboard failed: {}", e);
@@ -234,7 +234,7 @@ impl App {
                 }
             }
             _ => {
-                dialog.input.handle_event(&Event::Key(key));
+                handle_input_key(&mut dialog.input, key);
                 self.state.api_key_dialog = Some(dialog);
             }
         }
@@ -289,47 +289,47 @@ impl App {
                     if prompt.focus == PromptFocus::List {
                         prompt.toggle_multi_at_cursor();
                     } else {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     }
                 }
                 KeyCode::Up => {
                     if prompt.focus == PromptFocus::List {
                         prompt.move_up();
                     } else {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     }
                 }
                 KeyCode::Down => {
                     if prompt.focus == PromptFocus::List {
                         prompt.move_down();
                     } else {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     }
                 }
                 KeyCode::PageUp => {
                     if prompt.focus == PromptFocus::List {
                         prompt.page_up();
                     } else {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     }
                 }
                 KeyCode::PageDown => {
                     if prompt.focus == PromptFocus::List {
                         prompt.page_down();
                     } else {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     }
                 }
                 _ => {
                     if prompt.focus == PromptFocus::Supplement {
-                        prompt.supplement.handle_event(&Event::Key(key));
+                        handle_input_key(&mut prompt.supplement, key);
                     } else if prompt.request.allow_custom_input {
                         match key.code {
                             KeyCode::Char(_) => {
                                 let modifiers = key.modifiers;
                                 if modifiers.is_empty() || modifiers == event::KeyModifiers::SHIFT {
                                     prompt.focus = PromptFocus::Supplement;
-                                    prompt.supplement.handle_event(&Event::Key(key));
+                                    handle_input_key(&mut prompt.supplement, key);
                                 }
                             }
                             KeyCode::Backspace
@@ -339,7 +339,7 @@ impl App {
                             | KeyCode::Home
                             | KeyCode::End => {
                                 prompt.focus = PromptFocus::Supplement;
-                                prompt.supplement.handle_event(&Event::Key(key));
+                                handle_input_key(&mut prompt.supplement, key);
                             }
                             _ => {}
                         }
@@ -484,24 +484,37 @@ impl App {
             }
         }
 
+        // App-level shortcuts (hard-coded readline bindings): submit, newline,
+        // history. Editing-level shortcuts (move / delete / kill) are applied
+        // one layer deeper in `handle_input_key` (the default branch below),
+        // where unmatched chords degrade to the widget's plain keys.
+        //
+        // This runs after the slash/file-mention menus and the subagent view
+        // so that fixed keys (Esc/Tab/Ctrl+T/Alt+arrows) and menu navigation
+        // (Up/Down/Enter) are never shadowed.
+        if is_submit_chord(&key) {
+            self.submit_editing_input().await?;
+            return Ok(());
+        }
+        if is_insert_newline_chord(&key) {
+            self.insert_newline_into_input();
+            return Ok(());
+        }
+        if is_history_previous_chord(&key) {
+            self.state.chat_state.previous_input_history();
+            self.state.note_input_changed();
+            return Ok(());
+        }
+        if is_history_next_chord(&key) {
+            self.state.chat_state.next_input_history();
+            self.state.note_input_changed();
+            return Ok(());
+        }
+
         match key.code {
             KeyCode::Esc => {
                 // Esc clears an active transcript selection (mirrors opencode's Esc handler).
                 self.state.transcript_selection = None;
-            }
-            KeyCode::Enter => {
-                if editing_key_inserts_newline(key.code, key.modifiers) {
-                    self.insert_newline_into_input();
-                } else {
-                    self.submit_editing_input().await?
-                }
-            }
-            // Ctrl+J also inserts a newline. See `editing_key_inserts_newline`
-            // for why both the Enter and Char('j') branches route here.
-            KeyCode::Char('j') | KeyCode::Char('J')
-                if editing_key_inserts_newline(key.code, key.modifiers) =>
-            {
-                self.insert_newline_into_input();
             }
             KeyCode::Up if key.modifiers.is_empty() => {
                 if self.state.chat_state.input_history_cursor.is_some()
@@ -554,15 +567,11 @@ impl App {
                         return Ok(());
                     }
                 }
-                if let KeyCode::Char(_) = key.code {
-                    if key.modifiers.contains(event::KeyModifiers::ALT)
-                        && !key.modifiers.contains(event::KeyModifiers::CONTROL)
-                    {
-                        return Ok(());
-                    }
-                }
+                // The unbound Alt+letter drop lives in `handle_input_key`
+                // (single place, shared with the dialog fields) rather than
+                // being repeated here.
                 let before = self.state.chat_state.input.value().to_string();
-                self.state.chat_state.input.handle_event(&Event::Key(key));
+                handle_input_key(&mut self.state.chat_state.input, key);
                 if self.state.chat_state.input.value() != before {
                     self.state.chat_state.reset_input_history_navigation();
                 }
@@ -1228,7 +1237,7 @@ impl App {
             }
             _ => {
                 if let Some(dialog) = self.state.remote_session_dialog.as_mut() {
-                    dialog.url_input.handle_event(&Event::Key(key));
+                    handle_input_key(&mut dialog.url_input, key);
                     dialog.error = None;
                 }
             }
@@ -1788,30 +1797,61 @@ impl App {
     }
 }
 
-/// Classifies whether a key event in editing mode inserts a newline (rather
-/// than submitting or falling through to the editor's default text input).
+// ── hard-coded app-level shortcuts (readline / emacs) ──────────────────────
+// The key bindings are written out here and are NOT configurable. `is_chord`
+// (input/core.rs) compares the modifier bits exactly and matches letters
+// case-insensitively.
+
+/// `Enter` or `Shift+Enter` → submit the editing input.
 ///
-/// Two key forms route to the same newline outcome:
-/// - `Enter` with Alt or Control: most terminals send this for Alt+Enter /
-///   Ctrl+Enter. Some emulators encode Ctrl+J as `Enter`+Control rather than
-///   `Char('j')`+Control, so the Enter branch must accept Control too.
-/// - `Char('j'|'J')` with Control (and without Shift): the traditional Unix
-///   "LF" / ^J. Shift is excluded so Ctrl+Shift+J (and similar combos) is
-///   not silently hijacked as a newline.
+/// Mainstream unix terminals fold Shift+Enter onto the *same* 0x0D byte as
+/// plain `Enter` (so only the `Enter`/NONE case is ever delivered there), but
+/// terminals that can report modifiers (kitty keyboard / CSI u and similar)
+/// deliver `Enter`+SHIFT as a distinct event. Accepting both keeps Shift+Enter
+/// meaning "send" under either encoding instead of silently degrading to a
+/// no-op.
+fn is_submit_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Enter, event::KeyModifiers::NONE)
+        || is_chord(key, KeyCode::Enter, event::KeyModifiers::SHIFT)
+}
+
+/// `Ctrl+J` / `Alt+Enter` / `Ctrl+Enter` → insert a soft newline.
 ///
-/// Not every terminal can deliver all of these; `Ctrl+J` is the documented
-/// primary shortcut, the others are compatibility fallbacks.
-fn editing_key_inserts_newline(code: KeyCode, modifiers: event::KeyModifiers) -> bool {
-    match code {
-        KeyCode::Enter => {
-            modifiers.intersects(event::KeyModifiers::ALT | event::KeyModifiers::CONTROL)
-        }
-        KeyCode::Char('j') | KeyCode::Char('J') => {
-            modifiers.contains(event::KeyModifiers::CONTROL)
-                && !modifiers.contains(event::KeyModifiers::SHIFT)
-        }
-        _ => false,
-    }
+/// `Ctrl+J` (0x0A) is the documented primary form; the other two are
+/// compatibility fallbacks for terminals that encode the same physical key
+/// differently (some emulators send `Ctrl+J` as `Enter`+Control). Shift is
+/// excluded, so `Ctrl+Shift+J` is never hijacked as a newline.
+fn is_insert_newline_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Char('j'), event::KeyModifiers::CONTROL)
+        || is_chord(key, KeyCode::Enter, event::KeyModifiers::ALT)
+        || is_chord(key, KeyCode::Enter, event::KeyModifiers::CONTROL)
+}
+
+/// `Ctrl+P` → previous entry in the input history.
+fn is_history_previous_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Char('p'), event::KeyModifiers::CONTROL)
+}
+
+/// `Ctrl+N` → next entry in the input history.
+fn is_history_next_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Char('n'), event::KeyModifiers::CONTROL)
+}
+
+/// `Ctrl+Insert` / `Ctrl+Shift+Insert` → copy the selected input text.
+/// Terminal-independent X11 copy keys; `Ctrl+Shift+C` is intercepted by most
+/// terminals, and some bind plain `Ctrl+Insert` as well, so both are accepted.
+fn is_copy_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Insert, event::KeyModifiers::CONTROL)
+        || is_chord(
+            key,
+            KeyCode::Insert,
+            event::KeyModifiers::CONTROL | event::KeyModifiers::SHIFT,
+        )
+}
+
+/// `Ctrl+X` → cut the selected input text.
+fn is_cut_chord(key: &KeyEvent) -> bool {
+    is_chord(key, KeyCode::Char('x'), event::KeyModifiers::CONTROL)
 }
 
 fn is_leave_subagent_view_key(key: &KeyEvent) -> bool {

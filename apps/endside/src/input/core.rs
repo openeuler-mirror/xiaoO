@@ -1,4 +1,4 @@
-use crossterm::event::{Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Default)]
@@ -276,6 +276,176 @@ impl Input {
             .unwrap_or(0)
     }
 
+    // ── readline-style editing primitives ─────────────────────────────────────
+    // These implement the readline/emacs editing shortcuts (see
+    // `handle_input_key` below; the bindings are hard-coded, not configurable).
+    // Plain-key handling in `handle_event` keeps the classic behavior for the
+    // native editing keys (arrows / Home / End / Backspace / Delete / Shift).
+
+    fn move_to_line_start(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        self.cursor = self.current_line_start(&chars);
+        self.selection_anchor = None;
+    }
+
+    fn move_to_line_end(&mut self) {
+        let chars: Vec<char> = self.value.chars().collect();
+        let total = chars.len();
+        self.cursor = self.current_line_end(&chars, total);
+        self.selection_anchor = None;
+    }
+
+    fn move_left(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor = range.start;
+        } else {
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+        self.selection_anchor = None;
+    }
+
+    fn move_right(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor = range.end;
+        } else {
+            self.cursor = (self.cursor + 1).min(self.value.chars().count());
+        }
+        self.selection_anchor = None;
+    }
+
+    /// Move to the start of the previous word (over whitespace, then one word).
+    fn word_left(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor = range.start;
+            self.selection_anchor = None;
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let mut i = self.cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.cursor = i;
+        self.selection_anchor = None;
+    }
+
+    /// Move to the start of the next word (over one word, then whitespace).
+    fn word_right(&mut self) {
+        if let Some(range) = self.selected_range() {
+            self.cursor = range.end;
+            self.selection_anchor = None;
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let n = chars.len();
+        let mut i = self.cursor;
+        if i >= n {
+            self.selection_anchor = None;
+            return;
+        }
+        while i < n && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < n && chars[i].is_whitespace() {
+            i += 1;
+        }
+        self.cursor = i;
+        self.selection_anchor = None;
+    }
+
+    /// Delete a character range `[start, end)` (char indices) and put the
+    /// caret at the deletion point.
+    fn delete_char_range(&mut self, start: usize, end: usize) {
+        let mut chars: Vec<char> = self.value.chars().collect();
+        if start >= end || end > chars.len() {
+            return;
+        }
+        chars.drain(start..end);
+        self.value = chars.into_iter().collect();
+        self.cursor = start;
+        self.selection_anchor = None;
+    }
+
+    fn delete_word_backward(&mut self) {
+        if self.selected_range().is_some() {
+            self.delete_selected();
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let end = self.cursor;
+        if end == 0 {
+            return;
+        }
+        let mut start = end;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        self.delete_char_range(start, end);
+    }
+
+    fn delete_word_forward(&mut self) {
+        if self.selected_range().is_some() {
+            self.delete_selected();
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let n = chars.len();
+        let start = self.cursor;
+        if start >= n {
+            return;
+        }
+        let mut end = start;
+        while end < n && chars[end].is_whitespace() {
+            end += 1;
+        }
+        while end < n && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        self.delete_char_range(start, end);
+    }
+
+    /// readline `Ctrl+U`: delete from the line start up to the caret.
+    fn kill_to_line_start(&mut self) {
+        if self.selected_range().is_some() {
+            self.delete_selected();
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let end = self.cursor;
+        let start = self.current_line_start(&chars);
+        self.delete_char_range(start, end);
+    }
+
+    /// readline `Ctrl+K`: delete from the caret to the line end, *including*
+    /// the trailing newline when there is one, so the following line joins the
+    /// current one.
+    fn kill_to_line_end(&mut self) {
+        if self.selected_range().is_some() {
+            self.delete_selected();
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let total = chars.len();
+        let start = self.cursor;
+        if start >= total {
+            return;
+        }
+        let mut end = start;
+        while end < total && chars[end] != '\n' {
+            end += 1;
+        }
+        if end < total {
+            end += 1; // swallow the newline as well
+        }
+        self.delete_char_range(start, end);
+    }
+
     fn is_backspace_compat(key: &crossterm::event::KeyEvent) -> bool {
         match key.code {
             KeyCode::Backspace => true,
@@ -305,20 +475,16 @@ impl EventHandler for Input {
         }
 
         match key.code {
-            // Ctrl+A – select all
-            KeyCode::Char('a') if ctrl => {
-                self.selection_anchor = Some(0);
-                self.cursor = self.value.chars().count();
-            }
-            // Ctrl+X – cut (handled externally via selected_text + delete_selected;
-            // here we just delete so the caller can detect the selection first)
-            KeyCode::Char('x') if ctrl => {
-                // Deletion is handled by the key event handler in event_key.rs
-                // which reads selected_text() before calling delete_selected().
-                // We do nothing here so event_key.rs can intercept Ctrl+X first.
-            }
-            // Ignore all other Ctrl+letter combos (handled elsewhere).
-            KeyCode::Char(_ch) if ctrl => {}
+            // Ctrl+A (line start) and Ctrl+X (cut) are resolved one layer up —
+            // by `handle_input_key` and by the key event handler in
+            // event_key.rs — so this widget never selects-all or cuts by
+            // itself.
+            //
+            // Ignore all other Ctrl+letter combos (handled elsewhere); never
+            // insert control characters from them. Exception: Ctrl+Alt+letter
+            // (AltGr on European layouts, where AltGr == Ctrl+Alt) is printable
+            // input and must reach the insert arm below.
+            KeyCode::Char(_ch) if ctrl && !key.modifiers.intersects(KeyModifiers::ALT) => {}
             // Never insert control characters: some terminals/forwarders
             // surface raw ASCII controls (e.g. ESC as `\u{1b}`, NUL) as
             // `Char` events instead of dedicated key codes. Inserting them
@@ -434,6 +600,91 @@ impl From<String> for Input {
     fn from(value: String) -> Self {
         Self::default().with_value(value)
     }
+}
+
+/// The three modifier bits a terminal can actually deliver: Ctrl / Alt /
+/// Shift. Super/⌘ is intercepted by the terminal emulator, so it never
+/// reaches the app.
+fn chord_mask(modifiers: KeyModifiers) -> KeyModifiers {
+    modifiers & (KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// True when `key` is exactly the chord `code` + `mods`. Modifier bits are
+/// compared *exactly* (so `Ctrl+Shift+J` never matches `Ctrl+J`), and letters
+/// are matched case-insensitively because terminals deliver either
+/// `Char('a')` or `Char('A')` for the same physical key.
+pub(crate) fn is_chord(key: &KeyEvent, code: KeyCode, mods: KeyModifiers) -> bool {
+    fn normalize(code: KeyCode) -> KeyCode {
+        match code {
+            KeyCode::Char(c) => KeyCode::Char(c.to_ascii_lowercase()),
+            other => other,
+        }
+    }
+    normalize(key.code) == normalize(code) && chord_mask(key.modifiers) == chord_mask(mods)
+}
+
+/// Apply the hard-coded readline (emacs) editing shortcuts to `input`;
+/// unmatched chords fall through to the widget's plain-key handling.
+///
+/// | chord | action |
+/// |---|---|
+/// | `Ctrl+A` / `Ctrl+E` | move to line start / end |
+/// | `Ctrl+B` / `Ctrl+F` | move one char left / right |
+/// | `Alt+B` / `Alt+F` | move one word left / right |
+/// | `Ctrl+D` | delete one char forward |
+/// | `Ctrl+W` / `Alt+D` | delete one word backward / forward |
+/// | `Ctrl+U` / `Ctrl+K` | kill to line start / end |
+///
+/// These bindings are hard-coded — there is no keymap configuration. The
+/// app-level shortcuts (submit / newline / history / copy / cut) are resolved
+/// by the caller (`event_key.rs`) and are deliberately not consumed here; in a
+/// bare `Input` (dialog fields) they degrade to the widget's plain handling,
+/// which ignores control chords and inserts plain text only.
+///
+/// Returns `true` when the chord was fully consumed (an editing action was
+/// applied, or an unbound Alt+letter was dropped).
+pub(crate) fn handle_input_key(input: &mut Input, key: KeyEvent) -> bool {
+    use KeyCode::*;
+    const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+    const ALT: KeyModifiers = KeyModifiers::ALT;
+
+    if is_chord(&key, Char('a'), CTRL) {
+        input.move_to_line_start();
+    } else if is_chord(&key, Char('e'), CTRL) {
+        input.move_to_line_end();
+    } else if is_chord(&key, Char('b'), CTRL) {
+        input.move_left();
+    } else if is_chord(&key, Char('f'), CTRL) {
+        input.move_right();
+    } else if is_chord(&key, Char('b'), ALT) {
+        input.word_left();
+    } else if is_chord(&key, Char('f'), ALT) {
+        input.word_right();
+    } else if is_chord(&key, Char('d'), CTRL) {
+        input.delete();
+    } else if is_chord(&key, Char('w'), CTRL) {
+        input.delete_word_backward();
+    } else if is_chord(&key, Char('d'), ALT) {
+        input.delete_word_forward();
+    } else if is_chord(&key, Char('u'), CTRL) {
+        input.kill_to_line_start();
+    } else if is_chord(&key, Char('k'), CTRL) {
+        input.kill_to_line_end();
+    } else {
+        // Unbound Alt+letter (pure ALT without CONTROL — AltGr stays a valid
+        // input) is dropped in EVERY input field from this single guard: the
+        // main editor reaches this helper with the same keys, and the dialog
+        // inputs call it directly. Alt+letter therefore never types the bare
+        // letter (a bound Alt chord was applied above and returned `true`).
+        if let Char(_) = key.code {
+            if key.modifiers.contains(ALT) && !key.modifiers.contains(CTRL) {
+                return true;
+            }
+        }
+        input.handle_event(&Event::Key(key));
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
