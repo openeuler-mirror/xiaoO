@@ -257,6 +257,20 @@ HTTP requests can select an agent role preset by passing `runtime_profile_id` in
 
 More daemon configuration details are in [docs/daemon_config.md](./docs/daemon_config.md).
 
+## Testing
+
+All tests live under the repository-root `tests/` directory — functional source files carry no inline test code:
+
+- `tests/unit/` — unit tests mirrored by crate (`<source-file>_test.rs`), attached from the source file with a one-line `#[cfg(test)] #[path = "..."] mod ...;` declaration;
+- `tests/system/` — integration tests wired into crates through `[[test]]` targets.
+
+```bash
+bash tests/run.sh                 # run the full suite (cargo test --workspace)
+bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
+```
+
+`scripts/ci.sh` is the unified CI entry for static gates: facade discipline and test hygiene (keeps test code out of `src/`); it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
+
 ## More Documentation
 
 - [Memory & Context Compression](./docs/memory_context_system.md)

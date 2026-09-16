@@ -60,7 +60,7 @@ async fn mcp_tool_source_discovers_and_invokes() {
         .join("system")
         .join("mcp")
         .join("fixtures")
-        .join("mock_server.py");
+        .join("mock_server_test.py");
 
     let config = McpServerConfig {
         name: "mock".to_string(),

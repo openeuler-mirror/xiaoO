@@ -26,7 +26,9 @@
 
 系统测试：`tests/system/<pkg>/<场景>_test.rs`。
 
-辅助文件（不含 `#[test]` 的桩、fixture 构造等）保留原名，不受 `_test.rs` 规则约束。
+脚本类文件（`.py` / `.sh`，如 mock server、测试辅助脚本）一律命名为
+`*_test.py` / `*_test.sh`。`.rs` 辅助文件（不含 `#[test]` 的桩、fixture 构造等）
+保留原名，不受 `_test.rs` 规则约束。例外（如统一测试入口 `run.sh`）登记门禁白名单。
 
 ## 源文件中的最小残留
 
@@ -53,7 +55,7 @@ path = "../../tests/system/mcp/streamable_http_test.rs"
 ```
 
 `cargo test --workspace` 自动发现；fixture（如 mock server 脚本）放
-`tests/system/<pkg>/fixtures/`。
+`tests/system/<pkg>/fixtures/`，脚本类 fixture 命名 `*_test.py` / `*_test.sh`。
 
 ## 运行方式
 
@@ -66,6 +68,9 @@ cargo test --workspace -- --list  # 仅列出全部测试（基线核对用）
 ## 门禁
 
 - `scripts/check-tests-hygiene.sh`：测试卫生门禁——src 中禁止 `#[test]`、
-  至多一行 `#[cfg(test)] #[path]` 声明（seam 与多声明白名单除外）、`tests/` 下含
-  `#[test]` 的文件必须以 `_test.rs` 结尾。扫描范围由 workspace members 动态推导，
-  `plugins/` 天然排除。暂未接入 `scripts/ci.sh`，可手工运行。
+  至多一行 `#[cfg(test)] #[path]` 声明（目标须位于仓库根 tests/ 且文件存在；
+  seam 与多声明白名单除外）、`tests/` 下含 `#[test]` 的 `.rs` 必须以 `_test.rs`
+  命名、`.py`/`.sh` 脚本必须以 `_test.py`/`_test.sh` 命名（白名单除外）。
+  扫描范围由 workspace members 动态推导，`plugins/` 天然排除。
+- 已接入 `scripts/ci.sh`（统一 CI 入口），与门面纪律门禁一并执行；ci.sh 只含
+  静态门禁、不涉及编译，全量测试执行统一走 `bash tests/run.sh`。

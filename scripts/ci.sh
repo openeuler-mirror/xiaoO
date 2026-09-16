@@ -3,9 +3,15 @@
 #
 # 工程统一 CI 入口。跑这一个脚本即可，未来扩展只需在 STEPS 数组加一行。
 #
-# 当前编排的检查（全部静态、不编译，秒级）：
+# 当前编排的检查（全部静态、不编译、秒级）：
 #   1. 门面纪律门禁    scripts/check-facade.sh
 #      — 应用只依赖 xiaoo-api/xiaoo-shared；底层 publish=false；xiaoo-api 对外 pub 面冻结。
+#   2. 测试卫生门禁    tests-hygiene — scripts/check-tests-hygiene.sh
+#      — src 中无内联测试，test 门控仅剩指向仓库根 tests/ 的 #[path] 声明，
+#        tests/ 命名合规（规则见 tests/README.md）。
+#
+# 门禁不涉及编译：全量测试执行统一走 tests/run.sh（见 tests/README.md），
+# 不接入本脚本。
 #
 # 新增检查：在下方 STEPS 数组加一行 "名称|命令"。命令既可是脚本文件路径，
 # 也可是内联 shell 命令。诊断写到 stderr；失败时 ci.sh 捕获并按"失败详情"块
@@ -65,7 +71,7 @@ cd "$(root_dir)"
 usage() {
     cat >&2 <<'EOF'
 用法: scripts/ci.sh [-h]
-  跑工程统一 CI 全部检查（当前为静态门禁，秒级）。
+  跑工程统一 CI 全部检查（全部为静态门禁，不编译、秒级）。
   -h, --help   显示本帮助
 退出码：0 全过；1 有失败；2 参数错误
 EOF
@@ -88,10 +94,12 @@ done
 # 每行："名称|命令"。以首个 `|` 切分，故名称不得含 `|`（命令里可含 `|`，
 # 例如内联管道，首个 `|` 之后的部分整体作为命令）。
 # 命令既可以是脚本文件路径，也可以是内联 shell 命令。
-# 顺序即执行顺序。子脚本约定把诊断写到 stderr；失败时 ci.sh 捕获并按
+# 子脚本约定把诊断写到 stderr；失败时 ci.sh 捕获并按
 # "失败详情"块缩进回显，同时抽取一行原因进汇总。
+# 全部为静态门禁（不编译、秒级）；测试执行统一走 tests/run.sh，不入本表。
 STEPS=(
     "门面纪律门禁|scripts/check-facade.sh"
+    "tests-hygiene|bash scripts/check-tests-hygiene.sh"
 )
 
 # ---- 执行 -------------------------------------------------------------------
