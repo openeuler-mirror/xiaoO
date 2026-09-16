@@ -44,3 +44,7 @@ lazy_static = "1.4"
 name = "tool-cli"
 path = "src/bin/tool-cli.rs"
 required-features = ["tool-cli"]
+
+[[test]]
+name = "tool_mcp_tool_source"
+path = "../../tests/system/tool/mcp_tool_source_test.rs"

@@ -55,9 +55,12 @@ async fn mcp_tool_source_discovers_and_invokes() {
 
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("mcp")
+        .join("..")
         .join("tests")
-        .join("mock_server.py");
+        .join("system")
+        .join("mcp")
+        .join("fixtures")
+        .join("mock_server_test.py");
 
     let config = McpServerConfig {
         name: "mock".to_string(),

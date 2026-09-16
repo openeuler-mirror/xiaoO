@@ -2,8 +2,8 @@
 # scripts/check-tests-hygiene.sh
 #
 # 测试卫生门禁：防止测试代码回流功能源文件，强制测试统一收归仓库根 tests/。
-# 目录约定与命名规则见 tests/README.md。暂未接入 scripts/ci.sh（待存量迁移
-# 完成后启用），当前可手工运行，输出即迁移进度报告。
+# 目录约定与命名规则见 tests/README.md。已接入 scripts/ci.sh（tests-hygiene
+# 步骤）；也可手工运行。
 #
 # FAIL 行前缀（便于 ci.sh 抽取原因与读者对位）：
 #   [META]       cargo/python3 缺失、metadata 解析失败或扫描范围异常——硬失败，整体中止
@@ -12,8 +12,10 @@
 #                单个 `#[cfg(test)] #[path = "…"] mod …;` 声明（每文件至多 1 个）。
 #                覆盖：内联测试模块（mod 带 body）、门控的 fn/const/impl/use
 #                测试构造器与探针、缺 #[path] 的 mod 声明、同文件多个声明等。
-#   [SRC-PATH]   test 门控 mod 声明的 #[path] 目标不在仓库根 tests/ 目录下
-#   [TEST-NAME]  tests/ 下含 #[test] 的 .rs 文件未以 _test.rs 命名（白名单除外）
+#   [SRC-PATH]   test 门控 mod 声明的 #[path] 目标不在仓库根 tests/ 目录下，
+#                 或目标文件不存在（悬空声明，cargo test 将无法编译）
+#   [TEST-NAME]  tests/ 下含 #[test] 的 .rs 文件未以 _test.rs 命名；.py / .sh
+#                 脚本未以 _test.py / _test.sh 命名（白名单除外）
 #
 # 扫描范围（以 cargo metadata 的 workspace members 动态推导，不硬编码 crate 名单）：
 #   - SRC-TEST / SRC-CFG / SRC-PATH：各 member 的 src/；
@@ -36,8 +38,10 @@
 #                       格式："相对仓库根路径"。
 #                       例外文件中每个声明仍须为合规形式（单门控 + 单 #[path] +
 #                       mod 声明，目标在仓库根 tests/ 下）。
-#   TEST_NAME_WHITELIST tests/ 下含 #[test] 但因辅助职责不按 _test.rs 命名的文件。
-#                       格式："相对仓库根路径"。不含 #[test] 的辅助文件天然豁免，无需登记。
+#   TEST_NAME_WHITELIST tests/ 下因辅助职责不按 *_test 命名的文件。.rs 须不含
+#                       #[test]（含则不可豁免）；.py / .sh 须为确属非测试的
+#                       共享脚本（如统一测试入口 run.sh）。格式："相对仓库根路径"。
+#                       不含 #[test] 的 .rs 辅助文件天然豁免，无需登记。
 #
 # 已知限制（fail-closed，宁可误报不可漏报）：
 #   - 行级正则扫描，不解析 Rust 语法；字符串/文档注释中出现 `#[test]`、
@@ -123,7 +127,8 @@ MULTI_DECL_WHITELIST=(
     "crates/operation_backend/src/backends/local/exec/command_spec.rs"
 )
 TEST_NAME_WHITELIST=(
-    # 暂无
+    # 统一测试入口（runner 脚本），非测试代码本身
+    "tests/run.sh"
 )
 
 # ---- 扫描器 -------------------------------------------------------------------
@@ -240,18 +245,31 @@ def scan_src(path):
                 path_violations.append(
                     (attr_line, "#[path] 目标 %s 解析为 %s，不在仓库根 tests/ 下"
                      % (path_vals[0], rel_target)))
+            elif not os.path.exists(target):
+                # 悬空声明：目标文件缺失，cargo test 将无法编译。rust-tests
+                # 不在 ci.sh 门禁内，此处是唯一的静态兜底。
+                path_violations.append(
+                    (attr_line, "#[path] 目标文件不存在：%s（悬空声明，"
+                     "cargo test 将无法编译）" % rel_target))
             return
         # 其余形式一律不允许；seam 白名单（路径:符号名）例外
         sym = SYMBOL_RE.match(item_text)
         if sym and "%s:%s" % (rel, sym.group(1)) in SEAM_WL:
             return
         if md and not path_vals:
-            desc = "test 门控 mod 声明缺少 #[path]（须指向仓库根 tests/）"
+            desc = ("test 门控 mod 声明缺少 #[path]（须指向仓库根 tests/）："
+                    "`%s`" % item_text.strip())
         elif md:
             desc = ("test 门控 mod 声明形式不合规"
-                    "（要求恰一个门控 + 恰一个 #[path]）")
+                    "（要求恰一个门控 + 恰一个 #[path]）：`%s`"
+                    % item_text.strip())
         elif item_text.lstrip().startswith("mod "):
-            desc = "内联测试模块（mod 带 body），须迁出到 tests/unit/"
+            desc = ("内联测试模块（mod 带 body），须迁出到 tests/unit/：`%s`"
+                    % item_text.strip())
+        elif sym:
+            desc = ("test 门控的源码项 `%s`（测试构造器/探针须迁入 _test.rs；"
+                    "确属双版本 seam 则在 SEAM_WHITELIST 登记 `%s:%s`）"
+                    % (item_text.strip(), rel, sym.group(1)))
         else:
             desc = ("test 门控的源码项 `%s`（测试构造器/探针须迁入 _test.rs，"
                     "确属双版本 seam 则登记白名单）" % item_text.strip())
@@ -298,20 +316,21 @@ def scan_src(path):
     return rel, test_attrs, cfg_violations, path_violations
 
 
-def collect_rs(dirs):
+def collect_files(dirs):
+    """收集 tests/ 扫描范围内的 .rs / .py / .sh 文件。"""
     out = []
     for d in dirs:
         for dirpath, dirnames, filenames in os.walk(d):
             dirnames.sort()
             for fn in sorted(filenames):
-                if fn.endswith(".rs"):
+                if fn.endswith((".rs", ".py", ".sh")):
                     out.append(os.path.join(dirpath, fn))
     return out
 
 
 def main():
     n_fail = 0
-    for path in collect_rs(SRC_DIRS):
+    for path in collect_files(SRC_DIRS):
         rel, test_attrs, cfg_v, path_v = scan_src(path)
         if test_attrs:
             preview = ", ".join(str(l) for l in test_attrs[:5])
@@ -328,21 +347,35 @@ def main():
                   file=sys.stderr)
             n_fail += 1
 
-    for path in collect_rs(TEST_DIRS):
+    for path in collect_files(TEST_DIRS):
         rel = os.path.relpath(path, ROOT)
         base = os.path.basename(path)
-        if base.endswith("_test.rs") or rel in NAME_WL:
+        if rel in NAME_WL:
             continue
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                content = f.read()
-        except OSError:
+        if base.endswith(".rs"):
+            if base.endswith("_test.rs"):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except OSError:
+                continue
+            if TEST_ATTR_RE.search(content):
+                print("FAIL [TEST-NAME]: %s — 含 #[test] 但未以 _test.rs 命名"
+                      "（.rs 辅助文件请登记 TEST_NAME_WHITELIST）" % rel,
+                      file=sys.stderr)
+                n_fail += 1
             continue
-        if TEST_ATTR_RE.search(content):
-            print("FAIL [TEST-NAME]: %s — 含 #[test] 但未以 _test.rs 命名"
-                  "（辅助文件请登记 TEST_NAME_WHITELIST）" % rel, file=sys.stderr)
+        # .py / .sh：tests/ 下的一切脚本均属测试代码，一律 *_test.<ext>
+        ext = ".py" if base.endswith(".py") else ".sh"
+        if not base.endswith("_test" + ext):
+            print("FAIL [TEST-NAME]: %s — 未以 _test%s 命名（tests/ 下的测试"
+                  "脚本一律 *_test 后缀；确属非测试的共享脚本则登记"
+                  " TEST_NAME_WHITELIST）" % (rel, ext), file=sys.stderr)
             n_fail += 1
 
+    if n_fail:
+        print("测试卫生扫描：共 %d 项违规" % n_fail, file=sys.stderr)
     sys.exit(1 if n_fail else 0)
 
 
@@ -352,10 +385,11 @@ PYEOF
 # ---- 汇总 -------------------------------------------------------------------
 if [ "$fail" -ne 0 ]; then
     log ""
-    log "测试卫生检查未通过。"
+    log "测试卫生检查未通过（违规明细见上方逐条 FAIL 输出）。"
     log "修复方向：测试代码迁入 tests/unit/<pkg>/…（<被测文件>_test.rs），"
     log "源文件尾部仅保留一行 #[cfg(test)] #[path] 声明；"
-    log "系统测试迁入 tests/system/ 并以 [[test]] 接线；例外项登记白名单并评审。"
+    log "系统测试迁入 tests/system/ 并以 [[test]] 接线，脚本类 fixture 命名"
+    log "*_test.py / *_test.sh；例外项登记白名单并评审。"
     log "目录约定与命名规则见 tests/README.md。"
     exit 1
 fi

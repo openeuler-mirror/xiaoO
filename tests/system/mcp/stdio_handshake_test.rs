@@ -44,8 +44,13 @@ async fn stdio_initialize_list_and_call() {
     }
 
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("tests")
-        .join("mock_server.py");
+        .join("system")
+        .join("mcp")
+        .join("fixtures")
+        .join("mock_server_test.py");
 
     let config = mock_server_config(script);
     let client = mcp::McpClient::connect(&config)
@@ -81,8 +86,13 @@ async fn init_mcp_tools_surfaces_mock_server() {
     }
 
     let script: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
         .join("tests")
-        .join("mock_server.py");
+        .join("system")
+        .join("mcp")
+        .join("fixtures")
+        .join("mock_server_test.py");
     let config = mock_server_config(script);
 
     let servers = mcp::init_mcp_tools(std::slice::from_ref(&config)).await;

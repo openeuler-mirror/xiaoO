@@ -251,6 +251,20 @@ HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选
 
 更多 daemon 配置请参考 [docs/daemon_config.md](./docs/daemon_config.md)。
 
+## 测试
+
+全部测试收归仓库根 `tests/` 目录，功能源码文件不承载测试代码：
+
+- `tests/unit/`：单元测试，按 crate 镜像 src 结构（`<被测文件>_test.rs`），源文件尾部以一行 `#[cfg(test)] #[path = "…"] mod …;` 声明接入；
+- `tests/system/`：系统测试（Cargo 集成测试），经 crate 内 `[[test]]` 目标接线。
+
+```bash
+bash tests/run.sh                 # 全量测试（cargo test --workspace）
+bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
+```
+
+`scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁与测试卫生门禁（防止测试代码回流 `src/`）。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
+
 ## 更多文档
 
 - [Memory & Context Compression](./docs/memory_context_system.md)
