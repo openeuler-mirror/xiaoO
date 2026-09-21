@@ -615,3 +615,43 @@ async fn mid_batch_stop_still_records_every_executed_result() {
              earlier call in the batch triggered the stop rule"
     );
 }
+
+#[tokio::test]
+async fn tool_batch_preserves_build_failures_between_successful_calls() {
+    let registry = SingleToolRegistry::new();
+    let filter = tool_filter_from_specs(&registry.visible(), &registry);
+    let runtime = NoopRuntimeView::new();
+
+    for serialize in [false, true] {
+        let calls = [("first", "peek"), ("missing", "unknown"), ("last", "peek")]
+            .into_iter()
+            .map(|(id, name)| {
+                tool_exec::build_tool_call(
+                    agent_types::tool::RawToolCall {
+                        call_id: id.into(),
+                        tool_name: name.into(),
+                        input: json!({}),
+                    },
+                    filter.as_ref(),
+                )
+            })
+            .collect();
+        let results = tool_exec::execute_tool_batch(calls, &runtime, serialize).await;
+        assert_eq!(
+            results
+                .iter()
+                .map(ToolExecutionResult::call_id)
+                .collect::<Vec<_>>(),
+            ["first", "missing", "last"]
+        );
+        assert!(matches!(&results[1], ToolExecutionResult::Failed { .. }));
+        for (index, expected) in [(0, "ran first"), (2, "ran last")] {
+            assert!(matches!(
+                &results[index],
+                ToolExecutionResult::Completed {
+                    raw_outcome: RawToolOutcome::Success { output }, ..
+                } if output == expected
+            ));
+        }
+    }
+}
