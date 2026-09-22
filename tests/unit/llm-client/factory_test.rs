@@ -221,6 +221,46 @@ mod wrapper_tests {
         }
     }
 
+    /// A provider whose `complete_stream` records the request and then
+    /// never resolves — models an LLM response still streaming when the
+    /// caller cancels. `complete` is never reached on the streaming path.
+    struct PendingStreamProvider {
+        captured: Mutex<Option<LlmRequest>>,
+        caps: ProviderCapabilities,
+    }
+
+    impl PendingStreamProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                captured: Mutex::new(None),
+                caps: default_caps(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for PendingStreamProvider {
+        async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+            panic!("streaming path should use complete_stream instead of complete");
+        }
+
+        async fn complete_stream(
+            &self,
+            request: &LlmRequest,
+            _on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        ) -> Result<LlmResponse, LlmError> {
+            *self.captured.lock().unwrap() = Some(request.clone());
+            // The stream never completes: only the cancel branch of the
+            // wrapper can end this call.
+            std::future::pending::<()>().await;
+            unreachable!("pending future never resolves")
+        }
+
+        fn capabilities(&self) -> &ProviderCapabilities {
+            &self.caps
+        }
+    }
+
     // ── mock hooker registry ─────────────────────────────────────────────────
 
     struct MockHookerRegistry {
@@ -286,11 +326,17 @@ mod wrapper_tests {
         fn trace_kinds(&self) -> Vec<agent_contracts::TraceSpanKind> {
             self.trace_recorder.kinds.lock().unwrap().clone()
         }
+
+        /// Outcomes of every span that was ended, in order.
+        fn trace_outcomes(&self) -> Vec<agent_contracts::TraceOutcome> {
+            self.trace_recorder.outcomes.lock().unwrap().clone()
+        }
     }
 
     #[derive(Default)]
     struct TestTraceRecorder {
         kinds: Mutex<Vec<agent_contracts::TraceSpanKind>>,
+        outcomes: Mutex<Vec<agent_contracts::TraceOutcome>>,
     }
 
     #[async_trait]
@@ -315,9 +361,10 @@ mod wrapper_tests {
         async fn end_span(
             &self,
             _span: agent_contracts::TraceSpanHandle,
-            _outcome: agent_contracts::TraceOutcome,
+            outcome: agent_contracts::TraceOutcome,
             _fields: serde_json::Value,
         ) {
+            self.outcomes.lock().unwrap().push(outcome);
         }
 
         async fn finalize_trace(
@@ -731,6 +778,74 @@ mod wrapper_tests {
         assert_eq!(
             runtime_b.trace_kinds(),
             vec![agent_contracts::TraceSpanKind::LlmCall]
+        );
+    }
+
+    /// Regression: a stream cancelled mid-flight must still close its
+    /// LLM-call trace span (with `TraceOutcome::Cancelled`) instead of
+    /// leaving it dangling. Before the cancel race moved into the wrapper,
+    /// `agent_loop` dropped the `complete_stream_scoped` future on Esc;
+    /// the `end_trace_span` calls in the Ok/Err arms never ran and every
+    /// traced runtime (daemon / subagents) leaked an unterminated span per
+    /// cancelled turn. The wrapper must also return `LlmError::Cancelled`
+    /// (not the inner provider's never-arriving result) and skip error
+    /// hooks.
+    #[tokio::test]
+    async fn cancelled_stream_closes_trace_span_with_cancelled_outcome() {
+        let provider = PendingStreamProvider::new();
+        let wrapper = LlmProviderWrapper::new(provider.clone(), None, None);
+        let runtime = TestRuntimeView::new(MockHookerRegistry::with_hookers(vec![]));
+
+        let result = wrapper
+            .complete_stream_scoped_with_cancel(
+                Some(runtime.as_ref()),
+                &make_request("hello"),
+                &|_chunk| {},
+                // Already-fired cancellation, the deterministic equivalent
+                // of "Esc pressed while tokens are flowing".
+                std::future::ready::<()>(()),
+            )
+            .await;
+
+        assert!(matches!(result, Err(LlmError::Cancelled)));
+        // The provider saw the request before the stream hung.
+        assert!(provider
+            .captured
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|request| extract_text(request) == "hello"));
+        // One span begun and — the regression — ended, with the cancelled
+        // outcome.
+        assert_eq!(
+            runtime.trace_kinds(),
+            vec![agent_contracts::TraceSpanKind::LlmCall]
+        );
+        assert_eq!(
+            runtime.trace_outcomes(),
+            vec![agent_contracts::TraceOutcome::Cancelled]
+        );
+    }
+
+    /// The unbiased (no-cancel) `complete_stream_scoped` entry point must
+    /// keep its old behaviour: the same provider that hangs forever under
+    /// a fired cancel future is simply awaited, so this test only checks
+    /// the delegation does not eagerly cancel with a pending future —
+    /// using a SequencedMockLlmProvider that completes normally.
+    #[tokio::test]
+    async fn complete_stream_scoped_without_cancel_completes_normally() {
+        let provider = SequencedMockLlmProvider::new(vec![Ok(make_response("ok"))]);
+        let wrapper = LlmProviderWrapper::new(provider, None, None);
+        let runtime = TestRuntimeView::new(MockHookerRegistry::with_hookers(vec![]));
+
+        let result = wrapper
+            .complete_stream_scoped(Some(runtime.as_ref()), &make_request("hello"), &|_chunk| {})
+            .await;
+
+        assert_eq!(result.unwrap().message.text.as_deref(), Some("ok"));
+        assert_eq!(
+            runtime.trace_outcomes(),
+            vec![agent_contracts::TraceOutcome::Ok]
         );
     }
 

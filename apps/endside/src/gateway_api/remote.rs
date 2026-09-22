@@ -352,6 +352,10 @@ impl GatewayRuntime {
         self.stream_message_index = Some(state.chat_state.messages.len().saturating_sub(1));
         self.stream_reveal_buffer.clear();
         self.pending_stream_done = None;
+        // A previous turn may still be draining after an Esc cancel; its
+        // receiver is replaced below, so make sure the new turn's updates
+        // are processed normally (not swallowed by the drain guard).
+        self.draining_after_cancel = false;
 
         let (updates_tx, updates_rx) = unbounded_channel();
         let (interaction_tx, interaction_rx) = unbounded_channel();

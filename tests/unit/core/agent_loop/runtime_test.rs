@@ -517,3 +517,164 @@ async fn run_agent_loop_overwrites_token_usage_with_current_turn_usage() {
         _ => panic!("unexpected outcome"),
     }
 }
+
+/// A provider that streams a couple of chunks and then never completes —
+/// models an LLM response still streaming when Esc arrives. `streamed`
+/// flips once the chunks have been delivered so tests can cancel at a
+/// deterministic point (after content exists, before the call returns).
+struct PendingStreamProvider {
+    capabilities: ProviderCapabilities,
+    streamed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PendingStreamProvider {
+    fn new() -> Self {
+        Self {
+            capabilities: ProviderCapabilities {
+                supports_streaming: true,
+                supports_tool_calls: false,
+                supports_json_mode: false,
+                max_context_window: 4096,
+                model_name: "pending-stream-test".to_string(),
+            },
+            streamed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for PendingStreamProvider {
+    async fn complete(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        panic!("streaming path should use complete_stream instead of complete");
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: &LlmRequest,
+        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+    ) -> Result<LlmResponse, LlmError> {
+        on_chunk(StreamChunk {
+            delta_text: Some("Partial answer before ".to_string()),
+            delta_reasoning: None,
+            delta_tool_call: None,
+        });
+        on_chunk(StreamChunk {
+            delta_text: Some("Esc was pressed".to_string()),
+            delta_reasoning: None,
+            delta_tool_call: None,
+        });
+        self.streamed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // The response never completes: the stream is "still streaming"
+        // until the cancel branch of `llm_call` aborts it.
+        std::future::pending::<()>().await;
+        unreachable!("pending future never resolves")
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+}
+
+/// Layer-2 regression: cancelling mid-stream must abort the in-flight LLM
+/// call (not wait for it to finish naturally), synthesize the partial
+/// assistant message from the streamed buffers, and end the run through
+/// `ReturnCancelled` with the partial persisted into the message history.
+/// Deliberately runs WITHOUT an event sink: `stream_assistant_chunk` must
+/// accumulate the streamed buffers regardless, or the partial would be
+/// empty for sinkless callers.
+#[tokio::test]
+async fn cancel_mid_stream_persists_partial_assistant_message() {
+    let provider = Arc::new(PendingStreamProvider::new());
+    let streamed = Arc::clone(&provider.streamed);
+    let runtime = test_runtime(Arc::new(LlmProviderWrapper::new(provider, None, None)));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut loop_state =
+        LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel.clone());
+
+    let loop_task = tokio::spawn(async move {
+        run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("hello"))
+            .await
+            .expect("cancelled loop run should still return Ok")
+    });
+
+    // Wait until the stream has actually delivered its chunks, then cancel
+    // — the deterministic equivalent of "Esc while tokens are flowing".
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !streamed.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stream never delivered its chunks"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    cancel.cancel();
+
+    let result = loop_task
+        .await
+        .expect("loop task should not panic after cancellation");
+
+    match result {
+        LoopRunResult::Complete(AgentOutcome::Cancelled {
+            partial_reply,
+            messages,
+            ..
+        }) => {
+            assert_eq!(
+                partial_reply.as_deref(),
+                Some("Partial answer before Esc was pressed")
+            );
+            // The partial assistant message must be part of the persisted
+            // history (this is what `/save` snapshots after the drain).
+            assert!(messages.iter().any(|message| {
+                message.role == MessageRole::Assistant
+                    && message.text_content() == Some("Partial answer before Esc was pressed")
+            }));
+            // The user prompt is retained ahead of the partial.
+            assert_eq!(
+                messages.first().and_then(ChatMessage::text_content),
+                Some("hello")
+            );
+        }
+        _ => panic!("expected Cancelled outcome, got a different variant"),
+    }
+}
+
+/// Layer-2 regression: cancelling before the stream produced any content
+/// (Esc before the first token) must behave like the entry-point cancel
+/// check — `Cancelled` outcome, no synthesized assistant message, history
+/// unchanged.
+#[tokio::test]
+async fn cancel_before_stream_starts_yields_cancelled_without_partial() {
+    let provider = Arc::new(LlmProviderWrapper::new(
+        Arc::new(StreamingTestProvider::new()),
+        None,
+        None,
+    ));
+    let runtime = test_runtime(provider);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let mut loop_state = LoopState::new_with_cancel(uuid::Uuid::new_v4().to_string(), cancel);
+
+    let outcome = run_agent_loop(&runtime, &mut loop_state, AgentLoopInput::new("hello"))
+        .await
+        .expect("pre-cancelled loop run should still return Ok");
+
+    match outcome {
+        LoopRunResult::Complete(AgentOutcome::Cancelled {
+            partial_reply,
+            messages,
+            ..
+        }) => {
+            assert_eq!(partial_reply, None);
+            assert!(!messages
+                .iter()
+                .any(|message| message.role == MessageRole::Assistant));
+            assert_eq!(
+                messages.last().and_then(ChatMessage::text_content),
+                Some("hello")
+            );
+        }
+        _ => panic!("expected Cancelled outcome, got a different variant"),
+    }
+}

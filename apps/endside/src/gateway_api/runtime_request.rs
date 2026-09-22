@@ -147,14 +147,7 @@ impl GatewayRuntime {
         // cache fresh so snapshots and subsequent turns see the full
         // conversation history. This is an in-memory load and short-circuits
         // when the cache is already equal to the persisted state.
-        if let Some(record) = self.session_snapshot(&state.session_id).await {
-            if let Some(loop_state) = record.loop_state.as_ref() {
-                if !loop_state.messages.is_empty() && state.session_messages != loop_state.messages
-                {
-                    state.session_messages = loop_state.messages.clone();
-                }
-            }
-        }
+        self.sync_session_messages_from_store(state).await;
 
         let runtime_config = self.build_runtime_config(state).await?;
         let open_request = self.session_open_request(state)?;
@@ -176,6 +169,10 @@ impl GatewayRuntime {
         self.stream_message_index = Some(state.chat_state.messages.len().saturating_sub(1));
         self.stream_reveal_buffer.clear();
         self.pending_stream_done = None;
+        // A previous turn may still be draining after an Esc cancel; its
+        // receiver is replaced below, so make sure the new turn's updates
+        // are processed normally (not swallowed by the drain guard).
+        self.draining_after_cancel = false;
 
         let (updates_tx, updates_rx) = unbounded_channel();
         let (interaction_tx, interaction_rx) = unbounded_channel();

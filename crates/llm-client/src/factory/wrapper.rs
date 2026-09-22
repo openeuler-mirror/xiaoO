@@ -732,6 +732,37 @@ impl LlmProviderWrapper {
         request: &LlmRequest,
         on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
     ) -> Result<LlmResponse, LlmError> {
+        self.complete_stream_scoped_with_cancel(
+            runtime_view,
+            request,
+            on_chunk,
+            std::future::pending(),
+        )
+        .await
+    }
+
+    /// Cancellation-aware variant of [`Self::complete_stream_scoped`]: races
+    /// the in-flight stream (including its retries) against `cancel` so a
+    /// caller-side cancellation (Esc) lands in milliseconds instead of after
+    /// the model finishes the whole response. When `cancel` wins, the losing
+    /// stream future is dropped — aborting the underlying HTTP stream — and
+    /// `LlmError::Cancelled` is returned after the LLM-call trace span is
+    /// closed with `TraceOutcome::Cancelled`. This is why the race lives
+    /// here rather than in the caller: dropping the outer future mid-flight
+    /// (the pre-fix shape, where `agent_loop` selected on this future
+    /// directly) skipped the `end_trace_span` calls below and left the span
+    /// dangling in every traced runtime. Error hooks do not run for a user
+    /// cancellation — there is nothing to recover from.
+    pub async fn complete_stream_scoped_with_cancel<Fut>(
+        &self,
+        runtime_view: Option<&dyn RuntimeView>,
+        request: &LlmRequest,
+        on_chunk: &(dyn Fn(StreamChunk) + Send + Sync),
+        cancel: Fut,
+    ) -> Result<LlmResponse, LlmError>
+    where
+        Fut: std::future::Future<Output = ()>,
+    {
         let runtime_view = runtime_view.or(self.default_runtime_view.as_deref());
         // Lazy clone: only copy the request when pre-hooks are configured
         // (they may mutate it). Otherwise pass the original by reference,
@@ -784,10 +815,16 @@ impl LlmProviderWrapper {
         // to the original `request` when no pre-hooks ran.
         let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
 
-        match self
-            .complete_stream_with_retry(effective_request_ref, &traced_on_chunk)
-            .await
-        {
+        // biased: poll the stream first, so a response that completed at the
+        // same instant cancellation fired is still delivered in full instead
+        // of being discarded for a synthesized partial.
+        let stream_result = tokio::select! {
+            biased;
+            result = self.complete_stream_with_retry(effective_request_ref, &traced_on_chunk) => result,
+            _ = cancel => Err(LlmError::Cancelled),
+        };
+
+        match stream_result {
             Ok(mut response) => {
                 update_trace_span(
                     runtime_view,
@@ -844,6 +881,38 @@ impl LlmProviderWrapper {
                 )
                 .await;
                 Ok(response)
+            }
+            Err(LlmError::Cancelled) => {
+                // User cancellation: close the span with the cancelled
+                // outcome and the stream stats accumulated so far. Error
+                // hooks are deliberately skipped — a cancelled call has
+                // nothing to recover, and a `Recover` result would
+                // fabricate a response for a stream the caller believes
+                // it aborted.
+                let stream_trace_fields = match stream_stats.into_inner() {
+                    Ok(stats) => stream_trace_fields(&stats),
+                    Err(poisoned) => stream_trace_fields(&poisoned.into_inner()),
+                };
+                end_trace_span(
+                    runtime_view,
+                    &mut trace_span,
+                    TraceOutcome::Cancelled,
+                    merge_trace_fields(
+                        json!({
+                            "phase": "cancelled",
+                            "pre_hook_count": pre_hook_count,
+                            "post_hook_count": 0,
+                            "error_hook_count": 0,
+                            "pre_hook_error": pre_hook_error,
+                            "recovered": false,
+                            "error_kind": "cancelled",
+                            "error_message": "llm stream cancelled mid-flight",
+                        }),
+                        stream_trace_fields,
+                    ),
+                )
+                .await;
+                Err(LlmError::Cancelled)
             }
             Err(error) => {
                 if runtime_view.is_some() {

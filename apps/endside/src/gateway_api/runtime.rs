@@ -12,6 +12,20 @@ use crate::session_gateway::{SessionGateway, SessionTurnUpdate};
 
 pub(super) const STREAM_REVEAL_CHARS_PER_TICK: usize = 1;
 
+/// Upper bound for [`GatewayRuntime::settle_in_flight_turn`] — how long a
+/// caller (manual `/save`, interrupt auto-save) waits for an in-flight
+/// (cancelled) turn to settle before reading the session store anyway.
+/// Since the core-side cancel short-circuit (`llm_call` races the stream
+/// against the cancel token and persists the partial message
+/// immediately), a cancelled turn normally settles in milliseconds; the
+/// timeout is the safety net for pathological backends (hung stream, a
+/// non-cancelled turn settling naturally, layer-1-only cores).
+pub(crate) const TURN_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Poll cadence of [`GatewayRuntime::settle_in_flight_turn`] while pumping
+/// `poll_stream_updates` outside the normal event loop.
+const TURN_SETTLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+
 pub(super) struct PendingStreamDone {
     pub(super) prompt_tokens: u64,
     pub(super) completion_tokens: u64,
@@ -31,6 +45,16 @@ pub struct GatewayRuntime {
     /// `spawn_turn` via `SessionRuntimeBindings` so the session actor uses it
     /// instead of creating its own token.
     pub(super) cancel_token: Option<CancellationToken>,
+    /// True after Esc-cancel while the cancelled turn's stream is still
+    /// connected: the backend only persists the partial loop state (and
+    /// sends the terminal `Done`/`Err` update) after the in-flight LLM
+    /// call returns. In this mode `poll_stream_updates` ignores all
+    /// conversation-producing updates (TextDelta, tool events, …) so no
+    /// ghost messages appear, and consumes only `Done`/`Err` — `Done`
+    /// refreshes `session_messages` with the persisted partial state.
+    /// Cleared when the drain ends, when a new turn starts, and on
+    /// `reset_for_new_session`.
+    pub(super) draining_after_cancel: bool,
     pub(super) request_start: Option<Instant>,
     pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
@@ -89,6 +113,7 @@ impl GatewayRuntime {
             stream_reveal_buffer: String::new(),
             pending_stream_done: None,
             cancel_token: None,
+            draining_after_cancel: false,
             request_start: None,
             first_token_latency_recorded: false,
             interaction_reply_tx: None,
@@ -114,6 +139,7 @@ impl GatewayRuntime {
         self.stream_reveal_buffer.clear();
         self.pending_stream_done = None;
         self.cancel_token = None;
+        self.draining_after_cancel = false;
         self.request_start = None;
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
@@ -135,6 +161,66 @@ impl GatewayRuntime {
         self.stream_rx.is_some()
             || !self.stream_reveal_buffer.is_empty()
             || self.pending_stream_done.is_some()
+    }
+
+    /// Whether a turn's update stream has not fully settled yet: updates
+    /// are still flowing (normal streaming or the post-Esc drain), or a
+    /// terminal `Done` is pending reveal. Callers that read the backend
+    /// session store (manual `/save`, interrupt auto-save) must wait for
+    /// this to become `false` first — see
+    /// [`GatewayRuntime::settle_in_flight_turn`].
+    pub fn turn_stream_in_flight(&self) -> bool {
+        self.stream_rx.is_some() || self.pending_stream_done.is_some()
+    }
+
+    /// Wait for a turn whose stream is still in flight — typically a turn
+    /// cancelled with Esc, whose partial loop state the backend persists
+    /// only after the in-flight LLM call returns — to settle. Pumps
+    /// `poll_stream_updates` (normally driven by the App event loop) until
+    /// the terminal `Done`/`Err` update is consumed, bounded by
+    /// [`TURN_SETTLE_TIMEOUT`]. On timeout, the caller proceeds with a
+    /// store that may miss the last turn (logged here); this is no worse
+    /// than the pre-fix behaviour.
+    pub async fn settle_in_flight_turn(&mut self, state: &mut crate::app_state::AppState) {
+        if !self.turn_stream_in_flight() && !state.chat_state.is_loading {
+            return;
+        }
+        let deadline = Instant::now() + TURN_SETTLE_TIMEOUT;
+        loop {
+            self.poll_stream_updates(state);
+            if !self.turn_stream_in_flight() && !state.chat_state.is_loading {
+                return;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    timeout = ?TURN_SETTLE_TIMEOUT,
+                    "in-flight turn did not settle in time; proceeding with a session store that may miss the last turn"
+                );
+                return;
+            }
+            tokio::time::sleep(TURN_SETTLE_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Load the session record from the backend store and refresh the
+    /// TUI's `session_messages` cache from the persisted
+    /// `loop_state.messages`. Returns the loaded record so snapshot
+    /// writers (`/save`, interrupt auto-save) embed it — `None` when the
+    /// store holds no record for the session.
+    pub(crate) async fn sync_session_messages_from_store(
+        &self,
+        state: &mut crate::app_state::AppState,
+    ) -> Option<crate::gateway::SessionRecord> {
+        let record = self.session_snapshot(&state.session_id).await;
+        if let Some(loop_state) = record
+            .as_ref()
+            .and_then(|record| record.loop_state.as_ref())
+        {
+            if !loop_state.messages.is_empty() && state.session_messages != loop_state.messages {
+                state.session_messages = loop_state.messages.clone();
+            }
+        }
+        record
     }
 
     pub async fn session_snapshot(

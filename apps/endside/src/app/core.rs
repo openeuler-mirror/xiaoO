@@ -367,7 +367,22 @@ impl App {
         // persist the session to its rolling automatic slot. Manual
         // checkpoints are never written by this shutdown path.
         if self.state.quit_via_interrupt {
-            let record = self.gateway.session_snapshot(&self.state.session_id).await;
+            // A turn interrupted by Ctrl+C does not stop by itself: the
+            // backend persists the partial loop state only after the
+            // in-flight LLM call returns. Cancel any in-flight turn, wait
+            // for it to settle (bounded by a timeout), and refresh the
+            // TUI's `session_messages` cache from the persisted
+            // `loop_state.messages` before reading the store, so the
+            // auto-save keeps the conversation context instead of the
+            // pre-turn state.
+            if self.state.chat_state.is_loading || self.gateway.turn_stream_in_flight() {
+                self.gateway.cancel_streaming(&mut self.state);
+            }
+            self.gateway.settle_in_flight_turn(&mut self.state).await;
+            let record = self
+                .gateway
+                .sync_session_messages_from_store(&mut self.state)
+                .await;
             match crate::session_snapshot_service::autosave_on_interrupt(&self.state, record) {
                 Ok(Some(path)) => {
                     tracing::info!("Auto-saved session on interrupt to {}", path.display());
