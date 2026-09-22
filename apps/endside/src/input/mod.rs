@@ -7,3 +7,4 @@ pub(crate) mod file_mention;
 pub(crate) mod slash_complete;
 
 pub(crate) use core::{handle_input_key, is_chord, EventHandler, Input, InputRequest};
+pub(crate) use event_mouse::mouse_to_line_col;

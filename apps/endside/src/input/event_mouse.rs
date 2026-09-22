@@ -71,6 +71,16 @@ impl App {
             self.input_drag_active = false;
             return;
         }
+        // While a transcript drag-selection is in progress, the pointer may
+        // pass over the input box (dragging past the Messages bottom edge
+        // auto-scrolls the transcript and extends the selection). The caret
+        // must not follow it, and the input box must not steal those drag
+        // events. Any button press inside the input box clears the transcript
+        // selection first (see the Down fall-through arm in
+        // handle_transcript_mouse), so this guard only swallows the drags.
+        if self.state.transcript_drag_active() {
+            return;
+        }
         let Some(inner) = self.state.render_state.input_area else {
             self.input_drag_active = false;
             return;
@@ -348,12 +358,30 @@ impl App {
 
         match mouse_event.kind {
             MouseEventKind::ScrollUp => {
-                self.state.transcript_selection = None;
-                self.state.active_transcript_scroll_up();
+                // While a drag-selection is in progress, the wheel slides the
+                // content under the stationary pointer and the selection
+                // follows it: holding the button and rolling the wheel lets a
+                // single drag cover (and auto-copy on release) content beyond
+                // the visible viewport, not just what is on screen.
+                if self.state.transcript_drag_active() {
+                    self.state.active_transcript_scroll_up();
+                    self.state
+                        .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                } else {
+                    self.state.transcript_selection = None;
+                    self.state.active_transcript_scroll_up();
+                }
             }
             MouseEventKind::ScrollDown => {
-                self.state.transcript_selection = None;
-                self.state.active_transcript_scroll_down();
+                // See ScrollUp: scroll-and-extend while a drag is active.
+                if self.state.transcript_drag_active() {
+                    self.state.active_transcript_scroll_down();
+                    self.state
+                        .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                } else {
+                    self.state.transcript_selection = None;
+                    self.state.active_transcript_scroll_down();
+                }
             }
             // Shift+wheel commonly arrives as ScrollLeft/ScrollRight; when the
             // pointer hovers a windowed (wide) markdown table, pan it
@@ -370,11 +398,7 @@ impl App {
             // Right-click: copy whatever is currently selected (like opencode's right-click copy).
             MouseEventKind::Down(MouseButton::Right) => {
                 if let Some(text) = self.state.transcript_selected_text() {
-                    if let Err(e) = copy_to_clipboard(&text) {
-                        tracing::warn!("copy_to_clipboard failed: {}", e);
-                    } else {
-                        self.state.set_copy_notice();
-                    }
+                    self.state.report_clipboard_result(copy_to_clipboard(&text));
                     self.state.transcript_selection = None;
                 }
             }
@@ -440,18 +464,25 @@ impl App {
                 self.state.transcript_selection = None;
             }
             MouseEventKind::Drag(MouseButton::Left) if in_content_zone => {
-                let scroll_offset = self.state.active_transcript_scroll_offset();
-                if let Some(sel) = self.state.transcript_selection.as_mut() {
-                    let (line_idx, col) = mouse_to_line_col(
-                        mouse_event.column,
-                        mouse_event.row,
-                        area,
-                        scroll_offset,
-                        self.state.render_state.transcript_cache.as_ref(),
-                    );
-                    sel.cursor_line = line_idx;
-                    sel.cursor_col = col;
+                self.state
+                    .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+            }
+            // Drag-selection continued outside the content zone: above the top
+            // edge or below the bottom edge of the Messages box (e.g. into
+            // the input area). Auto-scroll one line in that direction and
+            // extend the selection to the first/last visible line — the
+            // classic drag-to-edge auto-scroll — so a single drag can cover
+            // content spanning several screens. A position inside the box but
+            // over the scrollbar columns simply extends the selection with
+            // the column clamped into the text area.
+            MouseEventKind::Drag(MouseButton::Left) if self.state.transcript_drag_active() => {
+                if mouse_event.row >= area.y.saturating_add(area.height) {
+                    self.state.active_transcript_scroll_down();
+                } else if mouse_event.row < area.y {
+                    self.state.active_transcript_scroll_up();
                 }
+                self.state
+                    .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
             }
             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
                 if self.state.active_transcript_scrollbar_dragging() =>
@@ -474,11 +505,7 @@ impl App {
                 // Auto copy-on-select: mirrors opencode's onMouseUp handler.
                 // Any non-empty selection is automatically copied when the mouse is released.
                 if let Some(text) = self.state.transcript_selected_text() {
-                    if let Err(e) = copy_to_clipboard(&text) {
-                        tracing::warn!("copy_to_clipboard failed: {}", e);
-                    } else {
-                        self.state.set_copy_notice();
-                    }
+                    self.state.report_clipboard_result(copy_to_clipboard(&text));
                 }
                 // Always clear: a non-empty selection that yields no extractable text
                 // (e.g. a drag confined to header lines) must not linger, otherwise the
@@ -565,7 +592,7 @@ fn mouse_in_rect(column: u16, row: u16, rect: Rect) -> bool {
 /// via `div_ceil(display_width, content_width)`, which diverged from textwrap's
 /// word-aware wrapping for long paths/URLs and caused clicks to land on the
 /// wrong character or the wrong line).
-fn mouse_to_line_col(
+pub(crate) fn mouse_to_line_col(
     column: u16,
     row: u16,
     area: Rect,

@@ -643,3 +643,264 @@ impl super::AppState {
         })
     }
 }
+
+/// Tests for the drag-selection + scroll interplay: holding the mouse button
+/// while wheel-scrolling (or dragging past the box edges) scrolls the
+/// transcript and extends the selection to the content now under the
+/// pointer, so one drag can select — and auto-copy on release — content
+/// beyond the visible viewport instead of only what is on screen.
+mod transcript_selection_scroll_tests {
+    use super::super::{clamp_to_transcript_content, AppState, CachedMessageRender};
+    use crate::render::transcript::build_transcript_cache;
+    use crate::render::wrap_line_to_visual_lines;
+    use crate::selection::TranscriptSelection;
+    use ratatui::layout::Rect;
+    use ratatui::text::Line;
+    use std::path::PathBuf;
+
+    /// A state with a 51-line transcript rendered as ONE message block whose
+    /// first logical line is the role header (headers are excluded from copy
+    /// extraction — `build_transcript_cache` marks line 0 of each block via
+    /// `HEADER_LINE_INDEX`) followed by 50 content lines "line-00"..
+    /// "line-49". Each logical line is one visual row at width 80, so visual
+    /// row == logical line index. The Messages area shows 10 visible rows at
+    /// `Rect(2, 5, 40, 10)` (rows 5..=14, content columns 3..=39).
+    fn state_with_line_transcript() -> (AppState, Rect) {
+        let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize");
+        let mut lines: Vec<Line<'static>> = vec![Line::from("  ▎ You  12:00:00")];
+        for i in 0..50 {
+            lines.push(Line::from(format!("line-{i:02}")));
+        }
+        let wrapped_lines: Vec<Vec<Line<'static>>> = lines
+            .iter()
+            .map(|l| wrap_line_to_visual_lines(l, 80))
+            .collect();
+        let render = CachedMessageRender {
+            width: 80,
+            wide_tables: Vec::new(),
+            lines,
+            wrapped_lines: Some(wrapped_lines),
+            tool_toggle_row_offset: None,
+            subagent_open_target: None,
+            frozen_prefix_line_count: None,
+        };
+        state.render_state.transcript_cache =
+            Some(build_transcript_cache(None, vec![Some(render)]));
+        let area = Rect::new(2, 5, 40, 10);
+        state.chat_state.total_lines = 51;
+        state.chat_state.last_visible_height = 10;
+        state.chat_state.scroll_offset = 0;
+        state.chat_state.stick_to_bottom = false;
+        state.chat_state.sync_scrollbar_state();
+        (state, area)
+    }
+
+    /// `transcript_drag_active` is true only while a selection exists and the
+    /// scrollbar is not being dragged — the state in which wheel scrolls and
+    /// edge drags extend the selection instead of dismissing it.
+    #[test]
+    fn transcript_drag_active_reflects_selection_and_scrollbar() {
+        let (mut state, _area) = state_with_line_transcript();
+        assert!(!state.transcript_drag_active(), "no selection → no drag");
+
+        state.transcript_selection = Some(TranscriptSelection::new(0, 0));
+        assert!(state.transcript_drag_active(), "selection → drag in progress");
+
+        state.chat_state.scrollbar_dragging = true;
+        assert!(
+            !state.transcript_drag_active(),
+            "scrollbar drag takes precedence"
+        );
+
+        state.chat_state.scrollbar_dragging = false;
+        assert!(state.transcript_drag_active());
+    }
+
+    /// Core feature: holding the mouse button and rolling the wheel scrolls
+    /// the content under the stationary pointer while the selection follows,
+    /// so one drag can select (and on release copy) content beyond the
+    /// visible viewport instead of only what is on screen.
+    #[test]
+    fn wheel_scroll_extends_selection_beyond_viewport() {
+        let (mut state, area) = state_with_line_transcript();
+        // Anchor at the start of "line-00" (logical line 1; line 0 is the
+        // role header).
+        state.transcript_selection = Some(TranscriptSelection::new(1, 0));
+        assert!(state.transcript_drag_active());
+
+        // Roll the wheel down three notches with the pointer parked at the
+        // bottom visible row (row 14 = area.y + 9): each notch scrolls one
+        // line and the selection extends to the content now under it.
+        for _ in 0..3 {
+            state.active_transcript_scroll_down();
+            state.extend_transcript_selection_to(12, 14, area);
+        }
+        assert_eq!(state.chat_state.scroll_offset, 3);
+        let sel = state.transcript_selection.as_ref().unwrap();
+        assert_eq!(sel.anchor_line, 1, "anchor stays where the drag began");
+        assert_eq!(
+            sel.cursor_line, 12,
+            "cursor follows the scrolled content (visual row = offset 3 + rel 9)"
+        );
+
+        // The extracted selection spans logical lines 1..=12 ("line-00"
+        // through "line-11") — the anchor line is scrolled far above the
+        // 10-row viewport — proving copy is not limited to visible content.
+        let text = state.transcript_selected_text().expect("selection text");
+        assert_eq!(text.lines().count(), 12);
+        assert!(text.starts_with("line-00"));
+        assert!(text.ends_with("line-11"));
+    }
+
+    /// The wheel works in the other direction too: rolling up while dragging
+    /// extends the selection towards earlier content.
+    #[test]
+    fn wheel_scroll_up_extends_selection_towards_earlier_lines() {
+        let (mut state, area) = state_with_line_transcript();
+        state.chat_state.scroll_offset = 10;
+        state.chat_state.sync_scrollbar_state();
+        // Anchor on the first content line visible at offset 10 (visual row
+        // 10 is the header, row 11 is "line-10").
+        state.transcript_selection = Some(TranscriptSelection::new(11, 0));
+        assert!(state.transcript_drag_active());
+
+        // Roll the wheel up two notches with the pointer at the top visible
+        // row (row 5 = area.y): offset 10 → 8, pointer maps to visual row 8.
+        for _ in 0..2 {
+            state.active_transcript_scroll_up();
+            state.extend_transcript_selection_to(12, 5, area);
+        }
+        assert_eq!(state.chat_state.scroll_offset, 8);
+        let sel = state.transcript_selection.as_ref().unwrap();
+        assert_eq!(sel.cursor_line, 8);
+        let (start_line, _, end_line, _) = sel.normalised();
+        assert_eq!((start_line, end_line), (8, 11));
+    }
+
+    /// Dragging past the bottom edge (e.g. into the input box) auto-scrolls
+    /// down one line per drag event and extends the selection to the last
+    /// visible line.
+    #[test]
+    fn drag_past_bottom_edge_extends_to_last_visible_line() {
+        let (mut state, area) = state_with_line_transcript();
+        state.transcript_selection = Some(TranscriptSelection::new(1, 0));
+        assert!(state.transcript_drag_active());
+
+        // Pointer dragged far below the Messages box (row 40 > bottom row 14).
+        state.active_transcript_scroll_down();
+        state.extend_transcript_selection_to(12, 40, area);
+
+        let sel = state.transcript_selection.as_ref().unwrap();
+        assert_eq!(
+            sel.cursor_line, 10,
+            "row 40 clamps to the last visible row (visual = offset 1 + rel 9)"
+        );
+        let (start_line, _, end_line, _) = sel.normalised();
+        assert_eq!((start_line, end_line), (1, 10));
+    }
+
+    /// Dragging above the top edge auto-scrolls up and extends the selection
+    /// to the first visible line.
+    #[test]
+    fn drag_above_top_edge_extends_to_first_visible_line() {
+        let (mut state, area) = state_with_line_transcript();
+        state.chat_state.scroll_offset = 10;
+        state.chat_state.sync_scrollbar_state();
+        // Anchor near the bottom of the visible window (offset 10 → visual
+        // rows 10..=19 visible; row 19 is "line-18").
+        state.transcript_selection = Some(TranscriptSelection::new(19, 0));
+        assert!(state.transcript_drag_active());
+
+        // Pointer dragged above the Messages box (row 3 < top row 5).
+        state.active_transcript_scroll_up();
+        state.extend_transcript_selection_to(12, 3, area);
+
+        let sel = state.transcript_selection.as_ref().unwrap();
+        assert_eq!(
+            sel.cursor_line, 9,
+            "row 3 clamps to the first visible row (visual = offset 9 + rel 0)"
+        );
+        let (start_line, _, end_line, _) = sel.normalised();
+        assert_eq!((start_line, end_line), (9, 19));
+    }
+
+    /// Positions from beyond the box edges clamp into the Messages content
+    /// area (text starts one column after the left border and ends before
+    /// the scrollbar track; rows are bounded by the box).
+    #[test]
+    fn clamp_to_transcript_content_bounds_positions() {
+        let area = Rect::new(2, 5, 40, 10); // rows 5..=14, content cols 3..=39
+        assert_eq!(clamp_to_transcript_content(10, 10, area), (10, 10));
+        assert_eq!(
+            clamp_to_transcript_content(0, 0, area),
+            (3, 5),
+            "above/left clamps to the top-left content cell"
+        );
+        assert_eq!(
+            clamp_to_transcript_content(200, 200, area),
+            (39, 14),
+            "below/right clamps to the bottom-right content cell"
+        );
+    }
+
+    /// Degenerate boxes (too narrow for border + scrollbar) must not panic.
+    #[test]
+    fn clamp_to_transcript_content_handles_narrow_area() {
+        let area = Rect::new(0, 0, 3, 5);
+        assert_eq!(clamp_to_transcript_content(9, 9, area), (1, 4));
+        assert_eq!(clamp_to_transcript_content(0, 0, area), (1, 0));
+    }
+}
+
+/// Tests for `report_clipboard_result`: the success toast must only appear
+/// when delivery is confirmed (native clipboard write or an OSC 52-capable
+/// terminal), while any completed attempt (`Ok`) still tells callers they
+/// may clear the source selection.
+mod clipboard_report_tests {
+    use super::super::AppState;
+    use crate::services::provider::ClipboardOutcome;
+    use anyhow::anyhow;
+    use std::path::PathBuf;
+
+    fn fresh_state() -> AppState {
+        AppState::new(PathBuf::from("config.toml"), PathBuf::from("."))
+            .expect("app state should initialize")
+    }
+
+    /// A native clipboard write is confirmed delivery: success toast, and
+    /// `true` so the caller may clear the selection.
+    #[test]
+    fn native_delivery_shows_success_toast() {
+        let mut state = fresh_state();
+        assert!(!state.copy_notice_active());
+        assert!(!state.copy_error_notice_active());
+        assert!(state.report_clipboard_result(Ok(ClipboardOutcome::Native)));
+        assert!(state.copy_notice_active());
+        assert!(!state.copy_error_notice_active());
+    }
+
+    /// A failed copy shows the error toast and reports `false` — the caller
+    /// keeps the selection so the user can retry.
+    #[test]
+    fn failed_copy_shows_error_toast_and_keeps_selection() {
+        let mut state = fresh_state();
+        assert!(!state.report_clipboard_result(Err(anyhow!("clipboard unavailable"))));
+        assert!(state.copy_error_notice_active());
+        assert!(!state.copy_notice_active());
+    }
+
+    /// An OSC 52 sequence is fire-and-forget: exactly one toast is shown —
+    /// success when the current terminal is known to honour the sequence,
+    /// the error toast otherwise — and the attempt is still reported so the
+    /// selection may be cleared.
+    #[test]
+    fn osc52_outcome_shows_exactly_one_toast() {
+        let mut state = fresh_state();
+        assert!(state.report_clipboard_result(Ok(ClipboardOutcome::Osc52)));
+        assert!(
+            state.copy_notice_active() ^ state.copy_error_notice_active(),
+            "exactly one of the copy/copy-error toasts must be active"
+        );
+    }
+}

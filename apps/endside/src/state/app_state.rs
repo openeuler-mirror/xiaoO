@@ -14,9 +14,11 @@ use crate::input::file_mention::{
     file_mention_candidates, file_mention_token, FileMentionCandidate, FileMentionToken,
     FILE_MENTION_MAX_CANDIDATES,
 };
+use crate::input::mouse_to_line_col;
 use crate::input::Input;
 use crate::interaction_prompt::{InteractionPromptState, PromptRequest};
 use crate::provider_dialog::ProviderDialog;
+use crate::provider_service::ClipboardOutcome;
 use crate::render::markdown::{MarkdownIncrementalState, WideTableRegion};
 use crate::selection::TranscriptSelection;
 use crate::services::command_loader::{load_external_commands, ExternalCommand};
@@ -584,6 +586,40 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// Report the outcome of a clipboard copy attempt: shows the success
+    /// toast only when delivery is confirmed (native clipboard tool) or the
+    /// terminal is known to honour OSC 52. A fire-and-forget OSC 52 sequence
+    /// into an unknown terminal (PuTTY, MobaXterm, FinalShell, Xshell …)
+    /// shows the error toast instead — previously the UI claimed
+    /// "Copied to clipboard" while the terminal silently dropped the
+    /// sequence and the clipboard kept its old contents.
+    ///
+    /// Returns `true` when a copy was actually attempted (`Ok(..)`), so
+    /// callers know they may clear the source selection.
+    pub fn report_clipboard_result(&mut self, result: Result<ClipboardOutcome>) -> bool {
+        match result {
+            Ok(outcome) => {
+                if outcome.delivered() {
+                    self.set_copy_notice();
+                } else {
+                    tracing::warn!(
+                        "clipboard: OSC 52 sequence emitted, but TERM={:?} TERM_PROGRAM={:?} \
+                         is not known to support it — the clipboard was not updated",
+                        std::env::var("TERM").unwrap_or_default(),
+                        std::env::var("TERM_PROGRAM").unwrap_or_default()
+                    );
+                    self.set_copy_error_notice();
+                }
+                true
+            }
+            Err(e) => {
+                tracing::warn!("copy_to_clipboard failed: {e}");
+                self.set_copy_error_notice();
+                false
+            }
+        }
+    }
+
     pub fn toggle_theme(&mut self) {
         self.theme = self.theme.toggled();
     }
@@ -827,6 +863,42 @@ impl AppState {
                 .map(f)
         } else {
             self.chat_state.messages.get_mut(message_index).map(f)
+        }
+    }
+
+    /// True while a transcript drag-selection is in progress: a selection
+    /// exists and the scrollbar is not being dragged. In this state the mouse
+    /// wheel and drags past the box edges scroll the transcript *and* extend
+    /// the selection to the content now under the pointer, so a single drag
+    /// can cover (and, on release, auto-copy) content that spans beyond the
+    /// visible viewport instead of only what is currently on screen.
+    pub fn transcript_drag_active(&self) -> bool {
+        self.transcript_selection.is_some() && !self.active_transcript_scrollbar_dragging()
+    }
+
+    /// Re-map a screen position to transcript text and move the in-progress
+    /// selection's cursor there.
+    ///
+    /// The position is first clamped into the Messages content area, so
+    /// events from beyond the box's edges — a drag that ran past the bottom
+    /// into the input box, or a pointer above the top edge — map to the
+    /// first/last visible line instead of being dropped. Called after each
+    /// scroll step while a drag-selection is active: the content slides
+    /// under the stationary pointer, and the selection is re-extended to
+    /// whatever now sits there.
+    pub fn extend_transcript_selection_to(&mut self, column: u16, row: u16, area: Rect) {
+        let (column, row) = clamp_to_transcript_content(column, row, area);
+        let scroll_offset = self.active_transcript_scroll_offset();
+        if let Some(sel) = self.transcript_selection.as_mut() {
+            let (line_idx, col) = mouse_to_line_col(
+                column,
+                row,
+                area,
+                scroll_offset,
+                self.render_state.transcript_cache.as_ref(),
+            );
+            sel.cursor_line = line_idx;
+            sel.cursor_col = col;
         }
     }
 
@@ -1328,6 +1400,29 @@ fn short_agent_id(agent_id: &str) -> String {
     } else {
         trimmed.chars().take(8).collect::<String>()
     }
+}
+
+/// Clamp a mouse position into the Messages content area: text starts one
+/// column after the left border and ends before the scrollbar track, and
+/// rows are bounded by the box itself. Positions from beyond the edges
+/// (a drag that ran past the bottom into the input box, a pointer above
+/// the top edge, a wheel event near a border) map to the first/last
+/// visible line/char instead of being dropped.
+fn clamp_to_transcript_content(column: u16, row: u16, area: Rect) -> (u16, u16) {
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let clamped_row = if last_row >= area.y {
+        row.clamp(area.y, last_row)
+    } else {
+        area.y
+    };
+    let content_left = area.x.saturating_add(1);
+    let content_right = area.x.saturating_add(area.width.saturating_sub(3));
+    let clamped_column = if content_right >= content_left {
+        column.clamp(content_left, content_right)
+    } else {
+        content_left
+    };
+    (clamped_column, clamped_row)
 }
 
 pub(crate) fn file_change_delta_from_tool_args(

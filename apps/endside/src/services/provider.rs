@@ -137,7 +137,113 @@ pub fn validate_and_connect_api_key(
     Ok(())
 }
 
-pub fn copy_to_clipboard(text: &str) -> Result<()> {
+/// How a copy request was delivered to the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardOutcome {
+    /// The system clipboard was set directly via a native tool
+    /// (wl-copy / xclip / xsel / arboard). Delivery is confirmed.
+    Native,
+    /// An OSC 52 escape sequence was emitted to the terminal. Delivery is
+    /// fire-and-forget: there is no acknowledgement, so the terminal may
+    /// silently ignore it (PuTTY, MobaXterm, FinalShell, Xshell and
+    /// VTE-based terminals do not implement OSC 52 by default).
+    Osc52,
+}
+
+impl ClipboardOutcome {
+    /// Whether the copy is confirmed — or at least very likely — to have
+    /// reached the clipboard the user will paste from. Only [`Self::Native`]
+    /// is confirmed; [`Self::Osc52`] additionally requires a terminal known
+    /// to implement the sequence (see [`osc52_likely_supported`]).
+    pub fn delivered(&self) -> bool {
+        match self {
+            ClipboardOutcome::Native => true,
+            ClipboardOutcome::Osc52 => osc52_likely_supported(),
+        }
+    }
+}
+
+/// Best-effort check whether the current terminal is *known* to implement
+/// the OSC 52 clipboard sequence. OSC 52 has no acknowledgement mechanism,
+/// so this sniffs `TERM` / `TERM_PROGRAM` / well-known terminal env vars.
+///
+/// Returns `false` for unknown terminals — PuTTY, MobaXterm, FinalShell and
+/// friends all report themselves as plain `xterm`/`xterm-256color`, VTE and
+/// stock xterm disable the feature by default — which is the safe answer:
+/// the UI then reports a copy failure instead of claiming success while the
+/// clipboard silently kept its old contents.
+///
+/// Inside tmux this stays conservative: tmux masks the pane `TERM` with its
+/// own `default-terminal` (`screen*`/`tmux*`), so the outer terminal can
+/// only be identified through signals that survive the tmux session
+/// environment snapshot (`TERM_PROGRAM`, `WT_SESSION`, `KITTY_WINDOW_ID`).
+/// `TMUX` alone proves nothing — with `allow-passthrough off` (the tmux >=
+/// 3.3 default) the DCS passthrough is silently dropped, and even when the
+/// sequence does reach the outer terminal it may not implement OSC 52.
+/// The snapshot can go stale when a session is created in one terminal and
+/// later attached from another; that rare case is accepted rather than
+/// queried.
+pub fn osc52_likely_supported() -> bool {
+    osc52_supported_by_terminal(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("WT_SESSION").is_some(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+    )
+}
+
+/// Pure form of [`osc52_likely_supported`] so the heuristic stays testable
+/// without mutating process-global env vars.
+fn osc52_supported_by_terminal(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    wt_session: bool,
+    kitty_window_id: bool,
+) -> bool {
+    // Windows Terminal sets WT_SESSION and implements OSC 52. The variable
+    // is not in tmux's default `update-environment` list, so it survives
+    // into panes as part of the session environment snapshot.
+    if wt_session {
+        return true;
+    }
+    // kitty refuses to set TERM_PROGRAM (kovidgoyal/kitty#3317) and is only
+    // recognizable through its own env vars; KITTY_WINDOW_ID is set per
+    // window and survives into tmux panes the same way. Without this, a
+    // kitty + tmux setup would be reported as unconfirmed even though
+    // kitty implements OSC 52.
+    if kitty_window_id {
+        return true;
+    }
+    // Terminals that identify themselves through `TERM` (kitty, Alacritty,
+    // WezTerm, ghostty, foot, rio, contour, mintty). `TERM`-suffix variants
+    // such as `alacritty-direct` / `foot-extra` are covered by the prefix
+    // match below. Inside tmux the pane `TERM` is `screen*`/`tmux*` and
+    // never matches; a hand-configured `default-terminal xterm-kitty`
+    // counts as an explicit opt-in.
+    const KNOWN_TERMS: [&str; 9] = [
+        "xterm-kitty", "alacritty", "wezterm", "xterm-ghostty", "ghostty", "foot", "rio",
+        "contour", "mintty",
+    ];
+    if let Some(term) = term {
+        if KNOWN_TERMS
+            .iter()
+            .any(|known| term == *known || term.starts_with(&format!("{known}-")))
+        {
+            return true;
+        }
+    }
+    // Terminals that identify themselves through `TERM_PROGRAM` (VS Code,
+    // iTerm2, WezTerm, ghostty, mintty, Hyper, Tabby, Warp). Inside tmux
+    // this is the main surviving signal: TERM_PROGRAM is not refreshed by
+    // tmux's `update-environment`, so the outer terminal's value is
+    // inherited by every pane.
+    const KNOWN_PROGRAMS: [&str; 8] = [
+        "vscode", "iTerm.app", "WezTerm", "ghostty", "mintty", "Hyper", "Tabby", "WarpTerminal",
+    ];
+    term_program.is_some_and(|program| KNOWN_PROGRAMS.iter().any(|known| program == *known))
+}
+
+pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     // Wayland: wl-copy
@@ -149,7 +255,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
             .map(|o| o.status.success())
             == Some(true)
         {
-            return Ok(());
+            return Ok(ClipboardOutcome::Native);
         }
     }
     // X11: xclip (only if DISPLAY is set)
@@ -163,7 +269,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
                 stdin.write_all(text.as_bytes())?;
             }
             if child.wait().ok().map(|s| s.success()) == Some(true) {
-                return Ok(());
+                return Ok(ClipboardOutcome::Native);
             }
         }
         // X11: xsel
@@ -176,32 +282,48 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
                 stdin.write_all(text.as_bytes())?;
             }
             if child.wait().ok().map(|s| s.success()) == Some(true) {
-                return Ok(());
+                return Ok(ClipboardOutcome::Native);
             }
         }
         // Fallback: arboard (only makes sense with a display server)
         if let Ok(mut clip) = arboard::Clipboard::new() {
             if clip.set_text(text).is_ok() {
-                return Ok(());
+                return Ok(ClipboardOutcome::Native);
             }
         }
     }
 
-    // OSC 52 fallback: works in most modern terminals including Windows Terminal,
-    // iTerm2, kitty, Alacritty, and over SSH.
+    // OSC 52 fallback: works in most modern terminals including Windows
+    // Terminal, iTerm2, kitty, Alacritty, and over SSH. There is no
+    // acknowledgement mechanism, so delivery is *not* confirmed — callers
+    // must check `ClipboardOutcome::delivered()` before claiming success,
+    // otherwise PuTTY/MobaXterm/FinalShell-style terminals (which ignore the
+    // sequence) keep the previous clipboard contents while the UI had shown
+    // "Copied to clipboard".
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
     // Write directly to stdout while still in raw mode.
     let mut out = std::io::stdout().lock();
-    // When running inside tmux, wrap with a DCS passthrough so the outer
-    // terminal receives the OSC 52 sequence (mirrors opencode's behaviour).
+    // When running inside tmux, emit BOTH delivery paths: tmux gates each
+    // behind a separate option and its defaults enable neither.
+    //   - The raw sequence: tmux intercepts it and forwards to the outer
+    //     terminal (and its own paste buffer) when `set-clipboard` is `on`.
+    //   - The DCS `tmux;` passthrough wrap: bypasses tmux and reaches the
+    //     outer terminal directly when `allow-passthrough` is `on` (the
+    //     tmux >= 3.3 default is off, which silently drops the wrap — the
+    //     trap opencode fell into, see anomalyco/opencode#19982).
+    // When both options are on the outer terminal receives the same payload
+    // twice, which is harmless; when neither is on nothing is delivered and
+    // `delivered()` already reports tmux copies as unconfirmed unless a
+    // known outer terminal was detected.
     if std::env::var("TMUX").is_ok() {
+        write!(out, "\x1b]52;c;{encoded}\x07")?;
         write!(out, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")?;
     } else {
         write!(out, "\x1b]52;c;{encoded}\x07")?;
     }
     out.flush()?;
-    Ok(())
+    Ok(ClipboardOutcome::Osc52)
 }
 
 #[cfg(test)]
