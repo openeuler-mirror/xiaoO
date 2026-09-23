@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior};
+
+use super::request_store;
 
 use super::super::storage_trait::{SpanStorage, TraceSummary};
 use crate::{MoiraiError, Result, Span};
@@ -76,6 +78,7 @@ impl SqliteStorage {
             CREATE INDEX IF NOT EXISTS idx_created_at ON spans(created_at DESC);
             "#,
         )?;
+        request_store::init(conn)?;
         let alter_result = conn.execute(
             "ALTER TABLE spans ADD COLUMN last_updated_at INTEGER NOT NULL DEFAULT 0",
             [],
@@ -88,10 +91,12 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn span_from_row(row: &Row) -> Result<Span> {
+    fn span_from_row(conn: &Connection, row: &Row) -> Result<Span> {
         let span_type: String = row.get(3)?;
         let extras_str: String = row.get(7)?;
-        let extras: serde_json::Value = serde_json::from_str(&extras_str)?;
+        let mut extras: serde_json::Value = serde_json::from_str(&extras_str)?;
+        let span_id: String = row.get(0)?;
+        request_store::decode(conn, &span_id, &mut extras)?;
 
         Ok(Span {
             span_id: row.get(0)?,
@@ -262,7 +267,7 @@ impl SqliteStorage {
         )?;
 
         let rows = stmt.query_map(rusqlite::params![trace_id], |row| {
-            Ok(SqliteStorage::span_from_row(row))
+            Ok(SqliteStorage::span_from_row(&conn, row))
         })?;
 
         let mut spans = Vec::new();
@@ -280,13 +285,16 @@ impl SpanStorage for SqliteStorage {
         let span = span.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn
+            let mut conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let extras_str = serde_json::to_string(&span.extras)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut extras = span.extras;
+            request_store::encode(&tx, &span.span_id, &mut extras)?;
+            let extras_str = serde_json::to_string(&extras)?;
 
-            conn.execute(
+            tx.execute(
                 "INSERT INTO spans (span_id, trace_id, parent_span_id, span_type, start_time, last_updated_at, end_time, extras, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 rusqlite::params![
@@ -301,6 +309,7 @@ impl SpanStorage for SqliteStorage {
                     span.created_at,
                 ],
             )?;
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -349,21 +358,14 @@ impl SpanStorage for SqliteStorage {
         let span_id = span_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn
+            let mut conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let mut stmt = conn.prepare(
-                "SELECT extras FROM spans WHERE span_id = ?1",
-            )?;
-
-            let current_extras_str: String = stmt.query_row(
-                rusqlite::params![&span_id],
-                |row| row.get(0),
-            ).map_err(|_| MoiraiError::NotFound(format!(
-                "Span not found: {}",
-                span_id
-            )))?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current_extras_str: String = tx.query_row(
+                "SELECT extras FROM spans WHERE span_id = ?1", [&span_id], |row| row.get(0),
+            ).optional()?.ok_or_else(|| MoiraiError::NotFound(format!("Span not found: {}", span_id)))?;
 
             let mut current_extras: serde_json::Value = serde_json::from_str(&current_extras_str)?;
 
@@ -373,20 +375,22 @@ impl SpanStorage for SqliteStorage {
                 }
             }
 
+            request_store::encode(&tx, &span_id, &mut current_extras)?;
             let merged_extras_str = serde_json::to_string(&current_extras)?;
 
             if let Some(end_time_val) = end_time {
-                conn.execute(
+                tx.execute(
                     "UPDATE spans SET extras = ?1, last_updated_at = ?2, end_time = ?3 WHERE span_id = ?4",
                     rusqlite::params![merged_extras_str, last_updated_at, end_time_val, span_id],
                 )?;
             } else {
-                conn.execute(
+                tx.execute(
                     "UPDATE spans SET extras = ?1, last_updated_at = ?2 WHERE span_id = ?3",
                     rusqlite::params![merged_extras_str, last_updated_at, span_id],
                 )?;
             }
 
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -401,6 +405,7 @@ impl SpanStorage for SqliteStorage {
             let conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+            let conn = conn.unchecked_transaction()?;
 
             let mut stmt = conn.prepare(
                 "SELECT span_id, trace_id, parent_span_id, span_type, start_time, last_updated_at, end_time, extras, created_at
@@ -410,7 +415,7 @@ impl SpanStorage for SqliteStorage {
             let mut rows = stmt.query(rusqlite::params![span_id])?;
 
             match rows.next()? {
-                Some(row) => Ok(Some(SqliteStorage::span_from_row(row)?)),
+                Some(row) => Ok(Some(SqliteStorage::span_from_row(&conn, row)?)),
                 None => Ok(None),
             }
         })
@@ -426,6 +431,7 @@ impl SpanStorage for SqliteStorage {
             let conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+            let conn = conn.unchecked_transaction()?;
 
             let mut stmt = conn.prepare(
                 "SELECT span_id, trace_id, parent_span_id, span_type, start_time, last_updated_at, end_time, extras, created_at
@@ -433,7 +439,7 @@ impl SpanStorage for SqliteStorage {
             )?;
 
             let rows = stmt.query_map(rusqlite::params![trace_id], |row| {
-                Ok(SqliteStorage::span_from_row(row))
+                Ok(SqliteStorage::span_from_row(&conn, row))
             })?;
 
             let mut spans = Vec::new();
@@ -733,6 +739,7 @@ impl SqliteStorage {
             let conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
+            let conn = conn.unchecked_transaction()?;
 
             let chain = {
                 let current = Self::load_trace_segment(&conn, &trace_id)?.ok_or_else(|| {
@@ -801,15 +808,18 @@ impl SqliteStorage {
         let conn = self.conn.clone();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn
+            let mut conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let deleted = conn.execute(
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let deleted = tx.execute(
                 "DELETE FROM spans WHERE created_at < ?1",
                 rusqlite::params![cutoff_timestamp_ms],
             )?;
 
+            request_store::collect_unused(&tx)?;
+            tx.commit()?;
             Ok(deleted)
         })
         .await
@@ -821,15 +831,18 @@ impl SqliteStorage {
         let trace_id = trace_id.to_string();
 
         tokio::task::spawn_blocking(move || {
-            let conn = conn
+            let mut conn = conn
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let deleted = conn.execute(
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let deleted = tx.execute(
                 "DELETE FROM spans WHERE trace_id = ?1",
                 rusqlite::params![trace_id],
             )?;
 
+            request_store::collect_unused(&tx)?;
+            tx.commit()?;
             Ok(deleted)
         })
         .await
