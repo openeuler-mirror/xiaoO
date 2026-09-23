@@ -304,6 +304,14 @@ pub struct NoopRuntimeView {
     agent_context: BasicAgentContext,
     interaction: Box<dyn InteractionHandle>,
     hookers: NoopHookerRegistry,
+    /// When set, `hookers()` delegates to this registry instead of the empty
+    /// noop one, so hook payload builders can resolve the configured
+    /// per-hooker policies (`policy_for`) even though the view itself carries
+    /// no session state. Session lifecycle hooks run under a NoopRuntimeView
+    /// (there is no live runtime at those dispatch sites); without the
+    /// override every session-event payload would report `policy: null` and
+    /// a policy-scoped plugin could never see its own scope config.
+    hookers_override: Option<Arc<dyn HookerRegistry>>,
     operation_backend: Option<Arc<dyn OperationBackend>>,
 }
 
@@ -324,8 +332,16 @@ impl NoopRuntimeView {
             ),
             interaction: Box::new(NoopInteractionHandle),
             hookers: NoopHookerRegistry,
+            hookers_override: None,
             operation_backend: None,
         }
+    }
+
+    /// Provide the configured hooker registry so `hookers()` (and thus
+    /// `policy_for`) resolves real per-hooker policies instead of none.
+    pub fn with_hooker_registry(mut self, registry: Arc<dyn HookerRegistry>) -> Self {
+        self.hookers_override = Some(registry);
+        self
     }
 
     /// Create the minimal runtime view while injecting the caller-owned
@@ -397,7 +413,10 @@ impl RuntimeView for NoopRuntimeView {
     }
 
     fn hookers(&self) -> &dyn HookerRegistry {
-        &self.hookers
+        match self.hookers_override.as_ref() {
+            Some(registry) => registry.as_ref(),
+            None => &self.hookers,
+        }
     }
 
     fn operation_backend(&self) -> Option<Arc<dyn OperationBackend>> {
