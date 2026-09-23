@@ -20,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
+use super::super::core::serialize_workspace_root;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 /// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
@@ -159,19 +160,28 @@ impl PluginToolHookerAdaptor {
         }
     }
 
+    /// Session identity emitted in every tool payload: the runtime agent
+    /// metadata's session id, falling back to the call id when the runtime
+    /// carries none. Shared by the pre/post/error payload builders so all
+    /// three stages report the identical session identity for one tool
+    /// invocation — post/error hookers can correlate their event with the
+    /// session the pre hook saw without cross-process state.
+    fn session_identity(runtime: &dyn RuntimeView, call_id: &str) -> String {
+        runtime
+            .agent_context()
+            .metadata()
+            .session_id
+            .clone()
+            .unwrap_or_else(|| call_id.to_string())
+    }
+
     fn build_pre_payload(
         &self,
         input: &PreToolHookInput,
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
-        // Get session_id (for cache key)
-        let session_id = runtime
-            .agent_context()
-            .metadata()
-            .session_id
-            .clone()
-            .unwrap_or_else(|| input.call.call_id.clone());
+        let session_id = Self::session_identity(runtime, &input.call.call_id);
 
         let recent_messages = runtime.agent_context().conversation().recent_messages(100);
 
@@ -301,6 +311,7 @@ impl PluginToolHookerAdaptor {
         Ok(json!({
             "stage": "pre",
             "session_id": session_id,
+            "workspace": serialize_workspace_root(runtime),
             "prompt_session": prompt_session,
             "prompt_history": prompt_history,
             "action_history": action_history,
@@ -320,8 +331,12 @@ impl PluginToolHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
+        let session_id = Self::session_identity(runtime, &input.call.call_id);
+
         Ok(json!({
             "stage": "post",
+            "session_id": session_id,
+            "workspace": serialize_workspace_root(runtime),
             "hooker": self.serialize_hooker_info(runtime),
             "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
@@ -339,8 +354,12 @@ impl PluginToolHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
+        let session_id = Self::session_identity(runtime, &input.call.call_id);
+
         Ok(json!({
             "stage": "error",
+            "session_id": session_id,
+            "workspace": serialize_workspace_root(runtime),
             "hooker": self.serialize_hooker_info(runtime),
             "metadata": self.serialize_metadata(metadata),
             "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {

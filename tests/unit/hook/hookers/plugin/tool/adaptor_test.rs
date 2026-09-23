@@ -48,6 +48,18 @@ impl TestAgentContext {
             },
         }
     }
+
+    fn with_workspace_and_session(workspace: PathBuf, session_id: Option<String>) -> Self {
+        Self {
+            conversation: TestConversation,
+            workspace: WorkspaceRef { root: workspace },
+            metadata: AgentMetadata {
+                agent_id: "test-agent".to_string(),
+                model: "test-model".to_string(),
+                session_id,
+            },
+        }
+    }
 }
 
 impl AgentContext for TestAgentContext {
@@ -195,6 +207,19 @@ impl TestRuntimeView {
             trace_recorder: TestTraceRecorder,
             agent_context: TestAgentContext::new(),
             interaction: TestInteractionHandle::new(response),
+            hookers: TestHookerRegistry,
+        }
+    }
+
+    fn with_agent_context(agent_context: TestAgentContext) -> Self {
+        Self {
+            state_store: TestToolStateStore,
+            tool_events: TestToolEventSink,
+            trace_recorder: TestTraceRecorder,
+            agent_context,
+            interaction: TestInteractionHandle::new(InteractionResponse::Confirmed {
+                allowed: false,
+            }),
             hookers: TestHookerRegistry,
         }
     }
@@ -447,4 +472,161 @@ async fn run_plugin_command_times_out_and_kills_hung_child() {
         "应等到 2s 超时才返回，实际耗时 {:?}（疑似子进程未卡住）",
         elapsed
     );
+}
+
+// ---- payload identity fields (workspace / session_id) -----------------
+
+fn sample_call() -> FinalToolCall {
+    FinalToolCall {
+        call_id: "call-9".to_string(),
+        tool_name: "bash".to_string(),
+        input: json!({"command": "pwd"}),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn pre_payload_carries_workspace_and_session_id() {
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_payload_test".to_string()),
+        HookPointId("test-agent.Tool.bash.pre".to_string()),
+        "cat > /dev/null".to_string(),
+        Value::Null,
+    );
+    let runtime =
+        TestRuntimeView::with_agent_context(TestAgentContext::with_workspace_and_session(
+            PathBuf::from("/ws/proj-a"),
+            Some("session-42".to_string()),
+        ));
+    let input = PreToolHookInput {
+        call: sample_call(),
+    };
+
+    let payload = adaptor
+        .build_pre_payload(&input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+
+    assert_eq!(payload["stage"], json!("pre"));
+    assert_eq!(payload["session_id"], json!("session-42"));
+    assert_eq!(payload["workspace"], json!("/ws/proj-a"));
+}
+
+#[test]
+fn post_payload_carries_session_id_and_workspace() {
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_payload_test".to_string()),
+        HookPointId("test-agent.Tool.bash.post".to_string()),
+        "cat > /dev/null".to_string(),
+        Value::Null,
+    );
+    let runtime =
+        TestRuntimeView::with_agent_context(TestAgentContext::with_workspace_and_session(
+            PathBuf::from("/ws/proj-a"),
+            Some("session-42".to_string()),
+        ));
+    let input = PostToolHookInput {
+        call: sample_call(),
+        outcome: RawToolOutcome::Success {
+            output: "ok".to_string(),
+        },
+    };
+
+    let payload = adaptor
+        .build_post_payload(&input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+
+    assert_eq!(payload["stage"], json!("post"));
+    assert_eq!(payload["session_id"], json!("session-42"));
+    assert_eq!(payload["workspace"], json!("/ws/proj-a"));
+    assert_eq!(payload["outcome"]["type"], json!("success"));
+}
+
+#[test]
+fn error_payload_carries_session_id_and_workspace() {
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_payload_test".to_string()),
+        HookPointId("test-agent.Tool.bash.error".to_string()),
+        "cat > /dev/null".to_string(),
+        Value::Null,
+    );
+    let runtime =
+        TestRuntimeView::with_agent_context(TestAgentContext::with_workspace_and_session(
+            PathBuf::from("/ws/proj-a"),
+            Some("session-42".to_string()),
+        ));
+    let input = ErrorToolHookInput {
+        call: sample_call(),
+        error: ToolExecutionError::ExecutionFailed {
+            message: "boom".to_string(),
+        },
+    };
+
+    let payload = adaptor
+        .build_error_payload(&input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+
+    assert_eq!(payload["stage"], json!("error"));
+    assert_eq!(payload["session_id"], json!("session-42"));
+    assert_eq!(payload["workspace"], json!("/ws/proj-a"));
+    assert_eq!(payload["error"]["type"], json!("execution_failed"));
+}
+
+#[test]
+fn post_and_error_session_id_falls_back_to_call_id() {
+    // Same fallback rule as the pre payload: without a runtime session id
+    // the call id identifies the invocation.
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_payload_test".to_string()),
+        HookPointId("test-agent.Tool.bash.post".to_string()),
+        "cat > /dev/null".to_string(),
+        Value::Null,
+    );
+    let runtime = TestRuntimeView::with_agent_context(
+        TestAgentContext::with_workspace_and_session(PathBuf::from("/ws/proj-a"), None),
+    );
+    let post_input = PostToolHookInput {
+        call: sample_call(),
+        outcome: RawToolOutcome::Success {
+            output: String::new(),
+        },
+    };
+    let payload = adaptor
+        .build_post_payload(&post_input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+    assert_eq!(payload["session_id"], json!("call-9"));
+
+    let error_input = ErrorToolHookInput {
+        call: sample_call(),
+        error: ToolExecutionError::ExecutionFailed {
+            message: "boom".to_string(),
+        },
+    };
+    let payload = adaptor
+        .build_error_payload(&error_input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+    assert_eq!(payload["session_id"], json!("call-9"));
+}
+
+#[test]
+fn payload_workspace_serializes_empty_root_as_null() {
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_payload_test".to_string()),
+        HookPointId("test-agent.Tool.bash.pre".to_string()),
+        "cat > /dev/null".to_string(),
+        Value::Null,
+    );
+    let runtime =
+        TestRuntimeView::with_agent_context(TestAgentContext::with_workspace_and_session(
+            PathBuf::new(),
+            Some("session-42".to_string()),
+        ));
+    let input = PreToolHookInput {
+        call: sample_call(),
+    };
+
+    let payload = adaptor
+        .build_pre_payload(&input, &HookInvokeMetadata::default(), &runtime)
+        .unwrap();
+
+    assert_eq!(payload["workspace"], Value::Null);
 }

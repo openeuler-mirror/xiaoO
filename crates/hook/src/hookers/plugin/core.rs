@@ -1,7 +1,7 @@
 use std::process::Stdio;
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
-use agent_types::common::HookerId;
+use agent_types::common::{workspace_root_string, HookerId};
 use agent_types::hook::{HookInvokeMetadata, HookPointId};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -121,6 +121,25 @@ impl PluginHookerCore {
         Ok(self
             .read_required_string_field(output, "result", make_err)?
             .to_lowercase())
+    }
+}
+
+/// Build the `workspace` field emitted in tool/chat plugin payloads: the
+/// absolute workspace root from the runtime's agent context, as a JSON
+/// string. `null` when the runtime carries no workspace (empty root), so
+/// plugins can distinguish "no workspace bound" from a real path. The
+/// plugin subprocess's own cwd is inherited from the host process and
+/// must not be relied on, which is why the root is carried in-band.
+///
+/// A free function (not a `PluginHookerCore` method) because it reads only
+/// the runtime, never the hooker's own state — the tool adaptor, which
+/// does not embed a core, shares it with the chat/llm adaptors verbatim.
+/// The empty-root-to-null rule itself is defined once in
+/// [`workspace_root_string`].
+pub(crate) fn serialize_workspace_root(runtime: &dyn RuntimeView) -> Value {
+    match workspace_root_string(&runtime.agent_context().workspace().root) {
+        Some(root) => Value::String(root),
+        None => Value::Null,
     }
 }
 
