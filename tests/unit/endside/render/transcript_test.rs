@@ -334,7 +334,10 @@ fn expanded_bash_tool_filters_timeout_and_decodes_escaped_output() {
     assert!(rendered_text.contains("\"cwd\": \"/tmp/work\""));
     assert!(!rendered_text.contains("\"timeout\""));
     assert!(rendered_text.contains("line1"));
-    assert!(rendered_text.contains("line2\tindented"));
+    // Tabs in tool output expand to four spaces: a raw tab byte in a
+    // rendered cell jumps the terminal to the next tab stop and desyncs
+    // the frame (garbled rows + stale columns until the next repaint).
+    assert!(rendered_text.contains("line2    indented"));
 }
 
 #[test]

@@ -79,3 +79,20 @@ fn find_substring_from_handles_empty_needle_and_missing_match() {
     // (which is the 3rd char '世') must land on a char boundary.
     assert_eq!(find_substring_from("你好世界", "世界", 0), Some(2));
 }
+
+#[test]
+fn sanitize_expands_tabs_and_drops_control_chars() {
+    // Non-ascii terminals must also strip control characters: a tab byte
+    // in a rendered cell jumps to the next tab stop, desyncing every
+    // following character from ratatui's 1-column advance and leaving the
+    // skipped columns unrepainted (stale rows until the next full repaint).
+    assert_eq!(sanitize_terminal_text_for_mode("a\tb", false), "a    b");
+    assert_eq!(sanitize_terminal_text_for_mode("a\u{8}\u{7f}b", false), "ab");
+    // '\n' is preserved: callers render line-by-line and ratatui splits
+    // Paragraph text on it.
+    assert_eq!(sanitize_terminal_text_for_mode("a\nb", false), "a\nb");
+    // Clean text passes through untouched in non-ascii mode (fast path).
+    assert_eq!(sanitize_terminal_text_for_mode("plain ✓", false), "plain ✓");
+    // Ascii mode: control handling composes with symbol substitution.
+    assert_eq!(sanitize_terminal_text_for_mode("▸\tx\u{7f}", true), ">    x");
+}
