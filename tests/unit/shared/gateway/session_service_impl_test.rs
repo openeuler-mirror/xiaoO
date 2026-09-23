@@ -2212,20 +2212,20 @@ async fn pop_time_check_allows_daemon_principal_when_http_client_holds_lease() {
 // specific LLM/backend failure mode outside this crate's contract.
 
 /// Records every `*.Session.lifecycle.state` invocation as a
-/// `(state, outcome)` pair onto a shared `Vec`, optionally returning
-/// per-state `actions`. Uses the `*` hook point so the test doesn't
-/// need to know the resolver's agent_id.
+/// `(state, outcome, workspace)` triple onto a shared `Vec`, optionally
+/// returning per-state `actions`. Uses the `*` hook point so the test
+/// doesn't need to know the resolver's agent_id.
 struct RecordingStateHooker {
     id: HookerId,
     hook_point: HookPointId,
-    invocations: Arc<StdMutex<Vec<(String, String)>>>,
+    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
     actions_by_state: HashMap<String, Vec<HookAction>>,
 }
 
 impl RecordingStateHooker {
     fn new(
         id: &str,
-        invocations: Arc<StdMutex<Vec<(String, String)>>>,
+        invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
         actions_by_state: HashMap<String, Vec<HookAction>>,
     ) -> Self {
         Self {
@@ -2259,7 +2259,11 @@ impl Hooker for RecordingStateHooker {
                 self.invocations
                     .lock()
                     .expect("recording hooker invocations")
-                    .push((state_input.state.clone(), state_input.outcome.clone()));
+                    .push((
+                        state_input.state.clone(),
+                        state_input.outcome.clone(),
+                        state_input.workspace.clone(),
+                    ));
                 let actions = self
                     .actions_by_state
                     .get(&state_input.state)
@@ -2287,7 +2291,7 @@ impl Hooker for RecordingStateHooker {
 /// Build a `HookerRegistry` with a single enabled `RecordingStateHooker`
 /// for `*.Session.lifecycle.state`.
 fn recording_state_hooker_registry(
-    invocations: Arc<StdMutex<Vec<(String, String)>>>,
+    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
     actions_by_state: HashMap<String, Vec<HookAction>>,
 ) -> Arc<dyn HookerRegistry> {
     let hooker = Box::new(RecordingStateHooker::new(
@@ -2324,11 +2328,14 @@ fn build_service_with_hooker_registry(
 /// Poll `invocations` until it holds `expected` entries, or panic
 /// after `timeout_ms` (the caller cannot await the fire-and-forget
 /// background task).
-async fn wait_for_invocations(
-    invocations: &Arc<StdMutex<Vec<(String, String)>>>,
+async fn wait_for_invocations<T>(
+    invocations: &Arc<StdMutex<Vec<T>>>,
     expected: usize,
     timeout_ms: u64,
-) -> Vec<(String, String)> {
+) -> Vec<T>
+where
+    T: Clone,
+{
     tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
         loop {
             let snapshot = invocations.lock().expect("invocations").clone();
@@ -2356,19 +2363,222 @@ async fn fire_session_state_hook_background_dispatches_failed_state() {
     let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());
     let service = build_service_with_hooker_registry(store, resolver, registry);
 
-    service.fire_session_state_hook_background(
-        "session-failed".to_string(),
-        "user-1".to_string(),
-        "test-agent".to_string(),
-        SessionLifecycleStatus::Failed.as_tag().to_string(),
-        SessionStateOutcome::Error.as_tag().to_string(),
-    );
+    service.fire_session_state_hook_background(SessionStateHookEvent {
+        session_id: "session-failed".to_string(),
+        sender_id: "user-1".to_string(),
+        agent_id: "test-agent".to_string(),
+        state: SessionLifecycleStatus::Failed.as_tag().to_string(),
+        outcome: SessionStateOutcome::Error.as_tag().to_string(),
+        workspace: Some("/ws/background".to_string()),
+    });
 
     let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
     assert_eq!(
         recorded,
-        vec![("failed".to_string(), "error".to_string())],
+        vec![(
+            "failed".to_string(),
+            "error".to_string(),
+            Some("/ws/background".to_string())
+        )],
         "fire_session_state_hook_background(state=\"failed\") must dispatch \
-             to the hooker with outcome=\"error\""
+             to the hooker with outcome=\"error\" and the event workspace"
+    );
+}
+
+// ===== session lifecycle hooks: workspace flows from the session record =====
+
+/// Records `*.Session.lifecycle.created` / `closed` invocations as
+/// `(session_id, sender_id, workspace)` triples onto a shared `Vec`.
+/// `stage` selects which event the hooker registers for; the hook point
+/// uses the `*` wildcard so the test doesn't need to know the resolver's
+/// agent_id.
+struct RecordingLifecycleHooker {
+    id: HookerId,
+    hook_point: HookPointId,
+    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+}
+
+impl RecordingLifecycleHooker {
+    fn new(
+        id: &str,
+        stage: &'static str,
+        invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+    ) -> Self {
+        Self {
+            id: HookerId(id.to_string()),
+            hook_point: HookPointId(format!("*.Session.lifecycle.{stage}")),
+            invocations,
+        }
+    }
+
+    fn registry(hooker: Self) -> Arc<dyn HookerRegistry> {
+        let hooker_id = hooker.id().clone();
+        let mut hookers: HashMap<HookerId, Box<dyn Hooker>> = HashMap::new();
+        hookers.insert(hooker_id.clone(), Box::new(hooker));
+        let mut enabled: HashSet<HookerId> = HashSet::new();
+        enabled.insert(hooker_id);
+        Arc::new(HookerRegistryImpl::new(hookers, enabled, HashMap::new()))
+    }
+}
+
+#[async_trait]
+impl Hooker for RecordingLifecycleHooker {
+    fn id(&self) -> &HookerId {
+        &self.id
+    }
+
+    fn hook_point(&self) -> &HookPointId {
+        &self.hook_point
+    }
+
+    async fn invoke(
+        &self,
+        input: HookInvokeInput,
+        _runtime: &dyn RuntimeView,
+    ) -> Result<HookInvokeOutput, HookInvokeError> {
+        let record = |session_id: String, sender_id: String, workspace: Option<String>| {
+            self.invocations
+                .lock()
+                .expect("recording hooker invocations")
+                .push((session_id, sender_id, workspace));
+        };
+        match input {
+            HookInvokeInput::SessionCreated { input, .. } => {
+                record(input.session_id, input.sender_id, input.workspace);
+                Ok(HookInvokeOutput::SessionCreated(
+                    SessionHookResult::Acknowledged,
+                ))
+            }
+            HookInvokeInput::SessionClosed { input, .. } => {
+                record(input.session_id, input.sender_id, input.workspace);
+                Ok(HookInvokeOutput::SessionClosed(
+                    SessionHookResult::Acknowledged,
+                ))
+            }
+            other => Err(HookInvokeError::Session(SessionHookError::Plugin {
+                message: format!(
+                    "recording hooker '{}' expected SessionCreated/SessionClosed input but got {:?}",
+                    self.id.0, other
+                ),
+            })),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn open_session_fires_created_hook_with_workspace() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = Arc::new(InMemorySessionStore::default());
+    let resolver = Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.path().to_path_buf(),
+        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+        llm_provider: stub_llm_provider(),
+        cancel_token: None,
+    });
+    let invocations = Arc::new(StdMutex::new(Vec::new()));
+    let registry = RecordingLifecycleHooker::registry(RecordingLifecycleHooker::new(
+        "recording-created-hooker",
+        "created",
+        invocations.clone(),
+    ));
+    let service = build_service_with_hooker_registry(store, resolver, registry);
+
+    service
+        .open_session(test_open_request("s-created-ws"))
+        .await
+        .expect("open session");
+
+    let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
+    let expected_workspace = workspace.path().to_string_lossy().into_owned();
+    assert_eq!(
+        recorded,
+        vec![(
+            "s-created-ws".to_string(),
+            "user-1".to_string(),
+            Some(expected_workspace)
+        )],
+        "SessionCreated hook input must carry the session record's workspace root"
+    );
+}
+
+#[tokio::test]
+async fn close_session_fires_closed_hook_with_workspace() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = Arc::new(InMemorySessionStore::default());
+    let resolver = Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.path().to_path_buf(),
+        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+        llm_provider: stub_llm_provider(),
+        cancel_token: None,
+    });
+    let invocations = Arc::new(StdMutex::new(Vec::new()));
+    let registry = RecordingLifecycleHooker::registry(RecordingLifecycleHooker::new(
+        "recording-closed-hooker",
+        "closed",
+        invocations.clone(),
+    ));
+    let service = build_service_with_hooker_registry(store, resolver, registry);
+
+    service
+        .open_session(test_open_request("s-closed-ws"))
+        .await
+        .expect("open session");
+    service
+        .force_close_session("s-closed-ws")
+        .await
+        .expect("close session");
+
+    let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
+    let expected_workspace = workspace.path().to_string_lossy().into_owned();
+    assert_eq!(
+        recorded,
+        vec![(
+            "s-closed-ws".to_string(),
+            "user-1".to_string(),
+            Some(expected_workspace)
+        )],
+        "SessionClosed hook input must carry the session record's workspace root"
+    );
+}
+
+#[tokio::test]
+async fn run_turn_dispatches_idle_state_hook_with_workspace() {
+    // Full-turn path: a successful turn must dispatch `state="idle"` with
+    // the workspace taken from the session record (`fire_session_state_hook_and_collect_actions`).
+    let workspace = TempDir::new().expect("workspace");
+    let store = Arc::new(InMemorySessionStore::default());
+    let seen_requests = Arc::new(StdMutex::new(Vec::new()));
+    let resolver = Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.path().to_path_buf(),
+        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+        llm_provider: replying_llm_provider(Arc::clone(&seen_requests)),
+        cancel_token: None,
+    });
+    let invocations = Arc::new(StdMutex::new(Vec::new()));
+    let registry = recording_state_hooker_registry(invocations.clone(), HashMap::new());
+    let service = build_service_with_hooker_registry(store, resolver, registry);
+
+    let result = service
+        .run_turn(test_open_request("s-idle-ws").into_turn_request("hi".to_string()))
+        .await;
+    assert!(
+        result.is_ok(),
+        "turn must succeed for the idle state hook to fire: {result:?}"
+    );
+
+    let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
+    let expected_workspace = workspace.path().to_string_lossy().into_owned();
+    assert_eq!(
+        recorded,
+        vec![(
+            "idle".to_string(),
+            "complete".to_string(),
+            Some(expected_workspace)
+        )],
+        "SessionState(idle) hook input must carry the session record's workspace root"
     );
 }

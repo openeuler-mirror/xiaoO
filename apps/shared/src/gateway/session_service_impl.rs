@@ -21,7 +21,7 @@ use agent_contracts::backend::{
     BackendPath,
 };
 use agent_contracts::{ChannelFileSender, HookerRegistry, InteractionHandle, LoopEventSink};
-use agent_types::common::HookerId;
+use agent_types::common::{workspace_root_string, HookerId};
 use agent_types::hook::{HookAction, HookInvokeInput, HookInvokeMetadata, HookPointId};
 use agent_types::session::{
     SessionClosedHookInput, SessionCreatedHookInput, SessionStateHookInput,
@@ -66,6 +66,27 @@ fn resolve_runtime_exec_shell(requested: Option<String>, backend_default: Option
     requested
         .or_else(|| backend_default.map(str::to_string))
         .unwrap_or_else(|| RUNTIME_EXEC_FALLBACK_SHELL.to_string())
+}
+
+/// Render a session record's workspace root as the optional string carried
+/// by session lifecycle hook inputs. Session hooks are dispatched with a
+/// `NoopRuntimeView`, so the session record is the only workspace source
+/// available. The empty-root-to-`None` rule is defined once in
+/// [`workspace_root_string`] and shared with the plugin payload builders,
+/// so the null semantics cannot drift between the two dispatch paths.
+fn session_workspace_for_hook(workspace_root: &std::path::Path) -> Option<String> {
+    workspace_root_string(workspace_root)
+}
+
+/// Identity + transition fields shared by the two `*.Session.lifecycle.state`
+/// dispatch paths (awaited action collection / background fire-and-forget).
+pub(crate) struct SessionStateHookEvent {
+    session_id: String,
+    sender_id: String,
+    agent_id: String,
+    state: String,
+    outcome: String,
+    workspace: Option<String>,
 }
 
 pub(crate) struct CoreBackedSessionService {
@@ -430,13 +451,17 @@ impl CoreBackedSessionService {
     /// set so the turn result is still delivered.
     pub(crate) async fn fire_session_state_hook_and_collect_actions(
         &self,
-        session_id: String,
-        sender_id: String,
-        agent_id: String,
-        state: String,
-        outcome: String,
+        event: SessionStateHookEvent,
         emitting_turn_chain_depth: usize,
     ) -> Vec<HookAction> {
+        let SessionStateHookEvent {
+            session_id,
+            sender_id,
+            agent_id,
+            state,
+            outcome,
+            workspace,
+        } = event;
         let hook_point = session_lifecycle_hook_point(&agent_id, "state");
         let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
         if hooker_ids.is_empty() {
@@ -454,6 +479,7 @@ impl CoreBackedSessionService {
                     agent_id,
                     state,
                     outcome,
+                    workspace,
                 },
                 metadata: HookInvokeMetadata::default(),
             };
@@ -525,14 +551,15 @@ impl CoreBackedSessionService {
     /// are discarded; plugin errors are logged. Bounded by
     /// [`SESSION_STATE_HOOK_OVERALL_DEADLINE`], mirroring
     /// [`fire_session_state_hook_and_collect_actions`].
-    fn fire_session_state_hook_background(
-        &self,
-        session_id: String,
-        sender_id: String,
-        agent_id: String,
-        state: String,
-        outcome: String,
-    ) {
+    fn fire_session_state_hook_background(&self, event: SessionStateHookEvent) {
+        let SessionStateHookEvent {
+            session_id,
+            sender_id,
+            agent_id,
+            state,
+            outcome,
+            workspace,
+        } = event;
         let hook_point = session_lifecycle_hook_point(&agent_id, "state");
         let hooker_ids = self.enabled_hooker_ids_for(&hook_point);
         if hooker_ids.is_empty() {
@@ -548,6 +575,7 @@ impl CoreBackedSessionService {
                     agent_id,
                     state,
                     outcome,
+                    workspace,
                 },
                 metadata: HookInvokeMetadata::default(),
             };
@@ -856,6 +884,7 @@ impl CoreBackedSessionService {
                 input: SessionCreatedHookInput {
                     session_id: child.session_id.clone(),
                     sender_id: child.sender_id.clone(),
+                    workspace: session_workspace_for_hook(&child.runtime.workspace_root),
                 },
                 metadata: HookInvokeMetadata::default(),
             },
@@ -1309,6 +1338,7 @@ impl CoreBackedSessionService {
                     input: SessionCreatedHookInput {
                         session_id: seed_session.session_id.clone(),
                         sender_id: seed_session.sender_id.clone(),
+                        workspace: session_workspace_for_hook(&seed_session.runtime.workspace_root),
                     },
                     metadata: HookInvokeMetadata::default(),
                 },
@@ -1320,6 +1350,7 @@ impl CoreBackedSessionService {
         let lifecycle_session_id = request.session_id.clone();
         let lifecycle_sender_id = request.sender_id.clone();
         let lifecycle_agent_id = resolved.descriptor.agent_id.0.clone();
+        let lifecycle_workspace = session_workspace_for_hook(&seed_session.runtime.workspace_root);
         let lifecycle_chain_depth = request.chain_depth;
 
         let prior_memory_context = seed_session
@@ -1348,11 +1379,14 @@ impl CoreBackedSessionService {
                 Ok(turn) => {
                     let actions = self
                         .fire_session_state_hook_and_collect_actions(
-                            lifecycle_session_id,
-                            lifecycle_sender_id,
-                            lifecycle_agent_id,
-                            SessionLifecycleStatus::Idle.as_tag().to_string(),
-                            turn.outcome.as_tag().to_string(),
+                            SessionStateHookEvent {
+                                session_id: lifecycle_session_id,
+                                sender_id: lifecycle_sender_id,
+                                agent_id: lifecycle_agent_id,
+                                state: SessionLifecycleStatus::Idle.as_tag().to_string(),
+                                outcome: turn.outcome.as_tag().to_string(),
+                                workspace: lifecycle_workspace,
+                            },
                             lifecycle_chain_depth,
                         )
                         .await;
@@ -1365,13 +1399,14 @@ impl CoreBackedSessionService {
                         agent_id = %lifecycle_agent_id,
                         "turn failed; dispatching state=\"failed\" session lifecycle hook"
                     );
-                    self.fire_session_state_hook_background(
-                        lifecycle_session_id,
-                        lifecycle_sender_id,
-                        lifecycle_agent_id,
-                        SessionLifecycleStatus::Failed.as_tag().to_string(),
-                        SessionStateOutcome::Error.as_tag().to_string(),
-                    );
+                    self.fire_session_state_hook_background(SessionStateHookEvent {
+                        session_id: lifecycle_session_id,
+                        sender_id: lifecycle_sender_id,
+                        agent_id: lifecycle_agent_id,
+                        state: SessionLifecycleStatus::Failed.as_tag().to_string(),
+                        outcome: SessionStateOutcome::Error.as_tag().to_string(),
+                        workspace: lifecycle_workspace,
+                    });
                 }
             }
         }
@@ -1493,6 +1528,7 @@ impl CoreBackedSessionService {
                 input: SessionCreatedHookInput {
                     session_id: session.session_id.clone(),
                     sender_id: session.sender_id.clone(),
+                    workspace: session_workspace_for_hook(&session.runtime.workspace_root),
                 },
                 metadata: HookInvokeMetadata::default(),
             },
@@ -1547,6 +1583,7 @@ impl CoreBackedSessionService {
                     input: SessionClosedHookInput {
                         session_id: closed.session_id.clone(),
                         sender_id: closed.sender_id.clone(),
+                        workspace: session_workspace_for_hook(&closed.runtime.workspace_root),
                     },
                     metadata: HookInvokeMetadata::default(),
                 },
