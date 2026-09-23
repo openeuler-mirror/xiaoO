@@ -16,7 +16,8 @@ use agent_types::hook::{
 use agent_types::outcome::{AgentError, AgentOutcome};
 use agent_types::tool::ToolExecutionResult;
 use agent_types::{
-    AgentId, AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StreamChunk,
+    AgentId, AssistantMessage, ChatMessage, ContentBlock, LlmError, MessageRole, StopReason,
+    StreamChunk, Usage,
 };
 use serde_json::{json, Value};
 
@@ -1393,27 +1394,122 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             .await?
     } else {
         let first_token_at = std::sync::Arc::clone(&first_token_at);
-        ctx.snapshot
-            .llm_provider
-            .complete_stream_scoped(runtime_view, &build_result.request, &|chunk| {
-                if first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                    first_token_at.store(
-                        start.elapsed().as_millis() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-                stream_assistant_chunk(
-                    event_sink.as_deref(),
-                    &agent_id,
-                    &streamed_text,
-                    &streamed_reasoning,
-                    &last_text_emit,
-                    &last_reasoning_emit,
-                    chunk,
-                    &secrets,
+        let on_chunk = |chunk: StreamChunk| {
+            if first_token_at.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                first_token_at.store(
+                    start.elapsed().as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
                 );
-            })
-            .await?
+            }
+            stream_assistant_chunk(
+                event_sink.as_deref(),
+                &agent_id,
+                &streamed_text,
+                &streamed_reasoning,
+                &last_text_emit,
+                &last_reasoning_emit,
+                chunk,
+                &secrets,
+            );
+        };
+        // Race the in-flight stream against cancellation so an Esc lands
+        // in milliseconds instead of after the model finishes the whole
+        // response: the session supervisor persists the partial loop state
+        // only once this call returns (and the TUI's `/save` /
+        // interrupt auto-save wait on that — see the endside drain fix).
+        // The race lives inside the provider wrapper
+        // (`complete_stream_scoped_with_cancel`) so the wrapper can close
+        // its LLM-call trace span with `TraceOutcome::Cancelled` before
+        // dropping the losing stream future (aborting the underlying HTTP
+        // stream). On cancellation the wrapper returns
+        // `LlmError::Cancelled`; the partial assistant message is
+        // synthesized from what has streamed so far, and the turn then
+        // winds down through `tool_exec::run` (which appends the partial
+        // to the history) and `decide` → `LoopDecision::ReturnCancelled`,
+        // which persists it.
+        match ctx
+            .snapshot
+            .llm_provider
+            .complete_stream_scoped_with_cancel(
+                runtime_view,
+                &build_result.request,
+                &on_chunk,
+                ctx.state.cancel.cancelled(),
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(LlmError::Cancelled) => {
+                let partial_text = streamed_text
+                    .lock()
+                    .map(|text| text.clone())
+                    .unwrap_or_default();
+                let partial_reasoning = streamed_reasoning
+                    .lock()
+                    .map(|reasoning| reasoning.clone())
+                    .unwrap_or_default();
+
+                ctx.turn.ttft_ms = first_token_at.load(std::sync::atomic::Ordering::Relaxed);
+                ctx.turn.total_time_ms = start.elapsed().as_millis() as u64;
+                ctx.turn.tpot_ms = 0.0;
+
+                if partial_text.is_empty() && partial_reasoning.is_empty() {
+                    // Nothing streamed yet (Esc before the first token):
+                    // mirror the entry-point cancel check above — no
+                    // assistant message, `decide` still returns
+                    // `ReturnCancelled` with the history as-is.
+                    return Ok(());
+                }
+
+                // Flush the final partial to the sink when throttling (or
+                // the delta fast path, which bypasses the throttle state)
+                // left a tail behind — mirrors the post-stream flush below
+                // so sink consumers see the same text that gets persisted.
+                if let Some(ref sink) = event_sink {
+                    let last_text_len = last_text_emit
+                        .lock()
+                        .map(|state| state.last_emit_len())
+                        .unwrap_or(0);
+                    if !partial_text.is_empty() && last_text_len != partial_text.len() {
+                        let filtered_text = filter_secrets_in_text(&partial_text, &secrets);
+                        sink.on_assistant_message(&agent_id, &filtered_text);
+                    }
+                    let last_reasoning_len = last_reasoning_emit
+                        .lock()
+                        .map(|state| state.last_emit_len())
+                        .unwrap_or(0);
+                    if !partial_reasoning.is_empty()
+                        && last_reasoning_len != partial_reasoning.len()
+                    {
+                        let filtered_reasoning =
+                            filter_secrets_in_text(&partial_reasoning, &secrets);
+                        sink.on_assistant_reasoning(&agent_id, &filtered_reasoning);
+                    }
+                }
+
+                tracing::info!(
+                    text_len = partial_text.len(),
+                    reasoning_len = partial_reasoning.len(),
+                    "LLM stream cancelled mid-flight; persisting partial assistant message"
+                );
+                ctx.turn.assistant_message = Some(AssistantMessage {
+                    text: (!partial_text.is_empty()).then_some(partial_text),
+                    reasoning_content: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
+                    // The stream was cut mid-flight: tool calls (had any
+                    // started arriving) are incomplete and discarded, and
+                    // usage is unknown — report zeros rather than stale
+                    // values from a previous turn.
+                    tool_calls: Vec::new(),
+                    usage: Usage::default(),
+                    // The partial never ended a turn naturally; EndTurn is
+                    // the closest variant (stop_reason is not persisted
+                    // into the message history).
+                    stop_reason: StopReason::EndTurn,
+                });
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
     };
 
     let total_time_ms = start.elapsed().as_millis() as u64;
@@ -1687,13 +1783,12 @@ fn stream_assistant_chunk(
     chunk: StreamChunk,
     secrets: &[String],
 ) {
-    // No sink → nothing to emit. The post-stream flush reads
-    // `response.message.text` / `reasoning_content` directly, so we skip
-    // accumulating into the streamed_* Mutexes (their contents are never
-    // read after the stream ends).
-    if sink.is_none() {
-        return;
-    }
+    // Always accumulate into the streamed_* buffers, even without a sink:
+    // the cancel branch of `llm_call` (Esc racing the in-flight stream)
+    // synthesizes the partial assistant message from them. The emits below
+    // are individually guarded on `sink`, so a sinkless call only pays the
+    // accumulation; the post-stream flush still reads
+    // `response.message.text` / `reasoning_content` directly.
 
     #[cfg(debug_assertions)]
     let _start = std::time::Instant::now();

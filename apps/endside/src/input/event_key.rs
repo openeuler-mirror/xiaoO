@@ -720,7 +720,19 @@ impl App {
             self.state.chat_state.input.reset();
             match manual_snapshot_name_from_command(trimmed, "/save") {
                 Ok(requested_name) => {
-                    let record = self.gateway.session_snapshot(&self.state.session_id).await;
+                    // A turn cancelled with Esc may still be draining: the
+                    // backend persists the partial loop state only after
+                    // the in-flight LLM call returns. Wait for the drain to
+                    // finish (bounded by a timeout) before reading the
+                    // store, and refresh the TUI's `session_messages` cache
+                    // from the persisted `loop_state.messages`, so the
+                    // snapshot keeps the conversation context instead of
+                    // the pre-turn state.
+                    self.gateway.settle_in_flight_turn(&mut self.state).await;
+                    let record = self
+                        .gateway
+                        .sync_session_messages_from_store(&mut self.state)
+                        .await;
                     match save_manual_snapshot(&self.state, record, requested_name.as_deref()) {
                         Ok((path, context)) => {
                             let name = context.name.clone();

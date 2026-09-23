@@ -861,3 +861,264 @@ fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing(
     assert_eq!(state.status_panel.input_context_tokens, 24);
     assert!(state.status_panel.input_context_tokens_estimated);
 }
+
+fn chat_text_message(
+    role: xiaoo_api::chat::MessageRole,
+    text: &str,
+) -> xiaoo_api::chat::ChatMessage {
+    xiaoo_api::chat::ChatMessage {
+        role,
+        blocks: vec![xiaoo_api::chat::ContentBlock::Text {
+            text: text.to_string(),
+        }],
+        message_id: None,
+        timestamp_ms: 0,
+        api_usage_tokens: None,
+        reasoning_content: None,
+        estimated_tokens: None,
+    }
+}
+
+/// Regression for the "Esc → /save → /load loses context" bug:
+/// `cancel_streaming` must keep the stream receiver connected and enter
+/// draining mode, ignore all intermediate updates (ghost messages), and
+/// still consume the terminal `Done` — which refreshes
+/// `session_messages` with the partial state the backend persisted on
+/// cancellation.
+#[test]
+fn cancel_streaming_drains_terminal_done_and_ignores_ghost_updates() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state.chat_state.messages.push(Message::user("hello"));
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(1);
+    runtime.set_stream_message_content(&mut state, "partial answer", true);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.stream_rx = Some(rx);
+
+    runtime.cancel_streaming(&mut state);
+
+    // The stream stays connected in draining mode; the UI is back to
+    // editing and the partial reply is finalized as visible text.
+    assert!(runtime.stream_rx.is_some());
+    assert!(runtime.turn_stream_in_flight());
+    assert!(!state.chat_state.is_loading);
+    assert!(!state.chat_state.messages[1].is_streaming);
+    assert_eq!(state.chat_state.messages[1].content, "partial answer");
+
+    // Residual updates from the still-running backend turn must be
+    // ignored: no appended text, no ghost tool messages.
+    tx.send(SessionTurnUpdate::AppendAssistantContent {
+        agent_id: AgentId("cli-agent".to_string()),
+        delta: " ghost tail".to_string(),
+    })
+    .expect("append update should send");
+    tx.send(SessionTurnUpdate::Tool {
+        agent_id: AgentId("cli-agent".to_string()),
+        update: sample_tool_update("drain-1"),
+    })
+    .expect("tool update should send");
+
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert_eq!(state.chat_state.messages.len(), 2);
+    assert_eq!(state.chat_state.messages[1].content, "partial answer");
+    assert!(state.chat_state.messages[1].tool_state.is_none());
+
+    // The terminal `Done` carries the persisted partial history and must
+    // refresh `session_messages` — this is exactly what `/save` waits for
+    // via `settle_in_flight_turn`.
+    let messages = vec![
+        chat_text_message(xiaoo_api::chat::MessageRole::User, "hello"),
+        chat_text_message(
+            xiaoo_api::chat::MessageRole::Assistant,
+            "partial answer (persisted)",
+        ),
+    ];
+    tx.send(SessionTurnUpdate::Done {
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        cached_tokens: 0,
+        estimated_input_tokens: 0,
+        messages: messages.clone(),
+    })
+    .expect("done update should send");
+
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert_eq!(state.session_messages, messages);
+    assert!(runtime.stream_rx.is_none());
+    assert!(!runtime.turn_stream_in_flight());
+    // The drained Done must not add chat messages of its own.
+    assert_eq!(state.chat_state.messages.len(), 2);
+}
+
+/// A late `Err` from a turn the user already cancelled must end the drain
+/// without injecting a ghost error message into the transcript.
+#[test]
+fn drain_err_ends_drain_without_ghost_error_message() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(0);
+    runtime.set_stream_message_content(&mut state, "partial answer", true);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.stream_rx = Some(rx);
+
+    runtime.cancel_streaming(&mut state);
+
+    tx.send(SessionTurnUpdate::Err("backend exploded".to_string()))
+        .expect("err update should send");
+
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert!(runtime.stream_rx.is_none());
+    assert!(!runtime.turn_stream_in_flight());
+    // No error message was injected: the transcript keeps only the
+    // cancelled partial reply.
+    assert_eq!(state.chat_state.messages.len(), 1);
+    assert_eq!(state.chat_state.messages[0].content, "partial answer");
+}
+
+/// A channel disconnect while draining (backend task died without a
+/// terminal update) must end the drain quietly — no disconnect notice
+/// after the user already cancelled.
+#[test]
+fn drain_disconnect_ends_drain_without_notice() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(0);
+    runtime.set_stream_message_content(&mut state, "partial answer", true);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.stream_rx = Some(rx);
+
+    runtime.cancel_streaming(&mut state);
+    drop(tx);
+
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert!(runtime.stream_rx.is_none());
+    assert!(!runtime.turn_stream_in_flight());
+    assert_eq!(state.chat_state.messages.len(), 1);
+    assert_eq!(state.chat_state.messages[0].content, "partial answer");
+}
+
+/// Esc pressed while the reveal buffer is still typing out an already
+/// finished turn: the consumed-but-unapplied `Done` must survive the
+/// cancel and still refresh `session_messages`.
+#[test]
+fn cancel_during_reveal_drain_still_applies_pending_done() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(0);
+    runtime.set_stream_message_content(&mut state, "done content", true);
+
+    let messages = vec![
+        chat_text_message(xiaoo_api::chat::MessageRole::User, "hello"),
+        chat_text_message(xiaoo_api::chat::MessageRole::Assistant, "done content"),
+    ];
+    runtime.pending_stream_done = Some(PendingStreamDone {
+        prompt_tokens: 3,
+        completion_tokens: 5,
+        total_tokens: 8,
+        estimated_input_tokens: 0,
+        messages: messages.clone(),
+    });
+    runtime.stream_rx = None;
+    runtime.stream_reveal_buffer = "tail".to_string();
+
+    runtime.cancel_streaming(&mut state);
+
+    // The pending Done is kept so it can still be applied.
+    assert!(runtime.turn_stream_in_flight());
+    assert!(runtime.poll_stream_updates(&mut state));
+    assert_eq!(state.session_messages, messages);
+    assert!(!runtime.turn_stream_in_flight());
+}
+
+/// `settle_in_flight_turn` (the `/save` / interrupt auto-save wait) must
+/// keep pumping `poll_stream_updates` outside the event loop until the
+/// terminal `Done` of a cancelled turn lands, then return.
+#[tokio::test]
+async fn settle_in_flight_turn_pumps_drain_until_done() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    state.chat_state.is_loading = true;
+    state
+        .chat_state
+        .messages
+        .push(Message::assistant_streaming());
+    runtime.stream_message_index = Some(0);
+    runtime.set_stream_message_content(&mut state, "partial answer", true);
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.stream_rx = Some(rx);
+
+    runtime.cancel_streaming(&mut state);
+    assert!(runtime.turn_stream_in_flight());
+
+    // The terminal Done arrives asynchronously — after the backend
+    // persists the partial state.
+    let messages = vec![
+        chat_text_message(xiaoo_api::chat::MessageRole::User, "hello"),
+        chat_text_message(
+            xiaoo_api::chat::MessageRole::Assistant,
+            "partial answer (persisted)",
+        ),
+    ];
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let _ = tx.send(SessionTurnUpdate::Done {
+            prompt_tokens: 3,
+            completion_tokens: 5,
+            total_tokens: 8,
+            cached_tokens: 0,
+            estimated_input_tokens: 0,
+            messages,
+        });
+    });
+
+    runtime.settle_in_flight_turn(&mut state).await;
+
+    assert!(!runtime.turn_stream_in_flight());
+    assert!(runtime.stream_rx.is_none());
+    assert_eq!(
+        state.session_messages,
+        vec![
+            chat_text_message(xiaoo_api::chat::MessageRole::User, "hello"),
+            chat_text_message(
+                xiaoo_api::chat::MessageRole::Assistant,
+                "partial answer (persisted)"
+            ),
+        ]
+    );
+}
+
+/// With nothing in flight, `settle_in_flight_turn` must return immediately
+/// (the common `/save` path while idle).
+#[tokio::test]
+async fn settle_in_flight_turn_returns_immediately_when_idle() {
+    let mut runtime = GatewayRuntime::new(uuid::Uuid::new_v4().to_string());
+    let mut state = test_state();
+    assert!(!runtime.turn_stream_in_flight());
+    runtime.settle_in_flight_turn(&mut state).await;
+    assert!(state.chat_state.messages.is_empty());
+}

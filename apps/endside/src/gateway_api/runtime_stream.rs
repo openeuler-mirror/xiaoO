@@ -30,12 +30,40 @@ impl GatewayRuntime {
                 Ok(update) => update,
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    if self.draining_after_cancel {
+                        // The cancelled turn's channel closed without a
+                        // terminal update (e.g. the spawned task died).
+                        // The user already cancelled; end the drain
+                        // quietly instead of injecting the disconnect
+                        // notice into the transcript.
+                        tracing::debug!("TUI: stream channel closed while draining cancelled turn");
+                        self.stream_rx = None;
+                        self.draining_after_cancel = false;
+                        self.interaction_reply_tx = None;
+                        changed = true;
+                        break;
+                    }
                     self.handle_stream_disconnect(state);
                     changed = true;
                     break;
                 }
             };
             changed = true;
+            // Draining after Esc: the turn was cancelled, so only the
+            // terminal `Done`/`Err` update is consumed (`Done` refreshes
+            // `session_messages` with the partial state the backend
+            // persisted on cancellation). Every other update — residual
+            // TextDeltas, tool events, subagent spawns, prompts — is
+            // dropped so the cancelled turn cannot spawn ghost messages
+            // or reopen interaction prompts.
+            if self.draining_after_cancel
+                && !matches!(
+                    update,
+                    SessionTurnUpdate::Done { .. } | SessionTurnUpdate::Err(_)
+                )
+            {
+                continue;
+            }
             match update {
                 SessionTurnUpdate::TurnStart { agent_id, turn } => {
                     if !is_root_stream_agent(&agent_id, state) {
@@ -204,6 +232,20 @@ impl GatewayRuntime {
                     }
                 }
                 SessionTurnUpdate::Err(error) => {
+                    if self.draining_after_cancel {
+                        // Late failure from a turn the user already
+                        // cancelled: log it and end the drain without
+                        // injecting a ghost error message into the
+                        // transcript.
+                        tracing::warn!(
+                            error = %error,
+                            "TUI: cancelled turn ended with an error after Esc"
+                        );
+                        self.stream_rx = None;
+                        self.draining_after_cancel = false;
+                        self.interaction_reply_tx = None;
+                        continue;
+                    }
                     let display_error = crate::error_log::record_tui_error("remote_input", &error);
                     self.stream_reveal_buffer.clear();
                     self.pending_stream_done = None;
@@ -251,9 +293,20 @@ impl GatewayRuntime {
         state.chat_state.is_loading = false;
         state.input_mode = InputMode::Editing;
         state.interaction_prompt = None;
-        self.stream_rx = None;
+        // Do NOT drop `stream_rx` (nor a pending `Done`): the backend
+        // persists the partial loop state only after the in-flight LLM
+        // call returns, and then sends the terminal `Done`/`Err` update
+        // through this channel. Keep the receiver and enter draining mode
+        // so `poll_stream_updates` can consume that terminal update —
+        // `Done` refreshes `session_messages` with the persisted partial
+        // state, and `/save` / interrupt auto-save wait on it via
+        // `settle_in_flight_turn`. Intermediate updates are ignored by the
+        // drain guard so no ghost messages appear. Dropping the receiver
+        // here is what made a `/save` right after Esc read a store whose
+        // `loop_state` was still `None`, losing the whole conversation on
+        // `/load`.
+        self.draining_after_cancel = self.stream_rx.is_some();
         self.stream_reveal_buffer.clear();
-        self.pending_stream_done = None;
         self.interaction_reply_tx = None;
         self.request_start = None;
         self.first_token_latency_recorded = false;
@@ -849,6 +902,9 @@ impl GatewayRuntime {
         state.session_messages = done.messages;
         state.chat_state.is_loading = false;
         self.stream_rx = None;
+        // The terminal `Done` of a drained (cancelled) turn has been
+        // applied; leave draining mode.
+        self.draining_after_cancel = false;
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
