@@ -76,14 +76,14 @@ impl ToolExecutor for AskUserQuestionExecutor {
                     prompt.clone(),
                 ),
                 QuestionItem::Choice {
-                    prompt,
-                    options,
-                    allow_custom_input,
+                    prompt, options, ..
                 } => (
                     InteractionRequest::Choice {
                         prompt: prompt.clone(),
                         options: options.clone(),
-                        allow_custom_input: *allow_custom_input,
+                        // Choice answers are relayed to the model verbatim, so
+                        // the user must always be able to answer off-list.
+                        allow_custom_input: true,
                         source: source.clone(),
                     },
                     prompt.clone(),
@@ -122,3 +122,7 @@ impl ToolExecutor for AskUserQuestionExecutor {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../../tests/unit/tool/impl/builtin/ask_user_question/executor_test.rs"]
+mod tests;

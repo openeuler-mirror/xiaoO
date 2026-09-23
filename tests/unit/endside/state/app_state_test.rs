@@ -276,6 +276,7 @@ fn sample_prompt_request() -> PromptRequest {
             description: Some("快速路径".to_string()),
         }],
         allow_custom_input: true,
+        custom_input_hint: None,
         multi_select: false,
         is_secret: false,
         default_index: Some(0),

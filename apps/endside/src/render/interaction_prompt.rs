@@ -19,6 +19,14 @@ use serde::{Deserialize, Serialize};
 use super::theme::Theme;
 use super::utils::sanitize_terminal_text;
 
+/// Supplement box title for secret (password) prompts.
+pub const SECRET_INPUT_TITLE: &str = " 密码输入 ";
+/// Default supplement box title when no custom hint is set.
+pub const DEFAULT_SUPPLEMENT_TITLE: &str = " 补充（可选） ";
+/// `custom_input_hint` for tool-sourced choice questions. No border
+/// padding; the renderer adds it.
+pub const TYPE_ANSWER_HINT: &str = "输入你的回答";
+
 /// Single selectable option (can align with JSON).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptChoice {
@@ -36,6 +44,9 @@ pub struct PromptRequest {
     pub choices: Vec<PromptChoice>,
     #[serde(default)]
     pub allow_custom_input: bool,
+    /// Custom title for the supplement input box; `None` uses the defaults.
+    #[serde(default)]
+    pub custom_input_hint: Option<String>,
     /// Multi-select: Space toggles selection in list, Enter submits `PromptResolution::Multi`.
     #[serde(default)]
     pub multi_select: bool,
@@ -58,6 +69,10 @@ pub enum PromptResolution {
     Single {
         choice_id: String,
         supplement: Option<String>,
+        /// Whether Enter was pressed in the supplement box; when false, any
+        /// supplement text must not override the explicit list selection.
+        #[serde(default)]
+        submitted_from_supplement: bool,
     },
     /// Reserved, corresponds to `PromptRequest::multi_select`.
     Multi {
@@ -379,9 +394,11 @@ pub fn render_interaction_prompt(
                 theme.border
             }))
             .title(if state.request.is_secret {
-                " 密码输入 "
+                SECRET_INPUT_TITLE.to_string()
+            } else if let Some(hint) = state.request.custom_input_hint.as_deref() {
+                format!(" {} ", hint)
             } else {
-                " 补充（可选） "
+                DEFAULT_SUPPLEMENT_TITLE.to_string()
             })
             .padding(Padding::horizontal(1));
         let sup_inner = sup_block.inner(sup_area);
