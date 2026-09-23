@@ -80,7 +80,7 @@ The `action` segment selects which hook family the entry belongs to. Today three
 
 - `Tool` — wraps a tool invocation. `stage` must be `pre`, `post`, or `error`.
 - `Chat` — wraps user input / system prompt assembly. Three sub-points exist (see sections 14 below): `*.Chat.command.before`, `*.Chat.message.received`, `*.Chat.system.transform`. These are matched as full hook points; the trailing segment is the hook name, not a free-form `stage`.
-- `Session` — wraps session lifecycle events. Currently only `*.Session.lifecycle.state` is emitted (see section 15).
+- `Session` — wraps session lifecycle events. Three sub-points exist (see section 15): `*.Session.lifecycle.created`, `*.Session.lifecycle.closed`, `*.Session.lifecycle.state`.
 
 Examples:
 
@@ -88,6 +88,7 @@ Examples:
 - `cli-agent.Tool.glob.post`
 - `*.Tool.*.pre`
 - `*.Chat.message.received`
+- `*.Session.lifecycle.created`
 - `*.Session.lifecycle.state`
 
 Wildcard support today:
@@ -346,14 +347,14 @@ If the command exits with failure, the adaptor treats the hook as failed.
 - does your `hook_point` really match the runtime hook point?
 - does your script exit with `0`?
 - does your script write valid JSON to stdout?
-- for chat/session hooks, does your `payload.stage` match the adaptor's stage string (`command_before` / `chat_message` / `system_transform` / `session_state`)?
-- for session state hooks, is your result exactly `{"result":"ack"}` (or the alias `acknowledged`)? Note that chat-hook result tags like `allow` / `accept` are **not** accepted here and will be treated as a failure.
+- for chat/session hooks, does your `payload.stage` match the adaptor's stage string (`command_before` / `chat_message` / `system_transform` / `session_created` / `session_closed` / `session_state`)?
+- for session lifecycle hooks, is your result exactly `{"result":"ack"}` (or the alias `acknowledged`)? Note that chat-hook result tags like `allow` / `accept` are **not** accepted here and will be treated as a failure.
 
 ## 14. Chat hook protocol
 
 The three chat hooks (`*.Chat.command.before`, `*.Chat.message.received`, `*.Chat.system.transform`) are **mutable** hooks: a plugin may rewrite or deny the input flowing through the agent loop. They share the same subprocess protocol as Tool hooks (`sh -c <command>`, one JSON payload on stdin, one JSON object on stdout, non-zero exit = failure), but the payload shape and the set of legal result tags differ per hook.
 
-> **session_id**: All three chat hooks carry `payload.session_id`. It is the **same value** in local and remote mode — the TUI sends its own `session_id` to the daemon via `RuntimeTurnRequest`, and the daemon reuses it verbatim, so a plugin never needs to detect which mode it is running in. Just read `payload.session_id`. (`*.Chat.system.transform` types it as `Option<String>`, so it may serialize as `null`; guard with `payload.session_id || "(unknown)"`.) Tool `pre` hooks and the session lifecycle state hook also carry `session_id`; Tool `post`/`error` and all `*.Llm.*` hooks currently do **not** — see the table in [`docs/plugins.md`](../../docs/plugins.md) "session_id 获取".
+> **session_id / workspace**: All three chat hooks carry `payload.session_id` and `payload.workspace`. `session_id` is the **same value** in local and remote mode — the TUI sends its own `session_id` to the daemon via `RuntimeTurnRequest`, and the daemon reuses it verbatim, so a plugin never needs to detect which mode it is running in. Just read `payload.session_id`. (`*.Chat.system.transform` types it as `Option<String>`, so it may serialize as `null`; guard with `payload.session_id || "(unknown)"`.) `workspace` is the absolute workspace root from the agent runtime context (`null` when none is bound); prefer it over the subprocess cwd, which is inherited from the host process and may drift. Tool `pre`/`post`/`error` hooks and the session lifecycle hooks also carry both fields; all `*.Llm.*` hooks currently do **not** — see the table in [`docs/plugins.md`](../../docs/plugins.md) "session_id 与 workspace 获取".
 
 ### 14.1 How chat hooks are dispatched
 
@@ -548,25 +549,45 @@ xiaoo presents the widget to the user. After the user answers, xiaoo calls the *
 
 The plugin inspects `interaction.response` and either returns another `action: "ask_user"` (loop) or returns a `result` (`final`). When `action` is absent or `"final"`, the `result` is treated as the hook's terminal output. This lets a plugin gate a `Transform`/`Deny` behind explicit user consent.
 
-The session state hook (section 15) does **not** support `ask_user` — it is event-only.
+The session lifecycle hooks (section 15) do **not** support `ask_user` — they are event-only.
 
-## 15. Session lifecycle state hook protocol
+## 15. Session lifecycle hook protocol
 
-`*.Session.lifecycle.state` is an **event-style observer** hook. It is dispatched by `CoreBackedSessionService::run_turn_inner` in the gateway layer (not inside `agent_loop`) on two lifecycle state transitions: after a non-error turn termination (`"idle"`) and after a turn terminates with an error (`"failed"`).
+The `*.Session.lifecycle.*` family — `created`, `closed`, and `state` — consists of **event-style observer** hooks. They are dispatched by `CoreBackedSessionService` in the gateway layer (not inside `agent_loop`): `created` when a session record is first created (first open, the first turn of a brand-new session, or a runtime forked from a checkpoint), `closed` when a session is force-closed (idempotent — an already-closed session does not re-fire), and `state` on root-turn lifecycle state transitions: after a non-error turn termination (`"idle"`) and after a turn terminates with an error (`"failed"`).
 
 ### 15.1 Contract
 
 - The only legal result is `{"result":"ack"}` (the alias `acknowledged` is also accepted for ergonomics). Any other tag — including `transform` and the chat-hook tags `allow` / `accept` — is rejected and the hooker is treated as failed, so a plugin that mistakenly reuses a chat-hook result tag gets a loud error rather than silent acceptance.
-- There is no `transform` / `deny` path. The event carries no mutable output — plugins are observers.
+- There is no `transform` / `deny` path. The events carry no mutable output — plugins are observers.
 - The lifecycle state tag is carried in `payload.state`, **not** in the hook point. Two `state` values are emitted today: `"idle"` (after any non-error turn termination) and `"failed"` (after a turn that returned `Err`). The `String` type is intentional so future call sites can emit additional tags without changing this contract or breaking existing plugins.
 - The turn's terminal kind is carried in `payload.outcome`. For `state="idle"` it is one of `"complete"` / `"max_turns_reached"` / `"budget_exhausted"` / `"cancelled"` (the four `Ok` variants of `AgentOutcome`), letting plugins distinguish a normal completion from a soft termination. For `state="failed"` it is `"error"` (true failure — the failure path has no `AgentOutcome` variant).
 - Dispatch:
+  - `created` / `closed`: `fire_session_hooks` awaits each registered hooker sequentially (sorted by id) but ignores the hook output — `actions` are **not** collected for these events. The hooker runs under the same 30s per-subprocess cap.
   - `state="idle"`: `run_turn_inner` calls `fire_session_state_hook_and_collect_actions`, which **awaits** every registered hooker (sorted by id) under a 30s overall deadline and collects their `actions` into `AppTurnResult.hook_actions`. Awaiting is required so action execution can be bundled into the turn's `Done` SSE event before the TUI tears down the stream.
   - `state="failed"`: `run_turn_inner` calls `fire_session_state_hook_background`, which **fire-and-forgets** the hookers via `tokio::spawn` without awaiting. There is no `AppTurnResult` to attach actions to (the turn has failed), so any `actions` requested by the plugin are intentionally discarded — chain-initiated turns only make sense after a turn terminates with `Ok`, so plugins should hook `idle` to chain.
 - Plugin errors (spawn failure, non-zero exit, invalid JSON, unsupported result) are logged via `tracing::warn!` and the loop continues to the next hooker. They never affect the turn result or downstream flows.
 - The hook is **not** wrapped in a trace span (unlike chat hooks). If you need observability, write to your own log file from inside the script.
 
-### 15.2 Input payload shape
+### 15.2 Input payload shapes
+
+`*.Session.lifecycle.created`:
+
+```json
+{
+  "stage": "session_created",
+  "session_id": "s1",
+  "sender_id": "u1",
+  "workspace": "/home/user/proj",
+  "hooker": { "id": "...", "hook_point": "*.Session.lifecycle.created", "command": "...", "agent_id": "..." },
+  "metadata": { ... },
+  "policy": null,
+  "definition": { ... }
+}
+```
+
+`*.Session.lifecycle.closed` has the same shape with `"stage": "session_closed"`.
+
+`*.Session.lifecycle.state` additionally carries the state transition:
 
 ```json
 {
@@ -578,12 +599,15 @@ The session state hook (section 15) does **not** support `ask_user` — it is ev
   "session_id": "s1",
   "sender_id": "u1",
   "agent_id": "defaultagent",
+  "workspace": "/home/user/proj",
   "policy": null,
   "definition": { ... }
 }
 ```
 
-The hook point sent to the plugin is constructed as `<agent_id>.Session.lifecycle.state`, so `agent_id` is also available inside `hooker.agent_id` and at top level.
+The hook point sent to the plugin is constructed as `<agent_id>.Session.lifecycle.<stage>`, so `agent_id` is also available inside `hooker.agent_id` and (for `state`) at top level.
+
+`workspace` is the session's workspace root, taken from the session record (these hooks are dispatched with a `NoopRuntimeView`, so the runtime context is not available); it serializes as `null` when the session has no resolvable workspace.
 
 > **session_id**: `payload.session_id` is the current session id. It is identical in local and remote mode (the TUI forwards its `session_id` to the daemon, which reuses it), so a plugin does not need to detect the run mode to obtain the correct id — just read `payload.session_id`. In remote mode the hooker subprocess is spawned by the daemon process; in local mode by the TUI process. The `create_session` / `switch_session` actions in the response only take effect in remote (daemon) mode (see 16.4); in local mode the hooker still runs and `payload.session_id` is still correct, but requested actions are dropped by the TUI.
 
