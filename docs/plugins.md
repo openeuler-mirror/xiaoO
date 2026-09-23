@@ -197,9 +197,11 @@ cat "$AGENT_MOSS_LOG_PATH"
 | `*.Chat.command.before` | 用户输入命中 `~/.xiaoo/commands/<name>.md` 斜杠命令、模板展开为 body 之后、body 提交为 user turn 之前 | `Allow` / `Transform { body }` / `Deny { reason }` |
 | `*.Chat.message.received` | user 消息构造完成、写入消息历史之前 | `Accept` / `Transform { message }` |
 | `*.Chat.system.transform` | PromptBuilder 组装完 `system: Vec<String>` 分段、合并成单条 system 消息之前 | `Allow` / `Transform { system }` |
+| `*.Session.lifecycle.created` | 会话新建（首次 open / 新会话首个 turn / 从 checkpoint 派生 runtime） | `Ack`（事件型，无可变输出） |
+| `*.Session.lifecycle.closed` | 会话被关闭（幂等：已 Closed 的会话不会重复触发） | `Ack`（事件型，无可变输出） |
 | `*.Session.lifecycle.state` | root turn 生命周期状态切换：`idle`（一次非错误 root turn 结束，`Complete`/`MaxTurnsReached`/`BudgetExhausted`/`Cancelled` 四种 `Ok` 结局，会话回到 idle）/ `failed`（turn 以 `Err` 结束） | `Ack`（事件型，无可变输出） |
 
-> 前三个 chat hook 是「可变 hook」——插件可以改写或拒绝输入；第四个 session hook 是「事件型观察者」——只能确认收到事件，没有 `transform`/`deny` 路径。`idle` 状态下 `actions`（`create_session` / `switch_session` / `send_prompt`）会被收集并执行；`failed` 状态下 `actions` 被丢弃（fire-and-forget）。
+> 前三个 chat hook 是「可变 hook」——插件可以改写或拒绝输入；三个 session hook 是「事件型观察者」——只能确认收到事件，没有 `transform`/`deny` 路径。`idle` 状态下 `actions`（`create_session` / `switch_session` / `send_prompt`）会被收集并执行；`failed` 状态下 `actions` 被丢弃（fire-and-forget）；`created`/`closed` 不收集 `actions`（gateway 忽略其输出）。
 
 ### 与 Tool hook 的差异
 
@@ -210,14 +212,16 @@ cat "$AGENT_MOSS_LOG_PATH"
 
 ### Minimal plugin.json
 
-`~/.xiaoo/hookers/js-test/plugin.json` 一次性注册四个 hooker，全指向同一个脚本：
+`~/.xiaoo/hookers/js-test/plugin.json` 一次性注册六个 hooker，全指向同一个脚本：
 
 ```json
 [
   { "id": "js_test_system_transform", "hook_point": "*.Chat.system.transform",    "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" },
   { "id": "js_test_chat_message",     "hook_point": "*.Chat.message.received",   "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" },
   { "id": "js_test_command_before",   "hook_point": "*.Chat.command.before",     "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" },
-  { "id": "js_test_session_state",    "hook_point": "*.Session.lifecycle.state", "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" }
+  { "id": "js_test_session_created",  "hook_point": "*.Session.lifecycle.created", "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" },
+  { "id": "js_test_session_closed",   "hook_point": "*.Session.lifecycle.closed",  "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" },
+  { "id": "js_test_session_state",    "hook_point": "*.Session.lifecycle.state",   "command": "node ~/.xiaoo/hookers/js-test/xiaoo-hook-test.js" }
 ]
 ```
 
@@ -230,9 +234,11 @@ cat "$AGENT_MOSS_LOG_PATH"
 | `*.Chat.system.transform` | `system_transform` |
 | `*.Chat.message.received` | `chat_message` |
 | `*.Chat.command.before` | `command_before` |
+| `*.Session.lifecycle.created` | `session_created` |
+| `*.Session.lifecycle.closed` | `session_closed` |
 | `*.Session.lifecycle.state` | `session_state` |
 
-### session_id 获取
+### session_id 与 workspace 获取
 
 插件需要当前会话 id 时，直接读 `payload.session_id` 即可，**无需区分 local / remote 模式**：
 
@@ -241,19 +247,20 @@ cat "$AGENT_MOSS_LOG_PATH"
 
 因此插件不必判断"我现在是被 TUI 还是 daemon 拉起的"，`payload.session_id` 永远是「当前会话」的正确 id。
 
-各 hook 点 `payload.session_id` 可用性：
+各 hook 点 `payload.session_id` / `payload.workspace` 可用性：
 
-| hook_point | payload.session_id | 类型 |
-|---|---|---|
-| `*.Chat.command.before` | ✓ | String |
-| `*.Chat.message.received` | ✓ | String |
-| `*.Chat.system.transform` | ✓ | String \| null |
-| `*.Session.lifecycle.state` | ✓ | String |
-| `*.Tool.*.pre` | ✓ | String |
-| `*.Tool.*.post` / `error` | ✗ | payload 不带 session_id |
-| `*.Llm.*.pre` / `post` / `error` | ✗ | payload 不带 session_id |
+| hook_point | payload.session_id | payload.workspace | 类型 |
+|---|---|---|---|
+| `*.Chat.command.before` | ✓ | ✓ | String |
+| `*.Chat.message.received` | ✓ | ✓ | String |
+| `*.Chat.system.transform` | ✓ | ✓ | String \| null（session_id） |
+| `*.Session.lifecycle.created` / `closed` | ✓ | ✓ | String（workspace 可能为 null） |
+| `*.Session.lifecycle.state` | ✓ | ✓ | String（workspace 可能为 null） |
+| `*.Tool.*.pre` | ✓ | ✓ | String |
+| `*.Tool.*.post` / `error` | ✓ | ✓ | String |
+| `*.Llm.*.pre` / `post` / `error` | ✗ | ✗ | payload 不带 session_id / workspace |
 
-> `system_transform` 的 session_id 理论上可能为 `null`（`ChatSystemTransformInput.session_id` 是 `Option<String>`），脚本里建议 `payload.session_id || "(unknown)"` 兜底。tool post/error 与 LLM hook 的 payload 目前不带 session_id；如需在这些钩子里拿会话 id，可考虑改用 `*.Tool.*.pre` 或 chat 层钩子记录映射。
+> `system_transform` 的 session_id 理论上可能为 `null`（`ChatSystemTransformInput.session_id` 是 `Option<String>`），脚本里建议 `payload.session_id || "(unknown)"` 兜底。`payload.workspace` 是会话工作区根目录的绝对路径：Tool/Chat hook 从 runtime 上下文取、Session hook 从会话记录取，未绑定工作区时为 `null`；hooker 子进程的 cwd 继承自宿主进程（可能随 bash `cd` 漂移），需要工作区路径时应以 `payload.workspace` 为准，不要依赖 cwd。`*.Llm.*` hook 的 payload 目前不带 session_id / workspace。
 
 ### Minimal demo script
 
@@ -272,7 +279,7 @@ const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
 // 统一取 session_id：system_transform 的该字段可能为 null，做兜底。
 const SID = payload.session_id || "(unknown)";
 
-// 每个 hook 触发时都往日志写一行，便于核对四个钩子各自拿到的 sid。
+// 每个 hook 触发时都往日志写一行，便于核对各钩子各自拿到的 sid。
 fs.appendFileSync("/tmp/xiaoo-demo.log",
   `[${new Date().toISOString()}] stage=${payload.stage} sid=${SID}\n`);
 
@@ -333,6 +340,13 @@ switch (payload.stage) {
     }
     break;
   }
+  case "session_created":
+  case "session_closed": {
+    // payload.session_id = 当前会话 id（事件型、只读）
+    // payload.workspace  = 会话工作区根目录（可能为 null）
+    result = { result: "ack" };
+    break;
+  }
   default:
     result = { result: "allow" };
 }
@@ -346,6 +360,8 @@ if (result === undefined) {
     chat_message: { result: "accept" },
     system_transform: { result: "allow" },
     session_state: { result: "ack" },
+    session_created: { result: "ack" },
+    session_closed: { result: "ack" },
   };
   result = noop[payload.stage] ?? { result: "allow" };
 }
@@ -355,12 +371,14 @@ process.stdout.write(JSON.stringify(result));
 运行后核对 session id：
 
 ```bash
-# 四个钩子每次触发都会写一行，可直接看到各钩子拿到的 sid
+# 各钩子每次触发都会写一行，可直接看到各钩子拿到的 sid
 cat /tmp/xiaoo-demo.log
 # [2026-...Z] stage=command_before sid=550e8400-e29b-...
 # [2026-...Z] stage=chat_message sid=550e8400-e29b-...
 # [2026-...Z] stage=system_transform sid=550e8400-e29b-...
+# [2026-...Z] stage=session_created sid=550e8400-e29b-...
 # [2026-...Z] stage=session_state sid=550e8400-e29b-...
+# [2026-...Z] stage=session_closed sid=550e8400-e29b-...
 ```
 
 > local 与 remote 模式下 `sid` 值一致；remote 模式下日志写在 **daemon 所在机器**（hooker 由 daemon 进程拉起），不是 TUI 机器。

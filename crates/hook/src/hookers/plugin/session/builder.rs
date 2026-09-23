@@ -10,7 +10,7 @@ pub(crate) fn build_plugin_session_hooker(
     parsed_hook_point: ParsedPluginHookPoint,
 ) -> Result<Box<dyn Hooker>, BuildError> {
     match parsed_hook_point.stage.0.as_str() {
-        "state" => {
+        "created" | "closed" | "state" => {
             let hooker = PluginSessionHookerAdaptor::new(
                 definition.id,
                 definition.hook_point,
@@ -24,3 +24,7 @@ pub(crate) fn build_plugin_session_hooker(
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../../tests/unit/hook/hookers/plugin/session/builder_test.rs"]
+mod tests;
