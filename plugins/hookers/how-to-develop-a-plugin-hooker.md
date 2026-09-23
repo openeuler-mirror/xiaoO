@@ -145,6 +145,8 @@ Typical pre-hook payload shape:
 ```json
 {
   "stage": "pre",
+  "session_id": "s1",
+  "workspace": "/home/user/proj",
   "hooker": {
     "id": "plugin_read_file_pre_gate",
     "hook_point": "*.Tool.builtin_read_file.pre",
@@ -166,6 +168,8 @@ Typical pre-hook payload shape:
   }
 }
 ```
+
+`session_id` is the id of the session driving the tool call (`null` never happens here; when the runtime carries no session id the call id is used as the fallback identity). `workspace` is the absolute workspace root bound to the agent (`null` when none); the plugin subprocess inherits the host's cwd, which may have drifted (e.g. after a `cd` inside a bash tool), so treat `payload.workspace` — not `process.cwd()` — as the authoritative workspace path.
 
 ### Allowed output
 
@@ -191,13 +195,15 @@ Rewrite tool input:
 
 ### Input payload
 
-The post-hook payload is like pre-hook, but also contains `outcome`.
+The post-hook payload is like pre-hook, but also contains `outcome`. It carries the same top-level `session_id` and `workspace` identity fields as the pre payload.
 
 Success example:
 
 ```json
 {
   "stage": "post",
+  "session_id": "s1",
+  "workspace": "/home/user/proj",
   "outcome": {
     "type": "success",
     "output": "file content"
@@ -235,13 +241,15 @@ Rewrite successful output text:
 
 ### Input payload
 
-The error-hook payload is like pre-hook, but also contains `error`.
+The error-hook payload is like pre-hook, but also contains `error`. It carries the same top-level `session_id` and `workspace` identity fields as the pre payload.
 
 Example:
 
 ```json
 {
   "stage": "error",
+  "session_id": "s1",
+  "workspace": "/home/user/proj",
   "error": {
     "type": "execution_failed",
     "message": "command failed"
@@ -384,6 +392,7 @@ Input payload shape:
   "metadata": { ... },
   "command": "review",
   "session_id": "s1",
+  "workspace": "/home/user/proj",
   "arguments": "src/main.rs",
   "body": "Review this carefully.\n\nsrc/main.rs",
   "policy": null,
@@ -419,6 +428,7 @@ Input payload shape (the `message` field is a full `ChatMessage` object — `rol
   "hooker": { ... },
   "metadata": { ... },
   "session_id": "s1",
+  "workspace": "/home/user/proj",
   "agent": "defaultagent",
   "model": { "provider_id": "...", "model_id": "..." },
   "message_id": null,
@@ -482,6 +492,7 @@ Input payload shape:
   "hooker": { ... },
   "metadata": { ... },
   "session_id": "s1",
+  "workspace": "/home/user/proj",
   "model": { "provider_id": "...", "model_id": "..." },
   "system": [ "base instruction", "second part" ],
   "policy": null,

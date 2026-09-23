@@ -391,3 +391,64 @@ fn command_before_deny_carries_reason() {
         other => panic!("expected Deny, got {:?}", other),
     }
 }
+
+// ---- payload workspace field ------------------------------------------
+
+#[test]
+fn chat_payloads_carry_workspace_root() {
+    let runtime = TestRuntimeView::new();
+
+    let mut adaptor = adaptor_for("cat > /dev/null");
+
+    adaptor
+        .core
+        .set_hook_point(HookPointId("test-agent.Chat.command.before".to_string()));
+    let command_input = CommandExecuteBeforeInput {
+        command: "review".to_string(),
+        session_id: "s1".to_string(),
+        arguments: "".to_string(),
+        body: "body".to_string(),
+    };
+    let payload = adaptor.build_command_before_payload(
+        &command_input,
+        &HookInvokeMetadata::default(),
+        &runtime,
+    );
+    assert_eq!(payload["stage"], json!("command_before"));
+    assert_eq!(payload["workspace"], json!("/tmp"));
+
+    adaptor
+        .core
+        .set_hook_point(HookPointId("test-agent.Chat.message.received".to_string()));
+    let message_input = ChatMessageHookInput {
+        session_id: "s1".to_string(),
+        agent: None,
+        model: None,
+        message_id: None,
+        message: user_text("hello"),
+        prior_message_count: 0,
+    };
+    let payload = adaptor.build_chat_message_payload(
+        &message_input,
+        &HookInvokeMetadata::default(),
+        &runtime,
+    );
+    assert_eq!(payload["stage"], json!("chat_message"));
+    assert_eq!(payload["workspace"], json!("/tmp"));
+
+    adaptor
+        .core
+        .set_hook_point(HookPointId("test-agent.Chat.system.transform".to_string()));
+    let system_input = ChatSystemTransformInput {
+        session_id: Some("s1".to_string()),
+        model: ModelRef::default(),
+        current_system: vec!["base".to_string()],
+    };
+    let payload = adaptor.build_system_transform_payload(
+        &system_input,
+        &HookInvokeMetadata::default(),
+        &runtime,
+    );
+    assert_eq!(payload["stage"], json!("system_transform"));
+    assert_eq!(payload["workspace"], json!("/tmp"));
+}

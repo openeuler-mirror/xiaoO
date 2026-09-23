@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::super::core::PluginHookerCore;
+use super::super::core::{serialize_workspace_root, PluginHookerCore};
 use super::super::PLUGIN_HOOK_COMMAND_TIMEOUT_MS;
 use crate::{resolve_hook_point_category, HookPointCategory};
 
@@ -176,6 +176,7 @@ impl PluginChatHookerAdaptor {
             "hooker": self.core.serialize_hooker_info(runtime),
             "metadata": self.core.serialize_metadata(metadata),
             "session_id": input.session_id,
+            "workspace": serialize_workspace_root(runtime),
             "model": {
                 "provider_id": input.model.provider_id,
                 "model_id": input.model.model_id,
@@ -197,6 +198,7 @@ impl PluginChatHookerAdaptor {
             "hooker": self.core.serialize_hooker_info(runtime),
             "metadata": self.core.serialize_metadata(metadata),
             "session_id": input.session_id,
+            "workspace": serialize_workspace_root(runtime),
             "agent": input.agent,
             "model": input.model.as_ref().map(|m| json!({
                 "provider_id": m.provider_id,
@@ -222,6 +224,7 @@ impl PluginChatHookerAdaptor {
             "metadata": self.core.serialize_metadata(metadata),
             "command": input.command,
             "session_id": input.session_id,
+            "workspace": serialize_workspace_root(runtime),
             "arguments": input.arguments,
             "body": input.body,
             "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
