@@ -411,7 +411,11 @@ impl CoreBackedSessionService {
     async fn fire_session_hooks(&self, input: HookInvokeInput, hook_point: HookPointId) {
         let hookers = self.enabled_hooker_ids_for(&hook_point);
 
-        let noop_runtime = NoopRuntimeView::new();
+        // Carry the configured registry so plugin payload builders can resolve
+        // [hooker.policies] (a NoopRuntimeView without it reports policy: null
+        // for every session-event payload, which would break policy-scoped plugins).
+        let noop_runtime =
+            NoopRuntimeView::new().with_hooker_registry(Arc::clone(&self.hooker_registry));
         for hooker_id in hookers {
             if let Some(hooker) = self.hooker_registry.get(&hooker_id) {
                 if let Err(err) = hooker.invoke(input.clone(), &noop_runtime).await {
@@ -471,7 +475,8 @@ impl CoreBackedSessionService {
         let max_depth = self.max_prompt_chain_depth;
         let registry = Arc::clone(&self.hooker_registry);
         let mut hook_task = tokio::spawn(async move {
-            let noop_runtime = NoopRuntimeView::new();
+            // With the configured registry so the payload's policy field resolves.
+            let noop_runtime = NoopRuntimeView::new().with_hooker_registry(Arc::clone(&registry));
             let input = HookInvokeInput::SessionState {
                 input: SessionStateHookInput {
                     session_id,
@@ -567,7 +572,8 @@ impl CoreBackedSessionService {
         }
         let registry = Arc::clone(&self.hooker_registry);
         tokio::spawn(async move {
-            let noop_runtime = NoopRuntimeView::new();
+            // With the configured registry so the payload's policy field resolves.
+            let noop_runtime = NoopRuntimeView::new().with_hooker_registry(Arc::clone(&registry));
             let input = HookInvokeInput::SessionState {
                 input: SessionStateHookInput {
                     session_id,

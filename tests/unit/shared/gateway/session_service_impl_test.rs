@@ -2505,6 +2505,108 @@ async fn open_session_fires_created_hook_with_workspace() {
     );
 }
 
+/// Records what `runtime.hookers().policy_for(id)` resolves to from inside a
+/// session lifecycle hook — the exact lookup a plugin session hooker's payload
+/// builder performs. Session hooks run under a NoopRuntimeView, so the registry
+/// the gateway passes in must still carry the configured `[hooker.policies]`.
+struct PolicyProbeHooker {
+    id: HookerId,
+    hook_point: HookPointId,
+    invocations: Arc<StdMutex<Vec<Option<Value>>>>,
+}
+
+impl PolicyProbeHooker {
+    fn new(id: &str, invocations: Arc<StdMutex<Vec<Option<Value>>>>) -> Self {
+        Self {
+            id: HookerId(id.to_string()),
+            hook_point: HookPointId("*.Session.lifecycle.created".to_string()),
+            invocations,
+        }
+    }
+
+    fn registry_with_policy(hooker: Self, policy: Value) -> Arc<dyn HookerRegistry> {
+        let hooker_id = hooker.id().clone();
+        let mut hookers: HashMap<HookerId, Box<dyn Hooker>> = HashMap::new();
+        hookers.insert(hooker_id.clone(), Box::new(hooker));
+        let mut enabled: HashSet<HookerId> = HashSet::new();
+        enabled.insert(hooker_id.clone());
+        let mut policies: HashMap<HookerId, Value> = HashMap::new();
+        policies.insert(hooker_id, policy);
+        Arc::new(HookerRegistryImpl::new(hookers, enabled, policies))
+    }
+}
+
+#[async_trait]
+impl Hooker for PolicyProbeHooker {
+    fn id(&self) -> &HookerId {
+        &self.id
+    }
+
+    fn hook_point(&self) -> &HookPointId {
+        &self.hook_point
+    }
+
+    async fn invoke(
+        &self,
+        input: HookInvokeInput,
+        runtime: &dyn RuntimeView,
+    ) -> Result<HookInvokeOutput, HookInvokeError> {
+        match input {
+            HookInvokeInput::SessionCreated { .. } => {
+                let policy = runtime.hookers().policy_for(&self.id).cloned();
+                self.invocations
+                    .lock()
+                    .expect("policy probe invocations")
+                    .push(policy);
+                Ok(HookInvokeOutput::SessionCreated(
+                    SessionHookResult::Acknowledged,
+                ))
+            }
+            other => Err(HookInvokeError::Session(SessionHookError::Plugin {
+                message: format!(
+                    "policy probe hooker '{}' expected SessionCreated input but got {:?}",
+                    self.id.0, other
+                ),
+            })),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[tokio::test]
+async fn open_session_created_hook_resolves_configured_policy() {
+    let workspace = TempDir::new().expect("workspace");
+    let store = Arc::new(InMemorySessionStore::default());
+    let resolver = Arc::new(StubRuntimeResolver {
+        workspace_root: workspace.path().to_path_buf(),
+        backend_options: json!({"temp_root": workspace.path().to_string_lossy().to_string()}),
+        llm_provider: stub_llm_provider(),
+        cancel_token: None,
+    });
+    let invocations = Arc::new(StdMutex::new(Vec::new()));
+    let registry = PolicyProbeHooker::registry_with_policy(
+        PolicyProbeHooker::new("policy-probe-created", invocations.clone()),
+        json!({"workspaces": ["/tmp/policy-probe-ws"]}),
+    );
+    let service = build_service_with_hooker_registry(store, resolver, registry);
+
+    service
+        .open_session(test_open_request("s-created-policy"))
+        .await
+        .expect("open session");
+
+    let recorded = wait_for_invocations(&invocations, 1, 2_000).await;
+    assert_eq!(
+        recorded,
+        vec![Some(json!({"workspaces": ["/tmp/policy-probe-ws"]}))],
+        "session hook payloads must resolve the configured [hooker.policies] entry; \
+         a NoopRuntimeView without the registry would report null"
+    );
+}
+
 #[tokio::test]
 async fn close_session_fires_closed_hook_with_workspace() {
     let workspace = TempDir::new().expect("workspace");
