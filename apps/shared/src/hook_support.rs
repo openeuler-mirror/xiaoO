@@ -210,6 +210,7 @@ fn synthetic_input(category: HookPointCategory) -> HookInvokeInput {
             input: SessionCreatedHookInput {
                 session_id: "xiaoo-hook-test".to_string(),
                 sender_id: "xiaoo-vscode".to_string(),
+                workspace: None,
             },
             metadata,
         },
@@ -217,6 +218,7 @@ fn synthetic_input(category: HookPointCategory) -> HookInvokeInput {
             input: SessionClosedHookInput {
                 session_id: "xiaoo-hook-test".to_string(),
                 sender_id: "xiaoo-vscode".to_string(),
+                workspace: None,
             },
             metadata,
         },
@@ -227,6 +229,7 @@ fn synthetic_input(category: HookPointCategory) -> HookInvokeInput {
                 agent_id: "xiaoo-hook-test".to_string(),
                 state: "idle".to_string(),
                 outcome: "complete".to_string(),
+                workspace: None,
             },
             metadata,
         },

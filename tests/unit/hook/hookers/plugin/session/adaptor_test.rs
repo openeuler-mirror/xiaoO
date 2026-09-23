@@ -190,6 +190,7 @@ fn idle_input() -> SessionStateHookInput {
         agent_id: "defaultagent".to_string(),
         state: "idle".to_string(),
         outcome: "complete".to_string(),
+        workspace: Some("/tmp/xiaoo-ws".to_string()),
     }
 }
 
@@ -307,6 +308,7 @@ fn session_state_payload_carries_state_and_session_fields() {
         agent_id: "agent-x".to_string(),
         state: "idle".to_string(),
         outcome: "complete".to_string(),
+        workspace: Some("/tmp/xiaoo-ws".to_string()),
     };
     let payload =
         adaptor.build_session_state_payload(&input, &HookInvokeMetadata::default(), &runtime);

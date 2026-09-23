@@ -1,13 +1,23 @@
+/// Absolute path of the session's workspace root, when known. Session
+/// lifecycle hooks are dispatched with a `NoopRuntimeView` (no agent
+/// context), so the workspace cannot be read from the runtime there;
+/// dispatchers fill this from the session record instead. `None` when
+/// the session has no resolvable workspace (synthetic inputs, records
+/// persisted before the field existed).
 #[derive(Clone, Debug)]
 pub struct SessionCreatedHookInput {
     pub session_id: String,
     pub sender_id: String,
+    pub workspace: Option<String>,
 }
 
+/// Workspace root of the session being closed; same semantics as
+/// [`SessionCreatedHookInput::workspace`].
 #[derive(Clone, Debug)]
 pub struct SessionClosedHookInput {
     pub session_id: String,
     pub sender_id: String,
+    pub workspace: Option<String>,
 }
 
 /// Input for `*.Session.lifecycle.state`. Fires on session lifecycle state
@@ -32,6 +42,7 @@ pub struct SessionStateHookInput {
     pub agent_id: String,
     pub state: String,
     pub outcome: String,
+    pub workspace: Option<String>,
 }
 
 #[derive(Clone, Debug)]
