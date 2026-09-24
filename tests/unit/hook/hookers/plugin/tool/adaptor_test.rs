@@ -445,6 +445,119 @@ fn final_responses_remain_backward_compatible() {
     assert!(matches!(explicit, PluginCommandResponse::Final(_)));
 }
 
+#[test]
+fn allow_result_parses_optional_extra() {
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_pre_allow".to_string()),
+        HookPointId("test-agent.Tool.bash.pre".to_string()),
+        "python3 unused.py".to_string(),
+        Value::Null,
+    );
+
+    // Legacy plugins: plain allow carries no extra.
+    match adaptor
+        .parse_pre_result(&json!({ "result": "allow" }))
+        .unwrap()
+    {
+        PreHookResult::Allow { extra } => assert!(extra.is_none()),
+        other => panic!("unexpected result: {:?}", other),
+    }
+
+    // allow + extra: the payload is surfaced verbatim for accumulation.
+    match adaptor
+        .parse_pre_result(&json!({
+            "result": "allow",
+            "extra": { "spawn_wrapper": { "prefix": ["/bin/true"] } }
+        }))
+        .unwrap()
+    {
+        PreHookResult::Allow { extra } => {
+            assert_eq!(
+                extra,
+                Some(json!({ "spawn_wrapper": { "prefix": ["/bin/true"] } }))
+            );
+        }
+        other => panic!("unexpected result: {:?}", other),
+    }
+
+    // deny ignores an extra key entirely.
+    match adaptor
+        .parse_pre_result(&json!({
+            "result": "deny",
+            "reason": "not allowed",
+            "extra": { "ignored": true }
+        }))
+        .unwrap()
+    {
+        PreHookResult::Deny { reason } => assert_eq!(reason, "not allowed"),
+        other => panic!("unexpected result: {:?}", other),
+    }
+}
+
+/// End-to-end pre invocation against a plugin script whose final response is
+/// `allow` with an `extra` payload: stdout JSON must reach the caller as
+/// `PreHookResult::Allow { extra: Some(..) }` so the framework can accumulate
+/// it into `FinalToolCall.extra`.
+#[tokio::test]
+async fn invoke_pre_returns_allow_with_extra_from_plugin_stdout() {
+    let script_path =
+        std::env::temp_dir().join(format!("plugin_allow_extra_{}.py", std::process::id()));
+    std::fs::write(
+        &script_path,
+        r#"import json
+import sys
+
+json.load(sys.stdin)
+json.dump(
+    {
+        "result": "allow",
+        "extra": {"spawn_wrapper": {"prefix": ["/opt/wrapper", "--session=s1", "--"]}},
+    },
+    sys.stdout,
+)
+"#,
+    )
+    .unwrap();
+
+    let adaptor = PluginToolHookerAdaptor::new(
+        HookerId("plugin_pre_allow".to_string()),
+        HookPointId("test-agent.Tool.bash.pre".to_string()),
+        format!("python3 {}", script_path.display()),
+        Value::Null,
+    );
+    let runtime = TestRuntimeView::new(InteractionResponse::Text {
+        value: None,
+        display_value: None,
+    });
+    let input = PreToolHookInput {
+        call: FinalToolCall {
+            call_id: "call-1".to_string(),
+            tool_name: "bash".to_string(),
+            input: json!({"command": "pwd"}),
+            ..Default::default()
+        },
+    };
+
+    let output = adaptor
+        .invoke_pre(&input, &HookInvokeMetadata::default(), &runtime)
+        .await
+        .unwrap();
+
+    match output.primary {
+        HookInvokePrimary::Pre(PreHookResult::Allow { extra }) => {
+            assert_eq!(
+                extra,
+                Some(json!({
+                    "spawn_wrapper": {"prefix": ["/opt/wrapper", "--session=s1", "--"]}
+                }))
+            );
+        }
+        other => panic!("unexpected output: {:?}", other),
+    }
+
+    let _ = std::fs::remove_file(script_path);
+}
+
 /// Verify the plugin hooker child-process timeout + kill fallback chain:
 /// spawn a `sleep 30` child (simulating a hang) with a 2s timeout, and assert:
 /// 1. It returns ToolExecutionError::Timeout (instead of blocking forever);

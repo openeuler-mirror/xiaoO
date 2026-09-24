@@ -46,3 +46,63 @@ fn plugin_visible_call_serializes_without_extra_key() {
     let with_extra = serde_json::to_value(&final_call).unwrap();
     assert!(with_extra.get("extra").is_some());
 }
+
+#[test]
+fn accumulate_extra_injects_hooker_id_and_appends() {
+    use super::accumulate_extra;
+    use agent_types::common::HookerId;
+
+    let mut call = FinalToolCall {
+        call_id: "call-1".to_string(),
+        tool_name: "file_write".to_string(),
+        input: serde_json::json!({"file_path": "a.txt"}),
+        ..Default::default()
+    };
+
+    // First contribution creates the array with the hooker id injected.
+    accumulate_extra(
+        &mut call,
+        &HookerId("plugin_a".to_string()),
+        Some(serde_json::json!({"spawn_wrapper": {"prefix": ["/bin/w"]}})),
+    );
+    assert_eq!(
+        call.extra,
+        Some(serde_json::json!([
+            {"hooker_id": "plugin_a", "spawn_wrapper": {"prefix": ["/bin/w"]}}
+        ]))
+    );
+
+    // A second contribution appends instead of replacing.
+    accumulate_extra(
+        &mut call,
+        &HookerId("plugin_b".to_string()),
+        Some(serde_json::json!({"note": "hi"})),
+    );
+    assert_eq!(
+        call.extra,
+        Some(serde_json::json!([
+            {"hooker_id": "plugin_a", "spawn_wrapper": {"prefix": ["/bin/w"]}},
+            {"hooker_id": "plugin_b", "note": "hi"}
+        ]))
+    );
+
+    // None is a no-op (legacy plugins without extra).
+    accumulate_extra(&mut call, &HookerId("plugin_c".to_string()), None);
+    assert_eq!(
+        call.extra,
+        Some(serde_json::json!([
+            {"hooker_id": "plugin_a", "spawn_wrapper": {"prefix": ["/bin/w"]}},
+            {"hooker_id": "plugin_b", "note": "hi"}
+        ]))
+    );
+
+    // A non-object payload still accumulates (hooker id cannot be injected,
+    // but the entry is preserved verbatim inside the entries array).
+    let mut bare = FinalToolCall::default();
+    accumulate_extra(
+        &mut bare,
+        &HookerId("plugin_d".to_string()),
+        Some(serde_json::json!([1, 2])),
+    );
+    assert_eq!(bare.extra, Some(serde_json::json!([[1, 2]])));
+}

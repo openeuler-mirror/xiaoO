@@ -8,7 +8,14 @@ pub struct PreToolHookInput {
 
 #[derive(Clone, Debug)]
 pub enum PreHookResult {
-    Allow,
+    Allow {
+        /// Plugin-produced per-invocation payload; the framework injects the
+        /// hooker id and accumulates entries into `FinalToolCall.extra`.
+        /// Same semantics as `Transform::extra`, for hookers that allow the
+        /// call through untouched while still contributing data.
+        /// A `null` payload is treated the same as `None`.
+        extra: Option<serde_json::Value>,
+    },
     Deny {
         reason: String,
     },
@@ -16,6 +23,7 @@ pub enum PreHookResult {
         modified_input: serde_json::Value,
         /// Plugin-produced per-invocation payload; the framework injects the
         /// hooker id and accumulates entries into `FinalToolCall.extra`.
+        /// A `null` payload is treated the same as `None`.
         extra: Option<serde_json::Value>,
     },
 }
