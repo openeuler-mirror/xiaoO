@@ -2,6 +2,7 @@ mod builder;
 mod chat;
 mod core;
 mod definition;
+mod interaction;
 mod llm;
 mod parsed_hook_point;
 mod session;

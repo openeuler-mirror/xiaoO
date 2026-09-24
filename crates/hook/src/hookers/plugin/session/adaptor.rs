@@ -54,6 +54,12 @@ impl PluginSessionHookerAdaptor {
         SessionHookError::Plugin { message }
     }
 
+    /// Session hook timeouts surface as the same plugin error, carrying the
+    /// driver's preformatted timeout message.
+    fn timeout_err(message: String, _timeout_ms: u64) -> SessionHookError {
+        Self::err(message)
+    }
+
     async fn invoke_for_category(
         &self,
         category: HookPointCategory,
@@ -91,11 +97,7 @@ impl PluginSessionHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, SessionHookError> {
         let payload = self.build_session_created_payload(input, metadata, runtime);
-        let output = self
-            .core
-            .run_plugin_command(&payload, Self::err, Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS))
-            .await?;
-        let primary = self.parse_session_event_result(&output, "created")?;
+        let (_, primary) = self.run_session_event(&payload, "created").await?;
         Ok(HookInvokeOutput::SessionCreated(primary))
     }
 
@@ -106,11 +108,7 @@ impl PluginSessionHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, SessionHookError> {
         let payload = self.build_session_closed_payload(input, metadata, runtime);
-        let output = self
-            .core
-            .run_plugin_command(&payload, Self::err, Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS))
-            .await?;
-        let primary = self.parse_session_event_result(&output, "closed")?;
+        let (_, primary) = self.run_session_event(&payload, "closed").await?;
         Ok(HookInvokeOutput::SessionClosed(primary))
     }
 
@@ -121,13 +119,57 @@ impl PluginSessionHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, SessionHookError> {
         let payload = self.build_session_state_payload(input, metadata, runtime);
-        let output = self
-            .core
-            .run_plugin_command(&payload, Self::err, Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS))
-            .await?;
-        let primary = self.parse_session_state_result(&output)?;
+        let (output, primary) = self.run_session_event(&payload, "state").await?;
         let actions = agent_types::hook::parse_actions(&output);
         Ok(HookInvokeOutput::SessionState(primary).with_actions(actions))
+    }
+
+    /// Run the plugin command for one session lifecycle event and parse its
+    /// ack-only result. Returns the raw plugin output alongside the parsed
+    /// result so the state stage can additionally collect plugin-requested
+    /// `actions` from it.
+    async fn run_session_event(
+        &self,
+        payload: &Value,
+        stage: &str,
+    ) -> Result<(Value, SessionHookResult), SessionHookError> {
+        let output = self
+            .core
+            .run_plugin_command(
+                payload,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+            )
+            .await?;
+        let primary = self.parse_session_event_result(&output, stage)?;
+        Ok((output, primary))
+    }
+
+    /// Build the payload shared by every session lifecycle event: the
+    /// common plugin payload skeleton plus the session identity fields
+    /// (`session_id` / `sender_id` / `workspace`) that all three session
+    /// hook inputs carry. Stage-specific fields are layered on by the
+    /// per-stage builders below.
+    fn build_session_payload(
+        &self,
+        stage: &str,
+        session_id: &str,
+        sender_id: &str,
+        workspace: &Option<String>,
+        metadata: &HookInvokeMetadata,
+        runtime: &dyn RuntimeView,
+    ) -> Value {
+        self.core.build_stage_payload(
+            stage,
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(session_id)),
+                ("sender_id", json!(sender_id)),
+                ("workspace", json!(workspace)),
+            ],
+        )
     }
 
     fn build_session_created_payload(
@@ -136,16 +178,14 @@ impl PluginSessionHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "session_created",
-            "session_id": input.session_id,
-            "sender_id": input.sender_id,
-            "workspace": input.workspace,
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
+        self.build_session_payload(
+            "session_created",
+            &input.session_id,
+            &input.sender_id,
+            &input.workspace,
+            metadata,
+            runtime,
+        )
     }
 
     fn build_session_closed_payload(
@@ -154,16 +194,14 @@ impl PluginSessionHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "session_closed",
-            "session_id": input.session_id,
-            "sender_id": input.sender_id,
-            "workspace": input.workspace,
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
+        self.build_session_payload(
+            "session_closed",
+            &input.session_id,
+            &input.sender_id,
+            &input.workspace,
+            metadata,
+            runtime,
+        )
     }
 
     fn build_session_state_payload(
@@ -172,24 +210,26 @@ impl PluginSessionHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "session_state",
-            "state": input.state,
-            "outcome": input.outcome,
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "session_id": input.session_id,
-            "sender_id": input.sender_id,
-            "agent_id": input.agent_id,
-            "workspace": input.workspace,
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
+        let mut payload = self.build_session_payload(
+            "session_state",
+            &input.session_id,
+            &input.sender_id,
+            &input.workspace,
+            metadata,
+            runtime,
+        );
+        payload["state"] = json!(input.state);
+        payload["outcome"] = json!(input.outcome);
+        payload["agent_id"] = json!(input.agent_id);
+        payload
     }
 
-    /// Result parsing for the created/closed event hooks: ack-only, no
-    /// `actions` collection (the gateway ignores the output of these
-    /// events; only `state` collects plugin-requested actions).
+    /// Result parsing for the ack-only session lifecycle hooks: the only
+    /// accepted result is `ack` / `acknowledged`, mapped to
+    /// [`SessionHookResult::Acknowledged`]. There is no `transform`/`deny`
+    /// path because the events carry no mutable output; created/closed are
+    /// best-effort observers whose output is not consumed by the gateway
+    /// (`actions` are not collected; only `state` collects them).
     fn parse_session_event_result(
         &self,
         output: &Value,
@@ -206,24 +246,6 @@ impl PluginSessionHookerAdaptor {
                 self.core.id().0,
                 result,
                 stage
-            ))),
-        }
-    }
-
-    fn parse_session_state_result(
-        &self,
-        output: &Value,
-    ) -> Result<SessionHookResult, SessionHookError> {
-        match self
-            .core
-            .read_required_result_tag(output, Self::err)?
-            .as_str()
-        {
-            "ack" | "acknowledged" => Ok(SessionHookResult::Acknowledged),
-            result => Err(Self::err(format!(
-                "plugin session hooker '{}' returned unsupported result '{}'; only 'ack' is valid for event-style state hook",
-                self.core.id().0,
-                result
             ))),
         }
     }

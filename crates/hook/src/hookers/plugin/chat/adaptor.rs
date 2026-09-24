@@ -7,11 +7,8 @@ use agent_types::chat::{
     ChatSystemTransformResult, CommandExecuteBeforeInput, CommandExecuteBeforeResult,
 };
 use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
-use agent_types::interaction::types::InteractionSource;
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::llm::ChatMessage;
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::super::core::{serialize_workspace_root, PluginHookerCore};
@@ -20,34 +17,6 @@ use crate::{resolve_hook_point_category, HookPointCategory};
 
 pub(crate) struct PluginChatHookerAdaptor {
     core: PluginHookerCore,
-}
-
-#[derive(Debug)]
-enum PluginCommandResponse {
-    Final(Value),
-    AskUser(AskUserDirective),
-}
-
-#[derive(Debug)]
-struct AskUserDirective {
-    request: PluginAskUserRequest,
-    continuation: Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum PluginAskUserRequest {
-    Confirm {
-        prompt: String,
-    },
-    TextInput {
-        prompt: String,
-    },
-    Choice {
-        prompt: String,
-        options: Vec<String>,
-        allow_custom_input: bool,
-    },
 }
 
 impl PluginChatHookerAdaptor {
@@ -67,6 +36,12 @@ impl PluginChatHookerAdaptor {
     /// construct `ChatHookError` rather than a foreign error type.
     fn err(message: String) -> ChatHookError {
         ChatHookError::Plugin { message }
+    }
+
+    /// Chat hook timeouts surface as the same plugin error, carrying the
+    /// driver's preformatted timeout message.
+    fn timeout_err(message: String, _timeout_ms: u64) -> ChatHookError {
+        Self::err(message)
     }
 
     async fn invoke_for_category(
@@ -105,7 +80,16 @@ impl PluginChatHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ChatHookError> {
         let payload = self.build_system_transform_payload(input, metadata, runtime);
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::ChatSystemTransform(
             self.parse_system_transform_result(&output)?,
         ))
@@ -118,7 +102,16 @@ impl PluginChatHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ChatHookError> {
         let payload = self.build_chat_message_payload(input, metadata, runtime);
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::ChatMessage(
             self.parse_chat_message_result(&output)?,
         ))
@@ -131,38 +124,19 @@ impl PluginChatHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ChatHookError> {
         let payload = self.build_command_before_payload(input, metadata, runtime);
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::CommandExecuteBefore(
             self.parse_command_before_result(&output)?,
         ))
-    }
-
-    async fn resolve_plugin_output(
-        &self,
-        initial_payload: Value,
-        runtime: &dyn RuntimeView,
-    ) -> Result<Value, ChatHookError> {
-        let mut payload = initial_payload;
-
-        loop {
-            let output = self
-                .core
-                .run_plugin_command(&payload, Self::err, Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS))
-                .await?;
-            match self.parse_plugin_command_response(output)? {
-                PluginCommandResponse::Final(final_output) => return Ok(final_output),
-                PluginCommandResponse::AskUser(directive) => {
-                    let request = self.with_hooker_interaction_source(directive.request);
-                    let response = runtime.interaction().ask(&request).await;
-                    payload = self.build_interaction_followup_payload(
-                        payload,
-                        directive.continuation,
-                        &request,
-                        &response,
-                    )?;
-                }
-            }
-        }
     }
 
     fn build_system_transform_payload(
@@ -171,20 +145,23 @@ impl PluginChatHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "system_transform",
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "session_id": input.session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "model": {
-                "provider_id": input.model.provider_id,
-                "model_id": input.model.model_id,
-            },
-            "system": input.current_system,
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
+        self.core.build_stage_payload(
+            "system_transform",
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(input.session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                (
+                    "model",
+                    json!({
+                        "provider_id": input.model.provider_id,
+                        "model_id": input.model.model_id,
+                    }),
+                ),
+                ("system", json!(input.current_system)),
+            ],
+        )
     }
 
     fn build_chat_message_payload(
@@ -193,23 +170,26 @@ impl PluginChatHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "chat_message",
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "session_id": input.session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "agent": input.agent,
-            "model": input.model.as_ref().map(|m| json!({
-                "provider_id": m.provider_id,
-                "model_id": m.model_id,
-            })),
-            "message_id": input.message_id,
-            "message": input.message,
-            "prior_message_count": input.prior_message_count,
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
+        self.core.build_stage_payload(
+            "chat_message",
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(input.session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                ("agent", json!(input.agent)),
+                (
+                    "model",
+                    json!(input.model.as_ref().map(|m| json!({
+                        "provider_id": m.provider_id,
+                        "model_id": m.model_id,
+                    }))),
+                ),
+                ("message_id", json!(input.message_id)),
+                ("message", json!(input.message)),
+                ("prior_message_count", json!(input.prior_message_count)),
+            ],
+        )
     }
 
     fn build_command_before_payload(
@@ -218,108 +198,18 @@ impl PluginChatHookerAdaptor {
         metadata: &HookInvokeMetadata,
         runtime: &dyn RuntimeView,
     ) -> Value {
-        json!({
-            "stage": "command_before",
-            "hooker": self.core.serialize_hooker_info(runtime),
-            "metadata": self.core.serialize_metadata(metadata),
-            "command": input.command,
-            "session_id": input.session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "arguments": input.arguments,
-            "body": input.body,
-            "policy": runtime.hookers().policy_for(self.core.id()).cloned(),
-            "definition": self.core.definition().clone(),
-        })
-    }
-
-    fn parse_plugin_command_response(
-        &self,
-        output: Value,
-    ) -> Result<PluginCommandResponse, ChatHookError> {
-        match output.get("action").and_then(Value::as_str) {
-            None | Some("final") => Ok(PluginCommandResponse::Final(output)),
-            Some("ask_user") => {
-                let request = serde_json::from_value(
-                    self.read_required_value_field(&output, "request")
-                        .cloned()?,
-                )
-                .map_err(|error| {
-                    Self::err(format!(
-                        "plugin hooker '{}' ask_user request is invalid: {}",
-                        self.core.id().0,
-                        error
-                    ))
-                })?;
-                let continuation = self
-                    .read_required_value_field(&output, "continuation")
-                    .cloned()?;
-                Ok(PluginCommandResponse::AskUser(AskUserDirective {
-                    request,
-                    continuation,
-                }))
-            }
-            Some(other) => Err(Self::err(format!(
-                "plugin hooker '{}' returned unsupported action '{}'",
-                self.core.id().0,
-                other
-            ))),
-        }
-    }
-
-    fn with_hooker_interaction_source(&self, request: PluginAskUserRequest) -> InteractionRequest {
-        let source = Some(InteractionSource::Hooker {
-            hooker_name: self.core.id().0.clone(),
-            hook_point: self.core.hook_point().0.clone(),
-        });
-
-        match request {
-            PluginAskUserRequest::Confirm { prompt } => {
-                InteractionRequest::Confirm { prompt, source }
-            }
-            PluginAskUserRequest::TextInput { prompt } => InteractionRequest::TextInput {
-                prompt,
-                source,
-                is_secret: false,
-            },
-            PluginAskUserRequest::Choice {
-                prompt,
-                options,
-                allow_custom_input,
-            } => InteractionRequest::Choice {
-                prompt,
-                options,
-                allow_custom_input,
-                source,
-            },
-        }
-    }
-
-    fn build_interaction_followup_payload(
-        &self,
-        payload: Value,
-        continuation: Value,
-        request: &InteractionRequest,
-        response: &InteractionResponse,
-    ) -> Result<Value, ChatHookError> {
-        let mut payload_map = match payload {
-            Value::Object(map) => map,
-            _ => {
-                return Err(Self::err(format!(
-                    "plugin hooker '{}' follow-up payload must be a JSON object",
-                    self.core.id().0
-                )));
-            }
-        };
-
-        payload_map.insert(
-            "interaction".to_string(),
-            json!({
-                "request": request,
-                "response": response,
-                "continuation": continuation,
-            }),
-        );
-        Ok(Value::Object(payload_map))
+        self.core.build_stage_payload(
+            "command_before",
+            metadata,
+            runtime,
+            vec![
+                ("command", json!(input.command)),
+                ("session_id", json!(input.session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                ("arguments", json!(input.arguments)),
+                ("body", json!(input.body)),
+            ],
+        )
     }
 
     fn parse_system_transform_result(
@@ -333,7 +223,9 @@ impl PluginChatHookerAdaptor {
         {
             "allow" => Ok(ChatSystemTransformResult::Allow),
             "transform" => {
-                let system = self.read_required_value_field(output, "system")?;
+                let system = self
+                    .core
+                    .read_required_value_field(output, "system", Self::err)?;
                 let system: Vec<String> =
                     serde_json::from_value(system.clone()).map_err(|error| {
                         Self::err(format!(
@@ -363,7 +255,9 @@ impl PluginChatHookerAdaptor {
         {
             "accept" => Ok(ChatMessageHookResult::Accept),
             "transform" => {
-                let message_value = self.read_required_value_field(output, "message")?;
+                let message_value =
+                    self.core
+                        .read_required_value_field(output, "message", Self::err)?;
                 let message: ChatMessage =
                     serde_json::from_value(message_value.clone()).map_err(|error| {
                         Self::err(format!(
@@ -413,20 +307,6 @@ impl PluginChatHookerAdaptor {
                 result
             ))),
         }
-    }
-
-    fn read_required_value_field<'a>(
-        &self,
-        output: &'a Value,
-        field_name: &str,
-    ) -> Result<&'a Value, ChatHookError> {
-        output.get(field_name).ok_or_else(|| {
-            Self::err(format!(
-                "plugin hooker '{}' response must contain field '{}'",
-                self.core.id().0,
-                field_name
-            ))
-        })
     }
 }
 
