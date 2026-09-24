@@ -30,6 +30,12 @@ use xiaoo_api::runtime::{LoopStateSnapshot, LoopSuspendReason, RuntimeOutput, Su
 
 use super::session_worker::{SessionWorker, SessionWorkerInput};
 
+/// How long `force_close` waits for cancelled subagent lanes to wind down
+/// before proceeding with the state transition. Lanes that miss the
+/// deadline still hit the close gate in `spawn_subagent_task`, so a late
+/// exit writes nothing.
+const LANE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct PendingJoinWaiter {
     sender: Option<oneshot::Sender<SubagentTerminalSnapshot>>,
     receiver: Option<oneshot::Receiver<SubagentTerminalSnapshot>>,
@@ -97,9 +103,17 @@ pub(crate) struct SessionSupervisor {
     pending_interactions: Mutex<HashMap<String, PendingInteractionWaiter>>,
     interaction_semaphore: Arc<tokio::sync::Semaphore>,
     root_turn_lock: Mutex<()>,
+    /// Per-session close token, cancelled by [`Self::force_close`]. Every
+    /// subagent lane runs on this token or a child of it, so closing the
+    /// session stops in-flight lanes at their next await point.
+    close_token: CancellationToken,
+    /// Join handles of in-flight subagent lane tasks, drained by
+    /// [`Self::force_close`] so no lane outlives the session. A sync
+    /// mutex: the critical sections (push/retain/take) never await.
+    lane_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Root turn's sinks, inherited by spawned subagent lanes in remote
-    /// (daemon) mode where the resolver returns default bindings. Set
-    /// in `run_root_turn`, read in `run_lane_until_terminal`, cleared
+    /// (daemon) mode where the resolver returns default bindings. Set in
+    /// `run_root_turn`, read in `run_lane_until_terminal`, cleared
     /// on exit. Kept as a single `Mutex<Option<RootTurnSinks>>` so the
     /// pair is always set/cleared atomically.
     current_root_sinks: Mutex<Option<RootTurnSinks>>,
@@ -140,6 +154,8 @@ impl SessionSupervisor {
             pending_interactions: Mutex::new(HashMap::new()),
             interaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             root_turn_lock: Mutex::new(()),
+            close_token: CancellationToken::new(),
+            lane_tasks: std::sync::Mutex::new(Vec::new()),
             current_root_sinks: Mutex::new(None),
             current_root_cancel: Mutex::new(None),
             interaction_timeout,
@@ -176,6 +192,11 @@ impl SessionSupervisor {
     }
 
     pub(crate) async fn force_close(&self) -> SessionRecord {
+        // Cancel first so in-flight lanes stop at their next await point,
+        // then join them (bounded) so no straggler writes past the Closed
+        // transition below.
+        self.close_token.cancel();
+        self.drain_lane_tasks().await;
         let session_id;
         let snapshot = {
             let mut session = self.session.lock().await;
@@ -192,6 +213,32 @@ impl SessionSupervisor {
         self.report_session_status(&session_id, &SessionLifecycleStatus::Closed)
             .await;
         snapshot
+    }
+
+    /// Wait (bounded) for in-flight subagent lanes to wind down after the
+    /// close token was cancelled. Lanes that miss the deadline still hit
+    /// the close gate in `spawn_subagent_task`, so a late exit writes
+    /// nothing.
+    async fn drain_lane_tasks(&self) {
+        let lanes: Vec<_> = {
+            let mut lanes = self
+                .lane_tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *lanes)
+        };
+        if lanes.is_empty() {
+            return;
+        }
+        if tokio::time::timeout(LANE_DRAIN_TIMEOUT, futures::future::join_all(lanes))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = LANE_DRAIN_TIMEOUT.as_secs(),
+                "in-flight subagent lanes missed the force-close drain deadline"
+            );
+        }
     }
 
     pub(crate) async fn hibernate_idle(&self) -> SessionRecord {
@@ -1046,21 +1093,30 @@ impl SessionSupervisor {
         cancellation_token: Option<CancellationToken>,
     ) {
         let supervisor = Arc::clone(self);
-        tokio::spawn(async move {
+        let lane = tokio::spawn(async move {
+            if supervisor.close_token.is_cancelled() {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "session closed before a subagent lane started; skipping the lane"
+                );
+                return;
+            }
             let runtime_input = {
                 let session = supervisor.snapshot().await;
                 runtime_input_from_session(&session, agent_id.clone(), max_turns)
             };
+            let (lane_cancellation_token, watcher) =
+                compose_lane_token(&supervisor.close_token, cancellation_token);
+            // Aborts the watcher on every exit path, panic unwinds included.
+            let _watcher = AbortOnDrop(watcher);
             let interaction_handle =
                 Arc::new(super::subagent_interaction::SubagentInteractionHandle::new(
                     Arc::clone(&supervisor),
                     agent_id.clone(),
                     parent_agent_id.clone(),
-                    // Same captured token the lane's LLM stream races, so
-                    // an Esc/Ctrl+C unparks this lane's pending
-                    // interactions (`ask_user_question` / permission
-                    // confirms) as well, not just its LLM calls.
-                    cancellation_token.clone(),
+                    // Races the lane token so a cancel also unparks this
+                    // lane's pending interactions.
+                    Some(lane_cancellation_token.clone()),
                 )) as Arc<dyn InteractionHandle>;
             let result = supervisor
                 .run_lane_until_terminal(LaneRunInput {
@@ -1073,15 +1129,23 @@ impl SessionSupervisor {
                     loop_event_sink_override: None,
                     interaction_handle_override: Some(interaction_handle),
                     channel_file_sender_override: None,
-                    // Inherit the root turn's cancel token (captured by
-                    // `apply_host_actions_internal` before this task was
-                    // spawned) so Esc/Ctrl+C aborts the subagent's
-                    // in-flight LLM stream in milliseconds instead of
-                    // letting it run to natural completion.
-                    cancellation_token,
+                    cancellation_token: Some(lane_cancellation_token),
                     command_context: None,
                 })
                 .await;
+
+            // Close gate: the session was force-closed while this lane was
+            // in flight (or it missed the drain deadline). Skip terminal
+            // persistence so no straggler write resurrects the closed
+            // session's record.
+            if supervisor.close_token.is_cancelled() {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    "session force-closed while a subagent lane was in flight; \
+                     skipping terminal persistence"
+                );
+                return;
+            }
 
             match result {
                 Ok(terminal) => {
@@ -1117,6 +1181,12 @@ impl SessionSupervisor {
                 }
             }
         });
+        let mut lanes = self
+            .lane_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        lanes.retain(|handle| !handle.is_finished());
+        lanes.push(lane);
     }
 
     async fn mark_subagent_terminal(
@@ -1396,6 +1466,41 @@ async fn wait_for_cancel(token: Option<&CancellationToken>) {
     match token {
         Some(token) => token.cancelled().await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+/// Token a subagent lane runs on: a child of the session's close token
+/// linked to the spawning turn's token, or the close token itself when
+/// the lane was spawned outside a turn. A turn-level cancel stops just
+/// that lane; a session force-close stops every lane through
+/// parent->child propagation; neither propagates upwards. The returned
+/// watcher forwards turn cancels into the lane token and must be
+/// aborted when the lane exits (see [`AbortOnDrop`]).
+fn compose_lane_token(
+    close_token: &CancellationToken,
+    turn_token: Option<CancellationToken>,
+) -> (CancellationToken, Option<tokio::task::JoinHandle<()>>) {
+    let Some(turn_token) = turn_token else {
+        return (close_token.clone(), None);
+    };
+    let lane_token = close_token.child_token();
+    let child = lane_token.clone();
+    let watcher = tokio::spawn(async move {
+        turn_token.cancelled().await;
+        child.cancel();
+    });
+    (lane_token, Some(watcher))
+}
+
+/// Aborts the wrapped task on drop so a lane's watcher never outlives
+/// the lane, panic unwinds included.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
     }
 }
 
