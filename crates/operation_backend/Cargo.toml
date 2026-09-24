@@ -19,6 +19,9 @@ tracing.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+tempfile = "3.9"
+
 [[bin]]
 name = "xiaoo-backend-cli"
 path = "src/bin/backend_cli.rs"

@@ -471,3 +471,64 @@ fn exec_linux_dynsandbox_survives_invalid_utf8_stderr_line() {
         prompts[0]
     );
 }
+
+#[test]
+fn spawn_wrapper_sits_outside_the_linux_dynsandbox() {
+    let workspace = PathBuf::from("/workspace");
+    let policy = LocalBackendPolicy::test_isolated(
+        "linux_dynsandbox",
+        vec![workspace.clone(), workspace.join("tmp")],
+        vec![workspace.join("tmp")],
+        false,
+    );
+    let request = ExecRequest {
+        command: "echo hi".to_string(),
+        args: vec![],
+        shell: Some("bash".to_string()),
+        cwd: Some(BackendPath::from_raw("/workspace".to_string())),
+        timeout_ms: Some(1_000),
+        extra: Some(json!([
+            {
+                "hooker_id": "plugin-x",
+                "spawn_wrapper": { "prefix": ["/opt/wrap", "--live", "--"] }
+            }
+        ])),
+        ..Default::default()
+    };
+
+    let command = command_from_spec(
+        &request,
+        LocalCommandSpec {
+            program: "bash".to_string(),
+            args: vec!["-c".to_string(), "echo hi".to_string()],
+        },
+        &policy,
+        Some(workspace.as_path()),
+    );
+
+    // The wrapper is the outermost layer: wrapper → dyn-sandbox → command.
+    assert_eq!(command.as_std().get_program(), "/opt/wrap");
+    let args: Vec<String> = command
+        .as_std()
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            "--live",
+            "--",
+            "dyn-sandbox",
+            "--mount",
+            "/workspace:ro",
+            "--mount",
+            "/workspace/tmp:rw",
+            "-c",
+            "/workspace",
+            "--",
+            "bash",
+            "-c",
+            "echo hi",
+        ]
+    );
+}
