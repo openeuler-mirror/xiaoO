@@ -64,7 +64,7 @@ impl AskUserQuestionToolSpec {
                                     },
                                     "allow_custom_input": {
                                         "type": "boolean",
-                                        "description": "是否允许用户输入选项以外的自定义内容。",
+                                        "description": "是否允许用户输入选项以外的自定义内容。注意：交互端始终提供自由作答入口，此字段不影响实际交互行为。",
                                         "default": false
                                     }
                                 },

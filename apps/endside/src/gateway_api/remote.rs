@@ -9,7 +9,7 @@ use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotItem, TodoSnapshotUp
 
 use crate::app_state::{sandbox_display_name, AppState};
 use crate::chat::{Message, ToolExecutionStatus, ToolExecutionUpdate};
-use crate::interaction_prompt::{PromptChoice, PromptRequest, PromptResolution, UserPromptResult};
+use crate::interaction_prompt::UserPromptResult;
 use crate::remote_sessions_service::record_remote_session;
 use crate::session_gateway::SessionTurnUpdate;
 use xiaoo_shared::gateway::{
@@ -23,6 +23,7 @@ use crate::gateway_api::http_timeouts::{
     EXIT_RPC_TIMEOUT, HEARTBEAT_RPC_TIMEOUT, OPEN_RPC_TIMEOUT, POST_JSON_SAFETY_TIMEOUT,
 };
 
+use super::interaction_convert::{build_prompt_request, map_response};
 use super::runtime::GatewayRuntime;
 
 /// Outcomes of a periodic `/runtimes/heartbeat` call from the TUI.
@@ -1267,109 +1268,6 @@ fn parse_sse_frame(frame: &str) -> Result<Option<RemoteSseEvent>, String> {
             }
             Err(error.to_string())
         }
-    }
-}
-
-fn build_prompt_request(request: &InteractionRequest) -> PromptRequest {
-    match request {
-        InteractionRequest::Confirm { prompt, .. } => PromptRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            title: prompt.clone(),
-            body: None,
-            choices: vec![
-                PromptChoice {
-                    id: "yes".to_string(),
-                    label: "Yes".to_string(),
-                    description: None,
-                },
-                PromptChoice {
-                    id: "no".to_string(),
-                    label: "No".to_string(),
-                    description: None,
-                },
-            ],
-            allow_custom_input: false,
-            multi_select: false,
-            default_index: Some(0),
-            is_secret: false,
-        },
-        InteractionRequest::TextInput {
-            prompt, is_secret, ..
-        } => PromptRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            title: prompt.clone(),
-            body: None,
-            choices: vec![PromptChoice {
-                id: "submit".to_string(),
-                label: "Submit".to_string(),
-                description: None,
-            }],
-            allow_custom_input: true,
-            multi_select: false,
-            default_index: Some(0),
-            is_secret: *is_secret,
-        },
-        InteractionRequest::Choice {
-            prompt,
-            options,
-            allow_custom_input,
-            ..
-        } => PromptRequest {
-            request_id: uuid::Uuid::new_v4().to_string(),
-            title: prompt.clone(),
-            body: None,
-            choices: options
-                .iter()
-                .map(|option| PromptChoice {
-                    id: option.clone(),
-                    label: option.clone(),
-                    description: None,
-                })
-                .collect(),
-            allow_custom_input: *allow_custom_input,
-            multi_select: false,
-            default_index: Some(0),
-            is_secret: false, // Choice type does not need password hiding
-        },
-    }
-}
-
-fn map_response(
-    request: &InteractionRequest,
-    response: UserPromptResult,
-) -> Option<InteractionResponse> {
-    match (request, response.resolution) {
-        (InteractionRequest::Confirm { .. }, PromptResolution::Single { choice_id, .. }) => {
-            Some(InteractionResponse::Confirmed {
-                allowed: choice_id == "yes",
-            })
-        }
-        (
-            InteractionRequest::TextInput { is_secret, .. },
-            PromptResolution::Single { supplement, .. },
-        ) => {
-            // For secret inputs, use display_value to hide the password in messages
-            let display_value = if *is_secret {
-                Some("<SECRET>".to_string())
-            } else {
-                None
-            };
-            Some(InteractionResponse::Text {
-                value: supplement,
-                display_value,
-            })
-        }
-        (
-            InteractionRequest::Choice { .. },
-            PromptResolution::Single {
-                choice_id,
-                supplement,
-            },
-        ) => Some(InteractionResponse::Choice {
-            value: supplement.or(Some(choice_id)),
-        }),
-        (_, PromptResolution::Cancelled) => None,
-        (_, PromptResolution::Multi { .. }) => None,
     }
 }
 

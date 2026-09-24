@@ -269,6 +269,7 @@ impl App {
                             .get(prompt.selected)
                             .map(|choice| choice.id.clone())
                             .unwrap_or_default();
+                        let submitted_from_supplement = prompt.focus == PromptFocus::Supplement;
                         let supplement = if prompt.request.allow_custom_input {
                             let value = prompt.supplement.value().trim();
                             if value.is_empty() {
@@ -282,6 +283,7 @@ impl App {
                         resolution = Some(PromptResolution::Single {
                             choice_id,
                             supplement,
+                            submitted_from_supplement,
                         });
                     }
                 }
