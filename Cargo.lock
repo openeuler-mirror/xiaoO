@@ -2234,6 +2234,7 @@ dependencies = [
  "agent-contracts",
  "agent-types",
  "async-trait",
+ "base64",
  "glob",
  "libc",
  "regex",

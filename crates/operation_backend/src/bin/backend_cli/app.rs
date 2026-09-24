@@ -15,31 +15,50 @@ use operation_backend::OperationBackendBuilderImpl;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// How the CLI received its work. The classic mode keeps
+/// `--config <path> request --json <json>`; the envelope mode reads
+/// `request --stdin` and carries the backend config plus the request in one
+/// JSON document, so the request body never touches argv (no
+/// `MAX_ARG_STRLEN` limit) and arbitrary bytes can pass through base64.
+enum Invocation {
+    ConfigFile {
+        config_path: String,
+        request_json: String,
+    },
+    StdinEnvelope,
+}
+
 pub(crate) fn run_from_env() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let parsed = parse_cli_args(args.as_slice())?;
-    let config = load_backend_config(parsed.config_path.as_str())?;
-    let request = serde_json::from_str::<BackendCliRequest>(parsed.request_json.as_str())
-        .map_err(|error| format!("invalid request json: {error}"))?;
+    let invocation = parse_cli_args(args.as_slice())?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to build tokio runtime: {error}"))?;
 
-    runtime.block_on(async move {
-        let builder = OperationBackendBuilderImpl::new();
-        let backend = builder
-            .build(&OperationBackendBuildInput {
-                config: Some(config),
-                ..OperationBackendBuildInput::default()
-            })
-            .await
-            .map_err(|error| format!("backend build failed: {error}"))?;
-        let request_result = handle_request(backend.as_ref(), request).await;
-        let shutdown_result = backend.shutdown().await;
+    let (config, request) = match invocation {
+        Invocation::ConfigFile {
+            config_path,
+            request_json,
+        } => {
+            let config = load_backend_config(config_path.as_str())?;
+            let request = serde_json::from_str::<BackendCliRequest>(request_json.as_str())
+                .map_err(|error| format!("invalid request json: {error}"))?;
+            (config, request)
+        }
+        Invocation::StdinEnvelope => {
+            let envelope_raw = read_stdin_to_string()?;
+            let envelope = serde_json::from_str::<RequestEnvelope>(envelope_raw.as_str())
+                .map_err(|error| format!("invalid request envelope: {error}"))?;
+            (
+                OperationBackendConfig::new(envelope.backend.kind, envelope.backend.options),
+                envelope.request,
+            )
+        }
+    };
 
-        let output = request_result.map_err(|error| format!("request failed: {error}"))?;
-        shutdown_result.map_err(|error| format!("backend shutdown failed: {error}"))?;
+    runtime.block_on(async move {
+        let output = execute_request(config, request).await?;
         println!(
             "{}",
             serde_json::to_string(&output).map_err(|error| error.to_string())?
@@ -48,14 +67,74 @@ pub(crate) fn run_from_env() -> Result<(), String> {
     })
 }
 
-struct ParsedCli {
-    config_path: String,
-    request_json: String,
+/// Run one request against a freshly built backend and return its output.
+/// Printing is left to the caller so tests can assert on the output value.
+async fn execute_request(
+    config: OperationBackendConfig,
+    request: BackendCliRequest,
+) -> Result<Value, String> {
+    let builder = OperationBackendBuilderImpl::new();
+    let backend = builder
+        .build(&OperationBackendBuildInput {
+            config: Some(config),
+            ..OperationBackendBuildInput::default()
+        })
+        .await
+        .map_err(|error| format!("backend build failed: {error}"))?;
+    let request_result = handle_request(backend.as_ref(), request).await;
+    let shutdown_result = backend.shutdown().await;
+
+    let output = request_result.map_err(|error| format!("request failed: {error}"))?;
+    shutdown_result.map_err(|error| format!("backend shutdown failed: {error}"))?;
+    Ok(output)
 }
 
-fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
+/// Upper bound for the stdin envelope document (64 MiB). The envelope
+/// channel exists to carry payloads past the kernel argv limit, but a
+/// runaway upstream pipe must fail with a clear error instead of
+/// exhausting memory.
+const MAX_ENVELOPE_BYTES: usize = 64 * 1024 * 1024;
+
+fn read_stdin_to_string() -> Result<String, String> {
+    read_envelope_limited(std::io::stdin(), MAX_ENVELOPE_BYTES)
+}
+
+/// Read one envelope document from `reader`, rejecting documents past
+/// `max_bytes` and non-UTF-8 input with dedicated errors so a bad upstream
+/// gets a precise message instead of a JSON parser failure.
+fn read_envelope_limited<R: std::io::Read>(reader: R, max_bytes: usize) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    // Read at most one byte beyond the cap: the extra byte only signals
+    // that the document is oversized.
+    reader
+        .take((max_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read request envelope from stdin: {error}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "request envelope exceeds the {max_bytes}-byte stdin limit"
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("request envelope from stdin is not valid UTF-8: {error}"))
+}
+
+fn parse_cli_args(args: &[String]) -> Result<Invocation, String> {
+    if args.len() >= 2 && args[0] == "request" && args[1] == "--stdin" {
+        if args.len() != 2 {
+            return Err(
+                "request --stdin takes no additional arguments (the envelope is read from stdin)"
+                    .to_string(),
+            );
+        }
+        return Ok(Invocation::StdinEnvelope);
+    }
     if args.len() != 5 {
-        return Err("usage: xiaoo-backend-cli --config <path> request --json <json>".to_string());
+        return Err(
+            "usage: xiaoo-backend-cli --config <path> request --json <json> | request --stdin"
+                .to_string(),
+        );
     }
     if args[0] != "--config" {
         return Err("missing --config".to_string());
@@ -70,7 +149,7 @@ fn parse_cli_args(args: &[String]) -> Result<ParsedCli, String> {
         return Err("missing request json".to_string());
     }
 
-    Ok(ParsedCli {
+    Ok(Invocation::ConfigFile {
         config_path: args[1].clone(),
         request_json: args[4].clone(),
     })
@@ -86,6 +165,19 @@ fn load_backend_config(path: &str) -> Result<OperationBackendConfig, String> {
         file_config.backend.kind,
         file_config.backend.options,
     ))
+}
+
+/// Envelope for the `request --stdin` mode: one JSON document carrying the
+/// backend section (same shape as the `--config` file's `backend` entry)
+/// plus the request itself (same shape as the `--json` payload).
+///
+/// The CLI is a leaf executor: the request shape structurally carries no
+/// plugin `extra` channel, so mutation externalization can never recurse
+/// through it.
+#[derive(Debug, Deserialize)]
+struct RequestEnvelope {
+    backend: BackendConfigEntry,
+    request: BackendCliRequest,
 }
 
 async fn handle_request(
@@ -109,6 +201,7 @@ async fn handle_request(
             Ok(path_stat_json(path.as_str(), &stat))
         }
         BackendCliRequest::ReadBytes { path } => {
+            use base64::Engine as _;
             let bytes = backend
                 .files()
                 .read_bytes(ReadBytesRequest {
@@ -117,19 +210,23 @@ async fn handle_request(
                 .await?;
             Ok(json!({
                 "path": path,
-                "text": String::from_utf8_lossy(bytes.as_slice()).to_string()
+                "text": String::from_utf8_lossy(bytes.as_slice()).to_string(),
+                "content_b64": base64::engine::general_purpose::STANDARD.encode(bytes.as_slice()),
             }))
         }
         BackendCliRequest::WriteBytes {
             path,
             content,
+            content_b64,
             mode,
         } => {
+            let content = decode_write_content(content, content_b64)
+                .map_err(|message| OperationError::ExecutionFailed { message })?;
             let outcome = backend
                 .files()
                 .write_bytes(WriteBytesRequest {
                     path: BackendPath::from_raw(path),
-                    content: content.into_bytes(),
+                    content,
                     mode: mode.into_contract(),
                     // The CLI is a leaf executor: requests never carry the
                     // plugin extra channel, so any backend-side mutation
@@ -343,6 +440,27 @@ struct BackendConfigFile {
     backend: BackendConfigEntry,
 }
 
+/// Resolve the write_bytes content: exactly one of the plain-UTF-8 `content`
+/// and the base64 `content_b64` fields must be present. The base64 channel
+/// keeps the write_bytes API byte-exact (the plain field is a String and
+/// cannot carry arbitrary bytes).
+fn decode_write_content(
+    content: Option<String>,
+    content_b64: Option<String>,
+) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    match (content, content_b64) {
+        (Some(text), None) => Ok(text.into_bytes()),
+        (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_str())
+            .map_err(|error| format!("invalid content_b64: {error}")),
+        (Some(_), Some(_)) => {
+            Err("write_bytes: content and content_b64 are mutually exclusive".to_string())
+        }
+        (None, None) => Err("write_bytes: one of content or content_b64 is required".to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BackendConfigEntry {
     kind: String,
@@ -364,7 +482,12 @@ enum BackendCliRequest {
     #[serde(rename = "write_bytes")]
     WriteBytes {
         path: String,
-        content: String,
+        /// Plain UTF-8 content (classic `--json` usage).
+        #[serde(default)]
+        content: Option<String>,
+        /// Binary-safe content, standard base64. Exactly one of
+        /// `content` / `content_b64` must be present.
+        content_b64: Option<String>,
         mode: WriteModeInput,
     },
     #[serde(rename = "create_dir_all")]
@@ -476,3 +599,7 @@ impl GrepModeInput {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../tests/unit/operation_backend/bin/backend_cli/app_test.rs"]
+mod tests;
