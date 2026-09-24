@@ -1,65 +1,27 @@
 use std::any::Any;
-use std::process::Stdio;
 
 use agent_contracts::runtime::runtime_view::RuntimeView;
 use agent_contracts::Hooker;
 use agent_types::common::HookerId;
 use agent_types::hook::HookPointId;
 use agent_types::hook::{HookInvokeError, HookInvokeInput, HookInvokeMetadata, HookInvokeOutput};
-use agent_types::interaction::types::InteractionSource;
-use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::llm::MessageRole;
 use agent_types::tool::{
     ErrorHookResult, ErrorToolHookInput, PostHookResult, PostToolHookInput, PreHookResult,
     PreToolHookInput, RawToolOutcome, ToolExecutionError,
 };
 use async_trait::async_trait;
-use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::time::{timeout, Duration};
 
-use super::super::core::serialize_workspace_root;
+use super::super::core::{serialize_workspace_root, PluginHookerCore};
 use crate::{resolve_hook_point_category, HookPointCategory};
 
 /// plugin hooker 子进程最长执行时间(10 分钟)。超时后由 `kill_on_drop` 自动兜底杀掉子进程,
 /// 防止卡死命令长期阻塞 tokio worker。
-const PLUGIN_HOOKER_TIMEOUT: Duration = Duration::from_secs(600);
+const PLUGIN_HOOKER_TIMEOUT_MS: u64 = 600_000;
 
 pub(crate) struct PluginToolHookerAdaptor {
-    id: HookerId,
-    hook_point: HookPointId,
-    command: String,
-    definition: serde_json::Value,
-}
-
-#[derive(Debug)]
-enum PluginCommandResponse {
-    Final(Value),
-    AskUser(AskUserDirective),
-}
-
-#[derive(Debug)]
-struct AskUserDirective {
-    request: PluginAskUserRequest,
-    continuation: Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum PluginAskUserRequest {
-    Confirm {
-        prompt: String,
-    },
-    TextInput {
-        prompt: String,
-    },
-    Choice {
-        prompt: String,
-        options: Vec<String>,
-        allow_custom_input: bool,
-    },
+    core: PluginHookerCore,
 }
 
 impl PluginToolHookerAdaptor {
@@ -70,11 +32,21 @@ impl PluginToolHookerAdaptor {
         definition: serde_json::Value,
     ) -> Self {
         Self {
-            id,
-            hook_point,
-            command,
-            definition,
+            core: PluginHookerCore::new(id, hook_point, command, definition),
         }
+    }
+
+    /// Lift a message into the tool-domain plugin error. Passed to
+    /// [`PluginHookerCore`] helpers so the shared subprocess/JSON code paths
+    /// construct `ToolExecutionError` rather than a foreign error type.
+    fn err(message: String) -> ToolExecutionError {
+        ToolExecutionError::ExecutionFailed { message }
+    }
+
+    /// Tool hook timeouts keep the tool-domain `Timeout` variant (carrying
+    /// the cap in milliseconds) instead of a generic message error.
+    fn timeout_err(_message: String, timeout_ms: u64) -> ToolExecutionError {
+        ToolExecutionError::Timeout { timeout_ms }
     }
 
     async fn invoke_for_category(
@@ -93,12 +65,11 @@ impl PluginToolHookerAdaptor {
             (HookPointCategory::ToolError, HookInvokeInput::Error { input, metadata }) => {
                 self.invoke_error(&input, &metadata, runtime).await
             }
-            (category, _) => Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "hooker '{}' received mismatched invoke input for category {:?}",
-                    self.id.0, category
-                ),
-            }),
+            (category, _) => Err(Self::err(format!(
+                "hooker '{}' received mismatched invoke input for category {:?}",
+                self.core.id().0,
+                category
+            ))),
         }
     }
 
@@ -109,7 +80,16 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
         let payload = self.build_pre_payload(input, metadata, runtime)?;
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOKER_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::Pre(self.parse_pre_result(&output)?))
     }
 
@@ -120,7 +100,16 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
         let payload = self.build_post_payload(input, metadata, runtime)?;
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOKER_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::Post(self.parse_post_result(&output)?))
     }
 
@@ -131,33 +120,17 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, ToolExecutionError> {
         let payload = self.build_error_payload(input, metadata, runtime)?;
-        let output = self.resolve_plugin_output(payload, runtime).await?;
+        let output = self
+            .core
+            .resolve_plugin_output(
+                payload,
+                runtime,
+                &Self::err,
+                &Self::timeout_err,
+                Some(PLUGIN_HOOKER_TIMEOUT_MS),
+            )
+            .await?;
         Ok(HookInvokeOutput::Error(self.parse_error_result(&output)?))
-    }
-
-    async fn resolve_plugin_output(
-        &self,
-        initial_payload: Value,
-        runtime: &dyn RuntimeView,
-    ) -> Result<Value, ToolExecutionError> {
-        let mut payload = initial_payload;
-
-        loop {
-            let output = self.run_plugin_command(&payload).await?;
-            match self.parse_plugin_command_response(output)? {
-                PluginCommandResponse::Final(final_output) => return Ok(final_output),
-                PluginCommandResponse::AskUser(directive) => {
-                    let request = self.with_hooker_interaction_source(directive.request);
-                    let response = runtime.interaction().ask(&request).await;
-                    payload = self.build_interaction_followup_payload(
-                        payload,
-                        directive.continuation,
-                        &request,
-                        &response,
-                    )?;
-                }
-            }
-        }
     }
 
     /// Session identity emitted in every tool payload: the runtime agent
@@ -308,21 +281,27 @@ impl PluginToolHookerAdaptor {
             }
         }
 
-        Ok(json!({
-            "stage": "pre",
-            "session_id": session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "prompt_session": prompt_session,
-            "prompt_history": prompt_history,
-            "action_history": action_history,
-            "hooker": self.serialize_hooker_info(runtime),
-            "metadata": self.serialize_metadata(metadata),
-            "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!("failed to serialize pre-hook call payload for '{}': {}", self.id.0, error),
-            })?,
-            "policy": runtime.hookers().policy_for(self.id()).cloned(),
-            "definition": self.definition.clone(),
-        }))
+        let call = serde_json::to_value(&input.call).map_err(|error| {
+            Self::err(format!(
+                "failed to serialize pre-hook call payload for '{}': {}",
+                self.core.id().0,
+                error
+            ))
+        })?;
+
+        Ok(self.core.build_stage_payload(
+            "pre",
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                ("prompt_session", json!(prompt_session)),
+                ("prompt_history", json!(prompt_history)),
+                ("action_history", json!(action_history)),
+                ("call", call),
+            ],
+        ))
     }
 
     fn build_post_payload(
@@ -332,20 +311,25 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
         let session_id = Self::session_identity(runtime, &input.call.call_id);
+        let call = serde_json::to_value(&input.call).map_err(|error| {
+            Self::err(format!(
+                "failed to serialize post-hook call payload for '{}': {}",
+                self.core.id().0,
+                error
+            ))
+        })?;
 
-        Ok(json!({
-            "stage": "post",
-            "session_id": session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "hooker": self.serialize_hooker_info(runtime),
-            "metadata": self.serialize_metadata(metadata),
-            "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!("failed to serialize post-hook call payload for '{}': {}", self.id.0, error),
-            })?,
-            "outcome": self.serialize_raw_outcome(&input.outcome),
-            "policy": runtime.hookers().policy_for(self.id()).cloned(),
-            "definition": self.definition.clone(),
-        }))
+        Ok(self.core.build_stage_payload(
+            "post",
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                ("call", call),
+                ("outcome", self.serialize_raw_outcome(&input.outcome)),
+            ],
+        ))
     }
 
     fn build_error_payload(
@@ -355,37 +339,25 @@ impl PluginToolHookerAdaptor {
         runtime: &dyn RuntimeView,
     ) -> Result<Value, ToolExecutionError> {
         let session_id = Self::session_identity(runtime, &input.call.call_id);
+        let call = serde_json::to_value(&input.call).map_err(|error| {
+            Self::err(format!(
+                "failed to serialize error-hook call payload for '{}': {}",
+                self.core.id().0,
+                error
+            ))
+        })?;
 
-        Ok(json!({
-            "stage": "error",
-            "session_id": session_id,
-            "workspace": serialize_workspace_root(runtime),
-            "hooker": self.serialize_hooker_info(runtime),
-            "metadata": self.serialize_metadata(metadata),
-            "call": serde_json::to_value(&input.call).map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!("failed to serialize error-hook call payload for '{}': {}", self.id.0, error),
-            })?,
-            "error": self.serialize_execution_error(&input.error),
-            "policy": runtime.hookers().policy_for(self.id()).cloned(),
-            "definition": self.definition.clone(),
-        }))
-    }
-
-    fn serialize_hooker_info(&self, runtime: &dyn RuntimeView) -> Value {
-        json!({
-            "id": self.id.0,
-            "hook_point": self.hook_point.0,
-            "command": self.command,
-            "agent_id": runtime.agent_context().metadata().agent_id,
-        })
-    }
-
-    fn serialize_metadata(&self, metadata: &HookInvokeMetadata) -> Value {
-        json!({
-            "trace_id": metadata.trace_id,
-            "span_id": metadata.span_id,
-            "parent_span_id": metadata.parent_span_id,
-        })
+        Ok(self.core.build_stage_payload(
+            "error",
+            metadata,
+            runtime,
+            vec![
+                ("session_id", json!(session_id)),
+                ("workspace", serialize_workspace_root(runtime)),
+                ("call", call),
+                ("error", self.serialize_execution_error(&input.error)),
+            ],
+        ))
     }
 
     fn serialize_raw_outcome(&self, outcome: &RawToolOutcome) -> Value {
@@ -424,285 +396,85 @@ impl PluginToolHookerAdaptor {
         }
     }
 
-    async fn run_plugin_command(&self, payload: &Value) -> Result<Value, ToolExecutionError> {
-        self.run_plugin_command_with_timeout(payload, PLUGIN_HOOKER_TIMEOUT)
-            .await
-    }
-
-    async fn run_plugin_command_with_timeout(
-        &self,
-        payload: &Value,
-        cmd_timeout: Duration,
-    ) -> Result<Value, ToolExecutionError> {
-        let payload_bytes =
-            serde_json::to_vec(payload).map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to serialize plugin command payload for hooker '{}': {}",
-                    self.id.0, error
-                ),
-            })?;
-
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(&self.command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to spawn plugin command for hooker '{}' (command='{}'): {}",
-                    self.id.0, self.command, error
-                ),
-            })?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&payload_bytes).await.map_err(|error| {
-                ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "failed to write stdin for plugin hooker '{}' (command='{}'): {}",
-                        self.id.0, self.command, error
-                    ),
-                }
-            })?;
-        }
-
-        let output = timeout(cmd_timeout, child.wait_with_output())
-            .await
-            .map_err(|_| ToolExecutionError::Timeout {
-                timeout_ms: cmd_timeout.as_millis() as u64,
-            })?
-            .map_err(|error| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to wait for plugin hooker '{}' (command='{}'): {}",
-                    self.id.0, self.command, error
-                ),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' command '{}' exited with status {}{}",
-                    self.id.0,
-                    self.command,
-                    output.status,
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {}", stderr)
-                    }
-                ),
-            });
-        }
-
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' command '{}' returned invalid JSON: {}",
-                    self.id.0, self.command, error
-                ),
-            }
-        })
-    }
-
-    fn parse_plugin_command_response(
-        &self,
-        output: Value,
-    ) -> Result<PluginCommandResponse, ToolExecutionError> {
-        match output.get("action").and_then(Value::as_str) {
-            None | Some("final") => Ok(PluginCommandResponse::Final(output)),
-            Some("ask_user") => {
-                let request = serde_json::from_value(
-                    self.read_required_value_field(&output, "request")?.clone(),
-                )
-                .map_err(|error| ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "plugin hooker '{}' ask_user request is invalid: {}",
-                        self.id.0, error
-                    ),
-                })?;
-                let continuation = self
-                    .read_required_value_field(&output, "continuation")?
-                    .clone();
-                Ok(PluginCommandResponse::AskUser(AskUserDirective {
-                    request,
-                    continuation,
-                }))
-            }
-            Some(other) => Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' returned unsupported action '{}'",
-                    self.id.0, other
-                ),
-            }),
-        }
-    }
-
-    fn with_hooker_interaction_source(&self, request: PluginAskUserRequest) -> InteractionRequest {
-        let source = Some(InteractionSource::Hooker {
-            hooker_name: self.id.0.clone(),
-            hook_point: self.hook_point.0.clone(),
-        });
-
-        match request {
-            PluginAskUserRequest::Confirm { prompt } => {
-                InteractionRequest::Confirm { prompt, source }
-            }
-            PluginAskUserRequest::TextInput { prompt } => {
-                InteractionRequest::TextInput {
-                    prompt,
-                    source,
-                    is_secret: false, // Default to false for plugin requests
-                }
-            }
-            PluginAskUserRequest::Choice {
-                prompt,
-                options,
-                allow_custom_input,
-            } => InteractionRequest::Choice {
-                prompt,
-                options,
-                allow_custom_input,
-                source,
-            },
-        }
-    }
-
-    fn build_interaction_followup_payload(
-        &self,
-        payload: Value,
-        continuation: Value,
-        request: &InteractionRequest,
-        response: &InteractionResponse,
-    ) -> Result<Value, ToolExecutionError> {
-        let mut payload_map = match payload {
-            Value::Object(map) => map,
-            _ => {
-                return Err(ToolExecutionError::ExecutionFailed {
-                    message: format!(
-                        "plugin hooker '{}' follow-up payload must be a JSON object",
-                        self.id.0
-                    ),
-                });
-            }
-        };
-
-        payload_map.insert(
-            "interaction".to_string(),
-            json!({
-                "request": request,
-                "response": response,
-                "continuation": continuation,
-            }),
-        );
-        Ok(Value::Object(payload_map))
-    }
-
     fn parse_pre_result(&self, output: &Value) -> Result<PreHookResult, ToolExecutionError> {
-        match self.read_required_result_tag(output)?.as_str() {
+        match self
+            .core
+            .read_required_result_tag(output, Self::err)?
+            .as_str()
+        {
             "allow" => Ok(PreHookResult::Allow),
             "deny" => Ok(PreHookResult::Deny {
                 reason: self
-                    .read_required_string_field(output, "reason")?
+                    .core
+                    .read_required_string_field(output, "reason", Self::err)?
                     .to_string(),
             }),
             "transform" => Ok(PreHookResult::Transform {
                 modified_input: self
-                    .read_required_value_field(output, "modified_input")?
+                    .core
+                    .read_required_value_field(output, "modified_input", Self::err)?
                     .clone(),
                 extra: output.get("extra").cloned(),
             }),
-            result => Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin tool pre-hooker '{}' returned unsupported result '{}'",
-                    self.id.0, result
-                ),
-            }),
+            result => Err(Self::err(format!(
+                "plugin tool pre-hooker '{}' returned unsupported result '{}'",
+                self.core.id().0,
+                result
+            ))),
         }
     }
 
     fn parse_post_result(&self, output: &Value) -> Result<PostHookResult, ToolExecutionError> {
-        match self.read_required_result_tag(output)?.as_str() {
+        match self
+            .core
+            .read_required_result_tag(output, Self::err)?
+            .as_str()
+        {
             "accept" => Ok(PostHookResult::Accept),
             "transform" => Ok(PostHookResult::Transform {
                 modified_output: self
-                    .read_required_string_field(output, "modified_output")?
+                    .core
+                    .read_required_string_field(output, "modified_output", Self::err)?
                     .to_string(),
             }),
-            result => Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin tool post-hooker '{}' returned unsupported result '{}'",
-                    self.id.0, result
-                ),
-            }),
+            result => Err(Self::err(format!(
+                "plugin tool post-hooker '{}' returned unsupported result '{}'",
+                self.core.id().0,
+                result
+            ))),
         }
     }
 
     fn parse_error_result(&self, output: &Value) -> Result<ErrorHookResult, ToolExecutionError> {
-        match self.read_required_result_tag(output)?.as_str() {
+        match self
+            .core
+            .read_required_result_tag(output, Self::err)?
+            .as_str()
+        {
             "propagate" => Ok(ErrorHookResult::Propagate),
             "recover" => Ok(ErrorHookResult::Recover {
                 output: self
-                    .read_required_string_field(output, "output")?
+                    .core
+                    .read_required_string_field(output, "output", Self::err)?
                     .to_string(),
             }),
-            result => Err(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin tool error-hooker '{}' returned unsupported result '{}'",
-                    self.id.0, result
-                ),
-            }),
+            result => Err(Self::err(format!(
+                "plugin tool error-hooker '{}' returned unsupported result '{}'",
+                self.core.id().0,
+                result
+            ))),
         }
-    }
-
-    fn read_required_result_tag(&self, output: &Value) -> Result<String, ToolExecutionError> {
-        Ok(self
-            .read_required_string_field(output, "result")?
-            .to_lowercase())
-    }
-
-    fn read_required_string_field<'a>(
-        &self,
-        output: &'a Value,
-        field_name: &str,
-    ) -> Result<&'a str, ToolExecutionError> {
-        output
-            .get(field_name)
-            .and_then(Value::as_str)
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' response must contain string field '{}'",
-                    self.id.0, field_name
-                ),
-            })
-    }
-
-    fn read_required_value_field<'a>(
-        &self,
-        output: &'a Value,
-        field_name: &str,
-    ) -> Result<&'a Value, ToolExecutionError> {
-        output
-            .get(field_name)
-            .ok_or_else(|| ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "plugin hooker '{}' response must contain field '{}'",
-                    self.id.0, field_name
-                ),
-            })
     }
 }
 
 #[async_trait]
 impl Hooker for PluginToolHookerAdaptor {
     fn id(&self) -> &HookerId {
-        &self.id
+        self.core.id()
     }
 
     fn hook_point(&self) -> &HookPointId {
-        &self.hook_point
+        self.core.hook_point()
     }
 
     async fn invoke(
@@ -710,13 +482,12 @@ impl Hooker for PluginToolHookerAdaptor {
         input: HookInvokeInput,
         runtime: &dyn RuntimeView,
     ) -> Result<HookInvokeOutput, HookInvokeError> {
-        let category = resolve_hook_point_category(&self.hook_point).map_err(|error| {
-            HookInvokeError::Tool(ToolExecutionError::ExecutionFailed {
-                message: format!(
-                    "failed to resolve hook point category for hooker '{}': {}",
-                    self.id.0, error
-                ),
-            })
+        let category = resolve_hook_point_category(self.core.hook_point()).map_err(|error| {
+            HookInvokeError::Tool(Self::err(format!(
+                "failed to resolve hook point category for hooker '{}': {}",
+                self.core.id().0,
+                error
+            )))
         })?;
 
         self.invoke_for_category(category, input, runtime)

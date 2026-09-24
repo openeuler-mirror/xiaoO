@@ -357,7 +357,10 @@ async fn ctrl_insert_copies_selection_through_real_dispatch() {
     // Copy never mutates the line…
     assert_eq!(app.state.chat_state.input.value(), "hello world");
     // …the copy path actually ran (not swallowed by another action):
-    assert!(copy_feedback(&app), "Ctrl+Insert must route to the copy path");
+    assert!(
+        copy_feedback(&app),
+        "Ctrl+Insert must route to the copy path"
+    );
     assert!(!app.state.should_quit);
 }
 

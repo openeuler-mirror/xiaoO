@@ -8,14 +8,21 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
+use super::interaction::{
+    build_interaction_followup_payload, parse_plugin_command_response,
+    with_hooker_interaction_source, PluginCommandResponse,
+};
+
 /// Shared, error-agnostic core for the plugin hookers (`chat`, `session`,
 /// `llm`, `tool`). Each concrete adaptor embeds a `PluginHookerCore` and
 /// delegates the structural concerns — identity, hook point, the plugin
-/// command subprocess, and JSON payload helpers — to it, supplying only the
-/// error constructor (`Fn(String) -> E`) appropriate to its domain. This
-/// removes the byte-identical `serialize_*` / `run_plugin_command` /
-/// `read_required_*` bodies that were previously copy-pasted across every
-/// adaptor.
+/// command subprocess, the common payload skeleton, result-field reading,
+/// and the `ask_user` interaction round-trip — to it, supplying only the
+/// error constructors (`Fn(String) -> E`, plus a timeout variant)
+/// appropriate to its domain. This removes the byte-identical
+/// `serialize_*` / `run_plugin_command` / `build_*_payload` /
+/// `read_required_*` / interaction-flow bodies that were previously
+/// copy-pasted across every adaptor.
 pub(crate) struct PluginHookerCore {
     id: HookerId,
     hook_point: HookPointId,
@@ -74,22 +81,38 @@ impl PluginHookerCore {
 
     /// Run the configured plugin command, feeding `payload` to its stdin and
     /// parsing the stdout as JSON. `make_err` lifts a human-readable message
-    /// into the adaptor's own error type, so the subprocess/IO/JSON/timeout
-    /// failure path is shared verbatim across all four plugin hookers.
+    /// into the adaptor's own error type, so the subprocess/IO/JSON failure
+    /// path is shared verbatim across all four plugin hookers;
+    /// `make_timeout_err` additionally receives the preformatted timeout
+    /// message and the cap in milliseconds, because some domains map
+    /// timeouts onto a dedicated variant (`LlmError::Timeout`,
+    /// `ToolExecutionError::Timeout`) instead of a message error.
     /// `timeout_ms` controls the hard cap on subprocess runtime: `Some(ms)`
-    /// kills the child after `ms` milliseconds. All adaptors (chat / llm /
-    /// tool / session state) pass `Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS)` so a
-    /// hung script cannot leak the driving task indefinitely — even the
+    /// kills the child after `ms` milliseconds. Chat and session hooker
+    /// commands are short observers and pass
+    /// `Some(PLUGIN_HOOK_COMMAND_TIMEOUT_MS)`; the llm and tool adaptors
+    /// keep their own longer 10-minute cap because their plugins may proxy
+    /// slow LLM/tool work. Every adaptor passes `Some(...)` so a hung
+    /// script cannot leak the driving task indefinitely — even the
     /// fire-and-forget session state hook, whose background task would
     /// otherwise linger forever. Delegates to the shared
     /// [`run_plugin_subprocess`] driver.
     pub(crate) async fn run_plugin_command<E>(
         &self,
         payload: &Value,
-        make_err: impl Fn(String) -> E,
+        make_err: &impl Fn(String) -> E,
+        make_timeout_err: &impl Fn(String, u64) -> E,
         timeout_ms: Option<u64>,
     ) -> Result<Value, E> {
-        run_plugin_subprocess(&self.id, &self.command, payload, make_err, timeout_ms).await
+        run_plugin_subprocess(
+            &self.id,
+            &self.command,
+            payload,
+            make_err,
+            make_timeout_err,
+            timeout_ms,
+        )
+        .await
     }
 
     /// Read a required string field from a plugin's JSON response. Used to
@@ -122,6 +145,94 @@ impl PluginHookerCore {
             .read_required_string_field(output, "result", make_err)?
             .to_lowercase())
     }
+
+    /// Read a required field (of any JSON shape) from a plugin's JSON
+    /// response; `make_err` produces the adaptor-specific "missing field"
+    /// error.
+    pub(crate) fn read_required_value_field<'a, E>(
+        &self,
+        output: &'a Value,
+        field_name: &str,
+        make_err: impl Fn(String) -> E,
+    ) -> Result<&'a Value, E> {
+        output.get(field_name).ok_or_else(|| {
+            make_err(format!(
+                "plugin hooker '{}' response must contain field '{}'",
+                self.id.0, field_name
+            ))
+        })
+    }
+
+    /// Build the payload skeleton shared by every plugin hooker stage: the
+    /// stage tag, the `hooker` info block, the trace `metadata` block, the
+    /// effective `policy`, and the hooker `definition`. `extra_fields`
+    /// carries the stage-specific fields merged on top, so adding a new
+    /// common payload field is a one-line change here instead of an edit in
+    /// every adaptor's builder (the shotgun surgery this core exists to
+    /// prevent).
+    pub(crate) fn build_stage_payload(
+        &self,
+        stage: &str,
+        metadata: &HookInvokeMetadata,
+        runtime: &dyn RuntimeView,
+        extra_fields: Vec<(&str, Value)>,
+    ) -> Value {
+        let mut payload = json!({
+            "stage": stage,
+            "hooker": self.serialize_hooker_info(runtime),
+            "metadata": self.serialize_metadata(metadata),
+            "policy": runtime.hookers().policy_for(self.id()).cloned(),
+            "definition": self.definition().clone(),
+        });
+        for (name, value) in extra_fields {
+            payload[name] = value;
+        }
+        payload
+    }
+
+    /// Drive a plugin command to its final output, transparently handling
+    /// the `ask_user` interaction protocol shared by the chat / llm / tool
+    /// plugin hookers: when a plugin responds with an `ask_user` directive,
+    /// the question is surfaced through the runtime's interaction handle,
+    /// and the command is re-invoked with an `interaction` block carrying
+    /// the request, the user's answer, and the plugin's continuation token.
+    /// Session hooks are ack-only observers and never enter this flow.
+    /// Error mapping follows [`Self::run_plugin_command`].
+    pub(crate) async fn resolve_plugin_output<E>(
+        &self,
+        initial_payload: Value,
+        runtime: &dyn RuntimeView,
+        make_err: &impl Fn(String) -> E,
+        make_timeout_err: &impl Fn(String, u64) -> E,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value, E> {
+        let mut payload = initial_payload;
+
+        loop {
+            let output = self
+                .run_plugin_command(&payload, make_err, make_timeout_err, timeout_ms)
+                .await?;
+            match parse_plugin_command_response(self.id(), output, make_err)? {
+                PluginCommandResponse::Final(final_output) => return Ok(final_output),
+                PluginCommandResponse::AskUser(directive) => {
+                    let request = with_hooker_interaction_source(
+                        self.id(),
+                        self.hook_point(),
+                        directive.request,
+                    );
+                    let response = runtime.interaction().ask(&request).await;
+                    payload = build_interaction_followup_payload(
+                        self.id(),
+                        payload,
+                        directive.continuation,
+                        &request,
+                        &response,
+                        make_err,
+                    )?;
+                }
+            }
+        }
+    }
 }
 
 /// Build the `workspace` field emitted in tool/chat plugin payloads: the
@@ -132,9 +243,9 @@ impl PluginHookerCore {
 /// must not be relied on, which is why the root is carried in-band.
 ///
 /// A free function (not a `PluginHookerCore` method) because it reads only
-/// the runtime, never the hooker's own state — the tool adaptor, which
-/// does not embed a core, shares it with the chat/llm adaptors verbatim.
-/// The empty-root-to-null rule itself is defined once in
+/// the runtime, never the hooker's own state — the session adaptors, whose
+/// workspace comes from the hook input rather than the runtime, do not use
+/// it. The empty-root-to-null rule itself is defined once in
 /// [`workspace_root_string`].
 pub(crate) fn serialize_workspace_root(runtime: &dyn RuntimeView) -> Value {
     match workspace_root_string(&runtime.agent_context().workspace().root) {
@@ -143,22 +254,26 @@ pub(crate) fn serialize_workspace_root(runtime: &dyn RuntimeView) -> Value {
     }
 }
 
-/// Default hard cap on how long a single plugin hooker subprocess may run, in
-/// milliseconds, used by every plugin hooker (chat / llm / tool / session
-/// state). Plugin hookers are short shell scripts (read stdin JSON, write
-/// stdout JSON); a hung script (deadlock, infinite loop, blocking network
-/// call without its own timeout) would otherwise block the async task
-/// driving it forever. After this duration the child is killed
-/// (`kill_on_drop`) and the hooker fails with a timeout error. The
-/// fire-and-forget session state hook passes the same cap so a hung plugin
-/// script cannot leak its background `tokio::spawn` task permanently.
+/// Default hard cap on how long a chat or session plugin hooker subprocess
+/// may run, in milliseconds. Plugin hookers are short shell scripts (read
+/// stdin JSON, write stdout JSON); a hung script (deadlock, infinite loop,
+/// blocking network call without its own timeout) would otherwise block the
+/// async task driving it forever. After this duration the child is killed
+/// (`kill_on_drop`) and the hooker fails with a timeout error. The llm and
+/// tool adaptors keep their own longer 10-minute cap
+/// (`PLUGIN_HOOKER_TIMEOUT_MS` in each adaptor) because their plugins may
+/// proxy slow LLM/tool work; the fire-and-forget session state hook passes
+/// this same cap so a hung plugin script cannot leak its background
+/// `tokio::spawn` task permanently.
 pub(crate) const PLUGIN_HOOK_COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 /// Shared subprocess driver for plugin hookers: spawn `sh -c <command>`,
 /// feed `payload` to stdin, await stdout, kill the child on timeout, and
 /// parse stdout as JSON. `make_err` lifts a human-readable message into the
-/// adaptor's own error type so the failure path (including timeout) is
-/// shared verbatim across the chat / session / llm / tool plugin hookers.
+/// adaptor's own error type so the failure path is shared verbatim across
+/// the chat / session / llm / tool plugin hookers; `make_timeout_err`
+/// receives the preformatted timeout message plus the cap in milliseconds
+/// so domains with a dedicated timeout variant can map it faithfully.
 /// `timeout_ms` is `Some(ms)` for all callers; a `None` value would wait
 /// indefinitely, which is never desirable — even the fire-and-forget
 /// session state hook passes a cap to avoid leaking its background task.
@@ -168,7 +283,8 @@ pub(crate) async fn run_plugin_subprocess<E>(
     id: &HookerId,
     command: &str,
     payload: &Value,
-    make_err: impl Fn(String) -> E,
+    make_err: &impl Fn(String) -> E,
+    make_timeout_err: &impl Fn(String, u64) -> E,
     timeout_ms: Option<u64>,
 ) -> Result<Value, E> {
     let payload_bytes = serde_json::to_vec(payload).map_err(|error| {
@@ -226,10 +342,13 @@ pub(crate) async fn run_plugin_subprocess<E>(
             Err(_) => {
                 // `run`'s future owns the `Child`; dropping it here triggers
                 // `kill_on_drop`, reaping the hung subprocess.
-                return Err(make_err(format!(
-                    "plugin hooker '{}' command '{}' timed out after {}ms",
-                    id.0, command, ms
-                )));
+                return Err(make_timeout_err(
+                    format!(
+                        "plugin hooker '{}' command '{}' timed out after {}ms",
+                        id.0, command, ms
+                    ),
+                    ms,
+                ));
             }
         },
         None => run.await?,

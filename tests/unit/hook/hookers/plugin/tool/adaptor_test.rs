@@ -3,6 +3,10 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use super::super::super::interaction::{
+    parse_plugin_command_response, AskUserDirective, PluginAskUserRequest, PluginCommandResponse,
+};
+
 use agent_contracts::events::tool_events::ToolEventSink;
 use agent_contracts::hook::registry::HookerRegistry;
 use agent_contracts::interaction::handle::InteractionHandle;
@@ -13,6 +17,8 @@ use agent_contracts::trace::{TraceOutcome, TraceRecorder, TraceSpanHandle, Trace
 use agent_types::common::{AgentMetadata, WorkspaceRef};
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::hook::HookInvokePrimary;
+use agent_types::interaction::types::InteractionSource;
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::FinalToolCall;
 use agent_types::ChatMessage;
 
@@ -352,16 +358,19 @@ fn ask_user_requires_continuation_field() {
         Value::Null,
     );
 
-    let error = adaptor
-        .parse_plugin_command_response(json!({
+    let error = parse_plugin_command_response(
+        adaptor.core.id(),
+        json!({
             "action": "ask_user",
             "request": {
                 "kind": "confirm",
                 "prompt": "continue?",
                 "source": null,
             }
-        }))
-        .unwrap_err();
+        }),
+        &PluginToolHookerAdaptor::err,
+    )
+    .unwrap_err();
 
     assert!(error
         .to_string()
@@ -377,16 +386,19 @@ fn ask_user_request_parses_minimal_confirm() {
         Value::Null,
     );
 
-    let parsed = adaptor
-        .parse_plugin_command_response(json!({
+    let parsed = parse_plugin_command_response(
+        adaptor.core.id(),
+        json!({
             "action": "ask_user",
             "request": {
                 "kind": "confirm",
                 "prompt": "continue?"
             },
             "continuation": {"step": 1}
-        }))
-        .unwrap();
+        }),
+        &PluginToolHookerAdaptor::err,
+    )
+    .unwrap();
 
     match parsed {
         PluginCommandResponse::AskUser(AskUserDirective {
@@ -409,17 +421,23 @@ fn final_responses_remain_backward_compatible() {
         Value::Null,
     );
 
-    let legacy = adaptor
-        .parse_plugin_command_response(json!({
+    let legacy = parse_plugin_command_response(
+        adaptor.core.id(),
+        json!({
             "result": "allow"
-        }))
-        .unwrap();
-    let explicit = adaptor
-        .parse_plugin_command_response(json!({
+        }),
+        &PluginToolHookerAdaptor::err,
+    )
+    .unwrap();
+    let explicit = parse_plugin_command_response(
+        adaptor.core.id(),
+        json!({
             "action": "final",
             "result": "allow"
-        }))
-        .unwrap();
+        }),
+        &PluginToolHookerAdaptor::err,
+    )
+    .unwrap();
 
     assert!(matches!(legacy, PluginCommandResponse::Final(_)));
     assert!(matches!(explicit, PluginCommandResponse::Final(_)));
@@ -444,7 +462,13 @@ async fn run_plugin_command_times_out_and_kills_hung_child() {
 
     let start = std::time::Instant::now();
     let result = adaptor
-        .run_plugin_command_with_timeout(&payload, Duration::from_secs(2))
+        .core
+        .run_plugin_command(
+            &payload,
+            &PluginToolHookerAdaptor::err,
+            &PluginToolHookerAdaptor::timeout_err,
+            Some(2_000),
+        )
         .await;
     let elapsed = start.elapsed();
 

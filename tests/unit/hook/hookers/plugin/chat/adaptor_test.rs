@@ -16,6 +16,7 @@ use agent_types::common::HookerId;
 use agent_types::common::{AgentMetadata, WorkspaceRef};
 use agent_types::events::ToolLifecycleEvent;
 use agent_types::hook::{HookInvokePrimary, HookPointId};
+use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use agent_types::tool::execution_types::ToolExecutionError;
 use agent_types::tool::FinalToolCall;
 use agent_types::{ContentBlock, MessageRole};
