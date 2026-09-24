@@ -99,12 +99,7 @@ impl App {
         // Ctrl+X: cut selected input text.
         if is_cut_chord(&key) {
             if let Some(text) = self.state.chat_state.input.delete_selected() {
-                if let Err(e) = copy_to_clipboard(&text) {
-                    tracing::warn!("copy_to_clipboard failed: {}", e);
-                    self.state.set_copy_error_notice();
-                } else {
-                    self.state.set_copy_notice();
-                }
+                self.state.report_clipboard_result(copy_to_clipboard(&text));
                 self.state.chat_state.reset_input_history_navigation();
                 self.state.note_input_changed();
             }
@@ -168,8 +163,8 @@ impl App {
 
     /// Copy the active selection (input box first, then transcript) to the
     /// clipboard. Returns `true` when a selection was copied. The selection
-    /// is cleared only on success; the success/error toast is shown either
-    /// way so the user always gets feedback.
+    /// is cleared when a copy was attempted; the success/error toast is shown
+    /// either way so the user always gets feedback.
     pub(crate) fn copy_active_selection(&mut self) -> bool {
         if let Some(text) = self
             .state
@@ -178,28 +173,14 @@ impl App {
             .selected_text()
             .map(str::to_owned)
         {
-            match copy_to_clipboard(&text) {
-                Ok(()) => {
-                    self.state.chat_state.input.clear_selection();
-                    self.state.set_copy_notice();
-                }
-                Err(e) => {
-                    tracing::warn!("copy_to_clipboard failed: {}", e);
-                    self.state.set_copy_error_notice();
-                }
+            if self.state.report_clipboard_result(copy_to_clipboard(&text)) {
+                self.state.chat_state.input.clear_selection();
             }
             return true;
         }
         if let Some(text) = self.state.transcript_selected_text() {
-            match copy_to_clipboard(&text) {
-                Ok(()) => {
-                    self.state.transcript_selection = None;
-                    self.state.set_copy_notice();
-                }
-                Err(e) => {
-                    tracing::warn!("copy_to_clipboard failed: {}", e);
-                    self.state.set_copy_error_notice();
-                }
+            if self.state.report_clipboard_result(copy_to_clipboard(&text)) {
+                self.state.transcript_selection = None;
             }
             return true;
         }
