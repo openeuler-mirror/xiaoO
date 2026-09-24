@@ -209,6 +209,16 @@ cat "$AGENT_MOSS_LOG_PATH"
 - **`payload.stage` 不同**：chat/session hook 的 stage 字符串是 `command_before` / `chat_message` / `system_transform` / `session_state`（不是 `pre`/`post`/`error`），脚本据此分发。
 - **调度差异**：chat hook 在 agent loop 同步执行，单个插件报错只 `tracing::warn!` 不中断整轮，只有 `command.before` 的 `Deny` 会短路；session state hook 在 gateway 后台执行：`idle` 状态在 `run_turn` 返回后等待所有 hooker 完成（30s 整体上限，便于收集 `actions` 注入 `Done` 事件），`failed` 状态走 `tokio::spawn` 的 fire-and-forget 路径（不阻塞错误返回），错误一律走 `tracing::warn!`，绝不影响主流程或 `run_turn` 返回值。
 - **交互机制**：三个 chat hook 还支持 `action: "ask_user"`——插件可发起 `Confirm` / `TextInput` / `Choice` 交互，用户回答后 xiaoo 会带着 `interaction` 字段再次调用同一命令，直到插件返回 `final`。session state hook 不支持该机制。
+  回调 payload 中 `interaction.response` 按 `kind` 区分四种取值（注意响应的 kind 命名与请求的 `confirm` / `text_input` / `choice` 不同名）：
+
+  | `response.kind` | JSON 形状 | 含义 |
+  |---|---|---|
+  | `confirmed` | `{"kind":"confirmed","allowed":true\|false}` | confirm 问题的明确回答：`allowed:true` = 用户选「是」，`allowed:false` = 用户选「否」 |
+  | `unanswered` | `{"kind":"unanswered"}` | 用户未作答（turn 被取消、提示框被关闭、超时或无可用交互后端）。**不能视为「否」**——插件不得将其当作拒绝处理；若该回答决定后续动作，应重新发起 `ask_user` |
+  | `text` | `{"kind":"text","value":...}` | text_input 的回答：`value` 为用户输入原文，`null` 表示未作答（超时场景可能是 `[INTERACTION_TIMEOUT]` 哨兵串） |
+  | `choice` | `{"kind":"choice","value":...}` | choice 的回答：`value` 为选中选项原文或自定义输入，`null` 表示未作答（超时哨兵同上） |
+
+  > 兼容性提示：confirm 的未作答/超时此前以 `{"kind":"confirmed","allowed":false}` 下发，现改为 `{"kind":"unanswered"}`。用 `!response.allowed` 之类取反判断的插件会把「未作答」误读为「否」，请改为先判 `response.kind`。完整协议见 [`plugins/hookers/how-to-develop-a-plugin-hooker.md`](../plugins/hookers/how-to-develop-a-plugin-hooker.md) 第 14.6 节。
 
 ### Minimal plugin.json
 

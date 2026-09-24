@@ -221,8 +221,15 @@ fn osc52_supported_by_terminal(
     // never matches; a hand-configured `default-terminal xterm-kitty`
     // counts as an explicit opt-in.
     const KNOWN_TERMS: [&str; 9] = [
-        "xterm-kitty", "alacritty", "wezterm", "xterm-ghostty", "ghostty", "foot", "rio",
-        "contour", "mintty",
+        "xterm-kitty",
+        "alacritty",
+        "wezterm",
+        "xterm-ghostty",
+        "ghostty",
+        "foot",
+        "rio",
+        "contour",
+        "mintty",
     ];
     if let Some(term) = term {
         if KNOWN_TERMS
@@ -238,7 +245,14 @@ fn osc52_supported_by_terminal(
     // tmux's `update-environment`, so the outer terminal's value is
     // inherited by every pane.
     const KNOWN_PROGRAMS: [&str; 8] = [
-        "vscode", "iTerm.app", "WezTerm", "ghostty", "mintty", "Hyper", "Tabby", "WarpTerminal",
+        "vscode",
+        "iTerm.app",
+        "WezTerm",
+        "ghostty",
+        "mintty",
+        "Hyper",
+        "Tabby",
+        "WarpTerminal",
     ];
     term_program.is_some_and(|program| KNOWN_PROGRAMS.iter().any(|known| program == *known))
 }

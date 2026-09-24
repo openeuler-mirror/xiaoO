@@ -26,7 +26,7 @@ pub(crate) const INTERACTION_TIMEOUT_SENTINEL: &str =
 ///   replies.
 pub(crate) fn interaction_timeout_response(request: &InteractionRequest) -> InteractionResponse {
     match request {
-        InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+        InteractionRequest::Confirm { .. } => InteractionResponse::Unanswered,
         InteractionRequest::TextInput { .. } => InteractionResponse::Text {
             value: Some(INTERACTION_TIMEOUT_SENTINEL.to_string()),
             display_value: None,
