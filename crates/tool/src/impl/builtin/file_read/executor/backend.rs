@@ -176,6 +176,7 @@ impl FileReadExecutor {
                         path: BackendPath::from_raw(output_path),
                         content,
                         mode: WriteMode::Create,
+                        extra: None,
                     }),
                 )
                 .await

@@ -207,6 +207,7 @@ async fn write_and_exec_mark_backend_dirty_for_next_checkpoint() {
             ),
             content: b"changed".to_vec(),
             mode: WriteMode::Overwrite,
+            extra: None,
         })
         .await
         .expect("write file");

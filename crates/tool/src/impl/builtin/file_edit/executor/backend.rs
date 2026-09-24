@@ -177,6 +177,7 @@ impl ToolExecutor for FileEditExecutor {
                     path: resolved,
                     content: input.new_string.as_bytes().to_vec(),
                     mode: write_mode,
+                    extra: call.extra.clone(),
                 }),
             )
             .await
@@ -257,6 +258,7 @@ impl ToolExecutor for FileEditExecutor {
                 path: resolved,
                 content: updated_content.as_bytes().to_vec(),
                 mode: write_mode,
+                extra: call.extra.clone(),
             }),
         )
         .await

@@ -132,6 +132,9 @@ async fn spill_full_output(
             path: temp.clone(),
             content: bytes.to_vec(),
             mode: WriteMode::Overwrite,
+            // Spill-to-temp bookkeeping, not a tool mutation: never carries
+            // the plugin extra channel.
+            extra: None,
         })
         .await
         .ok()?;

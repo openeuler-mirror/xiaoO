@@ -131,6 +131,10 @@ async fn handle_request(
                     path: BackendPath::from_raw(path),
                     content: content.into_bytes(),
                     mode: mode.into_contract(),
+                    // The CLI is a leaf executor: requests never carry the
+                    // plugin extra channel, so any backend-side mutation
+                    // externalization cannot recurse through it.
+                    extra: None,
                 })
                 .await?;
             Ok(json!({
