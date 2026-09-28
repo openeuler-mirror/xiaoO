@@ -547,6 +547,12 @@ xiaoo presents the widget to the user. After the user answers, xiaoo calls the *
 }
 ```
 
+`interaction.response` is tagged by `kind` (the response tags are named differently from the request kinds):
+
+- `{"kind":"confirmed","allowed":true|false}` — an explicit answer to a `confirm` request: `allowed:true` means the user chose "Yes", `allowed:false` means "No".
+- `{"kind":"unanswered"}` — no answer was received (turn cancelled, prompt dismissed, timeout, or no interaction backend available). This is **not** a denial: do not treat it as `allowed:false`; re-issue `action:"ask_user"` if the answer gates a decision.
+- `{"kind":"text","value":...}` / `{"kind":"choice","value":...}` — the answer to a `text_input` / `choice` request: `value` is the user's input verbatim (the chosen option text or a custom answer), `null` means no answer was received. On timeout the value may instead be an `[INTERACTION_TIMEOUT]` sentinel string.
+
 The plugin inspects `interaction.response` and either returns another `action: "ask_user"` (loop) or returns a `result` (`final`). When `action` is absent or `"final"`, the `result` is treated as the hook's terminal output. This lets a plugin gate a `Transform`/`Deny` behind explicit user consent.
 
 The session lifecycle hooks (section 15) do **not** support `ask_user` — they are event-only.

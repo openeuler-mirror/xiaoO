@@ -38,7 +38,7 @@ impl InteractionHandle for ChannelInteractionHandle {
         }
 
         // Prompt channel closed or the user dismissed the prompt: give the
-        // pending tool call a deny-style result so it can wind down.
+        // pending tool call a no-answer result so it can wind down.
         InteractionResponse::unanswered(request)
     }
 }
