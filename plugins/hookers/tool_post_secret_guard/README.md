@@ -4,12 +4,14 @@ xiaoO hooker 插件，在工具执行后拦截输出，检测并脱敏疑似敏�
 
 ## 工作流程
 
-1. 拦截 `bash`、`file_read`、`read_file` 工具的 post 阶段输出
+1. 拦截工具 post 阶段的输出——**挂载点是 `plugin.json` 里的 `*.Tool.*.post`**，即所有工具的 post 阶段都会调用本脚本（`plugins/hookers/tool_post_secret_guard/plugin.json:4`）；只处理哪几个工具由**脚本自己**在运行时判断：脚本读取 `payload.call.tool_name`，仅当它是 `bash` / `file_read` / `read_file` 时才继续，其余工具直接返回 `accept`（`guard_secret_like_output.py:113-115`）。所以「只覆盖 bash/file_read」是脚本级过滤，不是注册级过滤——想覆盖别的工具，改脚本里的名字列表即可，不必改 `plugin.json`。
 2. 扫描 `stdout` / `stderr` 是否匹配敏感信息正则模式
 3. 若检测到敏感信息：
    - 弹出确认提示，询问用户是否允许保留原始输出
    - 用户拒绝或未交互时，将敏感内容替换为 `[描述REDACTED]`
 4. 无敏感信息则直接放行
+
+> 注：`read_file` 不是 xiaoO 的真实内置工具名（内置工具是 `file_read`）。脚本里保留它只为兼容旧名，实际只会命中 `bash` 和 `file_read`。
 
 ## 文件说明
 

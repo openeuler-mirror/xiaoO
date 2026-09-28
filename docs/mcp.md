@@ -225,7 +225,15 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 
 ## Limitations (current)
 
-- No per-call retry or backoff (a single `timeout_ms` bounds each request).
+- Retries are deliberately narrow. Tool calls are **not** retried or
+  backed off: a single `timeout_ms` bounds each request. The one exception is
+  `initialize`, which is retried once when the server answers 429 with
+  `Retry-After` (`crates/mcp/src/transport/streamable_http.rs:720-757`); the
+  header is parsed at `:964-970`. Streamable HTTP SSE streams also resume after
+  a drop, honouring the server's `retry` field as the delay before reconnecting
+  with `Last-Event-ID` (`crates/mcp/src/transport/streamable_http.rs:617-660`).
+  Arbitrary tool calls are excluded from the 429 retry because the server may
+  have already performed a side effect.
 - No wildcard visibility (`mcp__*__*`); use exact tool names.
 - MCP `resources` and `prompts` are not exposed — only `tools`.
 - No hot-reload: changes to `[[mcp.servers]]` require restarting xiaoO.
@@ -236,6 +244,23 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 - **Tool not visible to the agent**: check the configured `tools` allowlist includes the exact `mcp__{server}__{tool}` name; a typo produces an "unknown tool name in visibility config" error at startup.
 - **Stale connections after config edit**: restart xiaoO; MCP clients are cached for the resolver's lifetime.
 
+### Diagnostics
+
+Prefer the built-in reports over manual reproduction:
+
+- `xiaoo-daemon config mcp` prints the resolved MCP client catalog as JSON,
+  including the JSON-config path resolved from `--mcp-config`/`~/.xiaoo`
+  (`apps/serverside/src/main.rs:265-287`; catalog assembly in
+  `apps/serverside/src/mcp_management.rs:15`).
+- `xiaoo-daemon config mcp-server` prints the `[mcp_server]` preflight report —
+  validation of the endpoint tokens, workspace, origins, and `agent_role`
+  references (`apps/serverside/src/main.rs:326-334`;
+  `apps/serverside/src/mcp_server_management.rs:53-193`).
+
+Both are reached via the `config` subcommand dispatch
+(`apps/serverside/src/main.rs:1088-1089`). Shared resolution helpers for the
+JSON config location live in `apps/shared/src/mcp_support.rs:22-115`.
+
 
 ---
 # Use xiaoO as MCP server
@@ -244,10 +269,18 @@ If no `tools` map is configured for a role, all MCP tools are visible by default
 The daemon can expose two independent MCP 2025-11-25 Streamable HTTP
 endpoints on the same host and port as the runtime API:
 
-| Endpoint | Exposed tool | Capability profile |
-|----------|--------------|--------------------|
+| Endpoint | Exposed tools | Capability profile |
+|----------|---------------|--------------------|
 | `/mcp/chatbot` | `chat` | Only `web_search` and `webfetch` internally |
-| `/mcp/agent` | `agent` | Full local Core agent, or a fixed configured agent role, excluding interactive `ask_user_question` and non-channel `send_file` |
+| `/mcp/agent` | `agent`, `agent_status` | Full local Core agent, or a fixed configured agent role, excluding interactive `ask_user_question` and non-channel `send_file` |
+
+`/mcp/agent` exposes two tools (`apps/serverside/src/mcp_server.rs:598-629`):
+
+- `agent` starts an operation and returns immediately.
+- `agent_status` polls an operation previously returned by `agent`. It takes
+  `operation_id` and is the only way to observe completion; `agent_status`
+  rejects an empty `operation_id` as a tool error
+  (`apps/serverside/src/mcp_server.rs:621-628`).
 
 ```toml
 [mcp_server]
@@ -310,13 +343,38 @@ Tool inputs are:
 {"name":"agent","arguments":{"message":"Inspect this repository","workspace":"/absolute/existing/directory","session_id":"mcp_agent_..."}}
 ```
 
-Omit `session_id` to create a session and complete its first turn in the same
-call. The result contains both MCP text content and `structuredContent` with
-`session_id`, `created`, `reply`, `outcome`, and `usage`. A new agent session
-requires an absolute, existing, readable workspace. Later calls may omit it;
-if supplied again, its canonical path must match the original binding.
-Unknown IDs, IDs from the other endpoint, and workspace conflicts are tool
-errors rather than implicit new sessions.
+```json
+{"name":"agent_status","arguments":{"operation_id":"op_..."}}
+```
+
+For `chat`, omit `session_id` to create a session and complete its first turn in
+the same call; the result contains both MCP text content and `structuredContent`
+with `session_id`, `created`, `reply`, `outcome`, and `usage`
+(`apps/serverside/src/mcp_server.rs:774-810`).
+
+For `agent`, the call is **asynchronous**. It starts the operation and returns
+immediately: `structuredContent` is `AgentOperationOutput{operation_id,
+session_id, created, state}` where `state` is a tagged union
+(`apps/serverside/src/mcp_server.rs:168-191`):
+
+- `state: "running"` — carries `poll_after_ms` and a `snapshot` of the latest
+  root-agent turn. Do not call again before `poll_after_ms` elapses; the server
+  enforces that interval by making an early request wait until the next poll is
+  due (`apps/serverside/src/mcp_server.rs:610-615`).
+- `state: "done"` — carries `reply` (the complete result), `outcome`, `usage`,
+  and an optional `error`.
+
+So for `agent` the first turn is *not* completed in the same call: an omitted
+`session_id` creates the session and the operation starts running, and you must
+poll `agent_status` with the returned `operation_id` until `state` is `done`
+before starting another operation in that session. Calling `agent` again for a
+session with a live operation returns a busy tool error naming the
+`operation_id` to poll (`apps/serverside/src/mcp_server.rs:915-926`).
+
+A new agent session requires an absolute, existing, readable workspace. Later
+calls may omit it; if supplied again, its canonical path must match the original
+binding. Unknown IDs, IDs from the other endpoint, and workspace conflicts are
+tool errors rather than implicit new sessions.
 
 After `idle_timeout_secs` with no active or queued turn, the daemon releases
 the local runtime and keeps the in-memory conversation record. A later call

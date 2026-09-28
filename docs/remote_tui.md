@@ -105,10 +105,16 @@ When `auto_connect = true`, TUI enters remote backend mode on startup using the 
 
 | Command | Description |
 |---------|-------------|
+| `/remote` | Open the remote-session dialog (no argument required) |
 | `/remote <base_url>` | Connect to a remote gateway daemon, for example `/remote http://A:18080` |
 | `/remote status` | Show current backend, remote URL, session-open state, and health result |
 | `/remote off` | Close the remote session and switch back to local backend |
+| `/remote close` | Close the remote session **on the daemon** (destroys it server-side), unlike `off` which only detaches |
 | `/new` | Start a new TUI session; in remote mode this closes the old remote session first |
+
+Bare `/remote` (no argument) opens the session dialog rather than connecting;
+see `apps/endside/src/input/event_key.rs:952`. `/remote close` is handled at
+`apps/endside/src/input/event_key.rs:967`.
 
 After `/remote <base_url>` succeeds, new turns go through Machine A's daemon. The status bar shows `Remote: <base_url>`.
 
@@ -122,11 +128,16 @@ runtime state.
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /api/v1/runtimes` | Runtime catalog (read-only listing) |
+| `GET /api/v1/sandboxes` | Sandbox catalog (read-only listing) |
+| `GET /api/v1/runtimes/checkpoints` | Checkpoint catalog (read-only listing) |
 | `POST /api/v1/runtimes/open` | Open or resume a runtime using `RuntimeOpenRequest` |
 | `POST /api/v1/runtimes/input` | Submit one user input and stream SSE events |
 | `POST /api/v1/runtimes/interaction` | Send a user interaction response back to the daemon |
 | `POST /api/v1/runtimes/cancel` | Request cancellation of the current turn |
 | `POST /api/v1/runtimes/close` | Close the runtime, remove its record, and fire lifecycle hooks |
+| `POST /api/v1/runtimes/heartbeat` | Renew this TUI's attach lease (called every 15 s by the TUI event loop) |
+| `POST /api/v1/runtimes/detach` | Release this TUI's attach lease without destroying the session or its backend |
 | `POST /api/v1/runtimes/checkpoint` | Capture an idle runtime as a checkpoint |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | Delete the provider snapshot referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | Create a new runtime from a checkpoint |
@@ -135,11 +146,30 @@ runtime state.
 | `POST /api/v1/runtimes/exec` | Run a shell command inside the runtime's backend |
 | `POST /api/v1/runtimes/read-file` | Read a file from the runtime's backend |
 | `POST /api/v1/runtimes/write-file` | Write a file inside the runtime's backend |
+| `POST /api/v1/runtimes/export` | Export the runtime's conversation/state |
+| `GET /api/v1/cron/jobs` | Cron job catalog (read-only listing) |
+| `POST /api/v1/cron/run` | Trigger a cron job immediately |
+| `GET /api/v1/channels` | Channel catalog (read-only listing) |
+| `POST /api/v1/channels/test` | Send a channel test message |
+| `POST /api/v1/channels/:channel_id/events` | Channel webhook ingress, keyed by `channel_id` (`feishu` / `telegram`). This one is **not** in the protected group — see note below |
 
-Remote TUI only consumes the `open` / `input` / `interaction` / `cancel` /
-`close` endpoints directly; `checkpoint`, `checkout`, `pause`, `resume`,
-`exec`, `read-file`, and `write-file` are programmatic control-plane endpoints
-exposed on the same protected route group for other clients. See
+The route list above is drawn from the protected route group at
+`apps/serverside/src/httpserver/router.rs:577-614`; the channel webhook route
+(`router.rs:620-623`) sits outside that group. `/api/v1/health`
+(`router.rs:619`) also bypasses bearer auth — that is what makes the daemon's
+HEALTHCHECK work.
+
+Remote TUI directly consumes `open` / `input` / `interaction` / `cancel` /
+`close` (the turn lifecycle) **plus** `POST /api/v1/runtimes/detach` and
+`POST /api/v1/runtimes/heartbeat`, which implement the attach-lease protocol
+that lets a second TUI detect a takeover. `detach` is issued on exit / `/new` /
+`/remote off` (`apps/endside/src/gateway_api/remote.rs:413-431`); `heartbeat`
+is issued every 15 s by the app event loop
+(`apps/endside/src/gateway_api/remote.rs:461-473`, driven from
+`apps/endside/src/app/core.rs:425-429`). The remaining endpoints
+(`checkpoint`, `checkout`, `pause`, `resume`, `exec`, `read-file`,
+`write-file`, the catalogs, cron and channels) are programmatic control-plane
+endpoints exposed on the same protected route group for other clients. See
 [runtime_checkpoint.md](./runtime_checkpoint.md) for the checkpoint/pause/resume
 semantics and `apps/serverside/src/httpserver/router.rs` for the authoritative
 route list.

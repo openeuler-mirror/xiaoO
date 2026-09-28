@@ -524,7 +524,11 @@ sudo systemctl enable --now agent-moss
 
 # HTTP 模式验证
 curl http://127.0.0.1:9090/api/v1/health
-# {"status":"healthy","version":"<当前版本，见 pyproject.toml / ts/package.json>"}
+# {"status":"healthy","version":"<当前版本，见 pyproject.toml / ts/package.json>","instance":"xiaoo"}
+#
+# instance 是归属标识，由 AGENT_MOSS_INSTANCE 注入（install.sh 设为 xiaoo）。
+# bridge.py 探测服务时会过滤 instance 不匹配的进程（bridge.py:171），
+# 避免同机上别的 agent（如 OpenDesk）起的 agentmoss 被误连。
 
 # Socket 模式验证
 curl --unix-socket /var/run/agent_moss/agent_moss.sock \
@@ -617,6 +621,12 @@ xiaoo-hookers-install --non-interactive agent_moss
 }
 ```
 
+> **`cwd` 是 AgentMoss 服务接口的字段，不是 xiaoO 传给 bridge.py 的 payload 字段。**
+> xiaoO 的 tool pre payload 里工作区字段名是 `workspace`（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`），
+> 而 `bridge.py` 读的是 `data.get("cwd", "")`（`bridge.py:358`），所以 xiaoO 转发过来的 `cwd` 恒为空串——
+> 依赖 `cwd` 的层2「间接文件访问检测」在 xiaoO 接入场景下不生效。其他直接调用 analyze 接口的调用方
+> （自带 `cwd`）不受影响。修复方向：bridge 改读 `data.get("workspace")`。
+
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `session_id` | string | 是 | 会话唯一标识 |
@@ -626,7 +636,7 @@ xiaoo-hookers-install --non-interactive agent_moss
 | `a_next.action_detail` | string | 是 | 命令/动作详情 |
 | `reason` | string | 否 | 执行理由 |
 | `os_type` | string | 否 | `"linux"` / `"windows"`，留空自动检测 |
-| `cwd` | string | 否 | 当前工作目录 |
+| `cwd` | string | 否 | 当前工作目录（AgentMoss 接口字段；xiaoO bridge 转发时为空串，见上文说明） |
 | `agent_id` | string | 否 | 调用方 agent 标识（如 `xiaoo` / `opendesk`）。留空走通用模式。详见[三方 agent 定制规则](#三方-agent-定制规则) |
 | `metadata` | object | 否 | 扩展元数据（`llm_config`/`llm_log_path` per-request LLM 配置） |
 

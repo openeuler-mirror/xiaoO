@@ -10,7 +10,7 @@ Open-source intelligence hub for AgentOS.
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-v0.2.0-red.svg)](https://gitcode.com/openeuler/xiaoO)
+[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
 ## What is xiaoO?
 
@@ -30,7 +30,7 @@ The runtime also includes a layered memory and adaptive context-compression syst
 - Session management: save and resume long-running work.
 - LSP diagnostics: inline errors and warnings after edits through servers such as `rust-analyzer`, `pyright`, `typescript-language-server`, `gopls`, and `clangd`.
 - Skills system: installable instruction packs loaded from local directories or Git sources.
-- Hook and plugin system: lifecycle hook points around agent creation, LLM calls, and tool calls for audit, policy, traceability, and custom extensions.
+- Hook and plugin system: lifecycle hook points around agent creation, LLM calls, and tool calls, plus session lifecycle stages (`SessionCreated`, `SessionClosed`, `SessionState`) and chat-message transforms, for audit, policy, traceability, and custom extensions.
 - Observability: live token/cost tracking and trace storage through `noop`, `stdout`, or `moirai-sqlite`.
 - Scheduled and triggered tasks: long-running automation workflows can be attached to the runtime.
 - Localized UI: a clean terminal interface designed for daily agent work.
@@ -44,7 +44,7 @@ The runtime also includes a layered memory and adaptive context-compression syst
 ## Installation From Source
 
 ```bash
-git clone https://gitcode.com/openeuler/xiaoO.git
+git clone https://atomgit.com/openeuler/xiaoO.git
 cd xiaoO
 cargo install --path apps/endside
 ```
@@ -56,7 +56,7 @@ This installs the application binaries into `~/.cargo/bin` and attempts to insta
 > **Installation Behavior**:
 > - First attempts to install builtin skills to system-level directory: `/usr/lib/.xiaoo/skills/` (requires root privileges)
 > - If system-level installation fails (e.g., permission denied), automatically falls back to user-level directory: `~/.xiaoo/skills/`
-> - Builtin skills include `xiaoo-guardian` (security policy enforcement) and other built-in capabilities
+> - Builtin skills are `xiaoo-guardian` (security policy enforcement), `block-analyzer`, and `security-rules-tester`
 > - Without these skills, security features may be unavailable.
 >
 > **For system-wide installation** (recommended for multi-user environments):
@@ -93,11 +93,23 @@ The build wrapper can install the `agent_moss` hooker, a thin bridge that audits
 
 ### Docker
 
-Build a single image containing both `xiaoo` and `xiaoo-daemon`. The image
+> **⚠️ The Docker image build is currently unavailable.** `docker build` fails on this
+> revision and is **not** fixed by the commands below. The three known defects are:
+>
+> - `Dockerfile:56` copies `crates/llm-client-cli/Cargo.toml`, a crate deleted by `a507b74`;
+> - the layered `COPY` (`Dockerfile:45-66`) omits the workspace members `crates/protocol` and
+>   `crates/xiaoo-api` (`Cargo.toml:25`, `Cargo.toml:24`), so metadata fetching fails;
+> - `Dockerfile:118-126` targets `plugins/hookers/audit_agent`, a directory that no longer exists.
+>
+> Build xiaoO from source instead (see above). The commands below document the image's
+> intended shape and will work once the Dockerfile is repaired; they are **not** a working
+> quickstart today. See [docs/docker_deploy.md](./docs/docker_deploy.md) for the full record.
+
+The finished image is intended to contain both `xiaoo` and `xiaoo-daemon`. The image
 ships **no** `config.toml` — pass your own at run time via `XIAOO_CONFIG`:
 
 ```bash
-docker build -t xiaoo:latest .
+docker build -t xiaoo:latest .   # currently fails; see the warning above
 docker run --rm -d -p 18080:18080 -p 28081:28081 \
   -v $PWD/my.toml:/cfg.toml:ro \
   -e XIAOO_CONFIG=/cfg.toml \
@@ -130,10 +142,19 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
+```
 
+> **Known gap:** `[subagent.<role>.tools]` is currently parsed and accepted, but **not enforced**
+> for subagent roles — the role's tool allowlist is ignored at spawn time
+> (`crates/tool/src/impl/builtin/spawn_subagent/executor.rs:76-91` reads only `prompt` and
+> `description`; `apps/shared/src/gateway/session_supervisor.rs:345-356` applies only `prompt`,
+> `max_turns`, and `description`). Use real builtin tool names such as `file_read`, `file_write`,
+> `bash`, `glob`, or `grep`; unknown names are silently dropped without a validation warning.
+
+```toml
 [trace]
 storage_backend = "moirai-sqlite"    # noop, stdout, or moirai-sqlite
 db_path = "~/.xiaoo/traces.db"       # Used when storage_backend is moirai-sqlite
@@ -187,7 +208,7 @@ Example CLI output:
 
 The effective context window is resolved dynamically. xiaoO resolves the effective value in this order:
 
-1. Dynamic model lookup against the provider's model catalog (`/models` or equivalent). Available for any provider whose profile has `supports_model_catalog = true`, including `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`, `deepseek`, `openrouter`, `kimi`, `kimi-coding-plan`, `minimax-coding-plan`, `gitcode`, `local`, and `other`. Providers marked `supports_model_catalog = false` (e.g. `minimax`, `minimax-anthropic`) skip this step.
+1. Dynamic model lookup against the provider's model catalog (`/models` or equivalent). Available for any provider whose profile has `supports_model_catalog = true`, including `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`, `deepseek`, `openrouter`, `kimi`, `kimi-coding-plan`, `minimax-coding-plan`, `zai-coding-plan`, `local`, and `other`. Providers marked `supports_model_catalog = false` (e.g. `minimax`, `minimax-anthropic`, `gitcode`) skip this step.
 2. Local fallback defaults keyed off the provider's protocol family:
    - OpenAI-compatible, Ollama, and Zhipu families default to `128000`
    - Anthropic defaults to `200000`
@@ -273,15 +294,24 @@ bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
 
 ## More Documentation
 
+- [Architecture Overview](./docs/architecture_overview.md) — apps, workspace crates, binaries, and runtime layering
 - [Memory & Context Compression](./docs/memory_context_system.md)
+- [Runtime Checkpoint Control](./docs/runtime_checkpoint.md)
+- [Runtime SDK Refactor (as built)](./docs/xiaoo_api_pure_runtime_refactor.md)
 - [Plugin System](./docs/plugins.md)
 - [Skill Usage](./docs/skill_usage.md)
+- [MCP Integration](./docs/mcp.md)
+- [Custom Tools](./docs/custom_tools.md)
+- [Scheduled Jobs (Cron)](./docs/cron_scheduled_jobs.md)
 - [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
 - [Custom Agents](./docs/custom_agent.md)
 - [Remote TUI](./docs/remote_tui.md)
 - [Feishu Deployment](./docs/feishu_deploy.md)
 - [Telegram Deployment](./docs/telegram_deploy.md)
 - [Docker Deployment](./docs/docker_deploy.md)
+- [Vault Secrets Design](./docs/vault_secrets_design.md)
+- [KV Cache Coordination Design](./docs/kvcache-coordination-design.md)
+- [Super Gateway Control Plane Design](./docs/super_gateway_control_plane_design.md)
 
 ## License
 

@@ -62,10 +62,14 @@ network = false  # 禁止网络访问
 
 ### hooker default 模式
 
-安装时会询问 `[hooker]` 段的 `default` 模式：
+安装时会询问 `[hooker]` 段的 `default` 模式。**它决定的是「已注册的 hooker 里哪些处于启用状态」，不是工具层的允许/拦截策略**（`crates/hook/src/framework/registry/builder.rs:118-127`）：
 
-- `All`：默认允许所有工具调用，仅对 plugins 列表中的插件进行拦截
-- `None`：默认拦截所有工具调用，仅对 plugins 列表中的插件放行
+- `All`：所有**已注册**的 hooker 默认启用；再用 `disabled` 列表排除个别 hooker
+- `None`：所有已注册 hooker 默认不启用；只有 `enabled` 列表里列出的 hooker 会跑
+
+也就是说 `default = "All"` ≠ 「允许所有工具调用」。工具调用是否被拦，取决于跑起来的 hooker 脚本返回什么（这里是 `wrap_bash_with_cerberus.py` 返回 `allow` / `deny` / `transform`），与 `default` 无关。如果一个 hooker 没被启用，它就像不存在一样——既不拦截也不放行任何东西。
+
+> `enabled` / `disabled` / `policies` 里出现**未注册**的 hooker id 会让 xiaoo 启动构建失败（`crates/hook/src/framework/registry/builder.rs:81-98`），而不是静默忽略。
 
 ## 工作原理
 

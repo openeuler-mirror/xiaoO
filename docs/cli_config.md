@@ -12,17 +12,19 @@ CLI is the simplest running mode, supporting all common configuration items, but
 
 | Configuration | CLI Support | Description |
 |--------|---------|------|
-| `[llm]` | ✅ | LLM provider configuration |
+| `[llm]` | ✅ | LLM provider configuration (`profiles`/`active_profile`/`context_window` are daemon-only) |
 | `[subagent]` | ✅ | Predefined subagent roles ⭐ |
-| `[skills]` | ✅ | Skills configuration |
+| `[skills]` | ✅ | Skills configuration (dirs/allow_scripts/disabled only) |
 | `[compact]` | ✅ | Context compression configuration |
 | `[trace]` | ✅ | Tracing configuration |
 | `[hooker]` | ✅ | Hooker configuration |
 | `[operation_backend]` | ✅ | Operation backend configuration |
-| `[vault]` | ✅ | Encrypted secrets storage (see vault_secrets_design.md) |
+| `[vault]` | ✅ | Encrypted secrets storage (see vault_secrets_design.md; `enabled` is informational) |
+| `[mcp]` and `.mcp.json` | ✅ | MCP client servers (`apps/endside/src/cli/config.rs:27`) |
+| `[memory_automation]` | ✅ | RAM-A long-term memory recall/ingest (`apps/endside/src/cli/config.rs:29`) |
 | `[agent]` | ❌ | Agent roles (TUI/Daemon only) |
-| `[lsp]` | ❌ | LSP configuration (TUI only) |
-| `[tui.remote]` | ❌ | Remote TUI (TUI only) |
+| `[lsp]` | ❌ | LSP configuration (CLI ignores it; TUI and Daemon both use it) |
+| `[tui]`, `[tui.remote]` | ❌ | TUI-only keys and Remote TUI (TUI only) |
 | `[channels]` | ❌ | Channel integration (Daemon only) |
 | `[http]` | ❌ | HTTP API (Daemon only) |
 | `[agents]` | ❌ | Multi-agent management (Daemon only; TUI reads a limited subset for default-agent validation only) |
@@ -49,7 +51,7 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
 
@@ -67,10 +69,14 @@ storage_backend = "stdout"
 
 # Hooker (optional)
 [hooker]
-default = "agent_moss"
+default = "all"
 ```
 
-> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field).
+> **Note**: `[hooker] default` accepts only `all` or `none`
+> (`crates/agent-types/src/hook/config/boot_configs.rs:24-30`); any other value
+> is rejected by `config validate`.
+
+> **Note**: The CLI's `[llm]` section only reads `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, and `kvcache_debug_enabled`. Fields like `max_tokens` and `reasoning_effort` are not read from the config file in CLI mode — use `--reasoning-effort` as a CLI argument instead. The context window is resolved dynamically (no `context_window` config field). `llm.profiles`, `llm.active_profile`, and `llm.context_window` are **daemon-only** and are silently ignored by the CLI.
 
 ---
 
@@ -96,9 +102,9 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 
 | Parameter | Description | Default |
 |------|------|--------|
-| `-p, --prompt` | Prompt to send to agent | Required |
-| `--config` | Configuration file path (also accepts `XIAOO_CONFIG` env var) | `~/.config/xiaoo/config.toml` |
-| `--debug` | Show intermediate process (turns, tool calls, etc.) | false |
+| `-p, --prompt` | Prompt to send to agent. **Optional and repeatable** (`num_args = 1..`); repeats are joined into one prompt | — |
+| `--config` | Configuration file path (also accepts `XIAOO_CONFIG` env var). `global` | `~/.config/xiaoo/config.toml` |
+| `--debug` | Show intermediate process (turns, tool calls, etc.). `global` | false |
 | `--provider` | Override provider in configuration file | - |
 | `--model` | Override model in configuration file | - |
 | `--api-key` | Override API key in configuration file / env | - |
@@ -108,11 +114,35 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 | `--no-tools` | Disable tool execution | false |
 | `--tools` | Comma-separated allowlist of tool names; empty/unset = all tools | - |
 | `--reasoning-effort` | Reasoning effort: off, high, max | off |
+| `--format` | Output format: `default` (human-readable) or `json` (one event object per line) | `default` |
+| `--title` | Human-readable session title | - |
+| `-s, --session` | Resume an existing session by ID | new random UUID |
+| `--agent` | Agent ID to use for this run | `defaultagent` |
+| `--attach` | Attach to a running daemon at the given URL instead of running locally | - |
+| `--mcp-config` | Path to standard MCP JSON config. `global` | `.mcp.json` discovery |
+| `-v, --version` | Show version number. `global` | false |
 
-> `--config` and `--debug` are `global = true` clap args, so they can appear
-> before or after the `run` subcommand. `XIAOO_CONFIG` env var falls back to
-> the default `~/.config/xiaoo/config.toml` when neither `--config` nor the env
-> var is set.
+> `--config`, `--debug`, `--mcp-config`, and `-v/--version` are `global = true`
+> clap args, so they can appear before or after the `run` subcommand
+> (`apps/endside/src/cli/entry.rs:35-48`). The remaining flags are
+> `run`-subcommand options (`entry.rs:59-120`). `XIAOO_CONFIG` env var falls
+> back to the default `~/.config/xiaoo/config.toml` when neither `--config` nor
+> the env var is set.
+
+> `--provider`, `--model`, `--api-key`, and `--api-base` override only the
+> top-level `[llm]` keys; they are not profile-aware.
+
+### Subcommands
+
+| Subcommand | Description |
+|------|------|
+| `run` | Run a single prompt through the AgentLoop |
+| `serve` | Start a local daemon server (`--port`, `--hostname`) |
+| `export <session_id>` | Export a session transcript from a running daemon (`--port`, `--client-id`) |
+| `debug` | Inspect resolved configuration and internal state |
+| `skill` | Manage skills |
+
+Source: `apps/endside/src/cli/entry.rs:63-142`.
 
 ---
 
@@ -132,10 +162,14 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
 ```
+
+> See the known-gap note in [config_file_guide.md](./config_file_guide.md#subagent---predefined-subagent-roles-new):
+> `[subagent.<role>.tools]` is currently **not enforced** for subagent roles — it
+> parses but is never applied by the session supervisor.
 
 ### Use Cases
 
@@ -164,12 +198,25 @@ When CLI has subagent configured:
 |------|-----|-----|--------|
 | Running mode | Single command | Interactive UI | HTTP API service |
 | Multi-role switching | ❌ | ✅ (Tab key) | ✅ |
-| LSP diagnostics | ❌ | ✅ | ❌ |
-| Remote connection | ❌ | ✅ | ❌ |
+| LSP diagnostics | ❌ | ✅ | ✅ (`[lsp]` is parsed and wired by the daemon) |
+| Remote connection | ✅ (`--attach <url>`) | ✅ | ❌ |
 | Channel integration | ❌ | ❌ | ✅ |
 | Subagent delegation | ✅ | ✅ | ✅ |
-| Session persistence | ❌ | ✅ | ✅ |
+| Session persistence | ✅ (`-s/--session <id>`, `export`) | ✅ | ✅ |
 | Interactive Q&A | ❌ | ✅ | ✅ |
+
+Notes:
+- **LSP**: the daemon parses `[lsp]`
+  (`apps/serverside/src/daemon_config.rs:54`) and builds an LSP registry when
+  `enabled = true` (`daemon_config.rs:938`), wired into the runtime at
+  `apps/serverside/src/daemon_runtime.rs:254`. The CLI does not read `[lsp]`.
+- **Remote connection**: `xiaoo --cli run --attach <url>` talks to a running
+  daemon instead of running locally (`apps/endside/src/cli/entry.rs:119-120`,
+  used at `:349-351`; implementation in `apps/endside/src/cli/attach.rs:11-38`).
+- **Session persistence**: `-s/--session <id>` resumes/continues a session
+  (`entry.rs:111-112`, consumed at `entry.rs:526`) and
+  `xiaoo --cli export <session_id>` exports a transcript from a running daemon
+  (`entry.rs:133-142`).
 
 ---
 
@@ -214,7 +261,16 @@ Not suitable for:
 
 ### Q: How does CLI handle long conversations?
 
-**A**: Each CLI run is an independent session, session persistence is not supported. For long conversations, use:
+**A**: By default each CLI run creates a new session (a fresh random UUID). Sessions **are** supported:
+
+- **Resume**: pass `-s/--session <id>` to reuse an existing session ID
+  (`apps/endside/src/cli/entry.rs:111-112`, consumed at `entry.rs:526`).
+- **Export**: `xiaoo --cli export <session_id>` exports a transcript from a
+  running daemon (`entry.rs:133-142`).
+- **Remote**: `--attach <url>` runs the turn against a daemon that owns the
+  session state (`entry.rs:119-120`).
+
+For fully interactive long conversations, prefer:
 - **TUI**: Supports session save and restore
 - **Daemon**: Supports session persistence
 
@@ -247,7 +303,7 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
 ```

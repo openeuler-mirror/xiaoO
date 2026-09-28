@@ -16,19 +16,19 @@ Cerberus 的策略来源按以下优先级解析：
 - 如果 `config/cerberus-policies/workspace-write-network-off.toml` 存在，它会覆盖同名内置 profile
 - 如果文件存在但解析失败，Cerberus 会直接报错，不会悄悄退回内置 profile
 
-当前仓库还额外签入了三份 **repo-root** 作用域的 file-backed profile：
+`config/cerberus-policies/` 目录与其中的 profile 文件**不由本仓库提供**（仓库内无
+`config/` 目录，也无 `repo-root-write-*` 之类的签入文件）。若你自行创建，例如
+`config/cerberus-policies/repo-root-write-network-off.toml`，它就是一份普通 TOML
+文件，因此：
 
-- `repo-root-write-network-off`
-- `repo-root-write-network-on`
-- `repo-root-write-network-on-dev-env`
+- `profile list` 会把它显示为 `[file: ...]`
+- 它的行为完全由文件字面内容决定
+- 文件名是用户自定的；惯例上带 `repo-root` 的名字表示这些规则写死了仓库根路径，
+  而不是通用的 workspace 预设
 
-它们不是内置 profile，而是 `config/cerberus-policies/` 下的普通 TOML 文件，因此：
-
-- `profile list` 会把它们显示为 `[file: ...]`
-- 它们的行为完全由文件字面内容决定
-- 它们的名字带 `repo-root`，是为了明确表示这些规则写死了当前仓库根路径，不是通用的 workspace 预设
-
-其中 `repo-root-write-network-off` 也比内置 `workspace-write-network-off` 更宽：它同样禁网，但保留了 repo-root 的 `readwrite`，以及 `/dev`、`/proc`、`/mnt/wsl` 的访问。
+例如，一份用户自建的 `repo-root-write-network-off` 可以比内置
+`workspace-write-network-off` 更宽：同样禁网，但保留 repo-root 的 `readwrite`，
+以及 `/dev`、`/proc`、`/mnt/wsl` 的访问。是否这样取舍完全取决于该文件的内容。
 
 ### CLI 默认行为（当前实现）
 
@@ -693,4 +693,3 @@ cerberus history
 - [Cerberus README](../README.md)
 - [Runtime Capability Matrix](./runtime-capability-matrix.md)
 - [History Storage](./storage.md)
-- [Scenario Comparisons](./03.scenario-comparisons.md)

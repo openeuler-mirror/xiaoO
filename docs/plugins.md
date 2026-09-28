@@ -35,7 +35,7 @@ You can also develop your own hookers and place them in `<your_xiaoO>/plugins/ho
 
 ### Built-in Skills
 
-When you run `cargo install --path apps/endside`, builtin skills are automatically installed. They provide security policy enforcement and other built-in capabilities, and are loaded with highest priority by the runtime.
+When you run `cargo install --path apps/endside`, builtin skills are automatically installed. They provide security policy enforcement and other built-in capabilities. They land in the **system level** directory, which is the **lowest-priority** skill source and can be shadowed by a same-named skill at project, config, or user level (see "Skill Directory Priority" below).
 
 **Installation locations** (automatic fallback):
 - **System level** (preferred): `/usr/lib/.xiaoo/skills/` - requires root privileges
@@ -44,6 +44,7 @@ When you run `cargo install --path apps/endside`, builtin skills are automatical
 **Builtin skills** (located in `<xiaoO>/plugins/skills/`):
 - `xiaoo-guardian` - Security policy enforcement
 - `block-analyzer` - Block analysis capabilities
+- `security-rules-tester` - Systematic verification/regression testing of agent_moss security rules
 
 > **Note**: `cargo build` does NOT install skills. Only `cargo install` triggers skill installation.
 >
@@ -57,10 +58,36 @@ When you run `cargo install --path apps/endside`, builtin skills are automatical
 
 ### Skill Directory Priority (Four Levels)
 
+Directories are scanned in this order and skills are deduplicated **by name, first match wins** — so a higher level *shadows* a same-named skill at a lower level (`crates/skill/src/loading/loader.rs:14-60`; `apps/endside/src/cli/skills.rs:27-53`):
+
 1. **Project level** (highest): `./.xiaoo/skills/` - Project-specific skills
 2. **Config level** (medium): Directories specified in `[skills].dirs` - Team/user shared skills
 3. **User level**: `~/.xiaoo/skills/` - Personal skills available everywhere
 4. **System level** (lowest): `/usr/lib/.xiaoo/skills/` - Built-in skills only
+
+Because the system level is **last**, a user or project skill with the same name as a builtin skill (e.g. `xiaoo-guardian`) wins and the builtin is never loaded. This is the intended override mechanism — but it means a locally-installed skill can silently replace a builtin security skill, so treat custom skills named like builtins with care.
+
+### Disabling Skills
+
+A skill can be excluded by name without deleting it, via `[skills].disabled` (`crates/skill/src/types/config.rs:8`; `crates/skill/src/loading/loader.rs:59-67`):
+
+```toml
+[skills]
+disabled = ["block-analyzer"]
+```
+
+The name is the skill's `name` (as declared in its `SKILL.md` / `SKILL.toml`), not the directory name. Disabled skills are skipped during loading regardless of which level they came from.
+
+### Security Audit of Skill Directories
+
+`[skills].audit_enabled` (default `false`) runs a security audit on each skill directory and **skips** any skill whose audit is not clean (`crates/skill/src/types/config.rs:9`; `crates/skill/src/loading/loader.rs:46-57`):
+
+```toml
+[skills]
+audit_enabled = true
+```
+
+Related knobs in the same struct: `allow_scripts` (default `false`, gates whether scripts inside a skill are permitted by the audit), `prompt_injection_mode`, and `prompt_budget_ratio` (`crates/skill/src/types/config.rs:5-12`).
 
 ### Custom Skills
 
@@ -159,16 +186,16 @@ disabled = [
 
 `disabled` 列表填写 plugin.json 中定义的 `id` 字段值。
 
-### RPM 场景下插件 install.sh 的变化
+### 插件自身 install.sh 的行为（以 agent_moss 为例）
 
-RPM 打包时，部分插件自身的 `install.sh` 行为会有所调整。以 agent_moss 为例：
+`plugins/hookers/install.sh` 会递归调用各插件子目录下的 `install.sh`（`plugins/hookers/install.sh:342-351`）。agent_moss 的 `install.sh` 当前行为：
 
-- **开发者场景**（git clone + cargo build）：`install.sh` 创建 Python 虚拟环境（`/opt/agent_moss/venv`），从 PyPI 安装 `agent-moss` 包，注册并启动 systemd 服务
-- **RPM 场景**（通过 RPM 安装）：`agent-moss` 包及其依赖由 RPM 提供（装在系统 Python / `/usr/lib/agent_moss/`），`install.sh` 跳过 venv 与 pip install，只负责注册 systemd 服务并启动（systemd unit 由 RPM 自带）
+- 创建 Python 虚拟环境（默认 `/opt/agent_moss/venv`，非 sudo 场景 fallback 到用户目录），从 PyPI 安装/升级 `agent-moss` 包（`plugins/hookers/agent_moss/install.sh:20-22,102-140`）
+- 写入 `AGENT_MOSS_INSTANCE=xiaoo`（systemd 模式写 `/etc/agent_moss/agent_moss.env`，nohup 模式 export）并注册/启动 systemd 服务（`plugins/hookers/agent_moss/install.sh:209-231`）
 
 agent_moss 是瘦 bridge 插件（`bridge.py` 仅依赖 stdlib，转发到常驻 AgentMoss HTTP 服务），判定逻辑在常驻服务进程里，不随每次 hook spawn 子进程。`AGENT_MOSS_URL`/`AGENT_MOSS_PORT` 可指向远端服务，`AGENT_MOSS_LOG_PATH` 指定桥接日志路径。
 
-这意味着在 RPM 场景下执行 `xiaoo-hookers-install` 不会因为缺少 pip 或 venv 而出错。
+> **已知缺口**：早期文档描述的「RPM 场景下 `install.sh` 跳过 venv/pip install，改用系统 Python」在当前 `plugins/hookers/agent_moss/install.sh` 中**没有实现**——脚本里没有任何 RPM 分支或检测。RPM 打包时若需要该行为，由打包方 patch 脚本，仓库内的 `install.sh` 不区分安装方式。以脚本实际行为为准。
 
 ### 验证插件是否生效
 
@@ -188,7 +215,20 @@ cat "$AGENT_MOSS_LOG_PATH"
 
 ## Chat & Session Lifecycle Hooks
 
-除 Tool 层 hook（`*.Tool.*.pre/post/error`）外，xiaoo 还提供 **chat 层** 与 **session 层** 两个挂载点，让外部插件能在用户输入、system prompt 组装、会话状态流转等阶段介入。它们与 Tool hook 共用同一套 `plugin.json` + `sh -c` 子进程 + stdin/stdout JSON 协议，可注册在同一个 `~/.xiaoo/hookers/<name>/plugin.json` 数组里。
+除 Tool 层 hook（`*.Tool.*.pre/post/error`）外，xiaoo 还提供 **chat 层** 与 **session 层** 两个挂载点，让外部插件能在用户输入、system prompt 组装、会话状态流转等阶段介入。它们与 Tool hook 共用同一套 `plugin.json` + `sh -c` 子进程 + stdin/stdout JSON 协议，可注册在同一个 plugin.json 数组里。
+
+> **重要：hooker 不会被自动发现。** 只有 `[hooker].plugins` 列表里显式列出的 plugin.json 文件才会被读取并注册（`crates/hook/src/framework/registry/builder.rs:25-32,68`）。把 plugin.json 放到 `~/.xiaoo/hookers/<name>/` 或任意目录**本身不会生效**——该目录只是社区约定放置 hooker 的位置，仍必须在 `[hooker].plugins` 中写入它的完整绝对路径。未列出的文件永远不会被读取，也不会报错。
+
+```toml
+[hooker]
+default = "None"          # None: 只启用 enabled 列表；All: 启用所有已注册 hooker
+plugins = [
+  "/home/me/.xiaoo/hookers/js-test/plugin.json",   # 必须显式列出绝对路径
+]
+enabled = ["js_test_chat_message"]
+```
+
+注册后是否生效还取决于 `default`：`default = "None"` 时只有 `enabled` 里列出的 hooker id 处于启用状态，`default = "All"` 时所有已注册 hooker 默认启用、再由 `disabled` 排除（`crates/hook/src/framework/registry/builder.rs:118-127`）。`enabled` / `disabled` / `policies` 里出现**未注册**的 hooker id 会直接构建失败（`crates/hook/src/framework/registry/builder.rs:81-98`）。
 
 ### Hook points overview
 
@@ -200,6 +240,11 @@ cat "$AGENT_MOSS_LOG_PATH"
 | `*.Session.lifecycle.created` | 会话新建（首次 open / 新会话首个 turn / 从 checkpoint 派生 runtime） | `Ack`（事件型，无可变输出） |
 | `*.Session.lifecycle.closed` | 会话被关闭（幂等：已 Closed 的会话不会重复触发） | `Ack`（事件型，无可变输出） |
 | `*.Session.lifecycle.state` | root turn 生命周期状态切换：`idle`（一次非错误 root turn 结束，`Complete`/`MaxTurnsReached`/`BudgetExhausted`/`Cancelled` 四种 `Ok` 结局，会话回到 idle）/ `failed`（turn 以 `Err` 结束） | `Ack`（事件型，无可变输出） |
+| `*.Llm.pre` | 单次 LLM 请求发出之前 | `Allow` / `Transform { modified_request }` |
+| `*.Llm.post` | LLM 响应返回之后 | `Accept` / `Transform { modified_response }` |
+| `*.Llm.error` | LLM 调用失败 | `Propagate` / `Recover { response }` |
+
+> **hook point 的 `detail` 段（第 3 段）是自由文本，不参与匹配。** 上表的 `message` / `system` / `command` / `lifecycle` / `complete` 只是可读性约定；真正决定路由的是 `action` + `stage`（`crates/hook/src/hookers/hook_point_category.rs:34,45-62`）。所以 `*.Llm.complete.pre` 与 `*.Llm.whatever.pre` 等价。段数必须正好 4 段。
 
 > 前三个 chat hook 是「可变 hook」——插件可以改写或拒绝输入；三个 session hook 是「事件型观察者」——只能确认收到事件，没有 `transform`/`deny` 路径。`idle` 状态下 `actions`（`create_session` / `switch_session` / `send_prompt`）会被收集并执行；`failed` 状态下 `actions` 被丢弃（fire-and-forget）；`created`/`closed` 不收集 `actions`（gateway 忽略其输出）。
 
@@ -207,8 +252,12 @@ cat "$AGENT_MOSS_LOG_PATH"
 
 - **执行模型相同**：都是 `sh -c <command>`，stdin 写入一次 JSON payload、stdout 读取一次 JSON 结果，非零退出视为失败。
 - **`payload.stage` 不同**：chat/session hook 的 stage 字符串是 `command_before` / `chat_message` / `system_transform` / `session_state`（不是 `pre`/`post`/`error`），脚本据此分发。
+- **hook 族共四个**：`tool` / `llm` / `chat` / `session`（`crates/hook/src/hookers/plugin/builder.rs:21-31`）。除了本文的 chat/session 挂载点，还有 **`*.Llm.pre` / `*.Llm.post` / `*.Llm.error`** 一族，包裹单次 LLM 请求/响应往返，可返回 `allow` / `transform { modified_request }`（pre）、`accept` / `transform { modified_response }`（post）、`propagate` / `recover { response }`（error）。仓库内的 `llm_pre_secret_guard` 就是活例子（`plugins/hookers/llm_pre_secret_guard/plugin.json:4`）。注意 Llm 族 payload **不带** `session_id` / `workspace`。
+- **超时不同**：chat / session 子进程上限 30s，tool / llm 为 10 分钟（`crates/hook/src/hookers/plugin/core.rs:268`；`crates/hook/src/hookers/plugin/tool/adaptor.rs:21`；`crates/hook/src/hookers/plugin/llm/adaptor.rs:21`）。超时后子进程被 `kill_on_drop` 杀掉，该 hook 记为失败。
+- **路由只在 (action, stage) 上**：hook point 第 3 段 `detail` 是自由文本，**不参与匹配也不做校验**——`*.Chat.message.received` 与 `*.Chat.whatever.received` 命中同一类目；决定族与类目的是 `action` 与 `stage`（`crates/hook/src/hookers/hook_point_category.rs:34,45-62`）。段数不等于 4、`action`/`stage` 为空、或 `(action, stage)` 不在支持列表内，都会在注册构建期直接报错。
 - **调度差异**：chat hook 在 agent loop 同步执行，单个插件报错只 `tracing::warn!` 不中断整轮，只有 `command.before` 的 `Deny` 会短路；session state hook 在 gateway 后台执行：`idle` 状态在 `run_turn` 返回后等待所有 hooker 完成（30s 整体上限，便于收集 `actions` 注入 `Done` 事件），`failed` 状态走 `tokio::spawn` 的 fire-and-forget 路径（不阻塞错误返回），错误一律走 `tracing::warn!`，绝不影响主流程或 `run_turn` 返回值。
-- **交互机制**：三个 chat hook 还支持 `action: "ask_user"`——插件可发起 `Confirm` / `TextInput` / `Choice` 交互，用户回答后 xiaoo 会带着 `interaction` 字段再次调用同一命令，直到插件返回 `final`。session state hook 不支持该机制。
+- **交互机制**：`action: "ask_user"` 由四个族共用的 plugin hooker core 实现，因此 **chat / tool / llm** 三类 hook 都支持——插件可发起 `Confirm` / `TextInput` / `Choice` 交互，用户回答后 xiaoo 会带着 `interaction` 字段再次调用同一命令，直到插件返回 `final`（`crates/hook/src/hookers/plugin/core.rs:193-235`；chat `chat/adaptor.rs:85`、tool `tool/adaptor.rs:85`、llm `llm/adaptor.rs:86`）。session lifecycle hook（`created` / `closed` / `state`）不支持该机制，它走一次性子进程调用（`session/adaptor.rs:136-144`）。
+
   回调 payload 中 `interaction.response` 按 `kind` 区分四种取值（注意响应的 kind 命名与请求的 `confirm` / `text_input` / `choice` 不同名）：
 
   | `response.kind` | JSON 形状 | 含义 |
@@ -218,11 +267,13 @@ cat "$AGENT_MOSS_LOG_PATH"
   | `text` | `{"kind":"text","value":...}` | text_input 的回答：`value` 为用户输入原文，`null` 表示未作答（超时场景可能是 `[INTERACTION_TIMEOUT]` 哨兵串） |
   | `choice` | `{"kind":"choice","value":...}` | choice 的回答：`value` 为选中选项原文或自定义输入，`null` 表示未作答（超时哨兵同上） |
 
+  取值定义见 `crates/agent-types/src/interaction/types.rs` 的 `InteractionResponse`（`Unanswered` 变体见 `:39-54`，`unanswered()` 辅助构造见 `:56-73`）。
+
   > 兼容性提示：confirm 的未作答/超时此前以 `{"kind":"confirmed","allowed":false}` 下发，现改为 `{"kind":"unanswered"}`。用 `!response.allowed` 之类取反判断的插件会把「未作答」误读为「否」，请改为先判 `response.kind`。完整协议见 [`plugins/hookers/how-to-develop-a-plugin-hooker.md`](../plugins/hookers/how-to-develop-a-plugin-hooker.md) 第 14.6 节。
 
 ### Minimal plugin.json
 
-`~/.xiaoo/hookers/js-test/plugin.json` 一次性注册六个 hooker，全指向同一个脚本：
+`~/.xiaoo/hookers/js-test/plugin.json` 一次性注册六个 hooker，全指向同一个脚本（该文件仍需按上文加入 `[hooker].plugins` 才会被读取）：
 
 ```json
 [
@@ -271,6 +322,8 @@ cat "$AGENT_MOSS_LOG_PATH"
 | `*.Llm.*.pre` / `post` / `error` | ✗ | ✗ | payload 不带 session_id / workspace |
 
 > `system_transform` 的 session_id 理论上可能为 `null`（`ChatSystemTransformInput.session_id` 是 `Option<String>`），脚本里建议 `payload.session_id || "(unknown)"` 兜底。`payload.workspace` 是会话工作区根目录的绝对路径：Tool/Chat hook 从 runtime 上下文取、Session hook 从会话记录取，未绑定工作区时为 `null`；hooker 子进程的 cwd 继承自宿主进程（可能随 bash `cd` 漂移），需要工作区路径时应以 `payload.workspace` 为准，不要依赖 cwd。`*.Llm.*` hook 的 payload 目前不带 session_id / workspace。
+>
+> **payload 里没有 `cwd` 字段。** Tool pre/post/error payload 的工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`，值由 `core.rs:250-255` 生成）。读 `payload.cwd` 会永远得到 `undefined`/`""`——不要在插件里用这个名字。
 
 ### Minimal demo script
 

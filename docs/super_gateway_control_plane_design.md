@@ -1,5 +1,13 @@
 # xiaoO Super Gateway 控制面、Runtime API 与 Workspace 设计说明
 
+> **状态：已实现（as-built）。** 本文描述的控制面能力已在本仓库落地，以下表格已按
+> 当前实现核对（master `a58d79f`）。文中所有 `path:line` 均可直接跳转验证。
+>
+> 与初稿的主要差异：SSE 事件从 8 个增至 **13 个**（§「SSE 事件」）；
+> 路由表补充了 runtimes/sandboxes/checkpoints/detach/heartbeat/capabilities 等
+> 后续新增端点；Conch backend 已被删除（见对应条目说明）。
+> §4.7 的「已知缺口」清单经核对**仍然准确**，予以保留。
+
 | 属性 | 内容 |
 | --- | --- |
 | 文档版本 | v1.1 |
@@ -8,7 +16,7 @@
 | 最后更新 | 2026-07-16 |
 | 评审状态 | 待评审 |
 | 基线版本 | `d16735b16b2d884a7a01bff68049c7f26d582703`（GitCode PR !210） |
-| 当前代码基线 | `b2e9389dd8b31772ae1f32405fd8a3b16505e1fd` |
+| 当前代码基线 | 本文档描述的实现位于 HEAD（`a58d79f`）；下表列出的匹配关系以当前代码为准 |
 | 关联变更 | GitCode PR !218（Gateway 重构与远程运行时管理）、!220/!222（sandbox 调度及修复）、!225（daemon dashboard）、!235（runtime evaluator API）、!258（E2B 执行错误分类）；E2B workspace bootstrap：`b1aa445`、`5b58db3`、`b2e9389` |
 
 ## 1. 概述
@@ -93,7 +101,7 @@ xiaoO 已从原先相对集中的 `apps/xiaoo-app` 演进为面向端侧、服�
 | NF-02 | 一致性 | E2B 的 prompt、repo map、skills 和工具文件系统使用同一真源。 | bootstrap 完成后仅从 E2B 读取；manifest digest 不匹配返回 `409`。 |
 | NF-03 | 安全性 | runtime 路由支持 Bearer Auth；provider 凭证不应明文落入共享 registry。 | 非 loopback 推荐启用 `[http].bearer_token_env`；E2B key 通过 PBKDF2-HMAC-SHA256 派生后再持久化索引。 |
 | NF-04 | 可扩展性 | runtime API 隔离 session/backend/provider 细节。 | backend 通过 `OperationBackend` 与 `BackendManager` 扩展；当前 session runtime 仅正式接受 local/E2B。 |
-| NF-05 | 兼容性 | 核心 runtime 请求兼容 legacy `session_id`。 | open/input/interaction/cancel/close 序列化为 `runtime_id`，反序列化接受 `session_id`。 |
+| NF-05 | 兼容性 | 核心 runtime 请求兼容 legacy `session_id`。 | open/input/interaction/cancel/close/heartbeat/detach 序列化为 `runtime_id`，反序列化接受 `session_id`（`crates/protocol/src/wire.rs:313-315,332-334`）。 |
 | NF-06 | 可靠性 | 稳定快照和 evaluator 操作不得与 Agent turn 并发。 | busy runtime 映射为 HTTP `429 Too Many Requests`。 |
 | NF-07 | 资源控制 | E2B live sandbox 受共享上限控制。 | 默认每个 sandbox key 20 个；配置项为 `max_sandbox_cnt`。 |
 | NF-08 | 并发安全 | 多进程同时创建 sandbox 不应穿透配额。 | 创建前 reservation；reservation TTL 为 300 秒；计数和 registry 使用进程内锁与 `flock`。 |
@@ -189,7 +197,7 @@ flowchart TB
 | `apps/endside` | `xiaoo` 二进制；CLI/TUI、本地 runtime、远程 TUI、SSE 消费、交互、远程会话记录。 | `apps/shared`、`crates/core`、`crates/tool`、`crates/llm-client` |
 | `apps/serverside` | `xiaoo-daemon`；Runtime HTTP API、SSE、Bearer Auth、Rate Limit、dashboard、Feishu/Telegram、cron。 | `apps/shared`、`axum`、`tower`、channel adapters |
 | `apps/shared::gateway` | SessionService、SessionControlPlane、actor/supervisor、runtime resolver、workspace prompt、session store。 | core、memory、tool、skill、prompt、agent-contracts |
-| `apps/shared::backend` | BackendManager、backend registry、sandbox counter、dirty tracker、local/E2B/Conch provider 代码和 lineage。 | `OperationBackend`、provider SDK/API |
+| `apps/shared::backend` | BackendManager、backend registry、sandbox counter、dirty tracker、local/E2B provider 代码和 lineage。 | `OperationBackend`、provider SDK/API |
 | `apps/shared::runtime_checkpoint` | RuntimeRecord、checkpoint/checkout/pause/resume/evaluator API 类型和内存 checkpoint store。 | gateway、backend |
 | `apps/shared::gateway::session_backend` | session backend lease、资源满时的驱逐重试、eviction checkpoint 恢复。 | BackendManager、SessionStore |
 | `apps/shared::backend::backend_registry` | 持久化 backend owner、session status、last activity、heartbeat 和 pending eviction。 | 本地文件系统、`flock` |
@@ -308,7 +316,11 @@ SessionHandle 提供单 session actor、有界队列、活动 turn 状态、取�
 pub session_id: String,
 ```
 
-该兼容适用于 open、input、interaction、cancel 和 close。checkpoint、pause、resume、exec/read/write 原生定义 `runtime_id`，不使用 legacy alias。
+该兼容适用于 open、input、interaction、cancel、close，**以及 heartbeat 和 detach**：
+`SessionHeartbeatRequest` 与 `SessionDetachRequest` 同样声明了
+`#[serde(rename = "runtime_id", alias = "session_id")]`
+（`crates/protocol/src/wire.rs:313-315`、`:332-334`）。
+checkpoint、pause、resume、exec/read/write 原生定义 `runtime_id`，不使用 legacy alias。
 
 #### 4.1.3 当前实现与目标语义的差距
 
@@ -347,6 +359,21 @@ checkpoint/checkout/pause/resume 已返回该类型。但当前 `open` 和 `clos
 | `POST /api/v1/runtimes/exec` | `RuntimeExecRequest` | `RuntimeExecResult` | 在 idle runtime 的 backend 中执行命令。 |
 | `POST /api/v1/runtimes/read-file` | `RuntimeReadFileRequest` | `RuntimeReadFileResult` | 读取二进制文件并返回 Base64。 |
 | `POST /api/v1/runtimes/write-file` | `RuntimeWriteFileRequest` | `RuntimeWriteFileResult` | Base64 覆盖写文件。 |
+| `GET /api/v1/runtimes` | 无 | runtime 目录 | 列出当前 runtime（`apps/serverside/src/httpserver/router.rs:577`）。 |
+| `GET /api/v1/runtimes/checkpoints` | 无 | checkpoint 目录 | 列出 checkpoint（`apps/serverside/src/httpserver/router.rs:579-582`）。 |
+| `POST /api/v1/runtimes/heartbeat` | `SessionHeartbeatRequest` | lease 状态 | 续租 runtime lease（`apps/serverside/src/httpserver/router.rs:591`；`crates/protocol/src/wire.rs:313-327`）。 |
+| `POST /api/v1/runtimes/detach` | `SessionDetachRequest` | 204 | 断开会话但保留 runtime（`apps/serverside/src/httpserver/router.rs:592`；`crates/protocol/src/wire.rs:332-334`）。 |
+| `POST /api/v1/runtimes/export` | session export 请求 | 导出结果 | 导出会话记录（`apps/serverside/src/httpserver/router.rs:609`）。 |
+| `GET /api/v1/sandboxes` | 无 | sandbox 目录 | 列出 sandbox 与绑定关系（`apps/serverside/src/httpserver/router.rs:578`）。 |
+| `GET /api/v1/capabilities` | 无 | capability 清单 | 声明控制面各域支持的 operation（`apps/serverside/src/httpserver/router.rs:620`）。 |
+| `GET /api/v1/cron/jobs` | 无 | `CronReport` | cron job 目录与运行状态（`apps/serverside/src/httpserver/router.rs:611`）。 |
+| `POST /api/v1/cron/run` | `CronRunRequest` | job 运行状态 | 立即触发 enabled cron job（`apps/serverside/src/httpserver/router.rs:612`）。 |
+| `GET /api/v1/channels` | 无 | channel 目录 | 列出已配置 channel（`apps/serverside/src/httpserver/router.rs:613`）。 |
+| `POST /api/v1/channels/test` | `ChannelTestRequest` | 测试结果 | 用当前凭据测试一个 enabled channel（`apps/serverside/src/httpserver/router.rs:614`）。 |
+
+> 全部 runtime/control-plane 路由位于 `apps/serverside/src/httpserver/router.rs:575-615`，
+> 并统一由 `apply_http_bearer_auth` 保护；`/api/v1/health`（`:619`）与
+> `/api/v1/channels/:channel_id/events`（`:621-624`）在保护组之外。
 
 当未配置 `SessionControlPlane` 时，控制面接口返回 `501 Not Implemented` 和 `session control plane is not configured`。
 
@@ -396,11 +423,20 @@ pub struct RuntimeExecResult {
 | `turn_start` | `agent_id`, `turn` | Agent turn 开始。 |
 | `text_delta` | `agent_id`, `delta`, `snapshot` | 助手文本增量与累计快照。 |
 | `thinking_delta` | `agent_id`, `delta`, `snapshot` | provider reasoning/thinking 增量。 |
+| `tool_call` | `agent_id`, `call_id`, `tool_name`, 参数预览 | 工具调用发起。 |
 | `tool_result` | `agent_id`, `call_id`, `tool_name`, `output_preview`, `is_error` | 工具结果摘要。 |
+| `tool_file_change` | 变更文件信息 | 工具产生的文件变更。 |
+| `plan_update` | 计划条目 | 计划更新。 |
+| `subagent_spawn` | 子 agent 信息 | 派生子 agent。 |
+| `loop_end` | loop 终止原因 | agent loop 结束。 |
 | `interaction_requested` | `request` | daemon 请求确认、文本或选项输入。 |
 | `done` | reply、token、messages、stop_reason、actions 等 | turn 完成。 |
 | `error` | `error` | turn 失败。 |
 | `cancelled` | `runtime_id` | 取消回执。 |
+
+以上 **13 个事件**为完整清单，定义于
+`apps/serverside/src/httpserver/router.rs:755-769`（`sse_events` 数组），
+对应的 Rust 类型见 `crates/protocol/src/sse.rs`。
 
 #### 4.2.5 HTTP 错误映射
 
