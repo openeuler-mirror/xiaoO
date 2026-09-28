@@ -545,16 +545,29 @@ impl HttpBearerAuthConfig {
     }
 }
 
+/// Channel-plane wiring for [`create_router_with_channel_runtimes_control_plane_and_timeout_and_auth`].
+pub struct ChannelRouterOptions {
+    pub runtimes: Vec<ChannelRuntime>,
+    pub interaction_timeout_secs: u64,
+    pub bearer_auth: Option<HttpBearerAuthConfig>,
+    pub rate_limit: Option<RateLimitConfig>,
+    pub cron_scheduler: Option<Arc<CronScheduler>>,
+    pub channel_manager: Arc<ChannelManager>,
+}
+
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     session_service: Arc<dyn SessionService>,
     session_control_plane: Arc<dyn SessionControlPlane>,
-    runtimes: Vec<ChannelRuntime>,
-    interaction_timeout_secs: u64,
-    bearer_auth: Option<HttpBearerAuthConfig>,
-    rate_limit: Option<RateLimitConfig>,
-    cron_scheduler: Option<Arc<CronScheduler>>,
-    channel_manager: Arc<ChannelManager>,
+    options: ChannelRouterOptions,
 ) -> ChannelResult<Router> {
+    let ChannelRouterOptions {
+        runtimes,
+        interaction_timeout_secs,
+        bearer_auth,
+        rate_limit,
+        cron_scheduler,
+        channel_manager,
+    } = options;
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
         session_control_plane.clone(),

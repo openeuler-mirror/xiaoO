@@ -313,11 +313,10 @@ impl ConfiguredRuntimeResolver {
             llm_config,
             llm_provider,
             token_budget,
-            feature_flags: {
-                let mut flags = FeatureFlags::default();
-                flags.kvcache_enabled = effective.kvcache_enabled;
-                flags.kvcache_debug_enabled = effective.kvcache_debug_enabled;
-                flags
+            feature_flags: FeatureFlags {
+                kvcache_enabled: effective.kvcache_enabled,
+                kvcache_debug_enabled: effective.kvcache_debug_enabled,
+                ..Default::default()
             },
             compression_pipeline: Some(compression_pipeline),
         })

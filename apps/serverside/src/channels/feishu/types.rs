@@ -1,15 +1,13 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum FeishuEventTransport {
     #[default]
     Webhook,
     Websocket,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeishuConfig {

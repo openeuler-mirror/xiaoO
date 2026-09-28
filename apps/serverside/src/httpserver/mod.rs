@@ -10,6 +10,6 @@ pub use channel_runtime::ChannelRuntimeProcessor;
 pub use dashboard::{dashboard_router, DashboardState};
 pub use router::{
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
-    create_router_with_control_plane_and_auth, HttpBearerAuthConfig,
+    create_router_with_control_plane_and_auth, ChannelRouterOptions, HttpBearerAuthConfig,
 };
 pub use service::{GatewayService, GatewayServiceError};
