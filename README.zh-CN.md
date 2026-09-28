@@ -301,7 +301,6 @@ bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
 - [Vault 密钥管理设计](./docs/vault_secrets_design.md)
 - [KV Cache 协同设计](./docs/kvcache-coordination-design.md)
 - [Super Gateway 控制面设计](./docs/super_gateway_control_plane_design.md)
-- [完整文档索引](./docs/README.md)
 
 ## 许可证
 

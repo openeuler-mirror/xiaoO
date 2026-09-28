@@ -22,7 +22,6 @@ AgentMoss 是一个**可被任意 AI Agent 调用的独立通用安全分析服�
 - [项目结构](#项目结构)
 - [测试](#测试)
 - [环境变量参考](docs/ENV_VARS.md)
-- [遗留缺陷记录](docs/KNOWN_ISSUES.md)（bridge 未读取 `workspace`：层2 检测在 xiaoO 下失效）
 
 ## 架构
 
@@ -626,7 +625,7 @@ xiaoo-hookers-install --non-interactive agent_moss
 > xiaoO 的 tool pre payload 里工作区字段名是 `workspace`（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`），
 > 而 `bridge.py` 读的是 `data.get("cwd", "")`（`bridge.py:358`），所以 xiaoO 转发过来的 `cwd` 恒为空串——
 > 依赖 `cwd` 的层2「间接文件访问检测」在 xiaoO 接入场景下不生效。其他直接调用 analyze 接口的调用方
-> （自带 `cwd`）不受影响。完整复现步骤与修复方向见 [遗留缺陷记录](docs/KNOWN_ISSUES.md)。
+> （自带 `cwd`）不受影响。修复方向：bridge 改读 `data.get("workspace")`。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|

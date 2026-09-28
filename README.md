@@ -312,7 +312,6 @@ bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
 - [Vault Secrets Design](./docs/vault_secrets_design.md)
 - [KV Cache Coordination Design](./docs/kvcache-coordination-design.md)
 - [Super Gateway Control Plane Design](./docs/super_gateway_control_plane_design.md)
-- [Full documentation index](./docs/README.md)
 
 ## License
 
