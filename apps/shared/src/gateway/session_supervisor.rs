@@ -503,8 +503,8 @@ impl SessionSupervisor {
 
                 self.persist_lane_state(
                     &root_agent_id,
-                    Some(partial_loop_state),
-                    Some(partial_memory_snapshot),
+                    Some(*partial_loop_state),
+                    Some(*partial_memory_snapshot),
                     Some(tool_manifest),
                     None,
                 )

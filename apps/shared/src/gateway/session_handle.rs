@@ -51,8 +51,11 @@ pub(crate) enum SessionPhase {
 
 pub(crate) enum SessionCommand {
     RunTurn {
-        request: AppTurnRequest,
-        resolved_runtime: ResolvedSessionRuntime,
+        /// Boxed: `AppTurnRequest` + `ResolvedSessionRuntime` dwarf every other
+        /// variant, and `ActorEvent::Command(Option<SessionCommand>)` embeds
+        /// this enum by value.
+        request: Box<AppTurnRequest>,
+        resolved_runtime: Box<ResolvedSessionRuntime>,
         event_sink: Option<Arc<dyn LoopEventSink>>,
         interaction_handle: Option<Arc<dyn InteractionHandle>>,
         channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
@@ -83,8 +86,8 @@ pub(crate) enum SessionCommand {
 }
 
 struct RunTurnCommand {
-    request: AppTurnRequest,
-    resolved_runtime: ResolvedSessionRuntime,
+    request: Box<AppTurnRequest>,
+    resolved_runtime: Box<ResolvedSessionRuntime>,
     event_sink: Option<Arc<dyn LoopEventSink>>,
     interaction_handle: Option<Arc<dyn InteractionHandle>>,
     channel_file_sender: Option<Arc<dyn ChannelFileSender>>,
@@ -190,8 +193,8 @@ impl SessionHandle {
         self.try_increment_queue_depth()?;
         let (reply_tx, reply_rx) = oneshot::channel();
         let command = SessionCommand::RunTurn {
-            request,
-            resolved_runtime,
+            request: Box::new(request),
+            resolved_runtime: Box::new(resolved_runtime),
             event_sink,
             interaction_handle,
             channel_file_sender,
@@ -647,8 +650,8 @@ impl SessionActor {
                 .await;
             let result = supervisor
                 .run_root_turn(
-                    turn.request,
-                    turn.resolved_runtime,
+                    *turn.request,
+                    *turn.resolved_runtime,
                     turn.event_sink,
                     turn.interaction_handle,
                     turn.channel_file_sender,

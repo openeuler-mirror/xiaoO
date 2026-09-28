@@ -196,8 +196,8 @@ impl SessionWorker {
 
                 return Err(SessionServiceError::CoreRunWithState {
                     message: error.to_string(),
-                    partial_loop_state: loop_state.to_snapshot(),
-                    partial_memory_snapshot: memory_manager.snapshot().clone(),
+                    partial_loop_state: Box::new(loop_state.to_snapshot()),
+                    partial_memory_snapshot: Box::new(memory_manager.snapshot().clone()),
                     tool_manifest,
                 });
             }
@@ -219,8 +219,8 @@ impl SessionWorker {
             memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
             return Err(SessionServiceError::CoreRunWithState {
                 message: format!("runtime shutdown failed: {error}"),
-                partial_loop_state: loop_state.to_snapshot(),
-                partial_memory_snapshot: memory_manager.snapshot().clone(),
+                partial_loop_state: Box::new(loop_state.to_snapshot()),
+                partial_memory_snapshot: Box::new(memory_manager.snapshot().clone()),
                 tool_manifest,
             });
         }
