@@ -423,6 +423,10 @@ impl SandboxCounter {
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
+            // The lock file is only ever used as an `flock` handle — its
+            // contents are never read or written — so state the truncate
+            // intent explicitly instead of leaving it implied.
+            .truncate(false)
             .open(&self.lock_path)
             .map_err(|e| SandboxCounterError::LockError {
                 message: format!("failed to create lock file: {}", e),

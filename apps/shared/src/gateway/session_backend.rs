@@ -27,13 +27,15 @@ pub(super) async fn lease_session_backend(
         if let Some(checkpoint) = session.paused_backend_checkpoint.clone() {
             return checkout_backend_with_eviction(
                 backend_manager,
-                &session.session_id,
-                checkpoint,
-                session_store,
-                Value::Null,
-                &CheckoutEvictionContext::resume(),
-                None,
-                initial_running,
+                CheckoutParams {
+                    session_id: &session.session_id,
+                    checkpoint,
+                    session_store,
+                    metadata: Value::Null,
+                    context: &CheckoutEvictionContext::resume(),
+                    options: None,
+                    initial_session_status: initial_running,
+                },
             )
             .await;
         }
@@ -123,16 +125,31 @@ impl CheckoutEvictionContext {
 /// mark for eviction) an idle sandbox and retry, up to
 /// `max_eviction_attempts` times. Only non-`NeedsEviction` errors — or
 /// exhaustion of the retry budget — surface to the caller.
+/// Everything one [`checkout_backend_with_eviction`] call needs besides the
+/// backend manager itself.
+pub(super) struct CheckoutParams<'a> {
+    pub session_id: &'a str,
+    pub checkpoint: crate::backend::BackendCheckpointRef,
+    pub session_store: Arc<dyn crate::gateway::SessionStore>,
+    pub metadata: Value,
+    pub context: &'a CheckoutEvictionContext,
+    pub options: Option<Value>,
+    pub initial_session_status: Option<(String, usize)>,
+}
+
 pub(super) async fn checkout_backend_with_eviction(
     backend_manager: &BackendManager,
-    session_id: &str,
-    checkpoint: crate::backend::BackendCheckpointRef,
-    session_store: Arc<dyn crate::gateway::SessionStore>,
-    metadata: Value,
-    context: &CheckoutEvictionContext,
-    options: Option<Value>,
-    initial_session_status: Option<(String, usize)>,
+    params: CheckoutParams<'_>,
 ) -> Result<BackendLease, SessionServiceError> {
+    let CheckoutParams {
+        session_id,
+        checkpoint,
+        session_store,
+        metadata,
+        context,
+        options,
+        initial_session_status,
+    } = params;
     let sandbox_key = BackendManager::sandbox_key_from_config(&GatewayBackendConfig::new(
         checkpoint.provider.clone(),
         checkpoint.provider_options.clone(),

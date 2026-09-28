@@ -116,7 +116,7 @@ impl SessionStore for InMemorySessionStore {
 
     async fn list_all(&self) -> Vec<SessionRecord> {
         let mut records: Vec<SessionRecord> = self.records.read().await.values().cloned().collect();
-        records.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+        records.sort_by_key(|record| std::cmp::Reverse(record.updated_at_ms));
         records
     }
 }

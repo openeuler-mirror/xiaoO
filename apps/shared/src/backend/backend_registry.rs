@@ -157,17 +157,17 @@ pub(crate) struct BackendRegistryData {
 
 #[derive(Debug, Clone)]
 pub(crate) enum BackendRegistryError {
-    FileError { message: String },
-    LockError { message: String },
-    ParseError { message: String },
+    File { message: String },
+    Lock { message: String },
+    Parse { message: String },
 }
 
 impl std::fmt::Display for BackendRegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::FileError { message } => write!(f, "file error: {}", message),
-            Self::LockError { message } => write!(f, "lock error: {}", message),
-            Self::ParseError { message } => write!(f, "parse error: {}", message),
+            Self::File { message } => write!(f, "file error: {}", message),
+            Self::Lock { message } => write!(f, "lock error: {}", message),
+            Self::Parse { message } => write!(f, "parse error: {}", message),
         }
     }
 }
@@ -338,15 +338,19 @@ impl BackendRegistry {
         let lock_file = OpenOptions::new()
             .create(true)
             .write(true)
+            // The lock file is only ever used as an `flock` handle — its
+            // contents are never read or written — so state the truncate
+            // intent explicitly instead of leaving it implied.
+            .truncate(false)
             .open(&self.lock_path)
-            .map_err(|e| BackendRegistryError::LockError {
+            .map_err(|e| BackendRegistryError::Lock {
                 message: format!("failed to create lock file: {}", e),
             })?;
 
         let fd = lock_file.as_raw_fd();
         let result = unsafe { libc::flock(fd, libc::LOCK_EX) };
         if result != 0 {
-            return Err(BackendRegistryError::LockError {
+            return Err(BackendRegistryError::Lock {
                 message: format!(
                     "failed to acquire lock: {}",
                     std::io::Error::last_os_error()
@@ -362,22 +366,20 @@ impl BackendRegistry {
             return Ok(BackendRegistryData::default());
         }
 
-        let file = File::open(&self.storage_path).map_err(|e| BackendRegistryError::FileError {
+        let file = File::open(&self.storage_path).map_err(|e| BackendRegistryError::File {
             message: format!("failed to open storage file: {}", e),
         })?;
 
         let reader = BufReader::new(file);
-        serde_json::from_reader(reader).map_err(|e| BackendRegistryError::ParseError {
+        serde_json::from_reader(reader).map_err(|e| BackendRegistryError::Parse {
             message: format!("failed to parse storage file: {}", e),
         })
     }
 
     fn save_data(&self, data: &BackendRegistryData) -> Result<(), BackendRegistryError> {
         super::atomic_save_json(&self.storage_path, data).map_err(|e| match e {
-            super::AtomicSaveError::Io(msg) => BackendRegistryError::FileError { message: msg },
-            super::AtomicSaveError::Serialize(msg) => {
-                BackendRegistryError::ParseError { message: msg }
-            }
+            super::AtomicSaveError::Io(msg) => BackendRegistryError::File { message: msg },
+            super::AtomicSaveError::Serialize(msg) => BackendRegistryError::Parse { message: msg },
         })
     }
 }

@@ -29,6 +29,10 @@ use hook::framework::HookerRegistryImpl;
 use std::any::Any;
 use std::collections::HashSet;
 
+/// Recorded hook invocations: `(state, outcome, workspace)` triples appended by
+/// the recording hookers below.
+type RecordedInvocations = Arc<StdMutex<Vec<(String, String, Option<String>)>>>;
+
 #[test]
 fn runtime_exec_shell_prefers_explicit_shell() {
     assert_eq!(
@@ -500,29 +504,34 @@ async fn memory_automation_failed_recall_keeps_user_text_and_turn_execution_unch
         .expect("turn should continue after memory recall failure");
 
     assert_eq!(result.visible_reply, "reply");
-    let requests = seen_requests.lock().expect("seen requests");
-    assert_eq!(
-        text_blocks(&requests[0].messages, agent_types::MessageRole::User),
-        vec!["hello".to_string()]
-    );
-    assert!(
-        !requests[0]
-            .messages
-            .iter()
-            .flat_map(|message| &message.blocks)
-            .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("<untrusted_long_term_memory>"))),
-        "failed recall must not add memory context"
-    );
-    drop(requests);
+    // Each guard is scoped to its own block: `std::sync::Mutex` guards must not
+    // be live across the `.await` points below.
+    {
+        let requests = seen_requests.lock().expect("seen requests");
+        assert_eq!(
+            text_blocks(&requests[0].messages, agent_types::MessageRole::User),
+            vec!["hello".to_string()]
+        );
+        assert!(
+            !requests[0]
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("<untrusted_long_term_memory>"))),
+            "failed recall must not add memory context"
+        );
+    }
 
-    let contexts = automation.seen_contexts.lock().expect("seen contexts");
-    assert_eq!(contexts[0].query, "hello");
-    drop(contexts);
-    let enqueued = automation.enqueued.lock().expect("enqueued");
-    assert_eq!(enqueued[0].user_text, "hello");
-    assert_eq!(enqueued[0].assistant_text, "reply");
-    assert!(enqueued[0].recent_messages.is_empty());
-    drop(enqueued);
+    {
+        let contexts = automation.seen_contexts.lock().expect("seen contexts");
+        assert_eq!(contexts[0].query, "hello");
+    }
+    {
+        let enqueued = automation.enqueued.lock().expect("enqueued");
+        assert_eq!(enqueued[0].user_text, "hello");
+        assert_eq!(enqueued[0].assistant_text, "reply");
+        assert!(enqueued[0].recent_messages.is_empty());
+    }
 
     dependencies
         .session_service
@@ -2218,14 +2227,14 @@ async fn pop_time_check_allows_daemon_principal_when_http_client_holds_lease() {
 struct RecordingStateHooker {
     id: HookerId,
     hook_point: HookPointId,
-    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+    invocations: RecordedInvocations,
     actions_by_state: HashMap<String, Vec<HookAction>>,
 }
 
 impl RecordingStateHooker {
     fn new(
         id: &str,
-        invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+        invocations: RecordedInvocations,
         actions_by_state: HashMap<String, Vec<HookAction>>,
     ) -> Self {
         Self {
@@ -2291,7 +2300,7 @@ impl Hooker for RecordingStateHooker {
 /// Build a `HookerRegistry` with a single enabled `RecordingStateHooker`
 /// for `*.Session.lifecycle.state`.
 fn recording_state_hooker_registry(
-    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+    invocations: RecordedInvocations,
     actions_by_state: HashMap<String, Vec<HookAction>>,
 ) -> Arc<dyn HookerRegistry> {
     let hooker = Box::new(RecordingStateHooker::new(
@@ -2395,15 +2404,11 @@ async fn fire_session_state_hook_background_dispatches_failed_state() {
 struct RecordingLifecycleHooker {
     id: HookerId,
     hook_point: HookPointId,
-    invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
+    invocations: RecordedInvocations,
 }
 
 impl RecordingLifecycleHooker {
-    fn new(
-        id: &str,
-        stage: &'static str,
-        invocations: Arc<StdMutex<Vec<(String, String, Option<String>)>>>,
-    ) -> Self {
+    fn new(id: &str, stage: &'static str, invocations: RecordedInvocations) -> Self {
         Self {
             id: HookerId(id.to_string()),
             hook_point: HookPointId(format!("*.Session.lifecycle.{stage}")),

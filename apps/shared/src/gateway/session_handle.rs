@@ -537,9 +537,7 @@ impl SessionActor {
             {
                 return None;
             }
-            let Some(next) = self.pending_turns.pop_front() else {
-                return None;
-            };
+            let next = self.pending_turns.pop_front()?;
             // Reaper `closing` flag: re-queue and pause popping rather than
             // rejecting. The reaper's TOCTOU re-check may clear `closing`
             // (→ `Nop` wakeup retries the turn) or proceed to `ForceClose`

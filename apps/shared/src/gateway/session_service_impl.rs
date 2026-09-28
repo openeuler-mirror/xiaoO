@@ -42,7 +42,7 @@ use super::memory_automation::{
 };
 use super::session_backend::{
     checkout_backend_with_eviction, lease_session_backend, sync_session_backend_instance,
-    CheckoutEvictionContext,
+    CheckoutEvictionContext, CheckoutParams,
 };
 use super::session_handle::SessionHandle;
 use super::session_lease::{is_daemon_principal, LeaseAcquireOutcome, SessionLeaseTable};
@@ -848,13 +848,15 @@ impl CoreBackedSessionService {
             Some(
                 checkout_backend_with_eviction(
                     self.backend_manager.as_ref(),
-                    &child_runtime_id,
-                    backend_checkpoint,
-                    self.session_store.clone(),
-                    request.metadata.clone(),
-                    &CheckoutEvictionContext::runtime_checkout(),
-                    request.options.clone(),
-                    None,
+                    CheckoutParams {
+                        session_id: &child_runtime_id,
+                        checkpoint: backend_checkpoint,
+                        session_store: self.session_store.clone(),
+                        metadata: request.metadata.clone(),
+                        context: &CheckoutEvictionContext::runtime_checkout(),
+                        options: request.options.clone(),
+                        initial_session_status: None,
+                    },
                 )
                 .await?,
             )
@@ -2362,10 +2364,11 @@ fn session_lifecycle_hook_point(agent_id: &str, stage: &str) -> HookPointId {
     HookPointId(format!("{}.Session.lifecycle.{}", agent_id, stage))
 }
 
-/// Stamp each `SendPrompt` action with `chain_depth = emitting_turn_depth
-/// + 1` (overwriting any plugin-supplied value) and drop it once the stamped
-/// value **reaches** `max_depth` (i.e., `next_depth >= max_depth` — exclusive
-/// upper bound). Other action kinds pass through unchanged. Pure (no I/O).
+/// Stamp each `SendPrompt` action with `chain_depth` set to
+/// `emitting_turn_depth + 1` (overwriting any plugin-supplied value) and drop it
+/// once the stamped value **reaches** `max_depth` (i.e., `next_depth >=
+/// max_depth` — exclusive upper bound). Other action kinds pass through
+/// unchanged. Pure (no I/O).
 ///
 /// Semantics: `max_depth = N` permits N turns total — the user-initiated
 /// turn (depth `0`) plus `N - 1` `send_prompt`-triggered turns (depths
