@@ -70,8 +70,7 @@ pub enum CronDialogMode {
 }
 
 /// Form fields for editing a cron job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CronEditForm {
     pub name: String,
     pub cron: String,
@@ -82,7 +81,6 @@ pub struct CronEditForm {
     pub max_retries: String,
     pub retry_delay: String,
 }
-
 
 impl CronEditForm {
     /// Build a form pre-filled from an existing job entry.
@@ -200,7 +198,9 @@ impl CronDialog {
     ) -> Self {
         Self {
             mode: CronDialogMode::List,
-            selected: if jobs.is_empty() { 0 } else { 0 },
+            // Always opens on the first job; `selected` is clamped by the
+            // navigation helpers when the list is empty.
+            selected: 0,
             jobs,
             jobs_file,
             default_timeout_secs,

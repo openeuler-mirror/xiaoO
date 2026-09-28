@@ -207,8 +207,8 @@ impl App {
 
         match &dialog.mode {
             CronDialogMode::List => {
-                let dialog_width = (area.width * 3 / 4).min(80).max(40);
-                let dialog_height = (area.height * 3 / 4).min(24).max(10);
+                let dialog_width = (area.width * 3 / 4).clamp(40, 80);
+                let dialog_height = (area.height * 3 / 4).clamp(10, 24);
                 let x = (area.width.saturating_sub(dialog_width)) / 2;
                 let y = (area.height.saturating_sub(dialog_height)) / 2;
                 let dialog_area = Rect {
@@ -328,7 +328,7 @@ impl App {
                 form, focus, error, ..
             } => {
                 let dialog_width = 70.min(area.width.saturating_sub(4));
-                let dialog_height = (area.height.saturating_sub(2)).min(22).max(3);
+                let dialog_height = (area.height.saturating_sub(2)).clamp(3, 22);
                 let x = (area.width.saturating_sub(dialog_width)) / 2;
                 let y = (area.height.saturating_sub(dialog_height)) / 2;
                 let dialog_area = Rect {

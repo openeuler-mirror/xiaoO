@@ -9,10 +9,31 @@ use super::{
     apply_expanded_tool_panel, build_side_by_side_diff_rows, build_transcript_cache,
     diff_change_counts, expanded_tool_background, highlight_line_selection, parse_file_edit_args,
     parse_join_subagent_terminal, parse_spawn_subagent_agent_id, render_file_edit_tool_lines,
-    render_message_entry, render_tool_message_lines, wrap_line_to_visual_lines, WideTableRegion,
+    render_message_entry, render_tool_message_lines, wrap_line_to_visual_lines, FileEditRenderCtx,
+    MessageRenderCtx, WideTableRegion,
 };
 use crate::app_state::CachedMessageRender;
 use crate::app_state::{MessageVisualBlock, TranscriptRenderCache};
+
+/// Build a `MessageRenderCtx` with the inert defaults these tests share
+/// (not streaming, not loading, no animation, no incremental markdown).
+fn render_ctx<'a>(
+    message: &'a Message,
+    theme: &'a Theme,
+    width: u16,
+    table_horiz_offset: usize,
+) -> MessageRenderCtx<'a> {
+    MessageRenderCtx {
+        message,
+        theme,
+        width,
+        table_horiz_offset,
+        is_active_stream_message: false,
+        chat_is_loading: false,
+        loading_animation: "",
+        incremental_markdown: None,
+    }
+}
 
 fn line_display_width(line: &Line<'static>) -> usize {
     line.spans
@@ -75,7 +96,8 @@ fn build_transcript_cache_keeps_total_lines_in_sync_with_visual_lines() {
     // used to be hidden below the viewport.
     let last_content_visual: String = flat
         .iter()
-        .rev().nth(1)
+        .rev()
+        .nth(1)
         .expect("cache should have at least one content line")
         .spans
         .iter()
@@ -424,7 +446,7 @@ fn tool_toggle_row_tracks_expanded_panel_spacer() {
         file_change: None,
     });
 
-    let (collapsed, _state) = render_message_entry(&message, &theme, 80, 0, false, false, "", None);
+    let (collapsed, _state) = render_message_entry(render_ctx(&message, &theme, 80, 0));
     assert_eq!(collapsed.tool_toggle_row_offset, Some(1));
 
     message
@@ -432,7 +454,7 @@ fn tool_toggle_row_tracks_expanded_panel_spacer() {
         .as_mut()
         .expect("tool state should exist")
         .expanded = true;
-    let (expanded, _state) = render_message_entry(&message, &theme, 80, 0, false, false, "", None);
+    let (expanded, _state) = render_message_entry(render_ctx(&message, &theme, 80, 0));
     assert_eq!(expanded.tool_toggle_row_offset, Some(2));
 }
 
@@ -480,13 +502,15 @@ fn file_edit_render_includes_path_and_stats() {
         .expect("tool message should carry tool state");
 
     let lines = render_file_edit_tool_lines(
-        &message,
-        tool,
-        &edit,
-        Color::Green,
-        &Theme::detect(),
-        80,
-        0,
+        FileEditRenderCtx {
+            message: &message,
+            tool,
+            edit: &edit,
+            tool_color: Color::Green,
+            theme: &Theme::detect(),
+            width: 80,
+            table_horiz_offset: 0,
+        },
         &mut vec![],
     );
     let rendered_text = lines
@@ -1370,13 +1394,12 @@ fn wide_table_metadata_flows_through_message_render_and_cache() {
     message.content = content.to_string();
 
     // Wide-enough viewport: no metadata, full content visible.
-    let (wide_enough, _state) =
-        render_message_entry(&message, &theme, 80, 0, false, false, "", None);
+    let (wide_enough, _state) = render_message_entry(render_ctx(&message, &theme, 80, 0));
     assert!(wide_enough.wide_tables.is_empty());
 
     // Narrow viewport: table is windowed; start_line rebased past header +
     // thinking block (1 header + 1 thinking header + 1 body + 1 blank = 4).
-    let (render, _state) = render_message_entry(&message, &theme, 20, 0, false, false, "", None);
+    let (render, _state) = render_message_entry(render_ctx(&message, &theme, 20, 0));
     assert_eq!(render.wide_tables.len(), 1);
     let wt = render.wide_tables[0];
     assert_eq!(wt.start_line, 4);
@@ -1392,8 +1415,7 @@ fn wide_table_metadata_flows_through_message_render_and_cache() {
     }
 
     // A huge offset clamps to the rightmost window.
-    let (render_max, _state) =
-        render_message_entry(&message, &theme, 20, 1000, false, false, "", None);
+    let (render_max, _state) = render_message_entry(render_ctx(&message, &theme, 20, 1000));
     let wt_max = render_max.wide_tables[0];
     assert_eq!(
         wt_max.horiz_offset,

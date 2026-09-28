@@ -19,6 +19,11 @@ use xiaoo_api::chat::AgentId;
 use xiaoo_api::events::LoopEndSummary;
 use xiaoo_shared::plan::{SpawnSubagentMetadata, TodoSnapshotUpdate};
 
+/// Slot holding the session's shared MCP memory client: `None` (outer) means
+/// not yet initialized, `None` (inner) a disabled or failed setup.
+pub(super) type MemoryAutomationSlot =
+    Arc<tokio::sync::Mutex<Option<Option<Arc<dyn TurnMemoryAutomation>>>>>;
+
 #[derive(Debug)]
 pub enum SessionTurnUpdate {
     TurnStart {
@@ -118,8 +123,7 @@ pub struct SessionGateway {
     pub(super) active_session_ids: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// One MCP memory client is shared by all local TUI turns. The nested
     /// option distinguishes not-yet-initialized from a disabled/failed setup.
-    pub(super) memory_automation:
-        Arc<tokio::sync::Mutex<Option<Option<Arc<dyn TurnMemoryAutomation>>>>>,
+    pub(super) memory_automation: MemoryAutomationSlot,
     /// Latest RAM-A health receiver. Unlike a turn's stream receiver, this
     /// remains available after a turn finishes so background ingest failures
     /// can update the TUI immediately.

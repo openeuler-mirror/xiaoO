@@ -171,14 +171,14 @@ fn line_char_bounds(s: &str, cursor: usize) -> (usize, usize) {
     let n = chars.len();
     let cursor = cursor.min(n);
     let mut line_start = 0usize;
-    for i in 0..cursor {
-        if chars[i] == '\n' {
+    for (i, &ch) in chars.iter().enumerate().take(cursor) {
+        if ch == '\n' {
             line_start = i + 1;
         }
     }
     let mut line_end = n;
-    for j in line_start..n {
-        if chars[j] == '\n' {
+    for (j, &ch) in chars.iter().enumerate().skip(line_start) {
+        if ch == '\n' {
             line_end = j;
             break;
         }

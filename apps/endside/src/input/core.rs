@@ -93,8 +93,7 @@ impl Input {
         let mut byte_end = 0;
         let mut found_start = false;
         let mut found_end = false;
-        let mut char_idx = 0;
-        for (byte_idx, _ch) in self.value.char_indices() {
+        for (char_idx, (byte_idx, _ch)) in self.value.char_indices().enumerate() {
             if char_idx == range.start && !found_start {
                 byte_start = byte_idx;
                 found_start = true;
@@ -104,8 +103,8 @@ impl Input {
                 found_end = true;
                 break;
             }
-            char_idx += 1;
         }
+
         if !found_end {
             byte_end = self.value.len();
         }

@@ -292,9 +292,11 @@ where
                 debug,
                 format,
                 session_title,
-                session,
-                agent,
-                attach,
+                RunOnceTarget {
+                    session,
+                    agent,
+                    attach,
+                },
             )
             .await;
         }
@@ -317,16 +319,27 @@ where
     }
 }
 
+/// Where a `run` invocation routes: session id, agent id, and an optional
+/// daemon URL to attach to instead of running locally.
+struct RunOnceTarget {
+    session: Option<String>,
+    agent: Option<String>,
+    attach: Option<String>,
+}
+
 async fn run_once(
     config: CliConfig,
     prompt: String,
     debug: bool,
     format: OutputFormat,
     title: Option<String>,
-    session: Option<String>,
-    agent: Option<String>,
-    attach: Option<String>,
+    target: RunOnceTarget,
 ) {
+    let RunOnceTarget {
+        session,
+        agent,
+        attach,
+    } = target;
     if debug {
         eprintln!(
             "[config] provider={}, model={}, max_turns={}, format={:?}",
@@ -379,10 +392,7 @@ async fn run_once(
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
-            agent_id: AgentId(
-                agent.clone()
-                    .unwrap_or_else(|| "defaultagent".into()),
-            ),
+            agent_id: AgentId(agent.clone().unwrap_or_else(|| "defaultagent".into())),
             model: config.model.clone(),
             llm: Some(LlmRuntimeConfig {
                 profile_id: None,

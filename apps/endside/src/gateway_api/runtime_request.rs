@@ -245,12 +245,11 @@ impl GatewayRuntime {
                 model: state.agent_config.llm.model.clone(),
                 llm: Some(llm_runtime_config_from_state(state)),
                 system_prompt,
-                feature_flags: {
-                    let mut flags = FeatureFlags::default();
-                    flags.kvcache_enabled = state.agent_config.llm.kvcache_enabled;
-                    flags.kvcache_debug_enabled = state.agent_config.llm.kvcache_debug_enabled;
-                    flags.redact_secrets_display = state.agent_config.tui.redact_secrets_display;
-                    flags
+                feature_flags: FeatureFlags {
+                    kvcache_enabled: state.agent_config.llm.kvcache_enabled,
+                    kvcache_debug_enabled: state.agent_config.llm.kvcache_debug_enabled,
+                    redact_secrets_display: state.agent_config.tui.redact_secrets_display,
+                    ..Default::default()
                 },
                 token_budget: TokenBudgetConfig {
                     total_budget,

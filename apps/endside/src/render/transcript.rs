@@ -141,8 +141,7 @@ impl App {
             let mut any_dirty =
                 render_state.transcript_cache.is_none() || width_changed || theme_changed;
 
-            for message_index in 0..message_count {
-                let message = &messages[message_index];
+            for (message_index, message) in messages.iter().enumerate() {
                 let is_active_stream_message = active_stream_index == Some(message_index);
                 let should_bypass_cache = is_active_stream_message && chat_is_loading;
                 let revision_changed = render_state.message_render_revisions[message_index]
@@ -159,16 +158,16 @@ impl App {
                         None
                     };
                     let table_horiz_offset = message.table_horiz_offset;
-                    let (rendered, new_markdown_state) = render_message_entry(
+                    let (rendered, new_markdown_state) = render_message_entry(MessageRenderCtx {
                         message,
-                        &theme,
-                        inner_area.width,
+                        theme: &theme,
+                        width: inner_area.width,
                         table_horiz_offset,
                         is_active_stream_message,
                         chat_is_loading,
-                        &loading_animation,
-                        prev_markdown_state,
-                    );
+                        loading_animation: &loading_animation,
+                        incremental_markdown: prev_markdown_state,
+                    });
                     // Persist the fingerprint only for non-bypass messages:
                     // bypass (active stream) messages are recomputed every
                     // tick by definition, so leaving their slot untouched
@@ -490,16 +489,32 @@ impl App {
     }
 }
 
-fn render_message_entry(
-    message: &Message,
-    theme: &Theme,
+/// Borrowed per-message render context shared by `render_message_entry` and
+/// `render_standard_message_lines` (both need the same eight values).
+struct MessageRenderCtx<'a> {
+    message: &'a Message,
+    theme: &'a Theme,
     width: u16,
     table_horiz_offset: usize,
     is_active_stream_message: bool,
     chat_is_loading: bool,
-    loading_animation: &str,
+    loading_animation: &'a str,
     incremental_markdown: Option<MarkdownIncrementalState>,
+}
+
+fn render_message_entry(
+    ctx: MessageRenderCtx<'_>,
 ) -> (CachedMessageRender, Option<MarkdownIncrementalState>) {
+    let MessageRenderCtx {
+        message,
+        theme,
+        width,
+        table_horiz_offset,
+        is_active_stream_message,
+        chat_is_loading,
+        loading_animation,
+        incremental_markdown,
+    } = ctx;
     let mut tool_toggle_row_offset = None;
     let mut subagent_open_target = None;
 
@@ -588,7 +603,7 @@ fn render_message_entry(
     }
 
     let (lines, wrapped_lines, new_markdown_state, frozen_prefix_line_count, wide_tables) =
-        render_standard_message_lines(
+        render_standard_message_lines(MessageRenderCtx {
             message,
             theme,
             width,
@@ -597,7 +612,7 @@ fn render_message_entry(
             chat_is_loading,
             loading_animation,
             incremental_markdown,
-        );
+        });
 
     (
         CachedMessageRender {
@@ -996,23 +1011,22 @@ fn rebuild_lines_with_styles(
         let mut spans = Vec::new();
         let mut current_style: Option<Style> = None;
         let mut segment_text = String::new();
-        let mut local_char_idx = 0;
-
-        for ch in line_text.chars() {
+        for (local_char_idx, ch) in line_text.chars().enumerate() {
             let global_pos = global_char_offset + local_char_idx;
             let style = find_style_at_position(style_ranges, global_pos);
 
             if current_style != Some(style) {
-                if current_style.is_some() && !segment_text.is_empty() {
-                    spans.push(Span::styled(segment_text.clone(), current_style.unwrap()));
-                    segment_text.clear();
+                if let Some(active_style) = current_style {
+                    if !segment_text.is_empty() {
+                        spans.push(Span::styled(segment_text.clone(), active_style));
+                        segment_text.clear();
+                    }
                 }
 
                 current_style = Some(style);
             }
 
             segment_text.push(ch);
-            local_char_idx += 1;
         }
 
         if !segment_text.is_empty() {
@@ -1142,13 +1156,15 @@ fn render_tool_message_lines(
     if tool.tool == "file_edit" {
         if let Some(edit) = parse_file_edit_args(&tool.args_preview) {
             return render_file_edit_tool_lines(
-                message,
-                tool,
-                &edit,
-                tool_color,
-                theme,
-                width,
-                table_horiz_offset,
+                FileEditRenderCtx {
+                    message,
+                    tool,
+                    edit: &edit,
+                    tool_color,
+                    theme,
+                    width,
+                    table_horiz_offset,
+                },
                 wide_tables,
             );
         }
@@ -1430,16 +1446,31 @@ fn parse_file_edit_args(args_preview: &str) -> Option<FileEditDisplay> {
     })
 }
 
-fn render_file_edit_tool_lines(
-    message: &Message,
-    tool: &ToolMessageState,
-    edit: &FileEditDisplay,
-    tool_color: Color,
-    theme: &Theme,
+/// Borrowed inputs for `render_file_edit_tool_lines`; `wide_tables` is passed
+/// separately because it is an output accumulator, not input context.
+struct FileEditRenderCtx<'a> {
+    message: &'a Message,
+    tool: &'a ToolMessageState,
+    edit: &'a FileEditDisplay,
+    tool_color: ratatui::style::Color,
+    theme: &'a Theme,
     width: u16,
     table_horiz_offset: usize,
+}
+
+fn render_file_edit_tool_lines(
+    ctx: FileEditRenderCtx<'_>,
     wide_tables: &mut Vec<WideTableRegion>,
 ) -> Vec<Line<'static>> {
+    let FileEditRenderCtx {
+        message,
+        tool,
+        edit,
+        tool_color,
+        theme,
+        width,
+        table_horiz_offset,
+    } = ctx;
     let timestamp = message.timestamp.format("%H:%M:%S").to_string();
     let toggle = sanitize_terminal_text(if tool.expanded { "▾" } else { "▸" });
     let status = match tool.status {
@@ -2051,22 +2082,28 @@ fn render_completion_check_lines(
     lines
 }
 
-fn render_standard_message_lines(
-    message: &Message,
-    theme: &Theme,
-    width: u16,
-    table_horiz_offset: usize,
-    is_active_stream_message: bool,
-    chat_is_loading: bool,
-    loading_animation: &str,
-    incremental_markdown: Option<MarkdownIncrementalState>,
-) -> (
+/// Rendered output of a standard transcript message: the visible lines, the
+/// per-sub-block lines, the incremental markdown state to carry into the next
+/// render, the selection-anchor line index, and the wide-table hit regions.
+type RenderedMessageLines = (
     Vec<Line<'static>>,
     Vec<Vec<Line<'static>>>,
     Option<MarkdownIncrementalState>,
     Option<usize>,
     Vec<WideTableRegion>,
-) {
+);
+
+fn render_standard_message_lines(ctx: MessageRenderCtx<'_>) -> RenderedMessageLines {
+    let MessageRenderCtx {
+        message,
+        theme,
+        width,
+        table_horiz_offset,
+        is_active_stream_message,
+        chat_is_loading,
+        loading_animation,
+        incremental_markdown,
+    } = ctx;
     #[cfg(debug_assertions)]
     let _start = std::time::Instant::now();
     let (indicator_color, role_label, role_style, content_style) = match message.role {

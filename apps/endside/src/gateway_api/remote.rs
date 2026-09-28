@@ -746,11 +746,13 @@ async fn run_remote_stream(
                 Ok(Some(event)) => {
                     handle_remote_event(
                         event,
-                        &client,
-                        &remote,
-                        token.as_deref(),
-                        &client_id,
-                        &turn_request.session_id,
+                        RemoteEventCtx {
+                            client: &client,
+                            remote: &remote,
+                            token: token.as_deref(),
+                            client_id: &client_id,
+                            session_id: &turn_request.session_id,
+                        },
                         &updates_tx,
                         &mut interaction_rx,
                     )
@@ -766,16 +768,29 @@ async fn run_remote_stream(
     }
 }
 
+/// Shared connection context for `handle_remote_event`: the HTTP client, the
+/// resolved remote runtime, and the lease identity of the turn it belongs to.
+struct RemoteEventCtx<'a> {
+    client: &'a reqwest::Client,
+    remote: &'a RemoteRuntimeConfig,
+    token: Option<&'a str>,
+    client_id: &'a str,
+    session_id: &'a str,
+}
+
 async fn handle_remote_event(
     event: RemoteSseEvent,
-    client: &reqwest::Client,
-    remote: &RemoteRuntimeConfig,
-    token: Option<&str>,
-    client_id: &str,
-    session_id: &str,
+    ctx: RemoteEventCtx<'_>,
     updates_tx: &UnboundedSender<SessionTurnUpdate>,
     interaction_rx: &mut UnboundedReceiver<UserPromptResult>,
 ) {
+    let RemoteEventCtx {
+        client,
+        remote,
+        token,
+        client_id,
+        session_id,
+    } = ctx;
     match event {
         RemoteSseEvent::TurnStart { agent_id, turn } => {
             let _ = updates_tx.send(SessionTurnUpdate::TurnStart {

@@ -167,7 +167,6 @@ pub struct PlanPanelState {
     pub last_visible_height: usize,
 }
 
-
 impl PlanPanelState {
     pub fn max_scroll_offset(&self) -> usize {
         self.total_lines
@@ -1036,12 +1035,17 @@ impl AppState {
         }
 
         let mut segments: Vec<String> = Vec::new();
-        for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+        let last_line = end_line.min(lines.len().saturating_sub(1));
+        for (line_idx, line) in lines
+            .iter()
+            .enumerate()
+            .take(last_line + 1)
+            .skip(start_line)
+        {
             // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
             if cache.line_is_header.get(line_idx).copied().unwrap_or(false) {
                 continue;
             }
-            let line = &lines[line_idx];
             let col_start = if line_idx == start_line { start_col } else { 0 };
             let col_end = if line_idx == end_line {
                 end_col.min(line.chars().count())
