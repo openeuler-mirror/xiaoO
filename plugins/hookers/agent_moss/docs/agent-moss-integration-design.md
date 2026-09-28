@@ -544,7 +544,7 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | 17 | 邮件操作 | 2 | 批量删邮箱 vs 发正常通知 |
 | 18 | 反弹 Shell/工具注入 | 3 | bash -i 反弹 shell、通用工具参数注入 payload |
 
-> **⚠️ 已知缺口：第 12 条「间接文件访问」在 xiaoO 接入场景下不生效。** 该规则需要 analyze 请求携带 `cwd`。xiaoO 的 tool pre payload 没有 `cwd` 字段，工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`；由 `crates/hook/src/hookers/plugin/core.rs:250-255` 生成），而 `bridge.py` 读的是 `data.get("cwd", "")`（`plugins/hookers/agent_moss/bridge.py:358`），因此转发给 AgentMoss 的 `cwd` **恒为空串**，层2 的间接文件访问检测在 xiaoO 下拿不到工作区、实际不触发。这是 bridge 侧字段名与宿主 payload 契约不一致导致的（代码看起来是 bug；本文档只记录实际行为，未改代码）。AgentMoss 作为独立服务被其他调用方（如自带 `cwd` 的 OpenDesk）接入时该规则仍正常。修复方向是把 bridge 改为读 `workspace`。
+> **⚠️ 已知缺口：第 12 条「间接文件访问」在 xiaoO 接入场景下不生效。** 该规则需要 analyze 请求携带 `cwd`。xiaoO 的 tool pre payload 没有 `cwd` 字段，工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`；由 `crates/hook/src/hookers/plugin/core.rs:250-255` 生成），而 `bridge.py` 读的是 `data.get("cwd", "")`（`plugins/hookers/agent_moss/bridge.py:358`），因此转发给 AgentMoss 的 `cwd` **恒为空串**，层2 的间接文件访问检测在 xiaoO 下拿不到工作区、实际不触发。这是 bridge 侧字段名与宿主 payload 契约不一致导致的（代码看起来是 bug；本文档只记录实际行为，未改代码）。AgentMoss 作为独立服务被其他调用方（如自带 `cwd` 的 OpenDesk）接入时该规则仍正常。修复方向是把 bridge 改为读 `workspace`。完整复现步骤、影响评估与修复清单见 [遗留缺陷记录](KNOWN_ISSUES.md)。
 
 **各配置通过率（实测，`tests/cases/README.md` 口径，分母 203）**：
 
