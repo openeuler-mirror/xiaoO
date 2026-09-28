@@ -26,6 +26,7 @@
 - `AGENT_MOSS_LLM_RETRIES` / `TEMPERATURE` / `MAX_TOKENS`：LLM 调参
 - `AGENT_MOSS_RUNTIME_CONFIG_PATH` / `TOKEN_STATS_PATH` / `SETTINGS_PATH` / `CONSOLE_TOKEN`：常驻服务新增
 - `AGENT_MOSS_URL` / `HOST` / `PORT`：bridge.py 消费方连服务用
+- `AGENT_MOSS_INSTANCE`：归属实例标识（install.sh 注入 `xiaoo`），bridge 探测时按它过滤实例，避免连到同机其他 agent 的 agentmoss
 
 ---
 
@@ -108,10 +109,13 @@ AGENT_MOSS_DISABLE_*  env  >  runtime JSON（~/.config/agentmoss/agent_moss_runt
 | `AGENT_MOSS_PORT` | 服务端口（被占时服务自动 findFreePort 往上找，bridge 探测 9090-9095 兜底）| `9090` |
 | `AGENT_MOSS_HOOK_TIMEOUT` | analyze 请求超时（秒）| `60` |
 | `AGENT_MOSS_HEALTH_TIMEOUT` | 活性检查超时（秒）| `2` |
+| `AGENT_MOSS_INSTANCE` | **本机归属实例标识**。bridge 探测 `/api/v1/health` 时要求返回的 `instance` 字段等于该值，不等则跳过该端口（宁可 fail-closed 也不连到别的 agent 的 agentmoss），见 `plugins/hookers/agent_moss/bridge.py:78,169-171`。`install.sh` 安装时注入为 `xiaoo`（systemd 模式写 `/etc/agent_moss/agent_moss.env`，nohup 模式 export），见 `plugins/hookers/agent_moss/install.sh:209-221`。**用户显式设了 `AGENT_MOSS_URL` / `AGENT_MOSS_PORT` 时跳过探测，此值不生效**（尊重显式配置，`bridge.py:200`）。| `xiaoo` |
 | `AGENT_MOSS_LOG_PATH` | **全量 hook 日志 + LLM prompt 日志路径**。bridge.py 记 HOOK_HEALTH_OK/HOOK_INPUT/HOOK_OUTPUT（每次 hook 调用都记，含 tool_input 和判定结果）；llm_analyzer.py 记 LLM 判定 prompt。两处写同一个文件，对应 audit_agent 的 `AUDIT_LOG_PATH`，行为完全一致 | 未设（不记）|
 | `AGENT_MOSS_CHECK_SOURCE` | 设 `1` 时额外检查 agent_moss 包是否可 import | 未设 |
 
-> 端口解析优先级（学 OpenDesk hook.ts resolveGateUrl）：`AGENT_MOSS_URL` > `AGENT_MOSS_PORT` 显式指定 > 探测 9090-9095 找 `/api/v1/health` 返回 healthy > 默认 9090。
+> 上表是 bridge.py 实际读取的**全部** env（`plugins/hookers/agent_moss/bridge.py:64-78`）。bridge 之外，还有一类由 bridge 从 xiaoo 配置读取后 **per-request 转发**给服务的变量：LLM 相关配置（如 API key）不在 bridge 进程 env 里读取，而是 bridge 解析 `~/.config/xiaoo/config.toml` + 相关 env 后随请求注入 `metadata.llm_config`（`bridge.py:114-125`）。
+
+> 端口解析优先级（学 OpenDesk hook.ts resolveGateUrl）：`AGENT_MOSS_URL` > `AGENT_MOSS_PORT` 显式指定 > 探测 9090-9095 找 `/api/v1/health` 返回 healthy **且 `instance` 匹配 `AGENT_MOSS_INSTANCE`** > 默认 9090。
 
 > 注：`AGENT_MOSS_LOG_PATH` 不依赖 L3 是否命中——即使命令在层1/层2 就被拦（或服务返回 422 fail-closed），hook 全量日志照常记录，便于排查。
 
@@ -155,6 +159,9 @@ export AGENT_MOSS_CUSTOM_RULES='[{"pattern":"kubectl delete namespace","action":
 
 # 指向远端 AgentMoss 服务（不在本机起）
 export AGENT_MOSS_URL=http://10.0.0.5:9095
+
+# 本机多 agentmoss 并存时，声明自己该连哪个实例
+export AGENT_MOSS_INSTANCE=xiaoo
 ```
 
 ---

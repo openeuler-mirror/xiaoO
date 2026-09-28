@@ -165,6 +165,7 @@ a_next (待执行动作)
 │ │   英文词边界+排参数前缀，避免 --format= /   │
 │ │   搜索模式 NON_WRITE 含 write 误报修改/删除│
 │ ├── 间接文件访问检测（看 cwd 列实际文件）     │
+│ │   ※ xiaoO 场景下不生效，见下注             │
 │ ├── 密码修改授权检测（看 history）            │
 │ ├── 用户/组删除授权检测（看 history）         │
 │ └── 提权检测（看 history，原死代码启用）      │
@@ -183,6 +184,8 @@ a_next (待执行动作)
 │     Fail: fail-closed + warn-allow           │
 └─────────────────────────────────────────────┘
 ```
+
+> **关于 `cwd` 的已知缺口（xiaoO → bridge 方向）**：上图的层2「间接文件访问检测」需要 analyze 请求里的 `cwd`。但 xiaoO 的 tool pre payload **没有 `cwd` 字段**——工作区字段名是 `workspace`（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`）。而 `bridge.py` 读的是 `data.get("cwd", "")`（`plugins/hookers/agent_moss/bridge.py:358`），因此 xiaoO 侧转发给 AgentMoss 的 `cwd` **恒为空串**，该检测在 xiaoO 接入场景下实际不生效。这是 bridge 侧字段名与宿主 payload 契约不一致导致的（代码看起来是 bug，此处只记录实际行为）。AgentMoss 作为独立服务（OpenDesk 等其他调用方自带 `cwd`）仍可用该检测。修复方向：bridge 改读 `data.get("workspace")`——不在本次文档变更范围内。
 
 ### 2.3 当前输入格式
 
