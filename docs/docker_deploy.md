@@ -1,8 +1,27 @@
 # Docker 容器化部署
 
-xiaoO 提供官方 `Dockerfile`，基于代码仓构建出一个包含 `xiaoo`、`xiaoo-daemon`
-和 `moirai` 三个程序的镜像。镜像默认拉起 `xiaoo-daemon`，对外暴露 HTTP API
-（`18080`）与只读 dashboard（`28081`）。
+> ## ⚠️ 当前 `Dockerfile` 无法构建成功（2026-09 核对）
+>
+> **`docker build` 今天会失败。本节文档描述的是镜像的设计意图与修复方向，不是
+> 可直接复现的现状。** 已确认三处缺陷（本次变更按用户决定**不修改 `Dockerfile`**，
+> 仅在此记录；修复 Dockerfile 属于独立变更）：
+>
+> | # | 位置 | 缺陷 | 修复方向 |
+> | --- | --- | --- | --- |
+> | 1 | `Dockerfile:56` | `COPY crates/llm-client-cli/Cargo.toml` 指向**已被删除**的 crate（删除提交 `a507b74` "refactor: remove llm-client-cli crate, remove related tests"；`crates/` 下现无 `llm-client-cli`）→ 构建在此中止 | 删除该行 |
+> | 2 | `Dockerfile:45-66` | 逐层 COPY 的 workspace 成员清单**遗漏** `crates/xiaoo-api` 与 `crates/protocol`，而两者都是 workspace 成员（`Cargo.toml:30-31`）→ 后续 `cargo fetch`（`Dockerfile:89`）无法解析整个 workspace | 补两行 `COPY crates/xiaoo-api/Cargo.toml` / `COPY crates/protocol/Cargo.toml` |
+> | 3 | `Dockerfile:118-126` | 对 `plugins/hookers/audit_agent/` 执行 `rm -f .../install.sh` 并向该目录写入 `plugin.json`，但 `audit_agent` 已在 `1f08b49` "移除 audit_agent，由 agent_moss 完全取代" 中被删除（`plugins/hookers/` 现无此目录）→ `&&` 链在该步失败 | 删除这两步，或改为对 `agent_moss` 做等价处理 |
+>
+> 附带（不单独致命，但同属 drift）：`Dockerfile:111-115` 的注释与 `:148-161` 的
+> pip/dnf 依赖清单仍围绕被删除的 `audit_agent` / `audit_dashboard` 编写，见下文 §1。
+>
+> 下文除"构建镜像"章节外，其余内容（镜像元信息、运行方式、环境变量）描述的是
+> **镜像成功构建后**的形态，可用于编写与评审 `Dockerfile` 修复，但**不要**据此
+> 认为镜像今天可用。
+
+xiaoO 提供官方 `Dockerfile`，设计目标是从代码仓构建出一个包含 `xiaoo`、
+`xiaoo-daemon` 和 `moirai` 三个程序的镜像。镜像默认拉起 `xiaoo-daemon`，
+对外暴露 HTTP API（`18080`）与只读 dashboard（`28081`）。
 
 > **镜像不内置 `config.toml`**：运行时挂载配置文件，同一镜像可服务
 > OpenRouter / OpenAI / 智谱 / 本地模型 / Feishu bot 等任何场景，只需换
@@ -26,7 +45,7 @@ xiaoO 提供官方 `Dockerfile`，基于代码仓构建出一个包含 `xiaoo`�
 | `/usr/bin/moirai` | moirai tracing 工具 |
 | `/usr/bin/xiaoo-hookers-install` / `-uninstall` | → hookers `install.sh` / `uninstall.sh` 的软链 |
 | `/usr/lib/.xiaoo/skills/` | 内置 skills |
-| `/usr/lib/.xiaoo/hookers/` | hookers 插件（`audit_agent` 等） |
+| `/usr/lib/.xiaoo/hookers/` | hookers 插件（随仓发布的四个：`agent_moss`、`cerberus_bash_control`、`llm_pre_secret_guard`、`tool_post_secret_guard`） |
 | `/usr/share/doc/xiaoO/` | `README.md`、`README.zh-CN.md`、`docs/*.md` |
 | `/usr/share/licenses/xiaoO/` | `LICENSE` |
 | `/root/.xiaoo/` | 运行时数据（trace.db 等），`VOLUME`；即 `~/.xiaoo` |
@@ -37,7 +56,16 @@ xiaoO 提供官方 `Dockerfile`，基于代码仓构建出一个包含 `xiaoo`�
 | 用途 | 包 |
 | --- | --- |
 | 主二进制 | `xclip`、`git`、`ca-certificates`、`curl`（HEALTHCHECK） |
-| audit_agent / audit_dashboard | `python3` + `python3-openai` / `httpx` / `pydantic` / `tenacity` / `tomli` / `fastapi` / `uvicorn` / `starlette` |
+| hookers（`agent_moss` 等 Python 脚本） | `python3` + `python3-tomli`（`agent_moss/bridge.py:57-60` 优先用 3.11+ 标准库 `tomllib`，降级用 `tomli`） |
+
+> **依赖清单已失配（known gap）**：`Dockerfile:148-161` 仍安装 `python3-openai` /
+> `httpx` / `pydantic` / `tenacity` / `fastapi` / `uvicorn` / `starlette`，这些是
+> 已删除的 `audit_agent` / `audit_dashboard` 所需。实际随镜像发布的 hooker 脚本
+> 只用标准库：对 `plugins/hookers/*/` 下全部 `*.py` 取 import 并集，第三方依赖
+> 仅 `tomli`（`agent_moss/bridge.py:60`；`llm_pre_secret_guard` /
+> `tool_post_secret_guard` / `cerberus_bash_control` 的脚本无第三方 import）。
+> `agent_moss/install.sh:116-143` 走的是 `pip install agent-moss` 的独立 venv 流程，
+> 与镜像内的系统级 preinstall 无关。修复 Dockerfile 时应据此精简该清单。
 
 ### 镜像元信息
 
@@ -58,13 +86,17 @@ xiaoO 提供官方 `Dockerfile`，基于代码仓构建出一个包含 `xiaoo`�
 
 ## 2. 构建镜像
 
+> ⚠️ **本命令当前会失败**，原因见文首缺陷表（`Dockerfile:56`、`:45-66`、`:118-126`）。
+> 修复 Dockerfile 后再执行；在此之前不要期望构建产物存在。
+
 ```bash
 docker build -t xiaoo:latest .
 ```
 
 构建约 10–20 分钟（主要耗时在 `cargo fetch` + `cargo build --release`）。
-国内网络通常无需任何 build-arg：`.cargo/config.toml` 走华为云 crates.io 镜像、
-Python 依赖走 openEuler dnf 仓库。
+国内网络通常无需任何 build-arg：`.cargo/config.toml` 走华为云 crates.io 镜像
+（`Dockerfile:37` 将该文件拷为全局 cargo 配置）、Python 依赖走 openEuler dnf 仓库
+（`Dockerfile:14-28` builder 工具链同样由 dnf 的华为云镜像提供）。
 
 ---
 

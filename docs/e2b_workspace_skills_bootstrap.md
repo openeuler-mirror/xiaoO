@@ -285,9 +285,16 @@ local backend 的 custom tools 行为保持不变。
 - 宿主机与 E2B 的双向同步；
 - 已绑定 runtime 的手动 refresh 或重新导入；
 - E2B 修改写回宿主机；
-- API 路径 allowed-roots；
+- API 路径 allowed-roots<sup>†</sup>；
 - E2B declarative custom tools 启用开关；
 - local backend 的 API 级 workspace/skills 覆盖。
+
+> <sup>†</sup> **验证状态：未在代码中核实。** 在 HEAD（`a58d79f`）上检索
+> `allowed_root` / `allowed_roots` 仅命中
+> `crates/tool/src/impl/plugin/catalog.rs:219`（插件目录白名单）与
+> `tests/unit/operation_backend/backends/local/policy_test.rs:140`
+> （local backend 沙箱策略），**均与 HTTP API 路径无关**。
+> 因此本条作为「未实现」的表述**尚无实现侧证据可直接引用**，标记为 unverified。
 
 ## 验证范围
 
@@ -325,3 +332,13 @@ workspace 测试中。
 | `apps/shared/src/gateway/session_service_impl.rs` | 初始化锁、backend 生命周期与 session 保存顺序 |
 | `crates/skill/src/loading/loader.rs` | 确定性 skill 扫描、解析、审计和去重 |
 | `crates/tool/src/impl/source_loader.rs` | E2B declarative custom tool source gating |
+
+以下模块承载 namespaced-`BackendPath` 相关工作（`97350f4`、`0d601e1`）：
+
+| 模块 | 职责 |
+| --- | --- |
+| `apps/shared/src/backend/e2b/mod.rs` | E2B backend 模块入口与对外导出 |
+| `apps/shared/src/backend/e2b/exec.rs` | E2B 命令执行的路径命名空间处理 |
+| `apps/shared/src/backend/e2b/filesystem.rs` | E2B 文件系统的 `BackendPath` 读写 |
+| `apps/shared/src/backend/e2b/search.rs` | E2B 检索的路径命名空间处理 |
+| `apps/shared/src/backend/e2b/path.rs` | E2B backend 的命名空间路径解析 |

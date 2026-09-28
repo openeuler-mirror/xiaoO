@@ -69,7 +69,8 @@ This is the recommended local development mode.
 In this setup:
 
 - xiaoO runs on your local machine
-- xiaoO binds to `127.0.0.1:18080`
+- xiaoO binds to `127.0.0.1:18080` (pass `--host 127.0.0.1`; the built-in
+  default is `0.0.0.0`, `apps/serverside/src/main.rs:1052-1053`)
 - no public callback URL is needed
 - xiaoO receives messages by long polling Telegram Bot API `getUpdates`
 
@@ -101,7 +102,8 @@ This is the recommended production mode when you have a public domain.
 In this setup:
 
 - xiaoO runs on a server
-- xiaoO binds to `127.0.0.1:18080`
+- xiaoO binds to `127.0.0.1:18080` (pass `--host 127.0.0.1` explicitly — this is
+  a hardening choice, not the default; see §10)
 - nginx exposes a public HTTPS webhook URL
 - Telegram sends updates to nginx
 - nginx forwards updates to the local daemon
@@ -249,6 +251,30 @@ Do not put the Telegram bot token directly into `config.toml`.
 
 Both Telegram modes share the same LLM and bot identity settings.
 
+> **LLM shape.** The canonical form is a named profile plus `active_profile`
+> (`apps/serverside/src/config_schema.rs:10-21`). The older flat
+> `[llm] provider/model/api_key_env` form still validates and is still honored —
+> `activate_profile` returns `Ok(None)` and falls through to the flat fields when
+> `llm.profiles` is empty (`apps/serverside/src/daemon_config.rs:138-146`) — but
+> new configs should use profiles. Both forms below pass
+> `xiaoo-daemon config validate`.
+
+Canonical (profile) form:
+
+```toml
+[llm]
+active_profile = "main"
+
+[llm.profiles.main]
+provider = "openrouter"
+api_base = "https://openrouter.ai/api/v1"
+model = "z-ai/glm-5"
+api_key_env = "OPENROUTER_API_KEY"
+max_tokens = 8192
+```
+
+Legacy (flat) form — still accepted, no profiles needed:
+
 ```toml
 [llm]
 provider = "openrouter"
@@ -256,7 +282,12 @@ api_base = "https://openrouter.ai/api/v1"
 model = "z-ai/glm-5"
 api_key_env = "OPENROUTER_API_KEY"
 max_tokens = 8192
+```
 
+The `[channels]` / `[channels.telegram]` / `[agents]` / `[skills]` sections that
+follow are identical in both forms:
+
+```toml
 [channels]
 interaction_timeout_secs = 600
 
@@ -368,16 +399,41 @@ Telegram sends the configured webhook secret in this header:
 X-Telegram-Bot-Api-Secret-Token
 ```
 
-xiaoO rejects the webhook request when the header does not match `channels.telegram.webhook_secret_token`.
+When `webhook_secret_token` **is** set, xiaoO rejects the webhook request when
+the header does not match it.
+
+> ⚠️ **Security-relevant: omitting `webhook_secret_token` disables webhook auth
+> entirely.** The field is optional (`apps/serverside/src/daemon_config.rs:214`)
+> and `verify_secret_token` short-circuits to `Ok` when it is absent
+> (`apps/serverside/src/channels/telegram/channel.rs:151-154`):
+>
+> ```rust
+> let Some(expected) = config.webhook_secret_token.as_deref() else {
+>     return Ok(());
+> };
+> ```
+>
+> With no token configured, **any** POST to the webhook path is accepted and
+> processed — no header check, no Telegram origin verification. If the daemon is
+> also bound to a public interface (see §10 — `0.0.0.0` is the default), that is
+> an unauthenticated path into the agent. Always set `webhook_secret_token` in
+> webhook mode and pass the same value to `setWebhook.secret_token`.
 
 ## 10. Why Reverse Proxy Is Needed for Webhook
 
-In the recommended server deployment, xiaoO does not bind directly on the public interface.
+> ⚠️ **Security-relevant correction.** An earlier revision of this document
+> claimed xiaoO "does not bind directly on the public interface". **That is
+> wrong.** The daemon's built-in defaults are `--host 0.0.0.0 --port 18080`
+> (`apps/serverside/src/main.rs:1052-1053`, echoed in the usage text at
+> `apps/serverside/src/main.rs:1339`). Started with no flags, xiaoO is reachable
+> on **every** interface. The loopback-only layout below is what you get
+> **only when you pass `--host 127.0.0.1` explicitly.**
 
-Instead:
+In the recommended secure server deployment, xiaoO is deliberately made to listen
+on loopback only, by passing the flag explicitly:
 
 - xiaoO listens on:
-  - `127.0.0.1:18080`
+  - `127.0.0.1:18080` (requires `--host 127.0.0.1`; **not** the default)
 - nginx listens publicly on:
   - `0.0.0.0:443`
 
@@ -501,7 +557,9 @@ WantedBy=multi-user.target
 
 A few important details:
 
-- `--host 127.0.0.1` means xiaoO is intentionally internal-only
+- `--host 127.0.0.1` makes xiaoO loopback-only — this is an **explicit opt-in**,
+  not the daemon default (`apps/serverside/src/main.rs:1052-1053` starts at
+  `0.0.0.0`). Do not omit it unless nginx or a firewall genuinely fronts the port.
 - webhook mode uses nginx for public exposure
 - polling mode does not need public exposure
 - `EnvironmentFile` is where `TELEGRAM_BOT_TOKEN` and `OPENROUTER_API_KEY` are loaded from
@@ -597,8 +655,11 @@ These layers must line up for webhook mode:
 2. `TELEGRAM_BOT_TOKEN` is present in the daemon environment
 3. `[channels.telegram].enabled = true`
 4. `[channels.telegram].transport = "webhook"`
-5. `webhook_secret_token` is configured
-6. xiaoO daemon is listening on `127.0.0.1:18080`
+5. `webhook_secret_token` is configured — **mandatory**: with it unset,
+   `verify_secret_token` returns `Ok` and the endpoint accepts any POST
+   (`apps/serverside/src/channels/telegram/channel.rs:151-154`)
+6. xiaoO daemon is listening on `127.0.0.1:18080` (pass `--host 127.0.0.1`;
+   the default is `0.0.0.0`)
 7. nginx has a matching HTTPS `location`
 8. nginx proxies to `/api/v1/channels/telegram/events`
 9. public DNS resolves to your server
@@ -658,6 +719,49 @@ Expected for webhook mode:
 ```json
 {"ok":true,"result":{"url":"https://<your-domain>/api/v1/channels/telegram/events"}}
 ```
+
+### 16.4.1 Check channel registration and config (bearer-protected)
+
+Both endpoints below sit in the protected route group
+(`apps/serverside/src/httpserver/router.rs:613-614`), so they need the bearer
+token from your `[http] bearer_token_env`:
+
+```bash
+curl -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
+  http://127.0.0.1:18080/api/v1/channels
+
+curl -X POST -H "Authorization: Bearer $XIAOO_HTTP_BEARER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  http://127.0.0.1:18080/api/v1/channels/test \
+  --data '{"channel_id":"telegram"}'
+```
+
+`GET /api/v1/channels` is the fastest way to confirm the Telegram runtime
+registered and that its credential env var resolved. A healthy entry looks like:
+
+```json
+{"schema_version":1,"interaction_timeout_secs":600,"channels":[
+  {"id":"telegram","configured":true,"enabled":true,"transport":"webhook",
+   "identity":"@your_bot_username","base_url":"https://api.telegram.org",
+   "webhook_path":"/api/v1/channels/telegram/events",
+   "credential_env":"TELEGRAM_BOT_TOKEN","credential_available":true,
+   "verification_available":true,"valid":true,"errors":[]}]}
+```
+
+`verification_available` reflects whether `webhook_secret_token` is set — a
+`false` here in webhook mode means the endpoint is unauthenticated (see §9).
+
+### 16.4.2 Check the same report offline (no daemon needed)
+
+`xiaoo-daemon config channels` prints the identical report from the config file
+alone — the fastest diagnostic when the service will not start:
+
+```bash
+xiaoo-daemon config channels --config /opt/xiaoo/config/config.toml
+```
+
+Dispatch: `apps/serverside/src/main.rs:383-391`; report builder
+`apps/serverside/src/channel_management.rs:235-240`.
 
 ### 16.5 Check service logs
 

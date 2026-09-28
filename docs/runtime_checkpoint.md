@@ -43,11 +43,50 @@ Bearer authentication applies when `[http]` auth is configured.
 
 | Endpoint | Request | Response | Meaning |
 | --- | --- | --- | --- |
+| `GET /api/v1/runtimes/checkpoints` | — | `Vec<RuntimeCheckpointSummary>` | List every checkpoint known to the process-local store |
 | `POST /api/v1/runtimes/checkpoint` | `RuntimeCheckpointRequest` | `RuntimeCheckpointResult` | Capture the current idle runtime as a checkpoint |
 | `POST /api/v1/runtimes/checkpoint/delete-snapshot` | `RuntimeCheckpointSnapshotDeleteRequest` | `RuntimeCheckpointSnapshotDeleteResult` | Delete the provider snapshot/template referenced by a checkpoint |
 | `POST /api/v1/runtimes/checkout` | `RuntimeCheckoutRequest` | `RuntimeCheckoutResult` | Create a new runtime from an existing checkpoint |
 | `POST /api/v1/runtimes/pause` | `RuntimePauseRequest` | `RuntimePauseResult` | Snapshot an idle runtime and release its live backend |
 | `POST /api/v1/runtimes/resume` | `RuntimeResumeRequest` | `RuntimeResumeResult` | Restore a paused runtime with the same runtime id |
+
+The catalog endpoint is registered alongside the mutating routes
+(`apps/serverside/src/httpserver/router.rs:579-582`) and is protected by the same
+bearer authentication. Each returned `RuntimeCheckpointSummary` carries
+`has_provider_snapshot`, which tells you whether the checkpoint can currently back a
+provider-side checkout without a fresh snapshot
+(`apps/shared/src/runtime_checkpoint.rs:106-115`; computed at
+`apps/shared/src/runtime_checkpoint.rs:130-143`). It is `true` only when a
+`BackendCheckpointRef` exists *and* still holds a provider snapshot id; after
+`checkpoint/delete-snapshot` clears that id the flag becomes `false` while the checkpoint
+record itself remains (`apps/shared/src/runtime_checkpoint.rs:225-233`).
+
+### Lease fields on mutating requests
+
+The checkpoint, pause, and resume request bodies each accept an optional `client_id`
+that identifies the lease holder:
+
+| Request | Field | Source |
+| --- | --- | --- |
+| `RuntimeCheckpointRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:365-367` |
+| `RuntimePauseRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:400-402` |
+| `RuntimeResumeRequest` | `client_id: Option<String>` | `crates/protocol/src/wire.rs:413-415` |
+
+`RuntimeCheckoutRequest` instead accepts `options: Option<Value>` for backend-specific
+checkout options (`crates/protocol/src/wire.rs:384-386`); it does not carry a `client_id`.
+
+Lease enforcement is **opt-in** and driven by the `XIAOO_ENFORCE_LEASE` environment
+variable (`apps/shared/src/gateway/bootstrap.rs:111-124`). Accepted truthy values are
+`1`, `true`, `yes`, and `on` (case-insensitive, trimmed); anything else — including unset —
+leaves enforcement off for gradual rollout.
+
+- **Default (off):** mutating RPCs that carry no `client_id` bypass the lease check
+  (`apps/serverside/src/httpserver/router.rs:944`).
+- **`XIAOO_ENFORCE_LEASE=on`:** mutating RPCs without a `client_id` are rejected with
+  `LeaseRequired` (HTTP 401) (`apps/shared/src/gateway/session_service_impl.rs:2021`).
+
+Anonymous callers are the target of the check; clients that already hold a lease are
+unaffected (`apps/shared/src/gateway/session_service_impl.rs:1824`).
 
 `RuntimeCheckpointRequest` contains `runtime_id`, optional `name`, and optional
 `metadata`. The result returns a generated `checkpoint_id`, the public
@@ -86,6 +125,17 @@ The in-memory checkpoint store records:
 - a `SessionRecord` snapshot
 - an optional `BackendCheckpointRef`
 - creation time, name, and metadata
+
+Alongside the checkpoint records it keeps two runtime-scoped head indexes
+(`apps/shared/src/runtime_checkpoint.rs:155-156`):
+
+- `runtime_heads` — maps a runtime id to its latest (current) checkpoint id
+  (`apps/shared/src/runtime_checkpoint.rs:164-172`);
+- `paused_runtime_heads` — maps a paused runtime id to the checkpoint it should resume from
+  (`apps/shared/src/runtime_checkpoint.rs:201-218`).
+
+Closing a runtime removes both index entries together with every checkpoint record for that
+runtime (`apps/shared/src/runtime_checkpoint.rs:271-279`).
 
 The store is process-local in v1. Restarting the daemon loses runtime
 checkpoints unless a later persistence layer is added.
@@ -182,19 +232,6 @@ checkpoint as the child runtime head.
 Resume only returns the current snapshot of an existing session handle. It does
 not create a checkpoint, does not create a branch, and does not change backend
 placement.
-
-## Compatibility Notes
-
-`SessionForkRequest`, `SessionForkResult`, and backend `fork_backend` shapes
-still exist for compatibility and tests. Conceptually, fork is now modeled as:
-
-```text
-checkpoint runtime -> checkout runtime
-```
-
-The HTTP router currently exposes the runtime checkpoint/checkout routes. New
-callers should use runtime checkpoint APIs directly instead of relying on a
-session-level fork concept.
 
 ## Module Layout
 

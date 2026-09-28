@@ -1,8 +1,49 @@
 # xiaoO AgentOS记忆系统 x LMCache：语义感知 KV Cache 协同说明文档
 
+> ## ⚠ 状态：部分实现 · 跨仓库
+>
+> **本文描述的功能只有一半在本仓库中。**
+>
+> | 部分 | 状态 | 位置 / 证据 |
+> |------|------|------------|
+> | Rust 客户端 | ✅ **已实现** | `crates/core/src/kvcache.rs:10-31,66`；`crates/core/src/agent_loop.rs:1567-1572,1585-1665` |
+> | 配置开关 | ✅ **已实现** | `kvcache_enabled` / `kvcache_debug_enabled`，`apps/serverside/src/config_schema.rs:22-23`；字段定义 `apps/serverside/src/daemon_config.rs:94,116` |
+> | LMCache-Ascend REST 服务（§4） | ❌ **不在本仓库** | 无服务端源码 |
+> | 存储管理器 / hot_cache / unpin / DiskBackend（§7） | ❌ **不在本仓库** | — |
+> | Python 测试（§8） | ❌ **不在本仓库** | 本仓库无 `tests/v1/**` |
+>
+> 证据：`git grep -il lmcache` 在整个仓库中**只命中本文件**（无任何源码或测试文件）。
+> §4、§7、§8 描述的是 **LMCache-Ascend 仓库**（见 §「LMCache-Ascend 部分说明」）的工作，
+> 请在那里查阅/维护；本文保留其接口约定作为跨仓库契约。
+>
+> 客户端唯一真实发起的调用是向 `http://localhost:6999/memory/{prefetch,evict}`
+> 的 HTTP POST（`crates/core/src/kvcache.rs:42,76`）——**本仓库内没有对应的服务端**。
+
 ## 功能介绍
 
-xiaoO 已经内嵌了 KVCache 感知调度能力，通过配置文件中的 `kvcache_enabled` 标志位开启，在请求前会根据请求中的 `chunk_hashes` 来判断是否需要从 KVCache 中读取缓存，在上下文变化时会根据 `diff_deleted` 方法来判断是否需要删除 KVCache 中的缓存
+xiaoO 已经内嵌了 KVCache 感知调度能力，通过配置文件中的 `kvcache_enabled` 标志位开启，
+在上下文变化时会根据 `diff_deleted` 方法来判断是否需要删除 KVCache 中的缓存
+（`crates/core/src/agent_loop.rs:1567-1572`；`crates/core/src/kvcache.rs:17-25`）。
+
+> **修正（prefetch 的真实触发条件）**：原文档称「在请求前会根据**请求中的**
+> `chunk_hashes` 来判断是否需要从 KVCache 中读取缓存」。实际发送给 LLM 的请求**从不携带**
+> `chunk_hashes`；prefetch 使用的是 **session snapshot 中记忆下来的** hash：
+
+```rust
+// apps/endside/src/gateway_api/runtime_request.rs:190-197
+let chunk_hashes: Vec<String> = snapshot
+    .loop_state.as_ref()
+    .map(|ls| ls.kv_cache_map.chunk_hashes())
+    .unwrap_or_default();
+spawn_prefetch(chunk_hashes, "turn_prefetch".to_string());
+```
+
+> **仅 endside 会 prefetch**：整个 workspace 只有两个 `spawn_prefetch` 调用点，
+> 且都在 endside ——
+> `apps/endside/src/gateway_api/runtime_request.rs:197`
+> 与 `apps/endside/src/gateway_api/session_core.rs:165`。
+> daemon 托管的 runtime **只 evict、从不 prefetch**（evict 调用点
+> `crates/core/src/agent_loop.rs:1571`，由 core 内触发，两条路径共用）。
 
 ## 示例配置
 ```

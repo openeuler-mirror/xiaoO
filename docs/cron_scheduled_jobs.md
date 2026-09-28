@@ -1,37 +1,55 @@
-# xiaoO Cron 定时任务功能 — Spec 设计文档
+# xiaoO Cron 定时任务 — 实现文档
+
+> **状态（截至 master `a58d79f`）：已实现。**
+>
+> 本文件原为 *Spec 设计文档*。cron 调度器、配置解析、TUI 编辑器、HTTP/CLI 接口均已落地，
+> 因此本文已改写为**按实现描述**，全部结论以 `path:line` 为据。
+> 与旧版 Spec 的主要差异：
+>
+> | 旧版 Spec 描述 | 实际实现 |
+> |---|---|
+> | `cron` crate v0.15 | `cron = "0.13"`（`Cargo.toml:53`） |
+> | 不支持动态添加/删除任务 | TUI 写入 `jobs.toml`；`config render-cron` 生成草稿 |
+> | 生命周期 `open_session → submit_turn → close_session` | 单次 `SessionService::run_turn()`（`apps/serverside/src/cron/scheduler.rs:454`） |
+> | 手动编辑后发送 SIGHUP 生效 | **无 SIGHUP**；只有 SIGINT/SIGTERM（`apps/serverside/src/main.rs:876-900`） |
+> | `scheduler.start()` | `new` / `catalog` / `trigger_now` / `stop` |
+> | 无 HTTP/CLI 章节 | §13 新增：`GET /api/v1/cron/jobs`、`POST /api/v1/cron/run`、`config cron` 等 |
+>
+> 保留的设计意图（cron 表达式规范、`[cron]` 配置语义、重试/超时策略）与实现一致。
 
 ## 1. 概述
 
 ### 1.1 背景
 
-xiaoO 当前已在 `GatewayEntryKind` 中预留了 `ScheduledJob` 枚举变体
-（`apps/xiaoo-app/src/gateway/turn_request.rs:10`），但调度层（cron 解析器、
-定时触发器、任务存储）尚未实现。本 Spec 描述完整的 cron 定时任务功能设计。
+cron 功能已在 `GatewayEntryKind::ScheduledJob` 枚举变体中预留并**已被真实使用**：
+`CronScheduler` 构造 `AppTurnRequest` 时填充该 kind
+（`apps/serverside/src/cron/scheduler.rs:419-423`）。
 
 ### 1.2 核心设计决策
 
-| 决策 | 选择 | 理由 |
+| 决策 | 选择 | 实现位置 |
 |---|---|---|
-| 全局设置 | `config.toml` 的 `[cron]` 段 | 与 daemon 生命周期绑定 |
-| 任务定义 | `~/.config/xiaoo/cron/jobs.toml` | 独立文件，方便脚本/工具直接管理 |
-| Cron 引擎 | `cron` crate (v0.15) | 成熟库，5/6 字段，零 unsafe |
-| 调度模式 | 每个 job 独立 `tokio::spawn` timer | 简单可靠，单机够用 |
-| 执行复用 | 构造 `AppTurnRequest` 注入现有 Session 体系 | 零侵入，复用 agent loop、trace 等全部能力 |
+| 全局设置 | `config.toml` 的 `[cron]` 段 | `apps/serverside/src/daemon_config.rs:1131-1140` |
+| 任务定义 | `<cron dir>/jobs.toml` | `apps/serverside/src/cron_management.rs:176` |
+| Cron 引擎 | `cron` crate v0.13 | `Cargo.toml:53` |
+| 调度模式 | 每个 job 独立 `tokio::spawn` timer | `apps/serverside/src/cron/scheduler.rs:74` |
+| 执行复用 | 构造 `AppTurnRequest`，调用 `SessionService::run_turn()` | `apps/serverside/src/cron/scheduler.rs:454` |
 
 ### 1.3 目标
 
 - 用户在 `jobs.toml` 中定义 cron 定时任务，到时间自动触发 agent 执行
-- 兼容标准 cron 表达式语法（5 字段 + 可选的秒字段）
+- 兼容标准 cron 表达式语法（5 字段，可归一化为 6 字段）
 - 任务执行结果可追溯（trace/moirai）
 - 与现有 Session 体系无缝对接
 - 支持任务的启用/禁用、重试、超时控制
+- 支持运维面：HTTP 目录/手动触发、CLI 校验/渲染/运行状态
 
 ### 1.4 非目标
 
 - 不实现分布式调度（单机 daemon 内调度）
-- 不支持动态添加/删除任务（需修改 `jobs.toml` + 手动 reload 或重启）
 - 不实现任务依赖（DAG 编排）
 - 秒级以下精度
+- **无 SIGHUP 热重载**：修改 `jobs.toml` 后需重启 daemon 才能生效（§13.4）
 
 ---
 
@@ -46,9 +64,9 @@ xiaoO 当前已在 `GatewayEntryKind` 中预留了 `ScheduledJob` 枚举变体
 │  ~/.config/xiaoo/config.toml          ~/.config/xiaoo/cron/       │
 │  ┌──────────────────────────┐         ┌──────────────────────┐   │
 │  │ [cron]                   │         │ jobs.toml             │   │
-│  │   jobs_dir = "..."       │         │ [[job]] name="..."    │   │
-│  │   max_concurrent = 3     │         │ [[job]] name="..."    │   │
-│  │   default_timeout = 3600 │         │ ...                   │   │
+│  │   enabled = true         │         │ [[job]] name="..."    │   │
+│  │   max_concurrent_jobs=3  │         │ [[job]] name="..."    │   │
+│  │   default_timeout_secs   │         │ ...                   │   │
 │  └──────────────────────────┘         └──────────┬───────────┘   │
 │                                                  │               │
 ├──────────────────────────────────────────────────┼───────────────┤
@@ -58,25 +76,21 @@ xiaoO 当前已在 `GatewayEntryKind` 中预留了 `ScheduledJob` 枚举变体
 │  │  DaemonConfig::resolve_cron_jobs()                        │    │
 │  │    → 读取 jobs.toml → 解析 cron → 合并全局默认 →          │    │
 │  │      Vec<CronJobConfig>                                   │    │
+│  │    ⚠ 任一条目非法 → 整个函数 Err → 全部 job 不加载        │    │
 │  └──────────────────────────────────────────────────────────┘    │
 │                              │                                   │
 │                              ▼                                   │
 │  ┌──────────────────────────────────────────────────────────┐    │
-│  │  CronScheduler                                              │    │
+│  │  CronScheduler::new(jobs, max_concurrent, session_svc)    │    │
 │  │                                                             │    │
-│  │  start()                                                    │    │
-│  │    ├── 为每个 enabled job 调用 spawn_job_timer()            │    │
+│  │  为每个 enabled job spawn_job_timer()                       │    │
 │  │    ├── tokio::select! { sleep until next / cancel }         │    │
 │  │    ├── acquire concurrency semaphore permit                 │    │
 │  │    └── execute_job_with_retry()                             │    │
-│  │          ├── execute_job_once()                             │    │
-│  │          │     ├── SessionService::open_session()           │    │
-│  │          │     ├── SessionService::submit_turn()            │    │
-│  │          │     └── SessionService::close_session()          │    │
-│  │          └── 失败重试 (max_retries × retry_delay_secs)      │    │
+│  │          └── execute_job_once()                             │    │
+│  │                └── SessionService::run_turn(AppTurnRequest)  │    │
 │  │                                                             │    │
-│  │  stop()                                                     │    │
-│  │    └── CancellationToken → 所有 timer 退出                  │    │
+│  │  catalog() / trigger_now(name) / stop()                     │    │
 │  └──────────────────────────────────────────────────────────┘    │
 │                              │                                   │
 │                              ▼                                   │
@@ -93,25 +107,37 @@ xiaoO 当前已在 `GatewayEntryKind` 中预留了 `ScheduledJob` 枚举变体
 
 | 集成点 | 位置 | 说明 |
 |---|---|---|
-| `GatewayEntryKind::ScheduledJob` | `turn_request.rs:10` | **已有枚举变体**，直接复用，无需变更 |
-| `AppTurnRequest` | `turn_request.rs` | **已有结构体**，scheduler 构造时填充 |
-| `SessionService` trait | `session_service.rs` | **已有 trait**，scheduler 持有 `Arc<dyn SessionService>` |
-| `SessionSupervisor::run_root_turn()` | `session_supervisor.rs` | **已有方法**，通过 `open_session` → `submit_turn` 进入 |
-| `SessionWorker::run()` | `session_worker.rs` | **已有**，无变更 |
-| `core::run_agent_loop()` | `agent_loop.rs` | **已有**，无变更 |
+| `GatewayEntryKind::ScheduledJob` | `apps/serverside/src/cron/scheduler.rs:420` | 实际填充该 kind |
+| `AppTurnRequest` | `apps/serverside/src/cron/scheduler.rs:417-440` | scheduler 构造时填充 |
+| `SessionService` trait | `apps/serverside/src/cron/scheduler.rs:32` | scheduler 持有 `Arc<dyn SessionService>` |
+| `SessionService::run_turn()` | `apps/serverside/src/cron/scheduler.rs:454` | **单次调用**，不 open/close session |
+| `core::run_agent_loop()` | `crates/core/src/agent_loop.rs` | **已有**，无变更 |
 
-### 2.3 `GatewayEntryKind::ScheduledJob` 的首次使用
+### 2.3 `GatewayEntryKind::ScheduledJob` 的使用
 
-当前 `ScheduledJob` 仅有定义，从未被构造。Cron 功能将是其**首次落地使用**：
+`CronScheduler` 每次执行构造 `AppTurnRequest` 时填充 `ScheduledJob`
+（`apps/serverside/src/cron/scheduler.rs:417-440`）：
 
 ```rust
-// CronScheduler 中构造 AppTurnRequest
-let entry = GatewayEntryContext {
-    kind: Some(GatewayEntryKind::ScheduledJob),   // ← 首次使用
-    runtime_profile_id: job.agent_role.clone(),
-    ..Default::default()
+let request = AppTurnRequest {
+    session_id: session_id.clone(),              // format!("cron-{name}-{ts}")
+    entry: GatewayEntryContext {
+        kind: Some(GatewayEntryKind::ScheduledJob),
+        runtime_profile_id: job.config.agent_role.clone(),
+        ..Default::default()
+    },
+    sender_id: format!("cron/{}", job.config.name),
+    text: job.config.prompt.clone(),
+    client_id: Some(daemon_cron_principal()),
+    chain_depth: 0,
+    // ...
 };
 ```
+
+> **与旧版 Spec 的差异**：实现**不**调用 `open_session()` / `close_session()`；
+> session id 由 `format!("cron-{}-{}", name, ts)` 直接生成
+> （`apps/serverside/src/cron/scheduler.rs:413-415`），
+> 一次 `run_turn` 即完成整个任务。
 
 ---
 
@@ -215,8 +241,10 @@ default_timeout_secs = 3600
 ```toml
 # ===== Cron 任务定义：~/.config/xiaoo/cron/jobs.toml =====
 #
-# 此文件可独立编辑。
-# 手动编辑后需要重启 daemon 或发送 SIGHUP 信号使其生效。
+# 此文件可独立编辑，也可由 TUI 的 Cron 编辑器写入
+# （apps/endside/src/services/cron_service.rs:144-187）。
+# 修改后必须重启 daemon 才能生效：daemon 只在启动时解析一次 jobs.toml
+# （apps/serverside/src/main.rs:653-656），且没有 SIGHUP 处理（§13.4）。
 
 [[job]]
 # 任务唯一标识（必填）
@@ -310,23 +338,26 @@ job.retry_delay_secs  >  默认 60
 
 ## 5. Rust 数据结构
 
-### 5.1 文件结构（新增和修改）
+### 5.1 文件结构（实际）
 
 ```
 crates/agent-types/src/
-├── lib.rs                              # 新增 pub mod cron;
 └── cron/
     ├── mod.rs
     ├── config.rs                       # CronGlobalConfig, CronJobDef, CronJobConfig
     ├── error.rs                        # CronParseError, CronExecutionError, CronError
     └── expression.rs                   # CronExpression (包装 cron crate)
 
-apps/xiaoo-app/src/
-├── daemon_config.rs                    # 修改：新增 CronSectionRaw, CronJobRaw
-├── main.rs                             # 修改：集成 CronScheduler 启动
+apps/serverside/src/
+├── daemon_config.rs                    # CronSectionRaw, CronJobRaw, resolve_cron_jobs()
+├── cron_management.rs                  # CronReport, CronJobsDraft, render_cron_jobs()
+├── main.rs                             # 集成 CronScheduler
 └── cron/
     ├── mod.rs
     └── scheduler.rs                    # CronScheduler, 执行 + 重试逻辑
+
+apps/endside/src/services/
+└── cron_service.rs                     # TUI 侧读写 jobs.toml
 ```
 
 ### 5.2 `agent-types::cron::expression`
@@ -545,7 +576,7 @@ impl DaemonConfig {
 ### 6.1 数据结构
 
 ```rust
-// apps/xiaoo-app/src/cron/scheduler.rs
+// apps/serverside/src/cron/scheduler.rs
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -563,17 +594,32 @@ struct CronJob {
     session_service: Arc<dyn SessionService>,
     cancel_token: CancellationToken,
     concurrency_limiter: Arc<Semaphore>,
-    last_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     next_run: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
-    run_count: AtomicU64,
+    running: AtomicBool,
+    last_result: Mutex<Option<CronLastResult>>,
+    /// 触发次数（含手动 trigger_now）
+    trigger_count: AtomicU64,
+    /// 成功执行次数
+    success_count: AtomicU64,
+    /// 重试耗尽后仍失败的次数
     failure_count: AtomicU64,
 }
 ```
 
+字段定义见 `apps/serverside/src/cron/scheduler.rs:140-154`。
+
+> **与旧版 Spec 的差异**：不存在 `last_run` / `run_count`；实际字段是
+> `next_run` / `running` / `last_result` / `trigger_count` / `success_count` / `failure_count`。
+
 ### 6.2 构造与生命周期
+
+公开 API 为 `new` / `catalog` / `trigger_now` / `stop`
+（`apps/serverside/src/cron/scheduler.rs:29,83,93,112`）——**没有 `start()` 方法**；
+`new()` 内部即为每个 enabled job spawn timer。
 
 ```rust
 impl CronScheduler {
+    /// 构造并立即为每个 enabled job spawn timer。
     pub fn new(
         jobs: Vec<CronJobConfig>,
         max_concurrent: usize,
@@ -584,46 +630,35 @@ impl CronScheduler {
         let concurrency_limiter = Arc::new(Semaphore::new(limit));
 
         let mut handles = Vec::new();
+        let mut runtime_jobs = HashMap::new();
         for config in jobs {
             if !config.enabled {
-                tracing::info!(job = %config.name, "disabled, skipping");
+                tracing::info!(job = %config.name, "cron job disabled, skipping");
                 continue;
             }
-            let job = Arc::new(CronJob {
-                config,
-                session_service: session_service.clone(),
-                cancel_token: cancel_token.clone(),
-                concurrency_limiter: concurrency_limiter.clone(),
-                last_run: Mutex::new(None),
-                next_run: Mutex::new(None),
-                run_count: AtomicU64::new(0),
-                failure_count: AtomicU64::new(0),
-            });
-            handles.push(Self::spawn_job_timer(job));
+            let job = Arc::new(CronJob { /* … 见上 */ });
+            handles.push(Self::spawn_job_timer(job.clone()));
+            runtime_jobs.insert(job.config.name.clone(), job);
         }
 
-        Self {
-            cancel_token,
-            concurrency_limiter,
-            handles: Mutex::new(handles),
-        }
+        Self { cancel_token, handles: Mutex::new(handles), jobs: runtime_jobs }
     }
 
-    pub fn start(&self) {
-        tracing::info!("cron scheduler started");
-    }
+    /// 返回所有 enabled job 的实时状态，按 name 排序。
+    pub async fn catalog(&self) -> Vec<CronJobRuntimeResponse> { /* :94-101 */ }
 
-    pub async fn stop(&self) {
-        tracing::info!("stopping cron scheduler...");
-        self.cancel_token.cancel();
-        let handles = std::mem::take(&mut *self.handles.lock().await);
-        for handle in handles {
-            let _ = handle.await;
-        }
-        tracing::info!("cron scheduler stopped");
-    }
+    /// 立即触发一个 enabled job；不等待 agent turn 完成。
+    /// 找不到 → TriggerError::NotFound；已在运行 → TriggerError::AlreadyRunning。
+    pub async fn trigger_now(&self, name: &str)
+        -> Result<CronJobRuntimeResponse, TriggerError> { /* :103-122 */ }
+
+    /// 取消全部 timer 并等待其退出。
+    pub async fn stop(&self) { /* :124-138 */ }
 }
 ```
+
+`trigger_now` 的错误类型见 `apps/serverside/src/cron/scheduler.rs:129-137`
+（`TriggerError::{NotFound, AlreadyRunning}`）。
 
 ### 6.3 Timer 主循环
 
@@ -671,10 +706,6 @@ impl CronScheduler {
 
                 // 4. 执行
                 execute_job_with_retry(&job).await;
-
-                // 5. 统计
-                *job.last_run.lock().await = Some(chrono::Utc::now());
-                job.run_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         })
     }
@@ -735,27 +766,8 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
     let session_id = format!("cron-{}-{}", job.config.name, ts);
     let conversation_id = format!("cron-{}-conv", job.config.name);
 
-    // 1. Open session
-    job.session_service
-        .open_session(SessionOpenRequest {
-            session_id: session_id.clone(),
-            sender_id: format!("cron/{}", job.config.name),
-            channel: None,
-            channel_instance_id: None,
-            entry: GatewayEntryContext {
-                kind: Some(GatewayEntryKind::ScheduledJob),
-                runtime_profile_id: job.config.agent_role.clone(),
-                ..Default::default()
-            },
-        })
-        .await
-        .map_err(|e| CronExecutionError::Session {
-            job_name: job.config.name.clone(),
-            error: e.to_string(),
-        })?;
-
-    // 2. Submit turn
-    let turn_req = AppTurnRequest {
+    // 单次 run_turn：不存在 open_session / close_session 步骤
+    let request = AppTurnRequest {
         session_id: session_id.clone(),
         entry: GatewayEntryContext {
             kind: Some(GatewayEntryKind::ScheduledJob),
@@ -772,14 +784,20 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
         reply_to_message_id: None,
         root_message_id: None,
         mentions: vec![],
-        reasoning_effort: agent_types::ReasoningEffort::Off,
+        reasoning_effort: None,
+        llm: None,
+        workspace: None,
+        skills: None,
+        command_context: None,
+        chain_depth: 0,
+        client_id: Some(daemon_cron_principal()),
     };
 
     let start = std::time::Instant::now();
 
     let result = tokio::time::timeout(
         Duration::from_secs(job.config.timeout_secs),
-        job.session_service.submit_turn(turn_req),
+        job.session_service.run_turn(request),
     )
     .await
     .map_err(|_| CronExecutionError::Timeout {
@@ -793,11 +811,9 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    // 3. Close session (best effort)
-    let _ = job.session_service.close_session(&session_id).await;
-
     Ok(JobRunResult {
         session_id,
+        reply: result.reply,
         total_tokens: result.total_tokens,
         duration_ms,
     })
@@ -809,54 +825,48 @@ async fn execute_job_once(job: &CronJob) -> Result<JobRunResult, CronExecutionEr
 ## 7. `main.rs` 集成
 
 ```rust
-// apps/xiaoo-app/src/main.rs
+// apps/serverside/src/main.rs
 
-async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Result<()> {
-    // ... 现有初始化代码 ...
-
-    // ---- 启动 Cron Scheduler ----
-    let cron_scheduler = match config.resolve_cron_jobs() {
-        Ok(jobs) if !jobs.is_empty() => {
-            let global = config.cron_section().unwrap();
-            let enabled_count = jobs.iter().filter(|j| j.enabled).count();
-            if enabled_count > 0 {
-                let scheduler = Arc::new(CronScheduler::new(
-                    jobs,
-                    global.max_concurrent_jobs,
-                    session_service.clone(),
-                ));
-                scheduler.start();
-                tracing::info!(
-                    enabled = enabled_count,
-                    total = jobs.len(),
-                    dir = %global.jobs_dir,
-                    "cron scheduler started"
-                );
-                Some(scheduler)
-            } else {
-                tracing::info!(total = jobs.len(), "no enabled cron jobs");
-                None
-            }
-        }
-        Ok(_) => None,
-        Err(error) => {
-            tracing::error!(%error, "failed to load cron jobs, cron disabled");
+// ---- 启动 Cron Scheduler ----
+// CronScheduler::new() 内部已为每个 enabled job spawn timer，
+// 不存在单独的 start() 方法。
+let cron_scheduler = match config.resolve_cron_jobs() {
+    Ok(jobs) if !jobs.is_empty() => {
+        let enabled_count = jobs.iter().filter(|j| j.enabled).count();
+        if enabled_count > 0 {
+            let scheduler = Arc::new(CronScheduler::new(
+                jobs,
+                config.app.cron.max_concurrent_jobs,
+                session_service.clone(),
+            ));
+            tracing::info!(enabled = enabled_count, "cron scheduler initialized");
+            Some(scheduler)
+        } else {
+            tracing::info!("cron section present but no jobs configured");
             None
         }
-    };
-
-    // ... 现有 serve 代码 ...
-
-    // Graceful shutdown
-    if let Some(s) = cron_scheduler {
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            s.stop().await;
-            std::process::exit(0);
-        });
     }
-}
+    Ok(_) => None,
+    Err(error) => {
+        // ⚠ 任一 job 非法都会走到这里：整个 cron 被禁用，无任何 job 加载
+        tracing::error!(%error, "failed to load cron jobs, cron disabled");
+        None
+    }
+};
 ```
+
+对应实现位置：`apps/serverside/src/main.rs:629-656`（resolve 与错误分支）；
+`CronScheduler::new` 定义于 `apps/serverside/src/cron/scheduler.rs:29-68`。
+
+### 7.1 优雅关闭
+
+Daemon 只响应 **SIGINT / SIGTERM**（`apps/serverside/src/main.rs:876-900`），
+在该路径上调用 `CronScheduler::stop()` 取消全部 timer 并等待其退出
+（`apps/serverside/src/main.rs:746-747`；实现见
+`apps/serverside/src/cron/scheduler.rs:112-125`）。
+
+> **无 SIGHUP**：代码中不存在 `SignalKind::hangup()`。修改 `jobs.toml` 后唯一生效方式是
+> **重启 daemon**。
 
 ---
 
@@ -868,13 +878,11 @@ async fn run_daemon(config_path: Option<PathBuf>, host: String, port: u16) -> Re
 cron:scheduler
 └── cron:job:{name}
     ├── cron:attempt:1
-    │   ├── session:open
-    │   ├── session:submit_turn
-    │   │   └── agent_loop          # 现有 trace
-    │   │       ├── turn:1
-    │   │       └── turn:2 ...
-    │   └── session:close
-    └── cron:attempt:2              # 重试
+    │   └── session:run_turn       # 单次调用，无 open/close
+    │       └── agent_loop         # 现有 trace
+    │           ├── turn:1
+    │           └── turn:2 ...
+    └── cron:attempt:2             # 重试
         └── ...
 ```
 
@@ -898,7 +906,7 @@ cron:scheduler
 
 ```toml
 [workspace.dependencies]
-cron = "0.15"
+cron = "0.13"
 shellexpand = "3"
 ```
 
@@ -909,7 +917,7 @@ cron.workspace = true
 chrono.workspace = true
 ```
 
-`xiaoo-app/Cargo.toml`：
+`apps/serverside/Cargo.toml`：
 ```toml
 [dependencies]
 cron.workspace = true
@@ -922,15 +930,21 @@ shellexpand.workspace = true
 
 | 阶段 | 情况 | 行为 |
 |---|---|---|
-| 启动 | `[cron]` 段不存在 | daemon 正常启动，不启用 cron |
-| 启动 | `jobs.toml` 不存在 | 日志 warn，daemon 正常启动 |
-| 启动 | `jobs.toml` 语法错误 | 日志 error，cron 禁用，daemon 正常启动 |
-| 启动 | 单个 job cron 表达式无效 | 日志 error，跳过该 job |
-| 运行 | Job 执行超时 | 标记 Timeout，按配置重试 |
-| 运行 | Job 并发达到上限 | Semaphore 排队等待 |
-| 关闭 | SIGINT/SIGTERM | CancellationToken 取消所有 timer |
+| 启动 | `[cron]` 段不存在 | daemon 正常启动，不启用 cron；`Ok(vec![])`（`apps/serverside/src/daemon_config.rs:963-966`） |
+| 启动 | `jobs.toml` 不存在 | 日志 info，`Ok(vec![])`，daemon 正常启动（`apps/serverside/src/daemon_config.rs:971-974`） |
+| 启动 | `jobs.toml` 语法错误 | `Err` → 日志 error，**cron 全部禁用**，daemon 正常启动（`apps/serverside/src/daemon_config.rs:978-979`） |
+| 启动 | 单个 job cron 表达式无效 | `Err` → **整个 resolve_cron_jobs 失败**，全部 job 不加载（`apps/serverside/src/daemon_config.rs:989-990`）⚠ |
+| 启动 | job 名称重复 | 同上，`bail!("duplicate cron job name")`（`apps/serverside/src/daemon_config.rs:985-987`）⚠ |
+| 运行 | Job 执行超时 | 标记 Timeout，按配置重试（`apps/serverside/src/cron/scheduler.rs:347-405`） |
+| 运行 | Job 并发达到上限 | Semaphore 排队等待（`apps/serverside/src/cron/scheduler.rs:278`） |
+| 运行 | 手动触发未找到/已在运行 | `TriggerError::NotFound` / `AlreadyRunning`（`apps/serverside/src/cron/scheduler.rs:129-137`） |
+| 关闭 | SIGINT/SIGTERM | CancellationToken 取消所有 timer（`apps/serverside/src/cron/scheduler.rs:112-125`） |
 
 **核心原则**：Fail Open — cron 解析失败不阻止 daemon 启动。
+
+> ⚠ **已知缺口**：**单个坏 job 并非"跳过该 job"**。旧 Spec 写的「日志 error，跳过该 job」
+> 不成立：`resolve_cron_jobs()` 对任一条目非法都直接 `bail!`，导致**所有** job 都不加载。
+> 排障请先运行 `xiaoo-daemon config cron` 查看 `errors` 字段（§13.5）。
 
 ---
 
@@ -975,9 +989,110 @@ xiaoo-daemon
 # [cron:daily-summary] timer started, next run in 4h 15m
 
 # 4. 修改任务
-vim ~/.config/xiaoo/cron/jobs.toml    # 编辑
-kill -SIGHUP $(pgrep xiaoo-daemon)      # 通知 daemon 重载
+vim ~/.config/xiaoo/cron/jobs.toml            # 编辑
+systemctl restart xiaoo-daemon                # 重启使其生效
+# 注意：SIGHUP 不会触发重载 —— daemon 仅处理 SIGINT/SIGTERM，
+# 且只在启动时解析一次 jobs.toml（apps/serverside/src/main.rs:629-656, 876-900）。
 ```
+
+### 12.1 通过 HTTP 查看 / 手动触发
+
+```bash
+# 查看 job 目录与运行状态
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:18080/api/v1/cron/jobs
+
+# 立即触发一个 enabled job
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"daily-summary"}' \
+     http://127.0.0.1:18080/api/v1/cron/run
+```
+
+### 12.2 通过 CLI 校验 / 渲染
+
+```bash
+# job 配置报告（含 valid / errors）
+xiaoo-daemon config cron
+
+# 校验并渲染草稿 JSON 为 jobs.toml 文本
+echo '{"jobs":[{"name":"daily","cron":"0 18 * * *","prompt":"摘要"}]}' \
+  | xiaoo-daemon config render-cron
+```
+
+---
+
+## 13. HTTP / CLI 运维面
+
+本章描述的接口在原 Spec 中完全缺失，属于已实现的功能。
+
+### 13.1 HTTP 路由
+
+两条路由都挂在 **bearer 保护**的路由组下
+（`apps/serverside/src/httpserver/router.rs:611-612`，组定义 `:575`）：
+
+| 方法 | 路径 | 处理函数 | 说明 |
+|------|------|---------|------|
+| `GET` | `/api/v1/cron/jobs` | `handle_cron_catalog` | 返回 job 目录与实时运行状态 |
+| `POST` | `/api/v1/cron/run` | `handle_cron_run` | 立即触发一个 enabled job |
+
+请求体（`POST /api/v1/cron/run`）为 `CronRunRequest`
+（`crates/protocol/src/wire.rs:485-490`）：
+
+```json
+{ "name": "daily-summary" }
+```
+
+`name` 必须匹配 `jobs.toml` 中一个 **enabled** 的 job；不存在返回 `404`，
+已在运行返回 `409`（对应 `TriggerError::{NotFound, AlreadyRunning}`，
+`apps/serverside/src/cron/scheduler.rs:129-137`）。
+
+> 触发是**非阻塞**的：`trigger_now()` 立即返回 job 的运行状态快照，
+> 不等待 agent turn 结束（`apps/serverside/src/cron/scheduler.rs:93-110`）。
+
+### 13.2 CLI
+
+| 命令 | 行为 | 位置 |
+|------|------|------|
+| `xiaoo-daemon config cron [--config <path>]` | 打印 `CronReport` JSON：`configured`/`valid`/`jobs_file`/`jobs`/`errors` | `apps/serverside/src/main.rs:467-475` |
+| `xiaoo-daemon config render-cron < draft.json` | 从 stdin 读草稿 JSON，校验并渲染为 jobs.toml 文本 | `apps/serverside/src/main.rs:476-486` |
+
+用法文本见 `apps/serverside/src/main.rs:1336-1337`。
+
+`render-cron` 是**任务编辑的官方入口**：它接收 `CronJobsDraft`，逐条校验
+（名称非空、名称唯一、cron 表达式合法等），返回
+`CronRenderReport { valid, content, errors }`
+（`apps/serverside/src/cron_management.rs:75-143`）。
+
+### 13.3 Capability 域
+
+cron 在 daemon 的 capability 清单中声明为独立域，支持的操作为
+**`list` / `validate` / `render` / `runtime_status` / `run_now`**
+（`apps/serverside/src/management_capabilities.rs:137-144`）。可用
+`GET /api/v1/capabilities` 查询（`apps/serverside/src/httpserver/router.rs:619`）。
+
+### 13.4 动态增删任务（实际能力）
+
+原 Spec 的「不支持动态添加/删除任务」已不准确：
+
+- **TUI 编辑器**：daemon 模式下 TUI 的 Cron 服务可直接写入 `jobs.toml`
+  （`apps/endside/src/services/cron_service.rs:144-187`）。
+- **CLI 草稿渲染**：`config render-cron` 生成规范的 jobs.toml 文本（§13.2）。
+- **HTTP 手动触发**：`POST /api/v1/cron/run` 可在不重启的情况下触发任务（§13.1）。
+
+> **已知缺口**：但**加载仍是一次性的**。`resolve_cron_jobs()` 只在 daemon 启动时执行，
+> 且没有 SIGHUP/热重载路径（`apps/serverside/src/main.rs:629-656,876-900`）。
+> 因此新增或修改 job 后仍需**重启 daemon**；`trigger_now` 只能触发启动时已加载的 job。
+
+### 13.5 配置错误处理（重要）
+
+`resolve_cron_jobs()` 是**全有或全无**：任一 job 条目非法都会使整个函数返回 `Err`
+（重复名称或 cron 表达式无法解析即 `bail!`，
+`apps/serverside/src/daemon_config.rs:980-989`），daemon 随后记录
+`failed to load cron jobs, cron disabled` 并**禁用全部 cron job**
+（`apps/serverside/src/main.rs:653-656`）。
+
+> **已知缺口**：单个坏 job 会导致**所有** job 静默停摆。排障请先运行
+> `xiaoo-daemon config cron` 查看 `errors` 字段。
 
 ---
 

@@ -29,6 +29,15 @@ cerberus-core = { path = "crates/cerberus/cerberus-core" }
 cerberus-cli = { path = "crates/cerberus/cerberus-cli" }
 ```
 
+> **Important — Cerberus ships outside the main workspace.** The three Cerberus crates
+> are commented out of the root workspace (`Cargo.toml:26-29`), and
+> `crates/cerberus/` has no `[workspace]` of its own. Their manifests inherit
+> `version.workspace = true`, so they cannot resolve a workspace root as checked out and
+> are not built by `cargo build --workspace`. To build or install them you must first
+> make them workspace members (uncomment the entries in the root `Cargo.toml`) or add a
+> `[workspace]` table under `crates/cerberus/`. An eBPF toolchain is additionally required
+> for the `ebpf` feature. See `tests/README.md:13` for the same caveat.
+
 ## Project Layout
 
 | Path | Purpose |
@@ -36,6 +45,7 @@ cerberus-cli = { path = "crates/cerberus/cerberus-cli" }
 | `cerberus-core/` | Core request, policy, execution, filtering, sandbox, result, and audit primitives |
 | `cerberus-cli/` | `cerberus` binary, built-in profiles, history storage, rendering, and host integration commands |
 | `docs/` | Scenario-driven documentation and verification notes |
+| `testcases/` | Manual end-to-end test cases, e.g. `testcases/cli-fs-permissions-e2e.md` |
 
 ## Quick Start
 
@@ -75,6 +85,13 @@ For a more stable global installation, install Cerberus into Cargo's bin directo
 cargo install --path crates/cerberus/cerberus-cli
 ```
 
+> **Prerequisite:** the command above only works once Cerberus is a resolvable workspace —
+> either uncomment the three Cerberus entries in the root `Cargo.toml:26-29`, or add a
+> `[workspace]` table under `crates/cerberus/`. As checked out, their
+> `version.workspace = true` manifests cannot find a workspace root and the install fails
+> (same caveat as `tests/README.md:13`). The `cargo run -p cerberus-cli` examples above
+> have the same requirement.
+
 If you need `network_policy` enforcement, install Cerberus with the eBPF-enabled core feature:
 
 ```bash
@@ -97,19 +114,28 @@ Cerberus resolves policies in a deterministic order:
 2. `config/cerberus-policies/<name>.toml` discovered project profile
 3. Built-in profile fallback: `workspace-write-network-on`, `workspace-write-network-off`, `workspace-write-network-on-dev-env`
 
+> **This repository ships no policy files.** There is no `config/` directory at the repo
+> root and no `cerberus-policies` directory anywhere in the tree, so level 2 never
+> resolves for a fresh clone — only `--policy-file` and the built-ins are actually
+> available out of the box. Level 2 is a convention for *your own* project: create
+> `config/cerberus-policies/<name>.toml` in the directory you run from, and the CLI
+> discovers it there.
+
 For CLI behavior, two runtime rules matter:
 
 - `cerberus exec` defaults to `workspace-write-network-on-dev-env` when you do not pass `--profile`
 - Built-in profiles (`workspace-write-network-on`, `workspace-write-network-off`, `workspace-write-network-on-dev-env`) auto-inject the current workspace as a `readwrite` custom path during `exec` and `profile show`; `--policy-file` remains file-defined and is not auto-modified
 - Legacy aliases `minimal`, `strict`, and `llm-safe` still resolve for compatibility, but `profile list` and docs now prefer the explicit names
 
-Checked-in file-backed profiles also expose three repo-specific presets:
-
-- `repo-root-write-network-off`
-- `repo-root-write-network-on`
-- `repo-root-write-network-on-dev-env`
-
-These are **not** built-ins. They are regular TOML files under `config/cerberus-policies/` that target this repository root explicitly, so they show up as `[file: ...]` in `profile list`. Their scope is intentionally different from the built-ins: for example, `repo-root-write-network-off` keeps repo-root `readwrite`, blocks network, and still allows `/dev`, `/proc`, and `/mnt/wsl` reads where the built-in `workspace-write-network-off` stays narrower.
+There are **no checked-in file-backed presets** in this repository. The
+`repo-root-write-*` names (`repo-root-write-network-off`, `repo-root-write-network-on`,
+`repo-root-write-network-on-dev-env`) are examples of file-backed policies that target a
+repository root explicitly; create them yourself under `config/cerberus-policies/` if you
+want that behavior. They are **not** built-ins and will not appear in a fresh clone's
+`profile list`. Their intended scope differs from the built-ins: for example, a
+`repo-root-write-network-off` policy keeps the repo root `readwrite`, blocks network, and
+still allows `/dev`, `/proc`, and `/mnt/wsl` reads, where the built-in
+`workspace-write-network-off` stays narrower.
 
 ### Built-in Profiles
 
@@ -147,7 +173,7 @@ Built-in profiles now share one CLI-specific filesystem convenience: the current
 |-------|-------------|
 | [Configuration Guide](docs/configuration.md) | 中文配置说明：策略文件写法、字段含义、内置 profile 差异与常见陷阱 |
 | [Runtime Capability Matrix](docs/runtime-capability-matrix.md) | 不同运行环境下的编译能力、运行门禁、配置差异与安全防护保留情况 |
-| [Scenario Comparisons](docs/03.scenario-comparisons.md) | Baseline vs `workspace-write-network-off` vs `workspace-write-network-on-dev-env` behavior for filesystem, network, environment, and process visibility |
+| [History Storage](docs/storage.md) | 执行历史的存储位置与排查方式 |
 
 ## Platform Notes
 
