@@ -20,7 +20,7 @@ pub(crate) fn handle_event(
 
     match envelope {
         FeishuEventEnvelope::Challenge(challenge) => handle_challenge(config, challenge),
-        FeishuEventEnvelope::Event(event) => handle_webhook_event(config, event),
+        FeishuEventEnvelope::Event(event) => handle_webhook_event(config, *event),
     }
 }
 

@@ -107,7 +107,9 @@ pub struct FeishuChatInfo {
 #[serde(untagged)]
 pub(crate) enum FeishuEventEnvelope {
     Challenge(FeishuChallengeEvent),
-    Event(FeishuWebhookEvent),
+    /// Boxed: the webhook event body is far larger than the challenge variant,
+    /// and this enum is built for every inbound Feishu payload.
+    Event(Box<FeishuWebhookEvent>),
 }
 
 #[derive(Debug, Deserialize)]

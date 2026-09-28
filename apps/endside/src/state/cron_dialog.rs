@@ -59,8 +59,9 @@ pub enum CronDialogMode {
     EditForm {
         /// Index in the jobs vec if editing existing; `None` if adding new.
         editing_index: Option<usize>,
-        /// The form field values.
-        form: CronEditForm,
+        /// The form field values. Boxed: `CronEditForm` is eight owned strings
+        /// and would otherwise dominate this enum's size.
+        form: Box<CronEditForm>,
         /// Currently focused field.
         focus: CronEditField,
         /// Validation error message, if any.
@@ -234,7 +235,7 @@ impl CronDialog {
     pub fn start_add(&mut self) {
         self.mode = CronDialogMode::EditForm {
             editing_index: None,
-            form: CronEditForm::default(),
+            form: Box::new(CronEditForm::default()),
             focus: CronEditField::Name,
             error: None,
         };
@@ -246,7 +247,7 @@ impl CronDialog {
             let form = CronEditForm::from_entry(entry);
             self.mode = CronDialogMode::EditForm {
                 editing_index: Some(self.selected),
-                form,
+                form: Box::new(form),
                 focus: CronEditField::Name,
                 error: None,
             };

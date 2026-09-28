@@ -127,7 +127,10 @@ async fn process_llm_tool_calls(
 }
 
 // Build errors remain in the same ordered batch as executable calls.
-type PreparedToolCall = Result<Box<dyn ToolCall>, ToolExecutionResult>;
+// The `Err` payload is boxed: `ToolExecutionResult` is ~200 bytes and every
+// build closure in this module would otherwise carry it on `Result`
+// (`result_large_err`).
+type PreparedToolCall = Result<Box<dyn ToolCall>, Box<ToolExecutionResult>>;
 
 pub(super) fn build_tool_call(raw: RawToolCall, filter: &dyn ToolFilter) -> PreparedToolCall {
     let fallback = FinalToolCall {
@@ -137,7 +140,10 @@ pub(super) fn build_tool_call(raw: RawToolCall, filter: &dyn ToolFilter) -> Prep
         ..Default::default()
     };
     ToolCallBuilderImpl::build_with_filter_ref(raw, filter).map_err(|error| {
-        build_framework_failed_tool_result(fallback, format!("tool call build failed: {error}"))
+        Box::new(build_framework_failed_tool_result(
+            fallback,
+            format!("tool call build failed: {error}"),
+        ))
     })
 }
 
@@ -147,7 +153,7 @@ pub(super) async fn execute_tool_call(
 ) -> ToolExecutionResult {
     let call = match call {
         Ok(call) => call,
-        Err(result) => return result,
+        Err(result) => return *result,
     };
     call.execute(runtime).await.unwrap_or_else(|error| {
         build_framework_failed_tool_result(call.final_call().clone(), error.to_string())
