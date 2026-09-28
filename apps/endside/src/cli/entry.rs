@@ -53,6 +53,14 @@ struct Args {
 }
 
 #[derive(clap::Subcommand)]
+// The `Run` variant carries every `run` flag inline (271 bytes vs 50 for the
+// next largest). The usual remedy — boxing the variant payload — is not
+// available here: `clap::Subcommand`'s derive requires the inner type to
+// implement `Subcommand`/`Args` itself, and `clap_derive` has no support for
+// unwrapping `Box<T>`, so `Run(Box<RunArgs>)` does not compile. Shrinking the
+// fields (`Option<Box<str>>` and friends) would only trade a few bytes on a
+// one-shot stack value for unidiomatic CLI plumbing.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run a single prompt through the AgentLoop
     Run {
