@@ -171,7 +171,7 @@ impl GrepExecutor {
 
         if let Some(ref glob) = input.glob {
             for pattern in glob
-                .split(|c| c == ',' || c == ' ')
+                .split([',', ' '])
                 .filter(|s| !s.is_empty())
             {
                 args.push("--glob".to_string());
@@ -427,7 +427,7 @@ impl GrepExecutor {
         if recursive {
             if let Some(ref glob) = input.glob {
                 for pattern in glob
-                    .split(|c| c == ',' || c == ' ')
+                    .split([',', ' '])
                     .filter(|s| !s.is_empty())
                 {
                     let pattern = pattern.trim();

@@ -105,7 +105,7 @@ impl LocalBackendPolicy {
             return Ok(Self::unrestricted());
         };
 
-        return match options {
+        match options {
             LocalIsolationOptions::MacosSeatbelt {
                 allow_network,
                 readable_roots,
@@ -191,7 +191,7 @@ impl LocalBackendPolicy {
                     grants: Arc::new(Mutex::new(GrantStore::default())),
                 })
             }
-        };
+        }
     }
 
     pub(crate) fn check_read(&self, path: &Path, operation: &str) -> Result<(), OperationError> {

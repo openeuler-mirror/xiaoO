@@ -30,7 +30,7 @@ impl ModelCatalog for OpenAiFamilyModelCatalog {
     async fn list_models(&self) -> Result<Vec<ModelSummary>, LlmError> {
         let mut req = self
             .client
-            .get(&self.models_url())
+            .get(self.models_url())
             .header("Content-Type", "application/json");
         if !self.api_key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.api_key));

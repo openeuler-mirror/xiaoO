@@ -202,7 +202,7 @@ impl App {
 
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
-        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(&value, cursor)
+        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(value, cursor)
             .map(|prefix| {
                 crate::slash_complete::candidates_for_prefix(&prefix, &self.state.external_commands)
             })
@@ -318,7 +318,7 @@ impl App {
         let view_len = inner.height as usize;
         let start = selected
             .saturating_sub(view_len.saturating_sub(1))
-            .min(candidates.len().saturating_sub(view_len).max(0));
+            .min(candidates.len().saturating_sub(view_len));
         let end = (start + view_len).min(candidates.len());
         self.state.render_state.file_mention_view_start = start;
         let list = List::new(items.into_iter().skip(start).take(end - start)).block(block);

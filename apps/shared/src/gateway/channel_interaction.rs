@@ -28,7 +28,7 @@ impl ChannelInteractionHandle {
         adapter: Arc<dyn ChannelAdapter>,
     ) -> Self {
         // Round up to whole minutes, minimum 1 minute.
-        let timeout_minutes = ((timeout_secs + 59) / 60).max(1);
+        let timeout_minutes = timeout_secs.div_ceil(60).max(1);
         let actual_timeout_secs = timeout_minutes * 60;
         Self {
             session_id,

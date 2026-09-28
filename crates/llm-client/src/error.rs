@@ -47,7 +47,7 @@ fn render_error_chain(err: &dyn std::error::Error) -> String {
         // Skip duplicates: many error wrappers just re-display their source.
         if chain
             .last()
-            .map_or(true, |last: &String| last.as_str() != s.as_str())
+            .is_none_or(|last: &String| last.as_str() != s.as_str())
         {
             chain.push(s);
         }

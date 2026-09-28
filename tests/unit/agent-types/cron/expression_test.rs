@@ -53,7 +53,7 @@ fn next_after_step_expression() {
     let next = expr.next_after(now).unwrap();
     // Next trigger should be within the next 5 minutes
     let diff_minutes = (next - now).num_minutes();
-    assert!(diff_minutes >= 0 && diff_minutes <= 5);
+    assert!((0..=5).contains(&diff_minutes));
 }
 
 #[test]

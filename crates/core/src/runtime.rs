@@ -8,6 +8,7 @@ use llm_client::LlmProviderWrapper;
 
 use crate::snapshot::RuntimeSnapshot;
 
+#[derive(Default)]
 pub struct RuntimePatch {
     pub llm_provider: Option<Arc<LlmProviderWrapper>>,
     pub tool_registry: Option<Arc<dyn ToolRegistry>>,
@@ -17,18 +18,6 @@ pub struct RuntimePatch {
     pub feature_flags: Option<FeatureFlags>,
 }
 
-impl Default for RuntimePatch {
-    fn default() -> Self {
-        Self {
-            llm_provider: None,
-            tool_registry: None,
-            skill_registry: None,
-            prompt_builder: None,
-            system_prompt: None,
-            feature_flags: None,
-        }
-    }
-}
 
 struct Replaceable {
     llm_provider: RwLock<Arc<LlmProviderWrapper>>,
@@ -152,6 +141,12 @@ pub struct AgentRuntimeBuilder {
     max_turns: Option<u32>,
     token_budget_config: Option<TokenBudgetConfig>,
     token_budget_policy: Option<Arc<dyn TokenBudgetPolicy>>,
+}
+
+impl Default for AgentRuntimeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentRuntimeBuilder {

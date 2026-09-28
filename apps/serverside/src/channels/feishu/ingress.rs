@@ -324,7 +324,7 @@ fn strip_leading_feishu_at_tag_for_ids<'a>(
         .and_then(|caps| caps.get(1))
         .map(|value| value.as_str().trim())?;
 
-    if invocation_mention_ids.iter().any(|id| *id == user_id) {
+    if invocation_mention_ids.contains(&user_id) {
         Some(after)
     } else {
         None

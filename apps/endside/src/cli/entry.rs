@@ -380,9 +380,7 @@ async fn run_once(
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
             agent_id: AgentId(
-                agent
-                    .as_ref()
-                    .map(|a| a.clone())
+                agent.clone()
                     .unwrap_or_else(|| "defaultagent".into()),
             ),
             model: config.model.clone(),

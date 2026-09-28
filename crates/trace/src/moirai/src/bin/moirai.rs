@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 use moirai::{Span, SpanStorage, SqliteStorage};
-use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -280,7 +279,7 @@ fn print_graph(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent_id) = &span.parent_span_id {
             children_map
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(span);
         }
     }
@@ -432,7 +431,7 @@ fn export_markdown(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent_id) = &span.parent_span_id {
             children_map
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(span);
         }
     }

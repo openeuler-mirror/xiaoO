@@ -93,7 +93,7 @@ impl SessionWorker {
         let cancel = input
             .cancellation_token
             .clone()
-            .unwrap_or_else(CancellationToken::new);
+            .unwrap_or_default();
         // Root lanes with an external cancel token wrap their interaction
         // handle so a parked `ask` (e.g. the bash tool blocked on a
         // dyn-sandbox AUTH_REQ permission prompt, or `ask_user_question`)

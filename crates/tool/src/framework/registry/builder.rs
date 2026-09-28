@@ -11,6 +11,12 @@ pub struct ToolRegistryBuilderImpl {
     config: Option<ToolRegistryConfig>,
 }
 
+impl Default for ToolRegistryBuilderImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolRegistryBuilderImpl {
     pub fn new() -> Self {
         Self {

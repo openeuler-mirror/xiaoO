@@ -224,7 +224,7 @@ pub(crate) fn repo_map_signatures(content: &str) -> Vec<String> {
         let trimmed = line.trim_start();
         if KW.iter().any(|kw| trimmed.starts_with(kw)) {
             let mut sig: String = trimmed.chars().take(110).collect();
-            if let Some(idx) = sig.find(|c| c == '{' || c == ';' || c == '=') {
+            if let Some(idx) = sig.find(['{', ';', '=']) {
                 sig.truncate(idx);
             }
             let sig = sig.trim_end().to_string();

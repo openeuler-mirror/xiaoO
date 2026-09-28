@@ -240,7 +240,7 @@ impl OperationExec for PermissionAwareExec {
         loop {
             let denial = runtime_exec_denial(
                 &self.inner,
-                self.exec_isolation.as_deref(),
+                self.exec_isolation,
                 &request,
                 &result,
             );
@@ -918,7 +918,7 @@ fn push_unique_path_string(paths: &mut Vec<String>, path: String) {
 fn denied_path_from_stderr(stderr: &str) -> Option<String> {
     stderr
         .lines()
-        .find_map(|line| denied_path_from_stderr_line(line))
+        .find_map(denied_path_from_stderr_line)
 }
 
 fn denied_path_from_stderr_line(line: &str) -> Option<String> {

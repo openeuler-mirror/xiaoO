@@ -10,6 +10,12 @@ pub struct ToolCallBuilderImpl {
     tool_filter: Option<Box<dyn ToolFilter>>,
 }
 
+impl Default for ToolCallBuilderImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolCallBuilderImpl {
     pub fn new() -> Self {
         Self {

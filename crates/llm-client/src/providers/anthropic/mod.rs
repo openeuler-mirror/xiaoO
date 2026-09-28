@@ -107,7 +107,7 @@ impl AnthropicProvider {
             body["tools"] = serde_json::json!(request
                 .tools
                 .iter()
-                .map(|t| to_anthropic_tool(t))
+                .map(to_anthropic_tool)
                 .collect::<Vec<_>>());
         }
 

@@ -3,20 +3,17 @@ use serde::{Deserialize, Serialize};
 /// Output mode for GrepTool
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum OutputMode {
     /// Show matching lines with context
     Content,
     /// Show file paths that contain matches
+    #[default]
     FilesWithMatches,
     /// Show match counts per file
     Count,
 }
 
-impl Default for OutputMode {
-    fn default() -> Self {
-        Self::FilesWithMatches
-    }
-}
 
 /// Input schema for GrepTool.
 ///

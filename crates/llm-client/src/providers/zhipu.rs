@@ -113,7 +113,7 @@ impl LlmProvider for ZhipuProvider {
     }
 
     fn capabilities(&self) -> &ProviderCapabilities {
-        &self.inner.capabilities()
+        self.inner.capabilities()
     }
 }
 

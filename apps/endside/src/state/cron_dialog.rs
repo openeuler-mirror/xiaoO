@@ -70,6 +70,7 @@ pub enum CronDialogMode {
 
 /// Form fields for editing a cron job.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CronEditForm {
     pub name: String,
     pub cron: String,
@@ -81,20 +82,6 @@ pub struct CronEditForm {
     pub retry_delay: String,
 }
 
-impl Default for CronEditForm {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            cron: String::new(),
-            prompt: String::new(),
-            description: String::new(),
-            agent_role: String::new(),
-            timeout_secs: String::new(),
-            max_retries: String::new(),
-            retry_delay: String::new(),
-        }
-    }
-}
 
 impl CronEditForm {
     /// Build a form pre-filled from an existing job entry.

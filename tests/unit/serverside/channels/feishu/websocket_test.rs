@@ -179,7 +179,7 @@ async fn receives_and_acknowledges_long_connection_event() {
             log_id_new: String::new(),
         };
         socket
-            .send(WsMessage::Binary(event_frame.encode_to_vec().into()))
+            .send(WsMessage::Binary(event_frame.encode_to_vec()))
             .await
             .expect("event frame should send");
 

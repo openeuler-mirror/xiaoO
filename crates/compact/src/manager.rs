@@ -492,7 +492,7 @@ impl ContextManager {
             .collect::<Vec<_>>();
 
         let candidates_include_summary =
-            candidate_messages.iter().any(|m| is_compression_summary(m));
+            candidate_messages.iter().any(is_compression_summary);
         let previous_summary = if candidates_include_summary {
             None
         } else {

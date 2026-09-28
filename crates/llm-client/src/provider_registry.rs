@@ -88,9 +88,7 @@ pub fn provider_catalog() -> Vec<ProviderMetadata> {
             continue;
         }
 
-        let aliases = (*candidate != profile.provider_name)
-            .then(|| vec![(*candidate).to_string()])
-            .unwrap_or_default();
+        let aliases = if *candidate != profile.provider_name { vec![(*candidate).to_string()] } else { Default::default() };
         indexes.insert(name.clone(), catalog.len());
         catalog.push(ProviderMetadata {
             name,

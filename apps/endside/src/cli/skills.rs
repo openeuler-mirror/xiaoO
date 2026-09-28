@@ -157,8 +157,8 @@ pub(super) fn handle_skill_command(command: SkillCommands) {
                 }
                 return;
             }
-            println!("{:<20} {}", "NAME", "DESCRIPTION");
-            println!("{:<20} {}", "----", "-----------");
+            println!("{:<20} DESCRIPTION", "NAME");
+            println!("{:<20} -----------", "----");
             for s in &skills {
                 println!("{:<20} {}", s.skill_id, s.description);
             }

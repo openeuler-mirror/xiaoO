@@ -149,7 +149,7 @@ impl OpenAiFamilyProvider {
             return Err(LlmError::ApiError(format!(
                 "unexpected content type: {content_type}; expected application/json. \
                  Response body preview: {}",
-                &resp_body.chars().take(200).collect::<String>(),
+                resp_body.chars().take(200).collect::<String>(),
             )));
         }
 

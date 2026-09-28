@@ -37,7 +37,7 @@ fn load_input_history_from_path(path: &Path) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&path)
+    let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read input history {}", path.display()))?;
     if content.trim().is_empty() {
         return Ok(Vec::new());
@@ -80,7 +80,7 @@ fn save_input_history_at(path: &Path, entries: &[String]) -> Result<()> {
         entries: entries.to_vec(),
     };
     let content = serde_json::to_string_pretty(&file)?;
-    fs::write(&path, content)
+    fs::write(path, content)
         .with_context(|| format!("failed to write input history {}", path.display()))
 }
 

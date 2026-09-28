@@ -75,9 +75,7 @@ fn build_transcript_cache_keeps_total_lines_in_sync_with_visual_lines() {
     // used to be hidden below the viewport.
     let last_content_visual: String = flat
         .iter()
-        .rev()
-        .skip(1) // skip the trailing empty spacer
-        .next()
+        .rev().nth(1)
         .expect("cache should have at least one content line")
         .spans
         .iter()

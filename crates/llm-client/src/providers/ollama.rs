@@ -64,7 +64,7 @@ impl OllamaProvider {
             let wire_tools: Vec<_> = request
                 .tools
                 .iter()
-                .map(|t| crate::convert::tool_to_wire(t))
+                .map(crate::convert::tool_to_wire)
                 .collect();
             body["tools"] = serde_json::json!(wire_tools);
         }

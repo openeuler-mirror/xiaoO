@@ -50,7 +50,7 @@ impl LocalOperationBackend {
         let home_dir_host: Option<std::path::PathBuf> = std::env::var("HOME")
             .ok()
             .map(std::path::PathBuf::from)
-            .or_else(|| {
+            .or({
                 #[cfg(windows)]
                 {
                     std::env::var("USERPROFILE")

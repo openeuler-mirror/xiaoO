@@ -11,6 +11,7 @@ pub struct OutputContract {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct EffectProfile {
     pub reads_filesystem: bool,
     pub writes_filesystem: bool,
@@ -18,13 +19,3 @@ pub struct EffectProfile {
     pub side_effects: bool,
 }
 
-impl Default for EffectProfile {
-    fn default() -> Self {
-        Self {
-            reads_filesystem: false,
-            writes_filesystem: false,
-            network_access: false,
-            side_effects: false,
-        }
-    }
-}

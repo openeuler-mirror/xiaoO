@@ -246,6 +246,6 @@ fn tui_bootstrap_rejects_builtin_plan_override() {
 /// makes the local TUI default-off while the remote path stays always-on.
 #[test]
 fn tui_config_default_does_not_redact_secrets() {
-    assert_eq!(TuiConfig::default().redact_secrets_display, false);
-    assert_eq!(Config::default().tui.redact_secrets_display, false);
+    assert!(!TuiConfig::default().redact_secrets_display);
+    assert!(!Config::default().tui.redact_secrets_display);
 }

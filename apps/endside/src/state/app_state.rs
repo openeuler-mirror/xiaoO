@@ -154,6 +154,7 @@ pub struct SubagentOpenRegion {
 /// visual line count depends on the current sidebar width), and
 /// `scroll_offset` is the number of wrapped visual lines skipped from the
 /// top of the panel.
+#[derive(Default)]
 pub struct PlanPanelState {
     /// Line-based scroll: wrapped visual lines skipped from the panel top.
     pub scroll_offset: usize,
@@ -166,17 +167,6 @@ pub struct PlanPanelState {
     pub last_visible_height: usize,
 }
 
-impl Default for PlanPanelState {
-    fn default() -> Self {
-        Self {
-            scroll_offset: 0,
-            scrollbar_state: ScrollbarState::default(),
-            scrollbar_dragging: false,
-            total_lines: 0,
-            last_visible_height: 0,
-        }
-    }
-}
 
 impl PlanPanelState {
     pub fn max_scroll_offset(&self) -> usize {
@@ -1143,7 +1133,7 @@ impl AppState {
             .file_mention
             .dismissed_prefix
             .as_deref()
-            .is_some_and(|dismissed| dismissed == &token.typed)
+            .is_some_and(|dismissed| dismissed == token.typed)
         {
             return false;
         }

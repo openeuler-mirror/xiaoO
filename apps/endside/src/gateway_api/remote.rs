@@ -468,7 +468,7 @@ impl GatewayRuntime {
             return Ok(());
         };
         let token = resolve_bearer_token(remote.bearer_token_env.as_deref())
-            .map_err(|error| HeartbeatError::Network(error))?;
+            .map_err(HeartbeatError::Network)?;
         let client = self.http_client.clone();
         let url = format!("{}/api/v1/runtimes/heartbeat", remote.base_url);
         let mut request = client.post(url).json(&RuntimeHeartbeatRequest {

@@ -1,18 +1,15 @@
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub enum AuthState {
+    #[default]
     Ready,
     Cooldown { until: Instant },
     Blocked { reason: String },
     Disabled,
 }
 
-impl Default for AuthState {
-    fn default() -> Self {
-        Self::Ready
-    }
-}
 
 impl AuthState {
     pub fn ready() -> Self {

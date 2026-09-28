@@ -1377,7 +1377,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     // its SSE path always-redacted.
     let all_secrets = ctx
         .state
-        .with_messages(|messages| extract_secrets_from_messages(messages));
+        .with_messages(extract_secrets_from_messages);
     let secrets: Vec<String> = if ctx.snapshot.feature_flags.redact_secrets_display {
         all_secrets
     } else {

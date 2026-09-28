@@ -212,9 +212,9 @@ fn print_usage(program: &std::ffi::OsStr) {
 fn default_config_path() -> Result<PathBuf> {
     #[cfg(unix)]
     {
-        return dirs::home_dir()
+        dirs::home_dir()
             .map(|home| home.join(".config").join("xiaoo").join("config.toml"))
-            .ok_or_else(|| anyhow::anyhow!("unable to resolve ~/.config/xiaoo/config.toml"));
+            .ok_or_else(|| anyhow::anyhow!("unable to resolve ~/.config/xiaoo/config.toml"))
     }
 
     #[cfg(windows)]

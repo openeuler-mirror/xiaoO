@@ -132,7 +132,7 @@ fn multibyte_selection_reports_full_text() {
     input.set_anchor();
     input.set_cursor(8);
 
-    assert_eq!(input.selected_text().as_deref(), Some("你好 world"));
+    assert_eq!(input.selected_text(), Some("你好 world"));
 }
 
 #[test]

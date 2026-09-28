@@ -127,7 +127,7 @@ impl LspClient {
         let msg_clone = msg.clone();
         tokio::spawn(async move {
             let mut stdin = stdin.lock().await;
-            let _ = write_framed(&mut *stdin, &msg_clone).await;
+            let _ = write_framed(&mut stdin, &msg_clone).await;
         });
     }
 
@@ -137,7 +137,7 @@ impl LspClient {
 
     async fn write_message(&self, msg: &Value) -> Result<(), LspError> {
         let mut stdin = self.stdin.lock().await;
-        write_framed(&mut *stdin, msg).await
+        write_framed(&mut stdin, msg).await
     }
 
     pub async fn shutdown(&self) {

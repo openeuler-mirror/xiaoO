@@ -25,7 +25,7 @@ use super::constants::BLOCKED_DEVICE_PATHS;
 /// ```
 pub fn is_blocked_device_path(path: &str) -> bool {
     // Fast path: check exact matches first
-    if BLOCKED_DEVICE_PATHS.iter().any(|&p| path == p) {
+    if BLOCKED_DEVICE_PATHS.contains(&path) {
         return true;
     }
 
@@ -47,11 +47,10 @@ pub fn is_blocked_device_path(path: &str) -> bool {
                 let pid_and_rest = &fd_part[..rest];
                 let fd = &fd_part[rest + 4..];
                 // Verify the PID part is digits only (basic validation)
-                if pid_and_rest.chars().all(|c| c.is_ascii_digit()) {
-                    if fd == "0" || fd == "1" || fd == "2" {
+                if pid_and_rest.chars().all(|c| c.is_ascii_digit())
+                    && (fd == "0" || fd == "1" || fd == "2") {
                         return true;
                     }
-                }
             }
         }
     }
