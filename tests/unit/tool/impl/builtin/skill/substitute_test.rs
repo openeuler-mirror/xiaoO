@@ -38,3 +38,20 @@ fn no_args_returns_prompt_as_is() {
     let result = substitute_arguments(prompt, &None, &["target".into()]);
     assert_eq!(result, prompt);
 }
+
+#[test]
+fn unmatched_trailing_quote_does_not_panic() {
+    // A lone/unmatched opening quote at the end used to make `start` equal
+    // `s.len()` while `end` was `s.len() - 1`, panicking on the slice.
+    assert_eq!(split_args("\""), Vec::<&str>::new());
+    assert_eq!(split_args("a \""), vec!["a"]);
+    assert_eq!(split_args(" \""), Vec::<&str>::new());
+    assert_eq!(split_args("foo bar \""), vec!["foo", "bar"]);
+}
+
+#[test]
+fn matched_trailing_quote_is_stripped() {
+    assert_eq!(split_args("\"a b\""), vec!["a b"]);
+    assert_eq!(split_args("\"a\""), vec!["a"]);
+    assert_eq!(split_args("a \"b c\" d"), vec!["a", "b c", "d"]);
+}
