@@ -246,5 +246,8 @@ fn clipboard_outcome_native_delivery_is_confirmed() {
 /// same env vars, so the equivalence holds whatever the test runner's TERM.
 #[test]
 fn clipboard_outcome_osc52_delivery_follows_terminal_heuristic() {
-    assert_eq!(ClipboardOutcome::Osc52.delivered(), osc52_likely_supported());
+    assert_eq!(
+        ClipboardOutcome::Osc52.delivered(),
+        osc52_likely_supported()
+    );
 }

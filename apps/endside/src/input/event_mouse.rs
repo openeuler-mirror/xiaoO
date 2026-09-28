@@ -365,8 +365,11 @@ impl App {
                 // the visible viewport, not just what is on screen.
                 if self.state.transcript_drag_active() {
                     self.state.active_transcript_scroll_up();
-                    self.state
-                        .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                    self.state.extend_transcript_selection_to(
+                        mouse_event.column,
+                        mouse_event.row,
+                        area,
+                    );
                 } else {
                     self.state.transcript_selection = None;
                     self.state.active_transcript_scroll_up();
@@ -376,8 +379,11 @@ impl App {
                 // See ScrollUp: scroll-and-extend while a drag is active.
                 if self.state.transcript_drag_active() {
                     self.state.active_transcript_scroll_down();
-                    self.state
-                        .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                    self.state.extend_transcript_selection_to(
+                        mouse_event.column,
+                        mouse_event.row,
+                        area,
+                    );
                 } else {
                     self.state.transcript_selection = None;
                     self.state.active_transcript_scroll_down();
@@ -464,8 +470,11 @@ impl App {
                 self.state.transcript_selection = None;
             }
             MouseEventKind::Drag(MouseButton::Left) if in_content_zone => {
-                self.state
-                    .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                self.state.extend_transcript_selection_to(
+                    mouse_event.column,
+                    mouse_event.row,
+                    area,
+                );
             }
             // Drag-selection continued outside the content zone: above the top
             // edge or below the bottom edge of the Messages box (e.g. into
@@ -481,8 +490,11 @@ impl App {
                 } else if mouse_event.row < area.y {
                     self.state.active_transcript_scroll_up();
                 }
-                self.state
-                    .extend_transcript_selection_to(mouse_event.column, mouse_event.row, area);
+                self.state.extend_transcript_selection_to(
+                    mouse_event.column,
+                    mouse_event.row,
+                    area,
+                );
             }
             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left)
                 if self.state.active_transcript_scrollbar_dragging() =>

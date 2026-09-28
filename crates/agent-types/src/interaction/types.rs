@@ -41,6 +41,9 @@ pub enum InteractionResponse {
     Confirmed {
         allowed: bool,
     },
+    /// No user answer was received (turn cancelled, channel closed,
+    /// timeout, or no interaction backend). Not an explicit denial.
+    Unanswered,
     Text {
         value: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,16 +55,16 @@ pub enum InteractionResponse {
 }
 
 impl InteractionResponse {
-    /// Deny-style response for a request whose interaction will never
-    /// receive a real answer (turn cancelled while a tool waited on
-    /// `ask`, prompt channel closed, no interaction backend available):
-    /// `Confirm` is denied and `TextInput` / `Choice` carry no value, so
-    /// the pending tool call can record a result and wind down instead
-    /// of blocking forever. Distinct from timeout-style responses, which
+    /// Response for a request whose interaction will never receive a real
+    /// answer (turn cancelled while a tool waited on `ask`, prompt channel
+    /// closed, no interaction backend available): `Confirm` is reported as
+    /// `Unanswered` and `TextInput` / `Choice` carry no value, so the
+    /// pending tool call can record a result and wind down instead of
+    /// blocking forever. Distinct from timeout-style responses, which
     /// carry a sentinel value explaining the timeout to the model.
     pub fn unanswered(request: &InteractionRequest) -> Self {
         match request {
-            InteractionRequest::Confirm { .. } => InteractionResponse::Confirmed { allowed: false },
+            InteractionRequest::Confirm { .. } => InteractionResponse::Unanswered,
             InteractionRequest::TextInput { .. } => InteractionResponse::Text {
                 value: None,
                 display_value: None,
@@ -70,3 +73,7 @@ impl InteractionResponse {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/agent-types/interaction/types_test.rs"]
+mod tests;

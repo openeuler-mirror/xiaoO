@@ -8,7 +8,7 @@ use agent_types::tool::call_types::FinalToolCall;
 use agent_types::tool::execution_types::{RawToolOutcome, ToolExecutionError, ToolExecutorOutput};
 
 use super::input::{AskUserQuestionInput, QuestionItem};
-use super::output::{AnswerItem, AskUserQuestionOutput};
+use super::output::{AnswerItem, AskUserQuestionOutput, ConfirmAnswer};
 use super::spec::AskUserQuestionToolSpec;
 use super::validation;
 
@@ -93,9 +93,10 @@ impl ToolExecutor for AskUserQuestionExecutor {
             let response = runtime.interaction().ask(&request).await;
 
             let answer = match response {
-                InteractionResponse::Confirmed { allowed } => {
-                    AnswerItem::Confirmed { prompt, allowed }
-                }
+                InteractionResponse::Confirmed { allowed } => AnswerItem::Confirm {
+                    prompt,
+                    answer: ConfirmAnswer::from(allowed),
+                },
                 InteractionResponse::Text {
                     value,
                     display_value,
@@ -105,6 +106,23 @@ impl ToolExecutor for AskUserQuestionExecutor {
                     display_value,
                 },
                 InteractionResponse::Choice { value } => AnswerItem::Choice { prompt, value },
+                // No answer received (cancelled / closed / timeout):
+                // report the absence, not a denial.
+                InteractionResponse::Unanswered => match question {
+                    QuestionItem::Confirm { .. } => AnswerItem::Confirm {
+                        prompt,
+                        answer: ConfirmAnswer::Unanswered,
+                    },
+                    QuestionItem::TextInput { .. } => AnswerItem::Text {
+                        prompt,
+                        value: None,
+                        display_value: None,
+                    },
+                    QuestionItem::Choice { .. } => AnswerItem::Choice {
+                        prompt,
+                        value: None,
+                    },
+                },
             };
             answers.push(answer);
         }

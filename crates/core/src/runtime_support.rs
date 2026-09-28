@@ -46,8 +46,9 @@ impl NoopInteractionHandle {
 #[async_trait]
 impl InteractionHandle for NoopInteractionHandle {
     async fn ask(&self, request: &InteractionRequest) -> InteractionResponse {
-        // No interaction backend: answer deny-style so a tool call routed
-        // here records a result instead of blocking forever.
+        // No interaction backend: report that no answer is available so a
+        // tool call routed here records a result instead of blocking
+        // forever.
         InteractionResponse::unanswered(request)
     }
 }
