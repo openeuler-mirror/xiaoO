@@ -116,15 +116,6 @@ impl CheckoutEvictionContext {
     }
 }
 
-/// Check out a backend from `checkpoint` for `session_id`, retrying with
-/// `try_evict_if_needed` when the sandbox pool is full.
-///
-/// This is the shared recovery path for both the paused-session resume flow
-/// and the checkpoint-checkout flow. When `checkout_backend` returns
-/// [`BackendError::NeedsEviction`], we ask the backend manager to evict (or
-/// mark for eviction) an idle sandbox and retry, up to
-/// `max_eviction_attempts` times. Only non-`NeedsEviction` errors — or
-/// exhaustion of the retry budget — surface to the caller.
 /// Everything one [`checkout_backend_with_eviction`] call needs besides the
 /// backend manager itself.
 pub(super) struct CheckoutParams<'a> {
@@ -137,6 +128,15 @@ pub(super) struct CheckoutParams<'a> {
     pub initial_session_status: Option<(String, usize)>,
 }
 
+/// Check out a backend from `checkpoint` for `session_id`, retrying with
+/// `try_evict_if_needed` when the sandbox pool is full.
+///
+/// This is the shared recovery path for both the paused-session resume flow
+/// and the checkpoint-checkout flow. When `checkout_backend` returns
+/// [`BackendError::NeedsEviction`], we ask the backend manager to evict (or
+/// mark for eviction) an idle sandbox and retry, up to
+/// `max_eviction_attempts` times. Only non-`NeedsEviction` errors — or
+/// exhaustion of the retry budget — surface to the caller.
 pub(super) async fn checkout_backend_with_eviction(
     backend_manager: &BackendManager,
     params: CheckoutParams<'_>,

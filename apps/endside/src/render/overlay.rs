@@ -1372,8 +1372,6 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-/// Commit pending whitespace then pending word into the current line at
-/// `(row, line_width)`, recording each char's visual position and advancing
 /// Whitespace/word runs buffered while wrapping one line, plus their running
 /// display widths. Drained together by `flush_pending`.
 #[derive(Default)]
@@ -1384,6 +1382,8 @@ struct PendingBuffers {
     word_width: usize,
 }
 
+/// Commit pending whitespace then pending word into the current line at
+/// `(row, line_width)`, recording each char's visual position and advancing
 /// the line width. Both pending buffers are drained and their width trackers
 /// reset to 0. Returns the updated line width.
 fn flush_pending(
