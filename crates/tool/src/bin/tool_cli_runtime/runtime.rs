@@ -58,7 +58,7 @@ impl ToolCliRuntime {
             .build()?;
 
         let trace_recorder = TraceRecorderBuilderImpl::default()
-            .from_json(serde_json::json!({
+            .with_json(serde_json::json!({
                 "storage_backend": trace_config.backend,
                 "db_path": trace_config.db_path,
                 "agent_id": "tool_cli",

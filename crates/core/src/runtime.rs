@@ -18,7 +18,6 @@ pub struct RuntimePatch {
     pub feature_flags: Option<FeatureFlags>,
 }
 
-
 struct Replaceable {
     llm_provider: RwLock<Arc<LlmProviderWrapper>>,
     tool_registry: RwLock<Arc<dyn ToolRegistry>>,

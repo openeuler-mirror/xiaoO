@@ -10,12 +10,10 @@ pub struct OutputContract {
     pub description: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct EffectProfile {
     pub reads_filesystem: bool,
     pub writes_filesystem: bool,
     pub network_access: bool,
     pub side_effects: bool,
 }
-

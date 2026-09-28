@@ -19,7 +19,7 @@ impl TraceRecorderBuilder for TraceRecorderBuilderImpl {
         }
     }
 
-    fn from_json(mut self, config: Value) -> Result<Self, BuildError> {
+    fn with_json(mut self, config: Value) -> Result<Self, BuildError> {
         self.config = TraceRecorderConfig::from_json(config)?;
         Ok(self)
     }

@@ -1,14 +1,14 @@
+//! Output types for FileEditTool.
+//!
+//! Matches the TypeScript outputSchema:
+//! - Hunk: Individual patch hunk with line range information
+//! - StructuredPatch: Array of hunks representing a complete patch
+//! - GitDiff: Git diff metadata (filename, status, additions, deletions, etc.)
+//! - FileEditOutput: Complete output of a file edit operation
+
 use serde::{Deserialize, Serialize};
 
 use crate::r#impl::lsp_hooks::LspDiagnosticsInfo;
-
-/// Output types for FileEditTool.
-///
-/// Matches the TypeScript outputSchema:
-/// - Hunk: Individual patch hunk with line range information
-/// - StructuredPatch: Array of hunks representing a complete patch
-/// - GitDiff: Git diff metadata (filename, status, additions, deletions, etc.)
-/// - FileEditOutput: Complete output of a file edit operation
 
 /// A hunk in a structured patch.
 ///

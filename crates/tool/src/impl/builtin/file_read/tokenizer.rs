@@ -89,7 +89,10 @@ fn chars_per_token_for_extension(extension: &str) -> f64 {
 
 /// Extract file extension from a file path.
 fn get_extension(file_path: &str) -> Option<&str> {
-    file_path.rsplit('.').next().filter(|&ext| !(ext.contains('/') || ext.is_empty()))
+    file_path
+        .rsplit('.')
+        .next()
+        .filter(|&ext| !(ext.contains('/') || ext.is_empty()))
 }
 
 /// Estimate the number of tokens in a file based on its content and file path.

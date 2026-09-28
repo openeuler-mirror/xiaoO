@@ -4,8 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileReadState {
     pub timestamp: i64,
     pub offset: Option<u64>,
@@ -62,7 +61,6 @@ impl DedupStateStore {
         }
     }
 }
-
 
 #[allow(dead_code)]
 pub fn get_file_mtime(path: &Path) -> Option<i64> {

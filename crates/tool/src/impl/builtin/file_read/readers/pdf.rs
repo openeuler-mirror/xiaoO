@@ -89,12 +89,16 @@ pub fn read_pdf_from_bytes(file_path: &str, bytes: &[u8]) -> PdfOutput {
     }
 }
 
+/// A planned PDF split: the `parts` output plus the `(part filename, bytes)`
+/// pairs the caller writes out.
+pub(crate) type PdfPartsPlan = (PartsOutput, Vec<(String, Vec<u8>)>);
+
 pub(crate) fn plan_pdf_parts_from_bytes(
     file_path: &str,
     bytes: &[u8],
     pages: &str,
     output_dir: &str,
-) -> Result<(PartsOutput, Vec<(String, Vec<u8>)>), PdfError> {
+) -> Result<PdfPartsPlan, PdfError> {
     let output_dir_path = Path::new(output_dir);
     let page_numbers = parse_page_range(pages, PDF_MAX_PAGES_PER_READ)?;
 

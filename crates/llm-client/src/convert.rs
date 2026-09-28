@@ -221,10 +221,9 @@ fn repair_unclosed_json(input: &str) -> Option<String> {
             '"' => in_string = true,
             '{' => closers.push('}'),
             '[' => closers.push(']'),
-            '}' | ']'
-                if closers.pop() != Some(ch) => {
-                    return None;
-                }
+            '}' | ']' if closers.pop() != Some(ch) => {
+                return None;
+            }
             _ => {}
         }
     }

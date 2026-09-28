@@ -123,16 +123,17 @@ impl LocalBackendProvider {
         })
     }
 
-    fn active_instance(
-        backend_id: BackendId,
-        session_id: String,
-        workspace_root: agent_contracts::backend::BackendPath,
-        provider_options: Value,
-        metadata: Value,
-        resources: BackendResourceAllocation,
-        created_at_ms: u64,
-        updated_at_ms: u64,
-    ) -> BackendInstance {
+    fn active_instance(spec: ActiveInstanceSpec) -> BackendInstance {
+        let ActiveInstanceSpec {
+            backend_id,
+            session_id,
+            workspace_root,
+            provider_options,
+            metadata,
+            resources,
+            created_at_ms,
+            updated_at_ms,
+        } = spec;
         BackendInstance {
             backend_id,
             provider: Self::provider_kind(),
@@ -153,6 +154,19 @@ impl LocalBackendProvider {
             updated_at_ms,
         }
     }
+}
+
+/// Every input needed to describe a freshly active local backend instance.
+/// Grouped because `create_sandbox` and `load` build the same eight values.
+struct ActiveInstanceSpec {
+    backend_id: BackendId,
+    session_id: String,
+    workspace_root: BackendPath,
+    provider_options: Value,
+    metadata: Value,
+    resources: BackendResourceAllocation,
+    created_at_ms: u64,
+    updated_at_ms: u64,
 }
 
 pub fn local_backend_provider() -> LocalBackendProvider {
@@ -184,20 +198,20 @@ impl BackendLifecycle for LocalBackendProvider {
             request.workspace_root.native(),
             "",
         );
-        Ok(Self::active_instance(
-            id,
-            request.session_id,
+        Ok(Self::active_instance(ActiveInstanceSpec {
+            backend_id: id,
+            session_id: request.session_id,
             workspace_root,
-            request.provider_options,
-            request.metadata,
-            BackendResourceAllocation {
+            provider_options: request.provider_options,
+            metadata: request.metadata,
+            resources: BackendResourceAllocation {
                 vcpu_count: request.resource_limits.vcpu_count,
                 memory_mb: request.resource_limits.memory_mb,
                 disk_mb: request.resource_limits.disk_mb,
             },
-            now,
-            now,
-        ))
+            created_at_ms: now,
+            updated_at_ms: now,
+        }))
     }
 
     async fn load(
@@ -220,20 +234,20 @@ impl BackendLifecycle for LocalBackendProvider {
             request.workspace_root.native(),
             "",
         );
-        Ok(Self::active_instance(
-            id,
-            request.session_id,
+        Ok(Self::active_instance(ActiveInstanceSpec {
+            backend_id: id,
+            session_id: request.session_id,
             workspace_root,
-            request.provider_options,
-            request.metadata,
-            BackendResourceAllocation {
+            provider_options: request.provider_options,
+            metadata: request.metadata,
+            resources: BackendResourceAllocation {
                 vcpu_count: request.resource_limits.vcpu_count,
                 memory_mb: request.resource_limits.memory_mb,
                 disk_mb: request.resource_limits.disk_mb,
             },
-            now,
-            now,
-        ))
+            created_at_ms: now,
+            updated_at_ms: now,
+        }))
     }
 
     async fn pause(

@@ -158,11 +158,7 @@ impl OperationSearch for LocalSearch {
                     }
                 }
                 GrepMode::Count => {
-                    entries.push(format!(
-                        "{}:{}",
-                        backend_path.native(),
-                        matched_lines.len()
-                    ));
+                    entries.push(format!("{}:{}", backend_path.native(), matched_lines.len()));
                     if request
                         .head_limit
                         .is_some_and(|limit| entries.len() >= limit)

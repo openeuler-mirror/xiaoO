@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use moirai::{Span, SpanStorage, SqliteStorage};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[path = "../cli_api.rs"]
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn cmd_list(
-    db_path: &PathBuf,
+    db_path: &Path,
     limit: usize,
     alive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -188,7 +188,7 @@ async fn cmd_list(
 }
 
 async fn cmd_log(
-    db_path: &PathBuf,
+    db_path: &Path,
     trace_id_input: &str,
     graph: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -329,7 +329,7 @@ fn print_tree_children(
 }
 
 async fn cmd_export(
-    db_path: &PathBuf,
+    db_path: &Path,
     trace_id_input: &str,
     format: Format,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -357,7 +357,7 @@ fn cli_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 async fn cmd_span(
-    db_path: &PathBuf,
+    db_path: &Path,
     span_id: &str,
     format: Format,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 /// Output mode for GrepTool
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default)]
 pub enum OutputMode {
     /// Show matching lines with context
     Content,
@@ -13,7 +12,6 @@ pub enum OutputMode {
     /// Show match counts per file
     Count,
 }
-
 
 /// Input schema for GrepTool.
 ///

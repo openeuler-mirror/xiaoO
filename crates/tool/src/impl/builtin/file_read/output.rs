@@ -1,14 +1,14 @@
-use serde::{Deserialize, Serialize};
+//! Output types for FileReadTool.
+//!
+//! Matches the TypeScript outputSchema:
+//! - text: Plain text file content
+//! - image: Image file (jpeg, png, gif, webp)
+//! - notebook: Jupyter notebook
+//! - pdf: PDF document
+//! - parts: File split into parts
+//! - file_unchanged: File that was read without changes
 
-/// Output types for FileReadTool.
-///
-/// Matches the TypeScript outputSchema:
-/// - text: Plain text file content
-/// - image: Image file (jpeg, png, gif, webp)
-/// - notebook: Jupyter notebook
-/// - pdf: PDF document
-/// - parts: File split into parts
-/// - file_unchanged: File that was read without changes
+use serde::{Deserialize, Serialize};
 
 /// Text output for plain text files.
 #[derive(Debug, Clone, Serialize, Deserialize)]

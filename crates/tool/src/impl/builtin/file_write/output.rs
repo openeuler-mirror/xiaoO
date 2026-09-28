@@ -1,12 +1,12 @@
+//! Output types for FileWriteTool.
+//!
+//! Matches the TypeScript outputSchema:
+//! - create: New file creation
+//! - update: Existing file modification
+
 use serde::{Deserialize, Serialize};
 
 use crate::r#impl::lsp_hooks::LspDiagnosticsInfo;
-
-/// Output types for FileWriteTool.
-///
-/// Matches the TypeScript outputSchema:
-/// - create: New file creation
-/// - update: Existing file modification
 
 /// Hunk representation for diff output.
 #[derive(Debug, Clone, Serialize, Deserialize)]

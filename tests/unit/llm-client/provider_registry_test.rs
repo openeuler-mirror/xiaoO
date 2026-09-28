@@ -3,22 +3,22 @@ use super::*;
 #[test]
 fn test_protocol_family_from_str() {
     assert_eq!(
-        ProtocolFamily::from_str("openai"),
+        ProtocolFamily::parse("openai"),
         Some(ProtocolFamily::OpenAiCompatible)
     );
     assert_eq!(
-        ProtocolFamily::from_str("anthropic"),
+        ProtocolFamily::parse("anthropic"),
         Some(ProtocolFamily::Anthropic)
     );
     assert_eq!(
-        ProtocolFamily::from_str("gemini"),
+        ProtocolFamily::parse("gemini"),
         Some(ProtocolFamily::Gemini)
     );
     assert_eq!(
-        ProtocolFamily::from_str("ollama"),
+        ProtocolFamily::parse("ollama"),
         Some(ProtocolFamily::Ollama)
     );
-    assert_eq!(ProtocolFamily::from_str("unknown"), None);
+    assert_eq!(ProtocolFamily::parse("unknown"), None);
 }
 
 #[test]
