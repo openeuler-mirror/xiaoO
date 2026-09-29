@@ -500,6 +500,23 @@ impl SubagentLaneState {
         self.sync_scrollbar_state();
     }
 
+    /// Scroll up by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the top so offset never underflows.
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.stick_to_bottom = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll down by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the bottom so the last line stays visible.
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
+        self.stick_to_bottom = self.scroll_offset >= max;
+        self.sync_scrollbar_state();
+    }
+
     pub fn set_scroll_offset(&mut self, line_offset: usize) {
         let max = self.max_scroll_offset();
         self.scroll_offset = line_offset.min(max);
@@ -1030,6 +1047,23 @@ impl ChatState {
         if self.scroll_offset >= max {
             self.stick_to_bottom = true;
         }
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll up by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the top so offset never underflows.
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.stick_to_bottom = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll down by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the bottom so the last line stays visible.
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
+        self.stick_to_bottom = self.scroll_offset >= max;
         self.sync_scrollbar_state();
     }
 

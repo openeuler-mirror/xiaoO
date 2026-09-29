@@ -27,6 +27,10 @@ use crate::slash_complete::{apply_slash_pick, candidates_for_prefix, slash_typed
 use crate::status_panel::StatusPanel;
 use crate::theme::Theme;
 
+/// Number of transcript lines moved per mouse-wheel notch. Keyboard
+/// Up/Down stay single-line; only wheel input advances by this step.
+pub const MOUSE_WHEEL_SCROLL_LINES: usize = 3;
+
 #[derive(PartialEq)]
 pub enum InputMode {
     Editing,
@@ -205,6 +209,21 @@ impl PlanPanelState {
         if self.scroll_offset < max {
             self.scroll_offset = (self.scroll_offset + 1).min(max);
         }
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll up by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the top so offset never underflows.
+    pub fn scroll_up_by(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.sync_scrollbar_state();
+    }
+
+    /// Scroll down by `lines` lines in one step (mouse wheel notch),
+    /// clamped at the bottom so the last line stays visible.
+    pub fn scroll_down_by(&mut self, lines: usize) {
+        let max = self.max_scroll_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max);
         self.sync_scrollbar_state();
     }
 
@@ -746,6 +765,32 @@ impl AppState {
         }
     }
 
+    /// Wheel-step scroll: move `lines` lines per mouse-wheel notch. The
+    /// routing mirrors `active_transcript_scroll_up`/`_down`, but applies
+    /// the multi-line step used only by wheel input.
+    pub fn active_transcript_scroll_up_by(&mut self, lines: usize) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.scroll_up_by(lines);
+            }
+        } else {
+            self.chat_state.scroll_up_by(lines);
+        }
+    }
+
+    /// Wheel-step scroll: move `lines` lines per mouse-wheel notch. The
+    /// routing mirrors `active_transcript_scroll_up`/`_down`, but applies
+    /// the multi-line step used only by wheel input.
+    pub fn active_transcript_scroll_down_by(&mut self, lines: usize) {
+        if let Some(agent_id) = self.chat_state.active_subagent_id().map(ToOwned::to_owned) {
+            if let Some(lane) = self.chat_state.subagent_lanes.get_mut(&agent_id) {
+                lane.scroll_down_by(lines);
+            }
+        } else {
+            self.chat_state.scroll_down_by(lines);
+        }
+    }
+
     pub fn active_transcript_scroll_offset(&self) -> usize {
         self.chat_state
             .active_subagent_id()
@@ -902,12 +947,16 @@ impl AppState {
         }
     }
 
-    pub fn plan_panel_scroll_up(&mut self) {
-        self.plan_panel.scroll_up();
+    /// Wheel-step scroll for the Plan panel: move `lines` lines per
+    /// mouse-wheel notch (same step as the transcript).
+    pub fn plan_panel_scroll_up_by(&mut self, lines: usize) {
+        self.plan_panel.scroll_up_by(lines);
     }
 
-    pub fn plan_panel_scroll_down(&mut self) {
-        self.plan_panel.scroll_down();
+    /// Wheel-step scroll for the Plan panel: move `lines` lines per
+    /// mouse-wheel notch (same step as the transcript).
+    pub fn plan_panel_scroll_down_by(&mut self, lines: usize) {
+        self.plan_panel.scroll_down_by(lines);
     }
 
     pub fn plan_panel_max_scroll_offset(&self) -> usize {
