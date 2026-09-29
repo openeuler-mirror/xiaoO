@@ -7,7 +7,7 @@
 | 创建日期 | 2026-08-08 |
 | 最后更新 | 2026-08-08 |
 | 评审状态 | 待评审 |
-| 关联需求 | [AgentMoss 服务仓库](~/gitcode/AgentMoss) 三层安全分析能力下沉至 xiaoO 插件层 |
+| 关联需求 | AgentMoss 服务仓库（`~/gitcode/AgentMoss`）三层安全分析能力下沉至 xiaoO 插件层 |
 
 > 本文档参考 `trusted-contract-unified-design.md` 的表述方式，从整体上描述 xiaoO 通过 `plugins/hookers/agent_moss` 插件接入 AgentMoss 安全服务的定位、需求、总体设计与实现方式。不详细体现 AgentMoss 服务内部实现细节，也不替代其在 `~/gitcode/AgentMoss` 仓库中的专项设计文档。
 
@@ -346,17 +346,19 @@ agent_moss 插件通过 xiaoO 的 Hook 机制注册，在工具执行前触发�
 ]
 ```
 
-bridge.py 从 stdin 接收的 payload 结构：
+bridge.py 从 stdin 接收的 payload 结构（字段名以宿主实际 payload 为准）：
 ```json
 {
   "session_id": "会话ID",
   "prompt_session": "原始任务描述",
-  "action_history": [{"name": "...", "action_detail": "..."}],
-  "call": {"tool_name": "bash", "input": {"command": "..."}},
-  "reason": "执行理由",
-  "cwd": "当前工作目录"
+  "prompt_history": [{"text": "原始任务描述", "actions": []}],
+  "action_history": [{"action_type": "...", "action_detail": "..."}],
+  "workspace": "/home/user/project",
+  "call": {"tool_name": "bash", "input": {"command": "..."}}
 }
 ```
+
+> **注意**：这里**没有 `cwd` 字段**。xiaoO 的 tool pre payload 里工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`）。也因此 `bridge.py` 读 `data.get("cwd", "")` 恒为空串（`plugins/hookers/agent_moss/bridge.py:358`），层2 的「间接文件访问检测」在 xiaoO 接入场景下不生效——详见本节后面的规则覆盖表（第 12 条）下的已知缺口说明。
 
 #### 4.1.2 AgentMoss 服务接口（HTTP）
 
@@ -534,13 +536,15 @@ AgentMoss 覆盖的 10 大安全风险类别与三大行业标准对齐（OWASP 
 | 9 | 系统配置篡改 | 7 | 改 iptables、/proc/sys、/boot、/etc/hosts、nginx |
 | 10 | 文件写入/重定向 | 7 | echo>、引号路径、wget -O、rsync 等边界写检测 |
 | 11 | 意图偏离 | 5 | prompt 要求查看却 rm、要求优化却 DROP、prompt 注入 |
-| 12 | 间接文件访问 | 2 | os.listdir/os.walk 遍历 cwd 间接读 .env 凭据 |
+| 12 | 间接文件访问 | 2 | os.listdir/os.walk 遍历 cwd 间接读 .env 凭据 ⚠️ xiaoO 接入场景下不生效（见下） |
 | 13 | 读后写违反 | 3 | 未读先写、先读后写同文件对照 |
 | 14 | 正常操作/白名单 | 5 | echo/grep/read/ls/pwd 等只读与高频运维放行 |
 | 15 | 供应链攻击 | 4 | pip/npm typosquatting、不可信 skill 安装 |
 | 16 | 浏览器钓鱼 | 3 | browser 导航钓鱼站 vs 官方文档 |
 | 17 | 邮件操作 | 2 | 批量删邮箱 vs 发正常通知 |
 | 18 | 反弹 Shell/工具注入 | 3 | bash -i 反弹 shell、通用工具参数注入 payload |
+
+> **⚠️ 已知缺口：第 12 条「间接文件访问」在 xiaoO 接入场景下不生效。** 该规则需要 analyze 请求携带 `cwd`。xiaoO 的 tool pre payload 没有 `cwd` 字段，工作区字段名是 **`workspace`**（`crates/hook/src/hookers/plugin/tool/adaptor.rs:298`；由 `crates/hook/src/hookers/plugin/core.rs:250-255` 生成），而 `bridge.py` 读的是 `data.get("cwd", "")`（`plugins/hookers/agent_moss/bridge.py:358`），因此转发给 AgentMoss 的 `cwd` **恒为空串**，层2 的间接文件访问检测在 xiaoO 下拿不到工作区、实际不触发。这是 bridge 侧字段名与宿主 payload 契约不一致导致的（代码看起来是 bug；本文档只记录实际行为，未改代码）。AgentMoss 作为独立服务被其他调用方（如自带 `cwd` 的 OpenDesk）接入时该规则仍正常。修复方向是把 bridge 改为读 `workspace`。
 
 **各配置通过率（实测，`tests/cases/README.md` 口径，分母 203）**：
 

@@ -1,8 +1,14 @@
 # xiaoo-api Runtime SDK 化提案（RFC）
 
-> 状态：提案草案，未评审。  
+> 状态：**已落地（as built）**。本文档的提案内容已实现，现作为该改造的架构记录维护。
+> 落地提交：`1ffe095`（2026-08-20，"pure runtime sdk"），后续由 `01aac5c`（抽出
+> `xiaoo-protocol`、runtime builder 默认值）、`d14be5c`（重导出 no-op 默认实现与
+> suspend/resume 类型）、`034a899`（测试迁移到 `tests/unit/`）收敛。
 > 范围：只讨论 `crates/xiaoo-api` 的公开边界及其直接依赖。  
 > 明确不讨论：`apps/*` 的迁移方式、daemon/TUI/HTTP 的组装、控制面如何消费 SDK。
+>
+> 阅读提示：§1 描述的"当前状态"是改造**之前**的形态，现已不存在，仅作历史保留。
+> 实际公开面见 §6，验收结果见 §9。
 
 ## 0. 结论
 
@@ -42,7 +48,12 @@ SDK 只把它接进 agent 的工具执行路径。
 
 ## 1. 问题不在于 Host 太重，而在于 Host 没有必要
 
-当前 xiaoo-api 把公开门面描述为：
+> **历史记录（改造前形态）。** 下列链路在改造前存在于 `xiaoo-api`，现已删除：
+> `LocalSessionHost`、`SessionStore`、`BackendManager`、`AppBootstrap`、
+> `GatewayBackendConfig` 在 `crates/xiaoo-api/src/` 中的检索结果为 0 命中。
+> 当前公开模块见 `crates/xiaoo-api/src/lib.rs:10-19`。本节保留以说明改造动机。
+
+改造前 xiaoo-api 把公开门面描述为：
 
 ```text
 LocalSessionHost -> open_session -> Session -> run_turn
@@ -277,22 +288,28 @@ LLM、operation backend、tools、skills、prompt、compact 都是 runtime 的�
 
 ## 6. xiaoo-api 模块重划
 
-建议公开模块收敛为：
+**已落地的公开模块**（对应 `crates/xiaoo-api/src/lib.rs:10-19`）：
 
 ```text
 xiaoo_api
-├── prelude
-├── runtime       # Runtime、builder、state、input/output、run
-├── backend       # operation plane contracts
-├── tools         # registry/source contracts与标准实现
-├── skills        # registry contracts与标准实现
-├── llm           # provider contracts与构造辅助
-├── events        # loop/tool event contracts
-├── interaction   # runtime interaction contracts
-└── extension     # 有真实需求后开放的窄扩展点
+├── prelude       # 纯 runtime SDK 的便捷导入（prelude.rs:3-6）
+├── runtime       # Runtime、builder、state、input/output、run（lib.rs:15）
+├── backend       # operation plane contracts（lib.rs:10）
+├── chat          # 会话消息与模型引用契约（lib.rs:11）
+├── tools         # registry/source contracts与标准实现（lib.rs:17）
+├── skills        # registry contracts与标准实现（lib.rs:16）
+├── llm           # provider contracts与构造辅助（lib.rs:14）
+├── events        # loop/tool event contracts（lib.rs:12）
+└── interaction   # runtime interaction contracts（lib.rs:13）
 ```
 
-以下模块不应继续作为 runtime SDK 公共模块：
+与原始提案的差异：
+
+- 新增 `chat` 模块，承载 `ChatMessage` / `ModelRef` 一类会话契约（`lib.rs:11`）；
+- `extension` **推迟（deferred）**：当前无真实 extension 消费者，按 §5.2 的判断
+  不提前冻结空泛 trait，因此 `lib.rs:10-19` 中没有 `extension` 模块。
+
+以下模块不应继续作为 runtime SDK 公共模块（已确认不再导出）：
 
 ```text
 host
@@ -304,8 +321,9 @@ backend 中的 BackendManager/GatewayBackendConfig exports
 sse                    # HTTP client protocol，不属于 runtime SDK
 ```
 
-如果 wire/client API 仍需独立发布，应进入单独的 protocol/client crate；不要因为历史兼容
-继续让 xiaoo-api 同时扮演 runtime SDK 和 daemon client contract 包。
+wire/client 协议类型已按此建议迁入独立 crate：`crates/protocol`
+（提交 `01aac5c`），因此 xiaoo-api 不再同时扮演 runtime SDK 和 daemon client
+contract 包。
 
 ## 7. 依赖纪律
 
@@ -321,17 +339,23 @@ runtime SDK 的依赖方向只能指向可复用的 lower-level crates，例如�
 - `tool` / `skill` / `prompt` / `compact`；
 - 其他明确属于 runtime 的基础 crate。
 
-只要 xiaoo-api 的 `Cargo.toml` 还包含：
+**验收状态：已满足。** `crates/xiaoo-api/Cargo.toml:7-19` 的依赖全部为
+`xiaoo-core`、`agent-types`、`agent-contracts`、`llm-client`、`compact`、`tool`、
+`skill`、`prompt`，**没有** `xiaoo-shared`。
+
+原始判据是：只要 `Cargo.toml` 还包含下面这行，就说明改造尚未完成。
 
 ```toml
 xiaoo-shared = { path = "../../apps/shared" }
 ```
 
-就说明 API 边界仍然被应用/服务层反向塑造，改造尚未完成。
+该行现已不存在，改造完成。
 
 ## 8. 建议落地顺序（仅 xiaoo-api）
 
-### 阶段 1：公开纯 runtime 最小面
+> 阶段 1-3 已随 `1ffe095` 及后续提交落地；阶段 4 尚未开始（无真实 extension 消费者）。
+
+### 阶段 1：公开纯 runtime 最小面（已完成）
 
 - 从 `runtime` 模块重导出/封装 core 的 runtime、state、input/output 和 run；
 - 从 `backend` 模块公开 `OperationBackend` operation plane；
@@ -341,7 +365,7 @@ xiaoo-shared = { path = "../../apps/shared" }
 
 验收：不经过 `LocalSessionHost`、`SessionStore`、`BackendManager` 即可执行一轮带工具调用的 agent loop。
 
-### 阶段 2：收敛 facade
+### 阶段 2：收敛 facade（已完成）
 
 - 为常用 prompt/compact/tool/skill 组装提供 runtime builder 默认值；
 - `prelude` 只导出纯 runtime 用例实际需要的名字；
@@ -349,7 +373,7 @@ xiaoo-shared = { path = "../../apps/shared" }
 
 验收：示例中不存在 host、open/close session、lease 或 backend kind/config。
 
-### 阶段 3：移除服务层公开面
+### 阶段 3：移除服务层公开面（已完成）
 
 - 删除 `pub mod host`；
 - 删除 session/control-plane/store exports；
@@ -360,7 +384,7 @@ xiaoo-shared = { path = "../../apps/shared" }
 
 验收：`cargo tree -p xiaoo-api` 中没有 `xiaoo-shared`，公开文档中没有 Host、lease、store、eviction、control plane。
 
-### 阶段 4：按实际需求增加 extension
+### 阶段 4：按实际需求增加 extension（未开始）
 
 - 收集第一个无法由标准 builder 参数表达的真实定制需求；
 - 为该需求增加最窄 extension capability；
@@ -370,16 +394,22 @@ xiaoo-shared = { path = "../../apps/shared" }
 
 ## 9. 公开面验收清单
 
-- [ ] `xiaoo-api` 不依赖 `apps/*`；
-- [ ] 最小用例从 `Runtime` 开始，而不是从 `Host` 开始；
-- [ ] 调用方能直接传入 `Arc<dyn OperationBackend>`；
-- [ ] runtime 不根据 kind/config 创建或治理 sandbox；
-- [ ] 对话状态由调用方持有；
-- [ ] SDK 不公开 SessionStore、lease、paused、eviction、checkpoint；
-- [ ] SDK 不公开 AppBootstrap 或 resolver 家族；
-- [ ] 标准 runtime 依赖使用明确 builder 方法；
-- [ ] 定制能力通过窄 extension 开放，不通过 L2 泄漏；
-- [ ] 没有为了替代 `LocalSessionHost` 而新造另一个 Host。
+**全部已满足**，逐项证据如下：
+
+- [x] `xiaoo-api` 不依赖 `apps/*` — `crates/xiaoo-api/Cargo.toml:7-19`；
+- [x] 最小用例从 `Runtime` 开始，而不是从 `Host` 开始 — `crates/xiaoo-api/src/prelude.rs:3-6`
+      只导出 `Runtime` / `RuntimeBuilder` / `RuntimeState` / `RuntimeInput` / `RuntimeOutput`；
+- [x] 调用方能直接传入 `Arc<dyn OperationBackend>` — `RuntimeBuilder::operation_backend`
+      (`crates/xiaoo-api/src/runtime.rs:291`)；
+- [x] runtime 不根据 kind/config 创建或治理 sandbox — 无 `backend_kind` / `backend_config` /
+      `backend_manager` 入口，见 §3.1；
+- [x] 对话状态由调用方持有 — `Runtime::run(&mut RuntimeState, RuntimeInput)`
+      （§4.2；`crates/xiaoo-api/src/runtime.rs:110,118`）；
+- [x] SDK 不公开 SessionStore、lease、paused、eviction、checkpoint — `lib.rs:10-19` 无相关模块；
+- [x] SDK 不公开 AppBootstrap 或 resolver 家族 — 同源检索 0 命中；
+- [x] 标准 runtime 依赖使用明确 builder 方法 — `runtime.rs:184` `RuntimeBuilder`；
+- [x] 定制能力通过窄 extension 开放，不通过 L2 泄漏 — `extension` 推迟，见 §6；
+- [x] 没有为了替代 `LocalSessionHost` 而新造另一个 Host — 同源检索 0 命中。
 
 ## 10. 一句话架构定义
 

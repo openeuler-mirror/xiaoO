@@ -130,7 +130,7 @@ L1 由 `HeuristicDetector`（`agent_moss/engine/heuristic.py`）协调，按优�
 
 ## 规则管控
 
-规则可通过 Policy Console（`http://127.0.0.1:9090/console`）动态增删/开关，详见 [README.md](README.md) 的 "Policy Console" 与 "runtime_config" 章节，及 [`POLICY_CONSOLE_SUMMARY.md`](POLICY_CONSOLE_SUMMARY.md)。
+规则可通过 Policy Console（`http://127.0.0.1:9090/console`）动态增删/开关，详见 [README.md](README.md) 的 "Policy Console" 与 "runtime_config" 章节。Policy Console 的专项设计文档（`POLICY_CONSOLE_SUMMARY.md`）不在本仓库内，属于 AgentMoss 服务仓库（`~/gitcode/AgentMoss/`）的文档。
 
 ---
 

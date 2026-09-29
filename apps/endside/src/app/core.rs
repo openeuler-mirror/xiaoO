@@ -39,8 +39,6 @@ pub struct App {
     pub(crate) animation_origin: Instant,
 }
 
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
-
 impl App {
     pub fn new_with_config(
         config: &Config,
@@ -67,10 +65,8 @@ impl App {
         tracing::debug!("PERF_PROBES_ACTIVE");
         let mut event_stream = EventStream::new();
         let mut pending_event: Option<Event> = None;
-        let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
+        let _ = execute!(io::stdout(), SetCursorStyle::SteadyBar);
         set_cursor_color(self.state.theme.border_active);
-        let mut cursor_visible = true;
-        let mut last_cursor_blink_toggle = Instant::now();
         let mut needs_redraw = true;
         // Absolute deadline of the next animation frame while streaming.
         // `Delay`-style: each tick advances by a fixed 16ms from the previous
@@ -90,20 +86,35 @@ impl App {
         // is open.
         heartbeat_interval.tick().await;
 
-        // Periodic full redraw while idle/ASK: refreshes the header clock
-        // (which only updates on `draw`) and recovers from external screen
-        // corruption (terminal wake/scrollback clear/reattach) that ratatui's
-        // diff optimization would otherwise miss — the previous buffer still
-        // matches the last frame, so an unchanged state produces an empty
-        // diff and the actual (cleared) screen is never rewritten. Skipped
-        // while loading: the 16ms tick already redraws constantly and any
-        // streaming state change yields a non-empty diff that recovers the
-        // screen naturally. `swap_buffers()` resets the back buffer (without
-        // emitting `\x1b[2J`, so no visible clear/flicker) so the next
-        // `draw()` writes the full frame instead of a no-op diff.
-        let mut force_redraw_interval = tokio::time::interval(Duration::from_secs(1));
-        force_redraw_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        force_redraw_interval.tick().await;
+        // Idle/ASK refresh, split by purpose:
+        //
+        // - 1s diff redraw: keeps the header clock (`%H:%M:%S`) and the
+        //   status light ticking. A normal `draw()` suffices — ratatui's
+        //   diff emits only the changed cells, a few bytes per tick.
+        // - 30s full repaint (`swap_buffers()`): recovers from external
+        //   screen corruption (terminal wake/scrollback clear/reattach)
+        //   that ratatui's diff optimization would otherwise miss — the
+        //   previous buffer still matches the last frame, so an unchanged
+        //   state produces an empty diff and the actual (cleared) screen
+        //   is never rewritten. `swap_buffers()` resets the back buffer
+        //   (without emitting `\x1b[2J`, so no visible clear/flicker) so
+        //   the next `draw()` writes the full frame instead of a no-op
+        //   diff. Full rewrites are the largest output the app produces
+        //   (one MoveTo per screen row, re-sent even when nothing
+        //   changed), so they are kept rare — FrameBackend ships each as
+        //   a single write, but on slow links (SSH/mux) the terminal may
+        //   still paint between network chunks and briefly show the
+        //   hardware cursor at those intermediate positions.
+        //
+        // Both are skipped while loading: the 16ms tick already redraws
+        // constantly and any streaming state change yields a non-empty
+        // diff that recovers the screen naturally.
+        let mut clock_refresh_interval = tokio::time::interval(Duration::from_secs(1));
+        clock_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        clock_refresh_interval.tick().await;
+        let mut corruption_recovery_interval = tokio::time::interval(Duration::from_secs(30));
+        corruption_recovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        corruption_recovery_interval.tick().await;
 
         #[cfg(unix)]
         let mut sigterm =
@@ -144,22 +155,13 @@ impl App {
                     );
                 }
             }
-            if last_cursor_blink_toggle.elapsed() >= CURSOR_BLINK_INTERVAL {
-                cursor_visible = !cursor_visible;
-                last_cursor_blink_toggle = Instant::now();
-                if cursor_visible {
-                    terminal.show_cursor()?;
-                } else {
-                    terminal.hide_cursor()?;
-                }
-            }
 
             let active_refresh =
                 self.state.chat_state.is_loading || self.gateway.needs_active_refresh();
             // While streaming, wake at the absolute animation deadline (Delay-
             // style: compensated for draw time → ~16ms cycle = 60fps). While
             // idle, a 250ms relative sleep is enough — the spinner doesn't
-            // run and `force_redraw_interval` (1s) handles idle refresh.
+            // run and `clock_refresh_interval` (1s) handles idle refresh.
             //
             // The deadline is ADVANCED only when the sleep actually fires
             // (see the select! sleep branch), never here: advancing per loop
@@ -222,7 +224,16 @@ impl App {
                         _ = heartbeat_interval.tick() => {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
-                        _ = force_redraw_interval.tick() => {
+                        _ = clock_refresh_interval.tick() => {
+                            // Light diff redraw: only the clock/status cells
+                            // are re-emitted (see the interval setup above).
+                            if !self.state.chat_state.is_loading {
+                                needs_redraw = true;
+                            }
+                        }
+                        _ = corruption_recovery_interval.tick() => {
+                            // Full-frame rewrite to recover from external
+                            // corruption; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 terminal.swap_buffers();
                                 needs_redraw = true;
@@ -282,7 +293,16 @@ impl App {
                         _ = heartbeat_interval.tick() => {
                             needs_redraw = self.run_heartbeat_tick().await || needs_redraw;
                         }
-                        _ = force_redraw_interval.tick() => {
+                        _ = clock_refresh_interval.tick() => {
+                            // Light diff redraw: only the clock/status cells
+                            // are re-emitted (see the interval setup above).
+                            if !self.state.chat_state.is_loading {
+                                needs_redraw = true;
+                            }
+                        }
+                        _ = corruption_recovery_interval.tick() => {
+                            // Full-frame rewrite to recover from external
+                            // corruption; see the interval setup above.
                             if !self.state.chat_state.is_loading {
                                 terminal.swap_buffers();
                                 needs_redraw = true;
@@ -397,6 +417,10 @@ impl App {
         self.gateway.close_sessions(&self.state.session_id).await;
         reset_cursor_color();
         terminal.show_cursor()?;
+        // FrameBackend stages cursor commands instead of flushing each one
+        // (see app/frame_backend.rs); push the trailing Show out before
+        // main.rs' teardown sequences hit stdout.
+        terminal.backend_mut().flush()?;
         Ok(())
     }
 

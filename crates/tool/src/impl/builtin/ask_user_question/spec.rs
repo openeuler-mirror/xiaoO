@@ -27,7 +27,7 @@ impl AskUserQuestionToolSpec {
                         "oneOf": [
                             {
                                 "type": "object",
-                                "description": "确认类问题，用户回答是或否。",
+                                "description": "确认类问题，用户回答是或否。prompt 必须让「是」与「否」的含义明确一一对应（如「是否执行 X？」）。返回结果中 answer=\"yes\" 表示用户回答「是」，answer=\"no\" 表示用户回答「否」，answer=\"unanswered\" 表示用户未作答（超时或会话取消），不能视为「否」。",
                                 "properties": {
                                     "kind":   { "type": "string", "enum": ["confirm"] },
                                     "prompt": { "type": "string", "description": "向用户展示的问题文本。" }
@@ -58,7 +58,7 @@ impl AskUserQuestionToolSpec {
                                     "prompt": { "type": "string", "description": "向用户展示的问题文本。" },
                                     "options": {
                                         "type": "array",
-                                        "description": "供用户选择的选项列表（至少 2 项）。",
+                                        "description": "供用户选择的选项列表（至少 2 项）。每个选项必须是可直接展示的纯文本内容，禁止携带字母或数字编号前缀（如 \"A:\"、\"B.\"、\"1)\"、\"（C）\"），界面会自行呈现选项顺序。",
                                         "items": { "type": "string" },
                                         "minItems": 2
                                     },
@@ -81,16 +81,26 @@ impl AskUserQuestionToolSpec {
         Self {
             id: ToolId("builtin_ask_user_question".to_string()),
             name: ToolName("ask_user_question".to_string()),
-            description: "向用户提出一个或多个问题并收集回答。\n\
+            description: "向用户提出一个或多个问题并收集回答，answers 与 questions 一一对应。\n\
                 支持三种问题类型：\n\
-                - confirm：是/否确认\n\
-                - text_input：自由文本输入（is_secret=true 时输入内容用*遮蔽，适用于密码等敏感信息）\n\
-                - choice：从给定选项中选择（可选允许自定义输入）\n\
+                - confirm：是/否确认。返回 {\"kind\":\"confirm\",\"prompt\":...,\"answer\":\"yes\"|\"no\"|\"unanswered\"}，\n\
+                answer=\"yes\" 表示用户对 prompt 所述事项给出肯定回答（是），answer=\"no\" 表示否定回答（否），\n\
+                answer=\"unanswered\" 表示用户未作答（超时、会话取消或交互通道关闭），不能视为「否」，\n\
+                若该回答影响后续动作请重新询问。必须严格按 answer 字段理解用户意图，不得推断相反含义。\n\
+                - text_input：自由文本输入（is_secret=true 时输入内容用*遮蔽，适用于密码等敏感信息）。\n\
+                返回 {\"kind\":\"text\",\"prompt\":...,\"value\":...}，value 为 null 表示用户未作答。\n\
+                - choice：从给定选项中选择（可选允许自定义输入）。返回 {\"kind\":\"choice\",\"prompt\":...,\"value\":...}，\n\
+                value 为用户选中的选项原文或自定义输入，为 null 表示用户未作答。选项文本必须是可直接展示的纯内容，\n\
+                不要携带 \"A:\"、\"B.\"、\"1)\" 之类的编号前缀。\n\
                 每次调用最多可提出 4 个问题，按顺序依次与用户交互。"
                 .to_string(),
             input_schema: InputSchemaRef { schema },
             output_contract: OutputContract {
-                description: "包含每个问题回答的列表，顺序与输入问题一致。".to_string(),
+                description: "包含每个问题回答的列表，顺序与输入问题一致：confirm → \
+                    {\"kind\":\"confirm\",\"prompt\":...,\"answer\":\"yes\"|\"no\"|\"unanswered\"}；text_input → \
+                    {\"kind\":\"text\",\"prompt\":...,\"value\":...}；choice → \
+                    {\"kind\":\"choice\",\"prompt\":...,\"value\":...}。"
+                    .to_string(),
             },
             effect_profile: EffectProfile {
                 reads_filesystem: false,

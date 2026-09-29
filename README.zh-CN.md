@@ -10,7 +10,7 @@ AgentOS 的开源智能中枢。
 
 [![License](https://img.shields.io/badge/license-MulanPSL--2.0-blue.svg)](./License)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-v0.2.0-red.svg)](https://gitcode.com/openeuler/xiaoO)
+[![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
 ## xiaoO 是什么？
 
@@ -30,7 +30,7 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 - 会话管理：支持保存和恢复长时间运行的任务。
 - LSP 诊断：编辑后通过 `rust-analyzer`、`pyright`、`typescript-language-server`、`gopls`、`clangd` 等服务展示错误和警告。
 - Skills 技能系统：从本地目录或 Git 来源安装可复用的指令包。
-- Hook 与插件系统：在 Agent 创建、LLM 调用前后、工具调用前后提供扩展点，可用于审计、策略、追踪和自定义扩展。
+- Hook 与插件系统：在 Agent 创建、LLM 调用前后、工具调用前后提供扩展点，同时支持会话生命周期阶段（`SessionCreated`、`SessionClosed`、`SessionState`）和 Chat 消息转换，可用于审计、策略、追踪和自定义扩展。
 - 可观测性：支持实时 token/cost 统计，并通过 `noop`、`stdout` 或 `moirai-sqlite` 存储 trace。
 - 定时和触发式任务：支持接入长期运行的自动化工作流。
 - 本地化 UI：提供适合日常 Agent 工作的终端界面。
@@ -44,7 +44,7 @@ xiaoO 的运行时还内置了分层记忆和自适应上下文压缩系统，�
 ## 从源码安装
 
 ```bash
-git clone https://gitcode.com/openeuler/xiaoO.git
+git clone https://atomgit.com/openeuler/xiaoO.git
 cd xiaoO
 cargo install --path apps/endside
 ```
@@ -56,7 +56,7 @@ cargo install --path apps/endside
 > **安装行为**：
 > - 首先尝试安装内置技能到系统级目录：`/usr/lib/.xiaoo/skills/`（需要 root 权限）
 > - 如果系统级安装失败（如权限不足），自动回退到用户级目录：`~/.xiaoo/skills/`
-> - 内置技能包括 `xiaoo-guardian`（安全策略执行）以及其他内置能力
+> - 内置技能为 `xiaoo-guardian`（安全策略执行）、`block-analyzer` 和 `security-rules-tester`
 > - 缺少这些技能可能导致安全功能不可用。
 >
 > **系统级安装**（推荐用于多用户环境）：
@@ -93,11 +93,19 @@ sudo rm -rf /usr/lib/.xiaoo/skills/xiaoo-guardian
 
 ### Docker
 
-基于代码仓构建一个同时包含 `xiaoo` 和 `xiaoo-daemon` 的镜像。镜像**不内置**
+> **⚠️ 当前 Docker 镜像构建不可用。** 在本版本上 `docker build` 会失败，下面的命令**并未**修复该问题。三个已知缺陷：
+>
+> - `Dockerfile:56` 拷贝了已被 `a507b74` 删除的 crate `crates/llm-client-cli/Cargo.toml`；
+> - 分层 `COPY`（`Dockerfile:45-66`）遗漏了 workspace 成员 `crates/protocol` 和 `crates/xiaoo-api`（`Cargo.toml:25`、`Cargo.toml:24`），导致元数据获取失败；
+> - `Dockerfile:118-126` 指向已不存在的目录 `plugins/hookers/audit_agent`。
+>
+> 请改用源码构建（见上文）。下面的命令仅说明该镜像的**预期形态**，待 Dockerfile 修复后才可用，**目前不是可用的快速开始**。完整记录见 [docs/docker_deploy.md](./docs/docker_deploy.md)。
+
+构建完成的镜像计划同时包含 `xiaoo` 和 `xiaoo-daemon`。镜像**不内置**
 `config.toml`，运行时通过 `XIAOO_CONFIG` 指向你挂载的配置文件：
 
 ```bash
-docker build -t xiaoo:latest .
+docker build -t xiaoo:latest .   # 当前会失败，见上方警告
 docker run --rm -d -p 18080:18080 -p 28081:28081 \
   -v $PWD/my.toml:/cfg.toml:ro \
   -e XIAOO_CONFIG=/cfg.toml \
@@ -128,10 +136,18 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
+```
 
+> **已知缺口：** `[subagent.<role>.tools]` 目前会被解析并接受，但对 subagent 角色**不生效**——
+> 角色级工具允许清单在 spawn 时被忽略（`crates/tool/src/impl/builtin/spawn_subagent/executor.rs:76-91`
+> 只读取 `prompt` 和 `description`；`apps/shared/src/gateway/session_supervisor.rs:345-356` 只应用
+> `prompt`、`max_turns` 和 `description`）。请使用真实的内置工具名，例如 `file_read`、
+> `file_write`、`bash`、`glob`、`grep`；未知名称会被静默丢弃，且不会给出校验警告。
+
+```toml
 [trace]
 storage_backend = "moirai-sqlite"    # noop, stdout, 或 moirai-sqlite
 db_path = "~/.xiaoo/traces.db"       # 当 storage_backend 为 moirai-sqlite 时使用
@@ -181,7 +197,7 @@ CLI 输出示例：
 
 上下文窗口大小由运行时动态解析。xiaoO 会按以下顺序解析最终值：
 
-1. 动态模型查询：调用 provider 的模型目录接口（`/models` 或等价接口）。只要 provider profile 中 `supports_model_catalog = true` 即可，包括 `openai`、`anthropic`、`gemini`、`ollama`、`zai`/`zhipu`、`deepseek`、`openrouter`、`kimi`、`kimi-coding-plan`、`minimax-coding-plan`、`gitcode`、`local`、`other` 等；`supports_model_catalog = false` 的 provider（如 `minimax`、`minimax-anthropic`）跳过此步。
+1. 动态模型查询：调用 provider 的模型目录接口（`/models` 或等价接口）。只要 provider profile 中 `supports_model_catalog = true` 即可，包括 `openai`、`anthropic`、`gemini`、`ollama`、`zai`/`zhipu`、`deepseek`、`openrouter`、`kimi`、`kimi-coding-plan`、`minimax-coding-plan`、`zai-coding-plan`、`local`、`other` 等；`supports_model_catalog = false` 的 provider（如 `minimax`、`minimax-anthropic`、`gitcode`）跳过此步。
 2. 本地兜底默认值（按 provider 协议族）：
    - OpenAI-compatible、Ollama 和智谱系列默认为 `128000`
    - Anthropic 默认为 `200000`
@@ -267,14 +283,24 @@ bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
 
 ## 更多文档
 
+- [架构总览](./docs/architecture_overview.md) — apps、workspace crate、二进制与运行时分层
 - [Memory & Context Compression](./docs/memory_context_system.md)
+- [运行时 Checkpoint 控制](./docs/runtime_checkpoint.md)
+- [Runtime SDK 改造（已落地）](./docs/xiaoo_api_pure_runtime_refactor.md)
 - [Plugin System](./docs/plugins.md)
 - [Skill Usage](./docs/skill_usage.md)
+- [MCP 集成](./docs/mcp.md)
+- [自定义工具](./docs/custom_tools.md)
+- [定时任务（Cron）](./docs/cron_scheduled_jobs.md)
+- [E2B Workspace & Skills Bootstrap](./docs/e2b_workspace_skills_bootstrap.md)
 - [Custom Agents](./docs/custom_agent.md)
 - [Remote TUI](./docs/remote_tui.md)
 - [Feishu Deployment](./docs/feishu_deploy.md)
 - [Telegram Deployment](./docs/telegram_deploy.md)
 - [Docker 容器化部署](./docs/docker_deploy.md)
+- [Vault 密钥管理设计](./docs/vault_secrets_design.md)
+- [KV Cache 协同设计](./docs/kvcache-coordination-design.md)
+- [Super Gateway 控制面设计](./docs/super_gateway_control_plane_design.md)
 
 ## 许可证
 

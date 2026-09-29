@@ -20,6 +20,17 @@ In practice, this gives xiaoO three core properties:
 - multi-agent lane memory isolation;
 - traceable compression and prompt-build lifecycle.
 
+Each of these is wired on the default path:
+
+| Claim | Evidence |
+| --- | --- |
+| Stale tool-noise microcompression is default-enabled | `compress()` calls `compression_pipeline.microcompact()` on every turn (`crates/core/src/agent_loop.rs:633-636`); the policy is always constructed with non-zero staleness and a protected tail (`crates/compact/src/defaults.rs:96-99`, `crates/compact/src/defaults.rs:57-58` — 120 s / 6 recent messages). |
+| Multi-agent lane memory isolation is default-enabled | Each lane builds its own `MemoryManager` keyed by session id for the root lane and by `agent_id` for spawned subagent lanes (`apps/shared/src/gateway/session_worker.rs:136-141`). |
+
+> Note on microcompression: the staleness threshold and protected tail are compile-time
+> constants, not user-configurable — `[compact]` exposes no microcompact keys
+> (see the configuration table below, and `crates/compact/src/defaults.rs:96-99`).
+
 ### Implemented and available for integration
 
 - structured session memory summaries;
@@ -118,9 +129,55 @@ In xiaoO, "memory self-evolution" refers to concrete mechanisms already present 
 
 For long-term memory specifically, xiaoO already exposes asynchronous update and restructuring paths through the `memory` crate: durable memory can be written incrementally, replaced in batches, searched semantically, and reindexed without forcing the main runtime loop to depend on one monolithic synchronous rebuild step.
 
+## Memory Automation and the Failed-Ingest Queue
+
+Beyond the `memory` crate APIs, the daemon ships an opt-in long-term memory automation
+path. It recalls memory into the turn as untrusted system context and ingests new
+observations asynchronously, so a failing ingest never blocks the agent loop.
+
+The automation config is a first-class TOML section, `[memory_automation]`
+(`apps/serverside/src/daemon_config.rs:62`), typed as `MemoryAutomationConfig`
+(`apps/shared/src/gateway/memory_automation.rs:21-42`). It is opt-in: `enabled` defaults
+to `false` (`apps/shared/src/gateway/memory_automation.rs:22-23`).
+
+Failed ingest attempts are not dropped. They go to a durable queue with bounded capacity
+and bounded retries:
+
+| Field | Default | Source |
+| --- | --- | --- |
+| `queue_path` | `memory-automation-queue.jsonl` | `apps/shared/src/gateway/memory_automation.rs:32-33,58-60` |
+| `queue_capacity` | `256` | `apps/shared/src/gateway/memory_automation.rs:34-35,49-51` |
+| `max_retries` | `5` | `apps/shared/src/gateway/memory_automation.rs:36-37,52-54` |
+| `retry_backoff_ms` | `250` | `apps/shared/src/gateway/memory_automation.rs:38-39,55-57` |
+
+The `xiaoo-daemon` binary exposes queue management for operators through
+`config memory-queue` (`apps/serverside/src/main.rs:351-360`, CLI action variant at
+`apps/serverside/src/main.rs:1007`). Three actions are available — `status`,
+`retry-failed`, and `clear-failed` (`apps/serverside/src/main.rs:1098-1102`;
+`apps/serverside/src/memory_management.rs:98-102`).
+
+```bash
+xiaoo-daemon config memory-queue status
+xiaoo-daemon config memory-queue retry-failed
+xiaoo-daemon config memory-queue clear-failed
+```
+
 ## Configuration
 
-The default runtime currently exposes **compression settings** through daemon/CLI config. Session memory and semantic retrieval are currently configured programmatically.
+The default runtime currently exposes **compression settings** through daemon/CLI config.
+
+Two distinct things are easy to conflate here:
+
+- **`[memory_automation]` DOES exist.** The daemon accepts a top-level `[memory_automation]`
+  section (`apps/serverside/src/daemon_config.rs:62`; type
+  `apps/shared/src/gateway/memory_automation.rs:21`), and it is documented in
+  [config_file_guide.md](./config_file_guide.md).
+- **There is no config section for the semantic/durable stores.** Session memory,
+  durable memory, and semantic retrieval are still configured **programmatically**, in
+  Rust, through the `memory` crate APIs shown in the Usage Guide below.
+
+The caveat below therefore applies only to the semantic/durable stores — not to memory
+automation.
 
 Compression-related options are also described in [daemon_config.md](./daemon_config.md).
 
@@ -159,14 +216,18 @@ summary_llm_max_tokens = 4096
 
 Important boundary:
 
-- there is **no `[memory]` TOML section yet** for durable memory or semantic retrieval;
-- those features are already implemented in the `memory` crate and can be integrated directly in Rust.
+- there is **no `[memory]` TOML section** for the durable/semantic stores — session
+  memory, durable memory, and semantic retrieval are configured programmatically in Rust;
+- this is **not** true of `[memory_automation]`, which *is* a real daemon TOML section
+  (`apps/serverside/src/daemon_config.rs:62`) covering recall and the failed-ingest queue;
+- the durable/semantic features are already implemented in the `memory` crate and can be
+  integrated directly in Rust.
 
 ## Usage Guide
 
 ### 1. Enable adaptive compression
 
-If you only need the built-in context-management path, configure `[compact]`. The context window is resolved dynamically (no explicit config field). This is already wired into:
+If you only need the built-in context-management path, configure `[compact]`. The context window is resolved dynamically; the daemon additionally accepts an explicit `[llm].context_window` override (`apps/serverside/src/daemon_config.rs:90`; schema `apps/serverside/src/config_schema.rs:19`), while the CLI exposes no such field. This is already wired into:
 
 - `apps/serverside/src/daemon_runtime.rs`
 - `apps/endside/src/cli/mod.rs`

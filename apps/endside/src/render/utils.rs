@@ -41,13 +41,26 @@ pub(crate) fn sanitize_terminal_text(text: &str) -> String {
 }
 
 fn sanitize_terminal_text_for_mode(text: &str, ascii_mode: bool) -> String {
-    if !ascii_mode {
+    // Control characters must never reach the terminal as raw bytes: a
+    // literal tab in a rendered cell is printed as 0x09, which the terminal
+    // interprets as a tab-stop jump, desynchronizing every following
+    // character from ratatui's 1-column advance and leaving the skipped
+    // columns unrepainted (stale rows that only the next full repaint
+    // clears). Tabs expand to four spaces; other control characters are
+    // dropped. '\n' is kept: callers render line-by-line and ratatui splits
+    // Paragraph text on it.
+    let has_control = text.chars().any(|ch| ch.is_control() && ch != '\n');
+    if !ascii_mode && !has_control {
         return text.to_string();
     }
 
     let mut output = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
+            '\t' => output.push_str("    "),
+            '\n' => output.push('\n'),
+            _ if ch.is_control() => {}
+            _ if !ascii_mode => output.push(ch),
             '▎' | '▌' | '│' => output.push('|'),
             '▾' => output.push('v'),
             '▸' => output.push('>'),

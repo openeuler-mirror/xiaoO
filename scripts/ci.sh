@@ -9,6 +9,8 @@
 #   2. 测试卫生门禁    tests-hygiene — scripts/check-tests-hygiene.sh
 #      — src 中无内联测试，test 门控仅剩指向仓库根 tests/ 的 #[path] 声明，
 #        tests/ 命名合规（规则见 tests/README.md）。
+#   3. 文档门禁        scripts/check-docs.sh
+#      — 全仓 .md 的相对链接必须可达（纯链接检查，见该脚本头注释）。
 #
 # 门禁不涉及编译：全量测试执行统一走 tests/run.sh（见 tests/README.md），
 # 不接入本脚本。
@@ -100,6 +102,7 @@ done
 STEPS=(
     "门面纪律门禁|scripts/check-facade.sh"
     "tests-hygiene|bash scripts/check-tests-hygiene.sh"
+    "文档门禁|bash scripts/check-docs.sh"
 )
 
 # ---- 执行 -------------------------------------------------------------------

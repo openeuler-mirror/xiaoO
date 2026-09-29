@@ -716,7 +716,10 @@ mod transcript_selection_scroll_tests {
         assert!(!state.transcript_drag_active(), "no selection → no drag");
 
         state.transcript_selection = Some(TranscriptSelection::new(0, 0));
-        assert!(state.transcript_drag_active(), "selection → drag in progress");
+        assert!(
+            state.transcript_drag_active(),
+            "selection → drag in progress"
+        );
 
         state.chat_state.scrollbar_dragging = true;
         assert!(

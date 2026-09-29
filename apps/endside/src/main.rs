@@ -251,10 +251,12 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
 
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     execute!(io::stdout(), EnterAlternateScreen).context("failed to enter alternate screen")?;
-    let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
-    let mut terminal =
-        ratatui::Terminal::new(backend).context("failed to create TUI terminal backend")?;
-    let _ = execute!(io::stdout(), SetCursorStyle::BlinkingBar);
+    // FrameBackend stages each frame and hands it to the tty in a single
+    // write — see app/frame_backend.rs for why the stock CrosstermBackend
+    // over stdout splits frames and makes the caret flicker.
+    let mut terminal = ratatui::Terminal::new(app::frame_backend::stdout_frame_backend())
+        .context("failed to create TUI terminal backend")?;
+    let _ = execute!(io::stdout(), SetCursorStyle::SteadyBar);
     let _ = execute!(io::stdout(), EnableMouseCapture);
     // `EnableMouseCapture` enables all-motion tracking (`?1003h`), which
     // makes the terminal report every mouse-move as an SGR byte sequence

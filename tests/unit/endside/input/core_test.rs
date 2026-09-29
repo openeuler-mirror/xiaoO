@@ -308,3 +308,53 @@ fn app_level_actions_fall_through_to_plain_handling() {
     assert_eq!(input.value(), "abc");
     assert_eq!(input.cursor(), 1);
 }
+
+#[test]
+fn tab_insert_expands_to_four_spaces() {
+    // A raw tab cannot live in the TUI cell grid: printed as 0x09 the
+    // terminal jumps to the next tab stop, desyncing every following
+    // character from ratatui's 1-column advance (garbled input box,
+    // history-switch leftover rows). Tabs expand to four spaces instead.
+    let mut input = Input::default();
+    input.handle(crate::input::InputRequest::InsertChar('\t'));
+    assert_eq!(input.value(), "    ");
+    assert_eq!(input.cursor(), 4);
+}
+
+#[test]
+fn control_chars_dropped_on_insert_newline_kept() {
+    let mut input = Input::default();
+    input.handle(crate::input::InputRequest::InsertChar('a'));
+    input.handle(crate::input::InputRequest::InsertChar('\u{8}')); // backspace byte
+    input.handle(crate::input::InputRequest::InsertChar('\u{b}')); // vertical tab
+    input.handle(crate::input::InputRequest::InsertChar('\u{7f}')); // DEL
+    input.handle(crate::input::InputRequest::InsertChar('\n')); // explicit newline stays
+    input.handle(crate::input::InputRequest::InsertChar('b'));
+    assert_eq!(input.value(), "a\nb");
+    assert_eq!(input.cursor(), 3);
+}
+
+#[test]
+fn with_value_normalizes_tabs_and_control_chars() {
+    // History restore (Input::from → with_value) must sanitize legacy
+    // entries that still contain tabs, or switching history re-garbles
+    // the input box.
+    let input = Input::default().with_value("a\tb\u{8}c\nd".to_string());
+    assert_eq!(input.value(), "a    bc\nd");
+    assert_eq!(input.cursor(), "a    bc\nd".chars().count());
+}
+
+#[test]
+fn pasted_indented_block_expands_tabs() {
+    // End-to-end: pasting an indented rpath=( … ) block (the reported
+    // repro) keeps every line but renders tab indentation as spaces.
+    let mut input = Input::default();
+    crate::render::paste_into_input(
+        &mut input,
+        "rpath=(\n\t\"/usr/lib64\",\n\t\"/lib64\",\n)\n)",
+    );
+    assert_eq!(
+        input.value(),
+        "rpath=(\n    \"/usr/lib64\",\n    \"/lib64\",\n)\n)"
+    );
+}

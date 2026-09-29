@@ -15,13 +15,17 @@ impl InteractionHandle for CliInteractionHandle {
                     "[tool-cli][interaction.confirm] {} [y/N]: ",
                     prompt
                 ));
-                let allowed = matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes");
-                InteractionResponse::Confirmed { allowed }
+                match input {
+                    None => InteractionResponse::Unanswered,
+                    Some(input) => InteractionResponse::Confirmed {
+                        allowed: matches!(input.to_ascii_lowercase().as_str(), "y" | "yes"),
+                    },
+                }
             }
             InteractionRequest::TextInput { prompt, .. } => {
                 let input = prompt_input(&format!("[tool-cli][interaction.text] {}: ", prompt));
                 InteractionResponse::Text {
-                    value: if input.is_empty() { None } else { Some(input) },
+                    value: input.filter(|value| !value.is_empty()),
                 }
             }
             InteractionRequest::Choice {
@@ -33,26 +37,28 @@ impl InteractionHandle for CliInteractionHandle {
                 }
                 let input = prompt_input("choice: ");
                 InteractionResponse::Choice {
-                    value: if input.is_empty() { None } else { Some(input) },
+                    value: input.filter(|value| !value.is_empty()),
                 }
             }
         }
     }
 }
 
-fn prompt_input(prompt: &str) -> String {
+/// Read one trimmed line from stdin; `None` on EOF or read failure.
+fn prompt_input(prompt: &str) -> Option<String> {
     print!("{}", prompt);
     let _ = io::stdout().flush();
 
     let mut input = String::new();
     match io::stdin().read_line(&mut input) {
-        Ok(_) => input.trim().to_string(),
+        Ok(0) => None,
+        Ok(_) => Some(input.trim().to_string()),
         Err(error) => {
             eprintln!(
                 "[tool-cli][interaction.error] failed to read stdin: {}",
                 error
             );
-            String::new()
+            None
         }
     }
 }

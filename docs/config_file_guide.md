@@ -4,6 +4,14 @@ Configuration file location: `~/.config/xiaoo/config.toml`
 
 This document focuses on shared configuration items plus local client runtime settings.
 
+> ⚠️ **Unknown keys are silently ignored.** No TOML config struct uses serde's
+> `deny_unknown_fields`, so a misspelled or stale key — and a valid key written
+> in a section that does not support it — parses successfully and is then
+> dropped without warning. Only the `.mcp.json` reader rejects unknown fields
+> (`crates/mcp/src/json_config.rs:62,73`). `xiaoo-daemon config validate`
+> reports `"valid": true` even for ignored keys, so a passing validate is **not**
+> proof that a key is honored.
+
 > **Mode-specific Configuration**:
 > - CLI: [cli_config.md](./cli_config.md)
 > - TUI: [tui_config.md](./tui_config.md)
@@ -19,13 +27,14 @@ Configuration items covered in this guide:
 |--------|------|----------|
 | `[llm]` | LLM provider configuration | [View Details](#llm---llm-provider-configuration) |
 | `[subagent]` ⭐ | Predefined subagent roles (all modes) | [View Details](#subagent---predefined-subagent-roles-new) |
-| `[skills]` | Skills configuration | [View Details](#skills---skills-configuration) |
+| `[skills]` | Skills configuration (dirs/allow_scripts/disabled only) | [View Details](#skills---skills-configuration) |
 | `[compact]` | Context compression strategy (CLI/Daemon only; TUI ignores this section) | [View Details](#compact---context-compression-strategy) |
 | `[trace]` | Tracing/Observability | [View Details](#trace---tracingobservability) |
 | `[hooker]` | Hooker configuration | [View Details](#hooker---hooker-configuration) |
 | `[operation_backend]` | CLI/TUI operation backend configuration | [View Details](#operation_backend---operation-backend-configuration) |
-| `[vault]` | Encrypted secrets storage (all modes; read via `xiaoo_shared::llm_secrets`) | [View Details](#vault---encrypted-secrets-storage) |
+| `[vault]` | Encrypted secrets storage (all modes; read via `xiaoo_shared::llm_secrets`; `enabled` is informational) | [View Details](#vault---encrypted-secrets-storage) |
 | `[mcp]` and `.mcp.json` | MCP client servers, including RAM-A Streamable HTTP | [View Details](#mcp---model-context-protocol-client-configuration) |
+| `[tui]` | TUI-only keys: `agent_order`, `redact_secrets_display` | [View Details](#tui---tui-only-keys) |
 | `[memory_automation]` | Opt-in RAM-A long-term memory recall and ingest | [View Details](#memory_automation---opt-in-long-term-memory) |
 
 ---
@@ -51,6 +60,32 @@ environment variable:
   }
 }
 ```
+
+MCP servers can also be declared directly in `config.toml` with the
+`[[mcp.servers]]` array-of-tables form (`crates/mcp/src/config.rs:6-10`):
+
+```toml
+[[mcp.servers]]
+name = "ram-a"
+transport = "streamable_http"
+url = "http://127.0.0.1:18081/mcp"
+bearer_token_env = "RAM_A_XIAOO_TOKEN"
+agent_id = "xiaoo"
+timeout_ms = 30000
+enabled = true
+
+[mcp.servers.effect]
+reads_filesystem = false
+writes_filesystem = false
+network_access = true
+side_effects = false
+```
+
+The `effect` profile declares which effects the server's tools have
+(`crates/mcp/src/config.rs:56-58,115-124`). It defaults to the **most
+conservative** assumption — all four flags `true` — so batches containing those
+tools are serialised. Relax it for known read-only servers to allow parallel
+execution. A `.mcp.json` entry has no `effect` key.
 
 MCP JSON lookup order is:
 
@@ -102,9 +137,26 @@ is absent from `allowed_agent_roles` deliberately skips recall and ingest.
 
 ## [llm] - LLM Provider Configuration
 
-**Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
+**Applicable to**: Basic keys CLI ✅ | TUI ✅ | Daemon ✅ — see the profile note below.
 
-### Native Model Profiles
+| `[llm]` key | CLI | TUI | Daemon |
+|-------------|-----|-----|--------|
+| `provider`, `model`, `api_key_env`, `api_base`, `kvcache_enabled`, `kvcache_debug_enabled` | ✅ | ✅ | ✅ |
+| `max_tokens` | ❌ | ✅ | ✅ |
+| `reasoning_effort` | ❌ | ✅ | ✅ (per-request HTTP field) |
+| `profiles`, `active_profile`, `context_window` | ❌ | ❌ | ✅ |
+
+### Native Model Profiles (Daemon only)
+
+> ⚠️ **Daemon-only**: `[llm.profiles.*]`, `llm.active_profile`, and
+> `llm.context_window` are read **only by the daemon**
+> (`apps/serverside/src/daemon_config.rs:76-119`). The CLI `[llm]` struct has
+> exactly six fields (`apps/endside/src/cli/config.rs:44-51`) and the TUI
+> `LlmConfig` has no profile or `context_window` field
+> (`apps/endside/src/support/config.rs:104-121`). In CLI and TUI these keys are
+> **silently ignored** — no error, no warning (see the unknown-keys warning
+> above). A CLI/TUI user who sets `active_profile` gets the `provider`/`model`
+> values instead, with no diagnostic.
 
 Use native profiles when more than one model is required. `active_profile`
 selects the startup/default profile; disabled profiles remain in the file but
@@ -169,7 +221,10 @@ kvcache_debug_enabled = false        # KV cache debug (optional)
 ### Configuration Priority
 
 The effective context window is resolved dynamically:
-1. Dynamic model query (supported for gemini, anthropic, ollama)
+1. Dynamic model query, for **any** provider whose profile sets
+   `supports_model_catalog` (`crates/llm-client/src/models/mod.rs:79-99`) —
+   this covers `openai`, `anthropic`, `gemini`, `ollama`, `zai`/`zhipu`,
+   `deepseek`, `openrouter`, and others; not just gemini/anthropic/ollama
 2. Local fallback defaults
 
 ### Provider Types
@@ -183,9 +238,9 @@ authoritative list, including aliases). Provider names are case-insensitive.
 | `anthropic` (alias `claude`) | Anthropic | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
 | `gemini` (alias `google`) | Gemini | `https://generativelanguage.googleapis.com` | `GEMINI_API_KEY` |
 | `ollama` | Ollama | `http://localhost:11434` | — (not required) |
-| `zai` (aliases `zhipu`, `glm`, `bigmodel`, `z-ai`, `z.ai`, `zai-cn`, `zai-china`, `zai-global`, `glm-cn`) | Zhipu | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` |
+| `zai` (aliases `zhipu`, `bigmodel`, `z-ai`, `z.ai`, `zai-cn`, `zai-china`, `zai-global`, `glm-cn`) | Zhipu | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` |
 | `zai-coding-plan` (aliases `zhipu-coding-plan`, `zhipuai-coding-plan`) | OpenAI-compatible | `https://api.z.ai/api/coding/paas/v4` | `ZHIPU_API_KEY` |
-| `deepseek` | OpenAI-compatible | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `deepseek` | OpenAI-compatible | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` |
 | `openrouter` | OpenAI-compatible | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `openai-compatible` | OpenAI-compatible | — (must set `api_base`) | `OPENAI_COMPATIBLE_API_KEY` |
 | `groq` | OpenAI-compatible | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
@@ -226,11 +281,26 @@ max_turns = 5                                  # Optional: maximum turn count
 # Format 1: Section format (recommended for clarity)
 [subagent.<role_id>.tools]
 bash = true
-read = true
+file_read = true
 
 # Format 2: Inline format (compact)
-# tools = { "bash" = true, "read" = true }
+# tools = { "bash" = true, "file_read" = true }
 ```
+
+> Tool keys must be real builtin tool names — `bash`, `file_read`, `file_write`,
+> `file_edit`, `glob`, `grep`, `lsp`, `skill`, `todo_write`, `web_search`,
+> `webfetch`, `spawn_subagent`, `join_subagent`, `ask_user_question`,
+> `count_text_length`, `print_hello_world`, `send_file`. `file_read` is the real
+> name (`crates/tool/src/impl/builtin/file_read/spec.rs:31`); `read`/`write`/`edit`
+> are **not** tool names and are silently skipped (see the known gap below).
+
+> ⚠️ **Known gap — subagent role `tools` is not enforced.** For agent roles
+> (`[agent.<name>.tools]`) the map acts as a visibility mask. For **subagent**
+> roles it is parsed and carried into `SubagentRoleRecord` but never applied:
+> the session supervisor reads only `prompt`, `max_turns`, and `description`
+> from the role (`apps/shared/src/gateway/session_supervisor.rs:345-356`). Only
+> the built-in exploration subagent is narrowed, via a hardcoded allowlist.
+> Do not rely on `[subagent.<role>.tools]` to restrict a subagent's tools.
 
 ### Configuration Example
 
@@ -246,7 +316,7 @@ max_turns = 5
 
 [subagent.code_reviewer.tools]
 bash = true
-read = true
+file_read = true
 glob = true
 grep = true
 
@@ -261,17 +331,17 @@ max_turns = 3
 # Option 2: Section format with explicit tools
 # [subagent.doc_writer.tools]
 # bash = true
-# read = true
-# write = true
+# file_read = true
+# file_write = true
 
 # Option 3: Inline format
 # [subagent.doc_writer]
 # description = "Documentation specialist"
 # max_turns = 3
-# tools = { "bash" = true, "read" = true, "write" = true }
+# tools = { "bash" = true, "file_read" = true, "file_write" = true }
 ```
 
-> **Note**: If `[subagent.<role_id>.tools]` is not configured, the subagent uses the global default tool permissions.
+> **Note**: If `[subagent.<role_id>.tools]` is not configured, the subagent uses the global default tool permissions. See the known-gap note above: the map is currently not enforced for subagent roles even when configured.
 
 ### Working Mechanism
 
@@ -318,6 +388,24 @@ allow_scripts = true                                    # Allow script-type skil
 disabled = ["legacy-review"]                           # Installed Skill IDs not loaded at runtime (optional)
 ```
 
+The file-configurable surface of `[skills]` is exactly these three keys —
+`dirs`, `allow_scripts`, `disabled` (`apps/serverside/src/daemon_config.rs:261-268`;
+TUI `apps/endside/src/support/config.rs:182-189`).
+
+> ⚠️ **Known gap — security knobs are not file-configurable and are silently
+> dropped.** `SkillsConfig` in the code also has `audit_enabled`,
+> `prompt_injection_mode`, `prompt_budget_ratio`, and
+> `max_listing_description_chars` (`crates/skill/src/types/config.rs:8-12`), but
+> **no** file-config section maps to them: every construction site fills them
+> from `SkillsConfig::default()` via `..SkillsConfig::default()`
+> (`apps/serverside/src/daemon_config.rs:884-898`,
+> `apps/endside/src/support/config.rs:350-362`,
+> `apps/endside/src/cli/skills.rs:55-67`). Writing `audit_enabled = true` in
+> `config.toml` therefore **passes `config validate` with `"valid": true` and is
+> then silently discarded** — skill security auditing stays off, and
+> `prompt_injection_mode` stays `Compact` with `prompt_budget_ratio = 0.01`. Do
+> not treat these as working config knobs.
+
 For detailed skills usage instructions, please refer to [skill_usage.md](./skill_usage.md).
 
 ---
@@ -361,9 +449,12 @@ db_path = "~/.xiaoo/traces.db"       # SQLite database path (for moirai-sqlite)
 ```
 
 **storage_backend types**:
-- `noop` - No storage (default)
+- `moirai-sqlite` - Store to SQLite database (the default; recommended for production)
+- `noop` - No storage
 - `stdout` - Output to standard output
-- `moirai-sqlite` - Store to SQLite database (recommended for production)
+
+The default backend is `moirai-sqlite` (`crates/trace/src/framework/config.rs:22,35`);
+`noop` is **not** the default.
 
 ---
 
@@ -373,10 +464,43 @@ db_path = "~/.xiaoo/traces.db"       # SQLite database path (for moirai-sqlite)
 
 ```toml
 [hooker]
-default = "agent_moss"              # Default hooker mode: None, agent_moss, etc.
+default = "all"                      # Default hooker mode: `all` or `none` only
+enabled = []                         # Explicit hooker IDs to enable (optional)
+disabled = []                        # Hooker IDs to disable (optional)
+plugins = []                         # Plugin paths to load (optional)
+policies = { }                       # Per-hooker policy values (optional)
+max_prompt_chain_depth = 128         # Cross-turn send_prompt chain depth cap (optional, default 128)
 ```
 
+`default` accepts **only `all` or `none`** (`all` is the default)
+(`crates/agent-types/src/hook/config/boot_configs.rs:24-30`; the config schema
+enum is `["all","none"]`, `apps/serverside/src/config_schema.rs:94`). Values
+such as `agent_moss` are **rejected** by `config validate` with
+``unknown variant `agent_moss` ``. The remaining keys come from the same struct
+(`boot_configs.rs:33-52`); `max_prompt_chain_depth` defaults to 128
+(`DEFAULT_MAX_PROMPT_CHAIN_DEPTH`, `boot_configs.rs:18`) and semantically
+permits a chain of N turns total.
+
 For detailed hooker configuration and plugin instructions, please refer to [plugins.md](./plugins.md).
+
+---
+
+## [tui] - TUI-only Keys
+
+**Applicable to**: CLI ❌ | TUI ✅ | Daemon ❌
+
+```toml
+[tui]
+agent_order = ["main", "plan"]       # Order in which agents are cycled (optional)
+redact_secrets_display = false       # Redact secrets echoed by the assistant in the TUI display (default false)
+```
+
+`agent_order` and `redact_secrets_display` are parsed only by the TUI
+(`apps/endside/src/support/config.rs:80-91`; declared in the config schema at
+`apps/serverside/src/config_schema.rs:189-191`). `redact_secrets_display`
+defaults to `false`, meaning the local TUI renders the transcript as-is; set it
+to `true` for shoulder-surf protection. It affects the display sink only — raw
+secrets remain in history and snapshots regardless.
 
 ---
 
@@ -429,24 +553,37 @@ grant automatically, then retry the failed command after approval.
 
 **Applicable to**: CLI ✅ | TUI ✅ | Daemon ✅
 
-The `[vault]` section toggles local encrypted storage of API keys and tokens in
-`llm_secrets.json` (sibling of `config.toml`). All three modes read this section
-through `xiaoo_shared::llm_secrets::init_on_demand_secret_provider`, which parses
-the raw `[vault]` table from the TOML file directly.
+The `[vault]` section controls local encrypted storage of API keys and tokens in
+`llm_secrets.json` (sibling of `config.toml`), and all three modes read the
+`use_sdf` key from it. The real API is
+`xiaoo_shared::llm_secrets`: `save_llm_secret`, `delete_llm_secret`,
+`auto_save_from_env`, `get_llm_secret`, `inject_llm_secrets_into_env`,
+`inspect_secret_store`, and `llm_secrets_path`
+(`apps/shared/src/llm_secrets.rs:40,58,79,228,245,257,219`). There is **no**
+`llm_secrets::init_on_demand_secret_provider` symbol.
 
 ```toml
 [vault]
-enabled = false  # true = persist secrets to llm_secrets.json encrypted with WhiteBox (use_sdf=false) or SDF (use_sdf=true)
-use_sdf = false   # false = WhiteBox + AES-256-GCM (TEST ONLY); true = SDF 国密 (Kunpeng servers only)
+enabled = false  # Informational only — does NOT gate secret persistence (see note)
+use_sdf = false  # false = WhiteBox + AES-256-GCM (TEST ONLY); true = SDF 国密 (Kunpeng servers only)
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Persist API keys/tokens to `llm_secrets.json` and decrypt on demand |
-| `use_sdf` | `false` | Choose WhiteBox (`false`, test only) or SDF 国密 (`true`, Kunpeng only) |
+| `enabled` | `false` | **Informational only.** Reported by the daemon's vault status; not consulted when writing or reading secrets |
+| `use_sdf` | `false` | Functional. Selects WhiteBox (`false`, test only) or SDF 国密 (`true`, Kunpeng only) |
+
+> ⚠️ **`enabled` is not a gate.** `llm_secrets.rs` never reads it — the only key
+> it parses from `[vault]` is `use_sdf`
+> (`apps/shared/src/llm_secrets.rs:22-38`, used on every path at :40,58,228,245,257).
+> The sole reader of `enabled` is daemon status reporting
+> (`apps/serverside/src/vault_management.rs:74`). Secrets are written regardless:
+> the TUI persists an API key unconditionally when one is entered
+> (`apps/endside/src/services/provider.rs:132`). Setting `enabled = false`
+> therefore does **not** prevent `llm_secrets.json` from being created.
 
 > ⚠️ WhiteBox master key is currently all-zeros (test only). For production use
-> SDF (`use_sdf = true`) on a Kunpeng server, or leave `enabled = false` and
+> SDF (`use_sdf = true`) on a Kunpeng server, or avoid persisting secrets and
 > supply credentials through environment variables. Full design, file layout,
 > and API reference: [vault_secrets_design.md](./vault_secrets_design.md).
 

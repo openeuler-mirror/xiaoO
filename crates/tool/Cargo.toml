@@ -40,6 +40,13 @@ regex = "1"
 sha2 = "0.10"
 lazy_static = "1.4"
 
+[dev-dependencies]
+# `#[tokio::test]` needs tokio's `macros` feature; declared here (not in
+# `[dependencies]`) so the lib target built for downstream consumers does
+# not pull it in. Without this the test macros only compile when some
+# transitive dependency (hyper/reqwest) happens to enable the feature.
+tokio = { workspace = true, features = ["macros"] }
+
 [[bin]]
 name = "tool-cli"
 path = "src/bin/tool-cli.rs"
