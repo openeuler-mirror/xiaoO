@@ -98,12 +98,18 @@ fn split_args(s: &str) -> Vec<&str> {
     }
 
     if let Some(s_idx) = start {
-        let end = if s.ends_with('"') && in_quote {
-            s.len() - 1
-        } else {
-            s.len()
-        };
-        result.push(&s[s_idx..end]);
+        // Strip a matched closing quote at the very end so it is not part of
+        // the value. This must only happen when the quotes are balanced
+        // (`in_quote == false`): an unmatched opening quote at the end leaves
+        // `s_idx` at `s.len()`, so no stripping happens and the guard below
+        // prevents the `start > end` slice panic.
+        let mut end = s.len();
+        if !in_quote && s.ends_with('"') && s_idx < end {
+            end -= 1;
+        }
+        if s_idx < end {
+            result.push(&s[s_idx..end]);
+        }
     }
 
     result
