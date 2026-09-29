@@ -44,8 +44,13 @@ fn draw_one_frame<B: Backend>(backend: B) -> io::Result<()> {
     Ok(())
 }
 
-fn recording_frame_backend()
--> (FrameBackend<BufWriter<RecordingWriter>>, Arc<Mutex<Vec<Vec<u8>>>>) {
+/// The backend under test plus the shared record of the writes it produced.
+type RecordingFrameBackend = (
+    FrameBackend<BufWriter<RecordingWriter>>,
+    Arc<Mutex<Vec<Vec<u8>>>>,
+);
+
+fn recording_frame_backend() -> RecordingFrameBackend {
     let writer = RecordingWriter::default();
     let calls = writer.calls.clone();
     let backend = FrameBackend::new(BufWriter::with_capacity(FRAME_BUFFER_CAPACITY, writer));
