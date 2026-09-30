@@ -265,9 +265,12 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
     // interleaves with keyboard input: when an ESC key lands next to a mouse
     // sequence, crossterm's parser swallows the sequence head and the
     // leftover `[<b;x;yM` is delivered as plain characters, which then get
-    // typed into the input box. Disable motion tracking; keep button
-    // (`?1000h`), drag (`?1002h`) and SGR (`?1006h`) modes.
-    let _ = io::stdout().write_all(b"\x1b[?1003l");
+    // typed into the input box. Disable all-motion tracking, then explicitly
+    // select button-event tracking (`?1002h`) for clicks, drags and the wheel.
+    // iTerm2 treats 1000/1002/1003 as mutually exclusive modes: `?1003l`
+    // disables mouse reporting entirely instead of falling back to 1002.
+    // SGR (`?1006h`) remains enabled by `EnableMouseCapture`.
+    let _ = io::stdout().write_all(b"\x1b[?1003l\x1b[?1002h");
     let _ = io::stdout().flush();
     let _ = execute!(io::stdout(), EnableBracketedPaste);
 
