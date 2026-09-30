@@ -318,12 +318,7 @@ impl App {
             }
 
             if let Some(event) = handled_event.as_ref() {
-                discard_redundant_boundary_scrolls(
-                    event,
-                    &self.state,
-                    &mut event_stream,
-                    &mut pending_event,
-                );
+                coalesce_wheel_scroll_burst(self, event, &mut pending_event).await?;
             }
 
             needs_redraw |= self.gateway.poll_stream_updates(&mut self.state);
@@ -778,91 +773,72 @@ async fn fetch_models_from_local_api(api_base: &str) -> Vec<crate::chat::ModelIn
     models
 }
 
-fn discard_redundant_boundary_scrolls(
+/// Coalesce a mouse-wheel (or pointer-motion) burst into a single redraw.
+///
+/// A wheel flick delivers 10–30 ScrollUp/ScrollDown events within a few
+/// hundred milliseconds. Handling them one per loop iteration costs a full
+/// frame each, and because scrolling shifts every visible row, every frame
+/// repaints the entire transcript area — tens of KB per event once the
+/// content is markdown-rich. On long transcripts that saturates the
+/// terminal and scrolling stutters; a fresh conversation has nothing to
+/// scroll (events are handled as clamped no-ops) and stays smooth, which
+/// is why the lag only shows up once the Messages box holds a lot of
+/// content.
+///
+/// After a handled wheel/motion event, drain the events already queued in
+/// the tty buffer and apply their state changes inline — scroll updates
+/// are O(1) and idempotent at the scroll boundary — letting the single
+/// `terminal.draw` at the top of the loop repaint the whole burst at once.
+/// The first non-coalescable event (key, click, …) is stashed in
+/// `pending_event` so ordering with other input is preserved.
+async fn coalesce_wheel_scroll_burst(
+    app: &mut App,
     handled_event: &Event,
-    state: &AppState,
-    event_stream: &mut EventStream,
     pending_event: &mut Option<Event>,
-) {
-    // Wheel bursts are classified by whichever scrollable region the cursor
-    // is over: the sidebar Plan panel when inside it, otherwise the
-    // transcript. The transcript usually sits pinned to its bottom, so
-    // classifying a plan-panel wheel burst by the transcript boundary would
-    // wrongly drain it and make the plan panel unscrollable.
-    let (scroll_offset, max_scroll) = match handled_event {
-        Event::Mouse(mouse)
-            if matches!(
-                mouse.kind,
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-            ) =>
-        {
-            let over_plan_panel = state.render_state.plan_panel_area.is_some_and(|area| {
-                mouse.column >= area.x
-                    && mouse.column < area.x.saturating_add(area.width)
-                    && mouse.row >= area.y
-                    && mouse.row < area.y.saturating_add(area.height)
-            });
-            if over_plan_panel {
-                (
-                    state.plan_panel.scroll_offset,
-                    state.plan_panel.max_scroll_offset(),
+) -> Result<()> {
+    let coalescable = |event: &Event| {
+        matches!(
+            event,
+            Event::Mouse(mouse)
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                        | MouseEventKind::Moved
                 )
-            } else {
-                (
-                    state.active_transcript_scroll_offset(),
-                    state.active_transcript_max_scroll_offset(),
-                )
-            }
-        }
-        _ => (0, 0),
+        )
     };
-
-    let boundary_kind = match handled_event {
-        Event::Mouse(mouse)
-            if mouse.kind == MouseEventKind::ScrollDown && scroll_offset >= max_scroll =>
-        {
-            Some(MouseEventKind::ScrollDown)
-        }
-        Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp && scroll_offset == 0 => {
-            Some(MouseEventKind::ScrollUp)
-        }
-        _ => None,
-    };
-
-    let Some(boundary_kind) = boundary_kind else {
-        return;
-    };
-    let opposite_kind = match boundary_kind {
-        MouseEventKind::ScrollDown => MouseEventKind::ScrollUp,
-        MouseEventKind::ScrollUp => MouseEventKind::ScrollDown,
-        _ => return,
-    };
-
-    for _ in 0..128 {
-        let Some(ready) = event_stream.next().now_or_never() else {
-            break;
-        };
-        let Some(Ok(event)) = ready else {
-            break;
-        };
-
-        match &event {
-            Event::Mouse(mouse) if mouse.kind == boundary_kind => {
-                continue;
-            }
-            Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
-                continue;
-            }
-            Event::Mouse(mouse) if mouse.kind == opposite_kind => {
-                *pending_event = Some(event);
-                return;
-            }
-            _ => {
-                *pending_event = Some(event);
-                return;
-            }
-        }
+    if !coalescable(handled_event) {
+        return Ok(());
     }
+
+    // Drain queued events with the synchronous crossterm API, never the
+    // `EventStream`. `EventStream::poll_next` must be driven by an
+    // executor-registered waker: polling it with `now_or_never()` passes a
+    // noop waker, and when no event is buffered crossterm arms its
+    // background poll thread with that noop waker while the thread parks
+    // holding the global event-reader mutex. The main `select!` can then
+    // neither see queued events (`try_lock` fails → "no events") nor re-arm
+    // the stream with the real waker, so every subsequent input event is
+    // only noticed when an unrelated `select!` branch fires (the 250ms idle
+    // sleep). The sync `poll`/`read` pair shares the same reader state but
+    // never touches a waker, so the stream's wakeup chain stays intact.
+    for _ in 0..128 {
+        if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+            break;
+        }
+        let Ok(event) = crossterm::event::read() else {
+            break;
+        };
+        if !coalescable(&event) {
+            *pending_event = Some(event);
+            return Ok(());
+        }
+        app.handle_event(event).await?;
+    }
+    Ok(())
 }
 
 fn set_cursor_color(color: ratatui::style::Color) {

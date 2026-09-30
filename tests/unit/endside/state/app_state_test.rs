@@ -3,6 +3,7 @@ use super::{
     current_sandbox_id, sandbox_backend_config, sandbox_display_name, ApiKeyDialogState, AppState,
     PlanPanelState, RuntimeStatusLight, WideTableScrollRegion,
 };
+use crate::app_state::MOUSE_WHEEL_SCROLL_LINES;
 use crate::backend::GatewayBackendConfig;
 use crate::config::{AgentRoleConfig, Config};
 use crate::input::Input;
@@ -301,6 +302,33 @@ fn plan_panel_scroll_clamps_to_content_bounds() {
         plan_panel.scroll_up();
     }
     assert_eq!(plan_panel.scroll_offset, 0, "scroll up must clamp at 0");
+}
+
+/// One mouse-wheel notch moves `MOUSE_WHEEL_SCROLL_LINES` (3) lines of the
+/// Plan panel, clamped at both ends.
+#[test]
+fn plan_panel_wheel_step_scrolls_three_lines_and_clamps() {
+    let mut plan_panel = PlanPanelState::default();
+    plan_panel.total_lines = 10;
+    plan_panel.last_visible_height = 4;
+    assert_eq!(plan_panel.max_scroll_offset(), 6);
+
+    // One notch down moves three lines: 0 → 3.
+    plan_panel.scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+    assert_eq!(plan_panel.scroll_offset, MOUSE_WHEEL_SCROLL_LINES);
+
+    // A second notch overshoots and clamps at the bottom.
+    plan_panel.scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+    assert_eq!(plan_panel.scroll_offset, 6);
+
+    // One notch up from the bottom: 6 → 3.
+    plan_panel.scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+    assert_eq!(plan_panel.scroll_offset, 3);
+
+    // Repeated up-notches clamp at the top without underflow.
+    plan_panel.scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+    plan_panel.scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+    assert_eq!(plan_panel.scroll_offset, 0);
 }
 
 #[test]
@@ -662,6 +690,7 @@ impl super::AppState {
 /// beyond the visible viewport instead of only what is on screen.
 mod transcript_selection_scroll_tests {
     use super::super::{clamp_to_transcript_content, AppState, CachedMessageRender};
+    use crate::app_state::MOUSE_WHEEL_SCROLL_LINES;
     use crate::render::transcript::build_transcript_cache;
     use crate::render::wrap_line_to_visual_lines;
     use crate::selection::TranscriptSelection;
@@ -743,14 +772,13 @@ mod transcript_selection_scroll_tests {
         state.transcript_selection = Some(TranscriptSelection::new(1, 0));
         assert!(state.transcript_drag_active());
 
-        // Roll the wheel down three notches with the pointer parked at the
-        // bottom visible row (row 14 = area.y + 9): each notch scrolls one
-        // line and the selection extends to the content now under it.
-        for _ in 0..3 {
-            state.active_transcript_scroll_down();
-            state.extend_transcript_selection_to(12, 14, area);
-        }
-        assert_eq!(state.chat_state.scroll_offset, 3);
+        // Roll the wheel down one notch with the pointer parked at the bottom
+        // visible row (row 14 = area.y + 9): one notch scrolls
+        // MOUSE_WHEEL_SCROLL_LINES (3) lines and the selection extends to the
+        // content now under it.
+        state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+        state.extend_transcript_selection_to(12, 14, area);
+        assert_eq!(state.chat_state.scroll_offset, MOUSE_WHEEL_SCROLL_LINES);
         let sel = state.transcript_selection.as_ref().unwrap();
         assert_eq!(sel.anchor_line, 1, "anchor stays where the drag began");
         assert_eq!(
@@ -779,17 +807,52 @@ mod transcript_selection_scroll_tests {
         state.transcript_selection = Some(TranscriptSelection::new(11, 0));
         assert!(state.transcript_drag_active());
 
-        // Roll the wheel up two notches with the pointer at the top visible
-        // row (row 5 = area.y): offset 10 → 8, pointer maps to visual row 8.
-        for _ in 0..2 {
-            state.active_transcript_scroll_up();
-            state.extend_transcript_selection_to(12, 5, area);
-        }
-        assert_eq!(state.chat_state.scroll_offset, 8);
+        // Roll the wheel up one notch with the pointer at the top visible
+        // row (row 5 = area.y): offset 10 → 7 (one notch = 3 lines), the
+        // pointer maps to visual row 7.
+        state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+        state.extend_transcript_selection_to(12, 5, area);
+        assert_eq!(state.chat_state.scroll_offset, 7);
         let sel = state.transcript_selection.as_ref().unwrap();
-        assert_eq!(sel.cursor_line, 8);
+        assert_eq!(sel.cursor_line, 7);
         let (start_line, _, end_line, _) = sel.normalised();
-        assert_eq!((start_line, end_line), (8, 11));
+        assert_eq!((start_line, end_line), (7, 11));
+    }
+
+    /// One mouse-wheel notch moves `MOUSE_WHEEL_SCROLL_LINES` (3) lines at
+    /// once, clamps at both ends, and re-arms stick-to-bottom only when the
+    /// bottom is reached. Keyboard Up/Down keep the single-line step.
+    #[test]
+    fn wheel_notch_scrolls_three_lines_with_clamping() {
+        let (mut state, _area) = state_with_line_transcript();
+        // 51 total lines, 10 visible → max scroll offset 41.
+        assert_eq!(state.chat_state.max_scroll_offset(), 41);
+
+        // At the top: a wheel-up notch cannot underflow.
+        state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+        assert_eq!(state.chat_state.scroll_offset, 0);
+
+        // One notch down moves three lines: 0 → 3.
+        state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+        assert_eq!(state.chat_state.scroll_offset, MOUSE_WHEEL_SCROLL_LINES);
+
+        // One notch up returns to the top and stops following the tail.
+        state.chat_state.stick_to_bottom = true;
+        state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+        assert_eq!(state.chat_state.scroll_offset, 0);
+        assert!(!state.chat_state.stick_to_bottom);
+
+        // Notches past the bottom clamp at the max offset and re-arm
+        // stick-to-bottom.
+        for _ in 0..20 {
+            state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+        }
+        assert_eq!(state.chat_state.scroll_offset, 41);
+        assert!(state.chat_state.stick_to_bottom);
+
+        // Keyboard Up/Down remain single-line (offset 41 → 40).
+        state.active_transcript_scroll_up();
+        assert_eq!(state.chat_state.scroll_offset, 40);
     }
 
     /// Dragging past the bottom edge (e.g. into the input box) auto-scrolls

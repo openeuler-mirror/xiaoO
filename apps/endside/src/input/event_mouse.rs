@@ -5,7 +5,9 @@ use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::App;
-use crate::app_state::{AppState, InputMode, TranscriptRenderCache, WideTableScrollRegion};
+use crate::app_state::{
+    AppState, InputMode, TranscriptRenderCache, WideTableScrollRegion, MOUSE_WHEEL_SCROLL_LINES,
+};
 use crate::interaction_prompt::PromptFocus;
 use crate::provider_service::copy_to_clipboard;
 use crate::render::find_substring_from;
@@ -194,12 +196,13 @@ impl App {
             && mouse_event.column < area.x + area.width;
 
         match mouse_event.kind {
+            // One wheel notch moves MOUSE_WHEEL_SCROLL_LINES lines of plan text.
             MouseEventKind::ScrollUp => {
-                self.state.plan_panel_scroll_up();
+                self.state.plan_panel_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
                 Ok(true)
             }
             MouseEventKind::ScrollDown => {
-                self.state.plan_panel_scroll_down();
+                self.state.plan_panel_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                 Ok(true)
             }
             MouseEventKind::Down(MouseButton::Left) if in_scrollbar_zone => {
@@ -357,13 +360,15 @@ impl App {
 
         match mouse_event.kind {
             MouseEventKind::ScrollUp => {
-                // While a drag-selection is in progress, the wheel slides the
-                // content under the stationary pointer and the selection
-                // follows it: holding the button and rolling the wheel lets a
-                // single drag cover (and auto-copy on release) content beyond
-                // the visible viewport, not just what is on screen.
+                // One wheel notch scrolls MOUSE_WHEEL_SCROLL_LINES lines
+                // (keyboard Up/Down stay single-line). While a drag-selection
+                // is in progress, the wheel slides the content under the
+                // stationary pointer and the selection follows it: holding the
+                // button and rolling the wheel lets a single drag cover (and
+                // auto-copy on release) content beyond the visible viewport,
+                // not just what is on screen.
                 if self.state.transcript_drag_active() {
-                    self.state.active_transcript_scroll_up();
+                    self.state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
                     self.state.extend_transcript_selection_to(
                         mouse_event.column,
                         mouse_event.row,
@@ -371,13 +376,13 @@ impl App {
                     );
                 } else {
                     self.state.transcript_selection = None;
-                    self.state.active_transcript_scroll_up();
+                    self.state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
                 }
             }
             MouseEventKind::ScrollDown => {
-                // See ScrollUp: scroll-and-extend while a drag is active.
+                // See ScrollUp: wheel-step scroll-and-extend while a drag is active.
                 if self.state.transcript_drag_active() {
-                    self.state.active_transcript_scroll_down();
+                    self.state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                     self.state.extend_transcript_selection_to(
                         mouse_event.column,
                         mouse_event.row,
@@ -385,7 +390,7 @@ impl App {
                     );
                 } else {
                     self.state.transcript_selection = None;
-                    self.state.active_transcript_scroll_down();
+                    self.state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                 }
             }
             // Shift+wheel commonly arrives as ScrollLeft/ScrollRight; when the
