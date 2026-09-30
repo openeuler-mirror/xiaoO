@@ -189,4 +189,9 @@ WORKDIR /root
 # wrapper), so its own SIGINT/SIGTERM handlers (apps/serverside/src/main.rs)
 # drive graceful shutdown on `docker stop`. For the TUI / CLI / bash dispatch
 # forms see docs/docker_deploy.md.
-CMD ["xiaoo-daemon"]
+#
+# Published ports only reach a container process bound to 0.0.0.0, so the image
+# binds all interfaces. The daemon refuses to serve the exec-capable runtime API
+# on a non-loopback address without authentication, so the mounted config must
+# configure a bearer token ([http].bearer_token / [http].bearer_token_env).
+CMD ["xiaoo-daemon", "--host", "0.0.0.0"]

@@ -69,8 +69,7 @@ This is the recommended local development mode.
 In this setup:
 
 - xiaoO runs on your local machine
-- xiaoO binds to `127.0.0.1:18080` (pass `--host 127.0.0.1`; the built-in
-  default is `0.0.0.0`, `apps/serverside/src/main.rs:1052-1053`)
+- xiaoO binds to `127.0.0.1:18080` (the built-in default; loopback only)
 - no public callback URL is needed
 - xiaoO receives messages by long polling Telegram Bot API `getUpdates`
 
@@ -102,8 +101,7 @@ This is the recommended production mode when you have a public domain.
 In this setup:
 
 - xiaoO runs on a server
-- xiaoO binds to `127.0.0.1:18080` (pass `--host 127.0.0.1` explicitly — this is
-  a hardening choice, not the default; see §10)
+- xiaoO binds to `127.0.0.1:18080` (the default; loopback only — see §10)
 - nginx exposes a public HTTPS webhook URL
 - Telegram sends updates to nginx
 - nginx forwards updates to the local daemon
@@ -415,25 +413,24 @@ the header does not match it.
 >
 > With no token configured, **any** POST to the webhook path is accepted and
 > processed — no header check, no Telegram origin verification. If the daemon is
-> also bound to a public interface (see §10 — `0.0.0.0` is the default), that is
-> an unauthenticated path into the agent. Always set `webhook_secret_token` in
-> webhook mode and pass the same value to `setWebhook.secret_token`.
+> also bound to a public interface (see §10), that is an unauthenticated path
+> into the agent. Always set `webhook_secret_token` in webhook mode and pass the
+> same value to `setWebhook.secret_token`.
 
 ## 10. Why Reverse Proxy Is Needed for Webhook
 
 > ⚠️ **Security-relevant correction.** An earlier revision of this document
-> claimed xiaoO "does not bind directly on the public interface". **That is
-> wrong.** The daemon's built-in defaults are `--host 0.0.0.0 --port 18080`
-> (`apps/serverside/src/main.rs:1052-1053`, echoed in the usage text at
-> `apps/serverside/src/main.rs:1339`). Started with no flags, xiaoO is reachable
-> on **every** interface. The loopback-only layout below is what you get
-> **only when you pass `--host 127.0.0.1` explicitly.**
+> claimed xiaoO "does not bind directly on the public interface". The built-in
+> default is now `--host 127.0.0.1 --port 18080` (loopback only), and the daemon
+> refuses to start on a non-loopback address unless a bearer token is configured
+> (`[http].bearer_token` / `[http].bearer_token_env`). Started with no flags,
+> xiaoO is reachable only from the local host.
 
-In the recommended secure server deployment, xiaoO is deliberately made to listen
+In the recommended secure server deployment, xiaoO listens on loopback:
 on loopback only, by passing the flag explicitly:
 
 - xiaoO listens on:
-  - `127.0.0.1:18080` (requires `--host 127.0.0.1`; **not** the default)
+  - `127.0.0.1:18080` (the default; `--host 127.0.0.1`)
 - nginx listens publicly on:
   - `0.0.0.0:443`
 
@@ -557,9 +554,9 @@ WantedBy=multi-user.target
 
 A few important details:
 
-- `--host 127.0.0.1` makes xiaoO loopback-only — this is an **explicit opt-in**,
-  not the daemon default (`apps/serverside/src/main.rs:1052-1053` starts at
-  `0.0.0.0`). Do not omit it unless nginx or a firewall genuinely fronts the port.
+- `--host 127.0.0.1` makes xiaoO loopback-only — this is also the daemon
+  default. Exposing a non-loopback address requires a configured bearer token;
+  without one the daemon refuses to start.
 - webhook mode uses nginx for public exposure
 - polling mode does not need public exposure
 - `EnvironmentFile` is where `TELEGRAM_BOT_TOKEN` and `OPENROUTER_API_KEY` are loaded from
@@ -658,8 +655,7 @@ These layers must line up for webhook mode:
 5. `webhook_secret_token` is configured — **mandatory**: with it unset,
    `verify_secret_token` returns `Ok` and the endpoint accepts any POST
    (`apps/serverside/src/channels/telegram/channel.rs:151-154`)
-6. xiaoO daemon is listening on `127.0.0.1:18080` (pass `--host 127.0.0.1`;
-   the default is `0.0.0.0`)
+6. xiaoO daemon is listening on `127.0.0.1:18080` (the default; loopback only)
 7. nginx has a matching HTTPS `location`
 8. nginx proxies to `/api/v1/channels/telegram/events`
 9. public DNS resolves to your server

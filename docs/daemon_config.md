@@ -70,7 +70,7 @@ whether a key is required, and model-catalog support.
 |-----------|-------------|---------|
 | `--config <PATH>` | Path to configuration file (also supports `XIAOO_CONFIG` environment variable, falling back to `~/.config/xiaoo/config.toml`) | Auto-detect |
 | `--mcp-config <PATH>` | Path to an additional MCP server descriptor file | — |
-| `--host <HOST>` | Bind address for the runtime API | `0.0.0.0` |
+| `--host <HOST>` | Bind address for the runtime API. A non-loopback address requires configured bearer auth (see below). | `127.0.0.1` |
 | `--port <PORT>` | Listen port for the runtime API | `18080` |
 | `--dashboard-host <HOST>` | Bind address for the read-only session/sandbox dashboard | `127.0.0.1` |
 | `--dashboard-port <PORT>` | Listen port for the dashboard. If the port is already in use the daemon automatically tries the next one (28082, 28083, …) up to 100 attempts. | `28081` |
@@ -86,10 +86,14 @@ whether a key is required, and model-catalog support.
 | `--allow-effects <bool>` | Allow effectful custom tools | off |
 | `--environment <NAME>` | Secret-store environment for `set-secret`/`delete-secret` | — |
 
-The bind defaults are confirmed by `--help` output: `Defaults: --host 0.0.0.0
---port 18080`, `--dashboard-host 127.0.0.1 --dashboard-port 28081`. Note that
-the runtime API therefore binds **all interfaces** (`0.0.0.0`) unless you pass
-`--host 127.0.0.1`.
+The bind defaults are confirmed by `--help` output: `Defaults: --host 127.0.0.1
+--port 18080`, `--dashboard-host 127.0.0.1 --dashboard-port 28081`. The runtime
+API therefore binds **loopback only** unless you explicitly pass a non-loopback
+`--host`. The runtime API can execute shell commands and read/write arbitrary
+files, so binding a non-loopback address **without** a configured bearer token
+is refused at startup; configure `[http].bearer_token` or
+`[http].bearer_token_env` (or `--bearer-token-env`) before exposing the daemon
+to the network.
 
 ### `config` Subcommands
 
@@ -632,6 +636,9 @@ Health check endpoint for liveness probes and load balancing.
 The daemon exposes runtime APIs for remote TUI and other first-class clients,
 plus checkpoint APIs for callers that need branching execution state.
 These endpoints are protected by HTTP Bearer auth when `[http]` auth is configured.
+Because they can execute commands (`/api/v1/runtimes/exec`) and read/write files,
+authentication is fail-closed: when no bearer token is configured the daemon only
+accepts a loopback bind and refuses to start on a non-loopback address.
 LLM provider settings are resolved per runtime/turn: request payloads may pass an
 optional `llm` object, and omitted fields fall back to `[llm]` in the daemon
 config. The daemon does not require the LLM API key at process startup.

@@ -1,4 +1,5 @@
-use super::{Cli, CliAction};
+use super::{ensure_external_bind_is_authenticated, Cli, CliAction};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[test]
@@ -533,11 +534,41 @@ fn parses_daemon_mcp_config_argument() {
 }
 
 #[test]
-fn daemon_defaults_to_port_18080() {
+fn daemon_defaults_to_loopback_host_and_port_18080() {
     let cli = Cli::parse(std::iter::empty::<String>()).expect("cli should parse with defaults");
 
-    assert_eq!(cli.host, "0.0.0.0");
+    // The runtime API exposes shell execution, so the default must not bind an
+    // externally reachable interface.
+    assert_eq!(cli.host, "127.0.0.1");
     assert_eq!(cli.port, 18080);
+}
+
+#[test]
+fn external_bind_without_auth_is_rejected() {
+    let addr: SocketAddr = "0.0.0.0:18080".parse().expect("valid socket address");
+
+    let error = ensure_external_bind_is_authenticated(addr, false)
+        .expect_err("an unauthenticated external bind must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("refusing to start"), "{message}");
+    assert!(message.contains("bearer_token"), "{message}");
+}
+
+#[test]
+fn external_bind_with_auth_is_allowed() {
+    let addr: SocketAddr = "0.0.0.0:18080".parse().expect("valid socket address");
+
+    assert!(ensure_external_bind_is_authenticated(addr, true).is_ok());
+}
+
+#[test]
+fn loopback_bind_without_auth_is_allowed() {
+    let v4: SocketAddr = "127.0.0.1:18080".parse().expect("valid socket address");
+    let v6: SocketAddr = "[::1]:18080".parse().expect("valid socket address");
+
+    assert!(ensure_external_bind_is_authenticated(v4, false).is_ok());
+    assert!(ensure_external_bind_is_authenticated(v6, false).is_ok());
 }
 
 #[test]

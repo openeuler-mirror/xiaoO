@@ -243,12 +243,17 @@ xiaoo --cli skill remove <name>
 xiaoO 可以作为 daemon 运行，并为 Feishu、Telegram 或自定义服务等外部系统提供 REST API。
 
 ```bash
-# 默认监听地址：0.0.0.0:18080
+# 默认监听地址：127.0.0.1:18080（仅回环）
 xiaoo-daemon
 
 # 指定配置文件、监听地址和端口
 xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
+
+runtime API 可执行命令并读写文件，因此默认只绑回环。若要暴露到其他网卡，
+必须配置 bearer token（`[http].bearer_token` / `[http].bearer_token_env` 或
+`--bearer-token-env`）；未配置时 daemon 拒绝在非回环地址上启动。详见
+[docs/daemon_config.md](./docs/daemon_config.md)。
 
 HTTP 请求可在 JSON body 的 `entry` 对象中通过 `runtime_profile_id` 选择 Agent 角色预设：
 

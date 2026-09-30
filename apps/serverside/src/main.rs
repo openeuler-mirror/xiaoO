@@ -568,6 +568,16 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
         }
         None => config.http_bearer_token()?.map(HttpBearerAuthConfig::new),
     };
+    // Fail closed: the runtime API exposes shell execution
+    // (`/api/v1/runtimes/exec`) plus arbitrary file read/write. When no bearer
+    // token is configured the auth middleware is not mounted at all
+    // (`apply_http_bearer_auth` returns the router unchanged), so binding a
+    // non-loopback address would publish an unauthenticated control plane.
+    // Refuse to start instead of serving it silently.
+    let listen_addr: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .with_context(|| format!("invalid listen address {host}:{port}"))?;
+    ensure_external_bind_is_authenticated(listen_addr, bearer_auth.is_some())?;
     let rate_limit = config.app.http.rate_limit.clone();
     let resolver = Arc::new(ConfiguredRuntimeResolver::from_config(&config).await?);
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
@@ -729,12 +739,9 @@ async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
             }
         }
 
-        let addr: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .with_context(|| format!("invalid listen address {host}:{port}"))?;
-        let listener = tokio::net::TcpListener::bind(addr)
+        let listener = tokio::net::TcpListener::bind(listen_addr)
             .await
-            .with_context(|| format!("failed to bind {addr}"))?;
+            .with_context(|| format!("failed to bind {listen_addr}"))?;
         let resolved_addr = listener
             .local_addr()
             .context("failed to resolve daemon listener address")?;
@@ -1065,7 +1072,7 @@ impl Cli {
     {
         let mut config = None;
         let mut mcp_config = None;
-        let mut host = "0.0.0.0".to_string();
+        let mut host = "127.0.0.1".to_string();
         let mut port = 18080_u16;
         let mut dashboard_host: Option<String> = None;
         let mut dashboard_port: Option<u16> = None;
@@ -1352,9 +1359,35 @@ fn print_usage() {
          \x20     xiaoo-daemon config cron [--config <path>]\n\n\
          \x20     xiaoo-daemon config render-cron < draft.json\n\n\
          \x20     xiaoo-daemon protocol schema\n\n\
-         Defaults: --host 0.0.0.0 --port 18080\n\
+         Defaults: --host 127.0.0.1 --port 18080\n\
          \x20         --dashboard-host 127.0.0.1 --dashboard-port 28081\n\n\
          Dashboard port auto-increments on conflict (28081, 28082, ...)."
+    );
+}
+
+/// Refuse to serve the exec-capable runtime API on a non-loopback address
+/// without bearer authentication.
+///
+/// The protected route group contains `/api/v1/runtimes/exec`,
+/// `/api/v1/runtimes/read-file` and `/api/v1/runtimes/write-file`. With no
+/// bearer token configured, `apply_http_bearer_auth` mounts no middleware at
+/// all, and anonymous callers also bypass the attach-lease check, so an
+/// externally reachable listener is an unauthenticated remote code execution
+/// surface. Fail closed instead of starting it.
+fn ensure_external_bind_is_authenticated(
+    listen_addr: SocketAddr,
+    authenticated: bool,
+) -> Result<()> {
+    if listen_addr.ip().is_loopback() || authenticated {
+        return Ok(());
+    }
+    bail!(
+        "refusing to start: the runtime API (including /api/v1/runtimes/exec, \
+         /api/v1/runtimes/read-file and /api/v1/runtimes/write-file) would be \
+         reachable without authentication on {listen_addr}. Configure \
+         [http].bearer_token or [http].bearer_token_env (or pass \
+         --bearer-token-env <NAME>), or bind a loopback address such as \
+         --host 127.0.0.1."
     );
 }
 

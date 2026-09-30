@@ -620,6 +620,10 @@ xiaoo-daemon --host 0.0.0.0 --port 18080 \
   --config ~/.config/xiaoo/config.toml
 ```
 
+> 默认监听 `127.0.0.1:18080`（仅回环）。上面的示例绑定了非回环地址，因此
+> 配置文件必须提供 bearer token（`[http].bearer_token` /
+> `[http].bearer_token_env`），否则 daemon 会拒绝启动。
+
 dashboard 默认在 `127.0.0.1:28081`；可通过 `[http.dashboard]` 或 `--dashboard-host/--dashboard-port` 修改。
 
 #### 4.6.3 Workspace Open 示例
