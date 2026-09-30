@@ -4,7 +4,7 @@ use super::*;
 fn test_in_memory_store_crud() {
     let store = InMemoryAuthStore::new();
     let cred = AuthCredential::new("test-1", "openai", "sk-test");
-    store.save(&[cred.clone()]).unwrap();
+    store.save(std::slice::from_ref(&cred)).unwrap();
 
     let loaded = store.load().unwrap();
     assert_eq!(loaded.len(), 1);

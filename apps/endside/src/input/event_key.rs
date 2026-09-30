@@ -1570,9 +1570,9 @@ impl App {
     }
 
     fn attempt_local_model_fetch(&mut self) {
-        let should_fetch = self.state.provider_dialog.as_ref().map_or(false, |d| {
+        let should_fetch = self.state.provider_dialog.as_ref().is_some_and(|d| {
             !d.local_models_loading
-                && d.providers.get(d.selected_provider).map_or(false, |p| {
+                && d.providers.get(d.selected_provider).is_some_and(|p| {
                     p.name == "local" && p.models.len() == 1 && p.models[0].name.contains("(Local)")
                 })
         });

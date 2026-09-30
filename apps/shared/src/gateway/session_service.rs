@@ -47,8 +47,11 @@ pub enum SessionServiceError {
     #[error("core runtime execution failed with partial state: {message}")]
     CoreRunWithState {
         message: String,
-        partial_loop_state: LoopStateSnapshot,
-        partial_memory_snapshot: MemorySnapshot,
+        /// Boxed: the two snapshots below dominate the enum's size, and a wide
+        /// `SessionServiceError` is carried through every `Result` in this
+        /// crate (`result_large_err`).
+        partial_loop_state: Box<LoopStateSnapshot>,
+        partial_memory_snapshot: Box<MemorySnapshot>,
         tool_manifest: Vec<ToolSpecSnapshot>,
     },
     #[error("memory handling failed: {message}")]

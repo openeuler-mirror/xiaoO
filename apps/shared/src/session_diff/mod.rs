@@ -144,9 +144,7 @@ impl SessionDiffTracker {
             );
         }
 
-        let Some(next) = next.filter(|change| change.additions > 0 || change.deletions > 0) else {
-            return None;
-        };
+        let next = next.filter(|change| change.additions > 0 || change.deletions > 0)?;
 
         self.adjust_session_file_change(
             call_id,

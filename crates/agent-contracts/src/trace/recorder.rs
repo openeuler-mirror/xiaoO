@@ -27,7 +27,7 @@ pub enum TraceOutcome {
 pub trait TraceRecorderBuilder: Sized {
     fn default() -> Self;
 
-    fn from_json(self, config: Value) -> Result<Self, BuildError>;
+    fn with_json(self, config: Value) -> Result<Self, BuildError>;
 
     async fn build(&self) -> Result<Box<dyn TraceRecorder>, BuildError>;
 }

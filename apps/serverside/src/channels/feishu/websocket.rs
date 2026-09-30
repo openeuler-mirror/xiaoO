@@ -404,7 +404,7 @@ async fn send_frame(
     frame: ProtoFrame,
 ) -> ChannelResult<()> {
     writer
-        .send(WsMessage::Binary(frame.encode_to_vec().into()))
+        .send(WsMessage::Binary(frame.encode_to_vec()))
         .await
         .map_err(|error| ChannelError::Transport {
             message: format!("failed to write Feishu websocket frame: {error}"),

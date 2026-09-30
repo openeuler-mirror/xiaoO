@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand};
 use moirai::{Span, SpanStorage, SqliteStorage};
-use serde_json;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[path = "../cli_api.rs"]
@@ -137,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn cmd_list(
-    db_path: &PathBuf,
+    db_path: &Path,
     limit: usize,
     alive: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -189,7 +188,7 @@ async fn cmd_list(
 }
 
 async fn cmd_log(
-    db_path: &PathBuf,
+    db_path: &Path,
     trace_id_input: &str,
     graph: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -280,7 +279,7 @@ fn print_graph(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent_id) = &span.parent_span_id {
             children_map
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(span);
         }
     }
@@ -330,7 +329,7 @@ fn print_tree_children(
 }
 
 async fn cmd_export(
-    db_path: &PathBuf,
+    db_path: &Path,
     trace_id_input: &str,
     format: Format,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -358,7 +357,7 @@ fn cli_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
 }
 
 async fn cmd_span(
-    db_path: &PathBuf,
+    db_path: &Path,
     span_id: &str,
     format: Format,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -432,7 +431,7 @@ fn export_markdown(spans: &[Span]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent_id) = &span.parent_span_id {
             children_map
                 .entry(parent_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(span);
         }
     }

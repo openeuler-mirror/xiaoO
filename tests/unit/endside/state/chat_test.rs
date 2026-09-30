@@ -163,8 +163,10 @@ fn total_line_scrollbar_state_leaves_gap_at_bottom_for_chat_offsets() {
 
 #[test]
 fn page_step_overlaps_one_line_for_pager_style_paging() {
-    let mut chat = ChatState::default();
-    chat.last_visible_height = 20;
+    let mut chat = ChatState {
+        last_visible_height: 20,
+        ..Default::default()
+    };
     assert_eq!(chat.page_step(), 19);
 
     // A viewport of a single line still pages by one.
@@ -194,11 +196,13 @@ fn scroll_page_up_moves_back_by_viewport_and_unsticks_from_bottom() {
 
 #[test]
 fn scroll_page_up_clamps_at_top_without_overshooting() {
-    let mut chat = ChatState::default();
-    chat.total_lines = 100;
-    chat.last_visible_height = 20;
-    chat.scroll_offset = 5;
-    chat.stick_to_bottom = false;
+    let mut chat = ChatState {
+        total_lines: 100,
+        last_visible_height: 20,
+        scroll_offset: 5,
+        stick_to_bottom: false,
+        ..Default::default()
+    };
 
     chat.scroll_page_up();
 
@@ -209,11 +213,13 @@ fn scroll_page_up_clamps_at_top_without_overshooting() {
 
 #[test]
 fn scroll_page_down_advances_by_viewport_and_resticks_at_bottom() {
-    let mut chat = ChatState::default();
-    chat.total_lines = 100;
-    chat.last_visible_height = 20;
-    chat.scroll_offset = 0;
-    chat.stick_to_bottom = false;
+    let mut chat = ChatState {
+        total_lines: 100,
+        last_visible_height: 20,
+        scroll_offset: 0,
+        stick_to_bottom: false,
+        ..Default::default()
+    };
 
     chat.scroll_page_down();
 
@@ -247,10 +253,12 @@ fn scroll_page_down_at_bottom_keeps_stick_to_bottom() {
 
 #[test]
 fn page_scroll_respects_short_transcript_without_overflow() {
-    let mut chat = ChatState::default();
-    chat.total_lines = 5;
-    chat.last_visible_height = 20;
-    chat.scroll_offset = 0;
+    let mut chat = ChatState {
+        total_lines: 5,
+        last_visible_height: 20,
+        scroll_offset: 0,
+        ..Default::default()
+    };
 
     // max_scroll_offset is 0 (everything fits), so paging down stays put and sticks.
     chat.scroll_page_down();

@@ -46,7 +46,7 @@ pub fn vec_to_bytes(v: &[f32]) -> Vec<u8> {
 /// that don't fill a complete f32 (< 4 bytes remainder) — this matches
 /// SQLite BLOB storage semantics where the length is always exact.
 pub fn bytes_to_vec(bytes: &[u8]) -> Vec<f32> {
-    if !bytes.is_empty() && bytes.len() % 4 != 0 {
+    if !bytes.is_empty() && !bytes.len().is_multiple_of(4) {
         // Log-worthy: indicates corrupted data. Return what we can parse.
         tracing::warn!(
             "embedding bytes length {} not divisible by 4, truncating remainder",

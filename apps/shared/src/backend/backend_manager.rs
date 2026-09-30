@@ -135,6 +135,12 @@ fn resolve_checkpoint_backend_id(
     }
 }
 
+impl Default for BackendManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BackendManager {
     pub fn new() -> Self {
         Self::new_with_limits(BackendManagerLimits::default())

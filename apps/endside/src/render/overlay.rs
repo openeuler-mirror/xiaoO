@@ -165,7 +165,7 @@ impl App {
 
         let available_width = area.width.saturating_sub(4).max(1);
         let width = if available_width >= 36 {
-            available_width.min(88).max(36)
+            available_width.clamp(36, 88)
         } else {
             available_width
         };
@@ -202,7 +202,7 @@ impl App {
 
         let value = self.state.chat_state.input.value();
         let cursor = self.state.chat_state.input.cursor();
-        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(&value, cursor)
+        let candidates: Vec<String> = crate::slash_complete::slash_typed_prefix(value, cursor)
             .map(|prefix| {
                 crate::slash_complete::candidates_for_prefix(&prefix, &self.state.external_commands)
             })
@@ -214,7 +214,7 @@ impl App {
 
         let available_width = area.width.saturating_sub(4).max(1);
         let width = if available_width >= 32 {
-            available_width.min(64).max(32)
+            available_width.clamp(32, 64)
         } else {
             available_width
         };
@@ -252,7 +252,7 @@ impl App {
         let height = desired_height.min(available_height).max(3);
         let available_width = area.width.saturating_sub(4).max(1);
         let width = if available_width >= 32 {
-            available_width.min(80).max(32)
+            available_width.clamp(32, 80)
         } else {
             available_width
         };
@@ -318,7 +318,7 @@ impl App {
         let view_len = inner.height as usize;
         let start = selected
             .saturating_sub(view_len.saturating_sub(1))
-            .min(candidates.len().saturating_sub(view_len).max(0));
+            .min(candidates.len().saturating_sub(view_len));
         let end = (start + view_len).min(candidates.len());
         self.state.render_state.file_mention_view_start = start;
         let list = List::new(items.into_iter().skip(start).take(end - start)).block(block);
@@ -391,9 +391,7 @@ impl App {
             && self.state.interaction_prompt.is_none();
         let title = if self.state.input_mode == InputMode::InteractionPrompt {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 | Tab 切换补充 "
-        } else if self.state.slash_menu_visible() {
-            " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
-        } else if self.state.file_mention_menu_visible() {
+        } else if self.state.slash_menu_visible() || self.state.file_mention_menu_visible() {
             " ↑↓ 选择 | Enter 补全 | Esc 关闭列表 | Ctrl+C 退出 "
         } else if self.state.api_key_dialog.is_some() {
             " Enter 连接 | Esc 取消 "
@@ -510,8 +508,8 @@ impl App {
         area: Rect,
         dialog: &ProviderDialog,
     ) {
-        let dialog_width = area.width.min(80).max(60);
-        let dialog_height = area.height.min(20).max(12);
+        let dialog_width = area.width.clamp(60, 80);
+        let dialog_height = area.height.clamp(12, 20);
         let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
         let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
         let dialog_area = Rect {
@@ -607,7 +605,7 @@ impl App {
         area: Rect,
         dialog: &SandboxDialog,
     ) {
-        let dialog_width = area.width.min(72).max(48);
+        let dialog_width = area.width.clamp(48, 72);
         let visible = dialog.options.len() as u16;
         let dialog_height = area.height.min(visible + 4).max(7);
         let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
@@ -685,7 +683,7 @@ impl App {
         area: Rect,
         dialog: &RemoteSessionDialog,
     ) {
-        let dialog_width = area.width.min(92).max(56);
+        let dialog_width = area.width.clamp(56, 92);
         let desired_height = match dialog.mode {
             RemoteSessionDialogMode::List => (dialog.entries.len() as u16 + 4).clamp(8, 22),
             RemoteSessionDialogMode::NewUrl => 9,
@@ -890,7 +888,7 @@ impl App {
         area: Rect,
         dialog: &SessionSnapshotDialog,
     ) {
-        let dialog_width = area.width.min(96).max(54);
+        let dialog_width = area.width.clamp(54, 96);
         let visible_manual = dialog.manual_entries.len().min(8) as u16;
         let visible_automatic = dialog.automatic_entries.len().min(8) as u16;
         let desired_height = (visible_manual + visible_automatic + 9).clamp(14, 30);
@@ -1042,7 +1040,7 @@ impl App {
     ) {
         match dialog {
             DeleteDialog::Selecting { entries, selected } => {
-                let dialog_width = area.width.min(80).max(50);
+                let dialog_width = area.width.clamp(50, 80);
                 let max_visible = 8u16;
                 let visible = (entries.len() as u16).min(max_visible);
                 let desired_height = visible + 3;
@@ -1120,7 +1118,7 @@ impl App {
                 turn,
                 subsequent_count,
             } => {
-                let dialog_width = area.width.min(50).max(36);
+                let dialog_width = area.width.clamp(36, 50);
                 let dialog_height = if *subsequent_count > 0 { 8 } else { 6 };
                 let dialog_x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
                 let dialog_y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
@@ -1187,7 +1185,7 @@ impl App {
         area: Rect,
         dialog: &ApiKeyDialogState,
     ) {
-        let width = area.width.min(56).max(40);
+        let width = area.width.clamp(40, 56);
         let height = 8u16;
         let x = area.x + (area.width.saturating_sub(width)) / 2;
         let y = area.y + (area.height.saturating_sub(height)) / 2;
@@ -1374,6 +1372,16 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Whitespace/word runs buffered while wrapping one line, plus their running
+/// display widths. Drained together by `flush_pending`.
+#[derive(Default)]
+struct PendingBuffers {
+    ws: Vec<usize>,
+    ws_width: usize,
+    word: Vec<usize>,
+    word_width: usize,
+}
+
 /// Commit pending whitespace then pending word into the current line at
 /// `(row, line_width)`, recording each char's visual position and advancing
 /// the line width. Both pending buffers are drained and their width trackers
@@ -1381,24 +1389,21 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 fn flush_pending(
     pos: &mut [(usize, usize)],
     chars: &[char],
-    pending_ws: &mut Vec<usize>,
-    pending_ws_width: &mut usize,
-    pending_word: &mut Vec<usize>,
-    pending_word_width: &mut usize,
+    pending: &mut PendingBuffers,
     row: usize,
     line_width: usize,
 ) -> usize {
     let mut lw = line_width;
-    for ci in pending_ws.drain(..) {
+    for ci in pending.ws.drain(..) {
         pos[ci] = (row, lw);
         lw += char_display_width(chars[ci]);
     }
-    *pending_ws_width = 0;
-    for ci in pending_word.drain(..) {
+    pending.ws_width = 0;
+    for ci in pending.word.drain(..) {
         pos[ci] = (row, lw);
         lw += char_display_width(chars[ci]);
     }
-    *pending_word_width = 0;
+    pending.word_width = 0;
     lw
 }
 
@@ -1433,25 +1438,13 @@ pub(crate) fn calculate_visual_cursor_position(
     let mut row = 0usize;
     let mut line_width = 0usize; // width of committed pending_line content
     let mut non_ws_prev = false;
-    let mut pending_word: Vec<usize> = Vec::new();
-    let mut pending_word_width = 0usize;
-    let mut pending_ws: Vec<usize> = Vec::new();
-    let mut pending_ws_width = 0usize;
+    let mut pending = PendingBuffers::default();
 
     for (idx, &ch) in chars.iter().enumerate() {
         // ratatui splits Paragraph text on '\n' into separate input Lines
         // before wrapping, so a newline is a hard line break.
         if ch == '\n' {
-            line_width = flush_pending(
-                &mut pos,
-                &chars,
-                &mut pending_ws,
-                &mut pending_ws_width,
-                &mut pending_word,
-                &mut pending_word_width,
-                row,
-                line_width,
-            );
+            line_width = flush_pending(&mut pos, &chars, &mut pending, row, line_width);
             pos[idx] = (row, line_width);
             row += 1;
             line_width = 0;
@@ -1472,25 +1465,16 @@ pub(crate) fn calculate_visual_cursor_position(
         // `untrimmed_overflow` only fires when trim == false (our case) and the
         // line has no committed content yet but the symbol would overflow.
         let untrimmed_overflow =
-            line_width == 0 && pending_word_width + pending_ws_width + sw > max_width;
+            line_width == 0 && pending.word_width + pending.ws_width + sw > max_width;
 
         if word_found || untrimmed_overflow {
             // commit pending whitespace then pending word into the current line
-            line_width = flush_pending(
-                &mut pos,
-                &chars,
-                &mut pending_ws,
-                &mut pending_ws_width,
-                &mut pending_word,
-                &mut pending_word_width,
-                row,
-                line_width,
-            );
+            line_width = flush_pending(&mut pos, &chars, &mut pending, row, line_width);
         }
 
         let line_full = line_width >= max_width;
         let pending_word_overflow =
-            sw > 0 && line_width + pending_ws_width + pending_word_width >= max_width;
+            sw > 0 && line_width + pending.ws_width + pending.word_width >= max_width;
 
         if line_full || pending_word_overflow {
             let pushed_row = row;
@@ -1503,7 +1487,7 @@ pub(crate) fn calculate_visual_cursor_position(
             // on the pushed line, not the next one.
             let mut remaining = max_width.saturating_sub(pushed_width);
             let mut fill_col = pushed_width;
-            while let Some(&ci) = pending_ws.first() {
+            while let Some(&ci) = pending.ws.first() {
                 let cw = char_display_width(chars[ci]);
                 if cw > remaining {
                     break;
@@ -1511,15 +1495,15 @@ pub(crate) fn calculate_visual_cursor_position(
                 pos[ci] = (pushed_row, fill_col);
                 fill_col += cw;
                 remaining -= cw;
-                pending_ws.remove(0);
-                pending_ws_width -= cw;
+                pending.ws.remove(0);
+                pending.ws_width -= cw;
             }
 
             // When the pending whitespace buffer is fully consumed at the break,
             // ratatui drops the current whitespace symbol (the first one of the
             // next word). Position it at the end of the just-pushed line so the
             // cursor clamps there instead of jumping to the next row prematurely.
-            if is_ws && pending_ws.is_empty() {
+            if is_ws && pending.ws.is_empty() {
                 pos[idx] = (pushed_row, max_width);
                 non_ws_prev = false;
                 continue;
@@ -1527,31 +1511,22 @@ pub(crate) fn calculate_visual_cursor_position(
         }
 
         if is_ws {
-            pending_ws.push(idx);
-            pending_ws_width += sw;
+            pending.ws.push(idx);
+            pending.ws_width += sw;
         } else {
-            pending_word.push(idx);
-            pending_word_width += sw;
+            pending.word.push(idx);
+            pending.word_width += sw;
         }
         non_ws_prev = !is_ws;
     }
 
     // end-of-input tail, mirroring ratatui's `process_input`
-    if line_width == 0 && pending_word.is_empty() && !pending_ws.is_empty() {
+    if line_width == 0 && pending.word.is_empty() && !pending.ws.is_empty() {
         // trailing whitespace with no following word on an empty line: ratatui
         // emits a blank line first, then the whitespace starts the next row.
         row += 1;
     }
-    line_width = flush_pending(
-        &mut pos,
-        &chars,
-        &mut pending_ws,
-        &mut pending_ws_width,
-        &mut pending_word,
-        &mut pending_word_width,
-        row,
-        line_width,
-    );
+    line_width = flush_pending(&mut pos, &chars, &mut pending, row, line_width);
     pos[n] = (row, line_width);
 
     pos[cursor]

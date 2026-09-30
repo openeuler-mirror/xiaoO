@@ -623,13 +623,11 @@ fn incremental_streaming_benchmark() {
     // Full: re-render the whole accumulated content once per tick.
     let mut full_elapsed = std::time::Duration::ZERO;
     let mut acc2 = String::new();
-    let mut acc2_lines = 0usize;
-    for line in content.lines() {
+    for (acc2_lines, line) in content.lines().enumerate() {
         if acc2_lines > 0 {
             acc2.push('\n');
         }
         acc2.push_str(line);
-        acc2_lines += 1;
         let t0 = std::time::Instant::now();
         let _lines = render_markdown(&acc2, &theme, width);
         full_elapsed += t0.elapsed();

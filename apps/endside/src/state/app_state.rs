@@ -154,6 +154,7 @@ pub struct SubagentOpenRegion {
 /// visual line count depends on the current sidebar width), and
 /// `scroll_offset` is the number of wrapped visual lines skipped from the
 /// top of the panel.
+#[derive(Default)]
 pub struct PlanPanelState {
     /// Line-based scroll: wrapped visual lines skipped from the panel top.
     pub scroll_offset: usize,
@@ -164,18 +165,6 @@ pub struct PlanPanelState {
     pub total_lines: usize,
     /// Inner height of the plan panel (updated each render).
     pub last_visible_height: usize,
-}
-
-impl Default for PlanPanelState {
-    fn default() -> Self {
-        Self {
-            scroll_offset: 0,
-            scrollbar_state: ScrollbarState::default(),
-            scrollbar_dragging: false,
-            total_lines: 0,
-            last_visible_height: 0,
-        }
-    }
 }
 
 impl PlanPanelState {
@@ -1046,12 +1035,17 @@ impl AppState {
         }
 
         let mut segments: Vec<String> = Vec::new();
-        for line_idx in start_line..=end_line.min(lines.len().saturating_sub(1)) {
+        let last_line = end_line.min(lines.len().saturating_sub(1));
+        for (line_idx, line) in lines
+            .iter()
+            .enumerate()
+            .take(last_line + 1)
+            .skip(start_line)
+        {
             // Skip role/tool/planner header lines (▎ Role  HH:MM:SS).
             if cache.line_is_header.get(line_idx).copied().unwrap_or(false) {
                 continue;
             }
-            let line = &lines[line_idx];
             let col_start = if line_idx == start_line { start_col } else { 0 };
             let col_end = if line_idx == end_line {
                 end_col.min(line.chars().count())
@@ -1143,7 +1137,7 @@ impl AppState {
             .file_mention
             .dismissed_prefix
             .as_deref()
-            .is_some_and(|dismissed| dismissed == &token.typed)
+            .is_some_and(|dismissed| dismissed == token.typed)
         {
             return false;
         }

@@ -127,7 +127,7 @@ mod truncate_tool_tests {
         );
         // Preview should be > 0 — the whole point of the fallback.
         assert!(
-            preview.len() > 0,
+            !preview.is_empty(),
             "preview must have content, not just the hint"
         );
     }

@@ -254,15 +254,15 @@ fn osc52_supported_by_terminal(
         "Tabby",
         "WarpTerminal",
     ];
-    term_program.is_some_and(|program| KNOWN_PROGRAMS.iter().any(|known| program == *known))
+    term_program.is_some_and(|program| KNOWN_PROGRAMS.contains(&program))
 }
 
 pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     // Wayland: wl-copy
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        if Command::new("wl-copy")
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && Command::new("wl-copy")
             .arg(text)
             .output()
             .ok()
@@ -271,7 +271,6 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
         {
             return Ok(ClipboardOutcome::Native);
         }
-    }
     // X11: xclip (only if DISPLAY is set)
     if std::env::var("DISPLAY").is_ok() {
         if let Ok(mut child) = Command::new("xclip")

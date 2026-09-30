@@ -545,16 +545,29 @@ impl HttpBearerAuthConfig {
     }
 }
 
+/// Channel-plane wiring for [`create_router_with_channel_runtimes_control_plane_and_timeout_and_auth`].
+pub struct ChannelRouterOptions {
+    pub runtimes: Vec<ChannelRuntime>,
+    pub interaction_timeout_secs: u64,
+    pub bearer_auth: Option<HttpBearerAuthConfig>,
+    pub rate_limit: Option<RateLimitConfig>,
+    pub cron_scheduler: Option<Arc<CronScheduler>>,
+    pub channel_manager: Arc<ChannelManager>,
+}
+
 pub fn create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
     session_service: Arc<dyn SessionService>,
     session_control_plane: Arc<dyn SessionControlPlane>,
-    runtimes: Vec<ChannelRuntime>,
-    interaction_timeout_secs: u64,
-    bearer_auth: Option<HttpBearerAuthConfig>,
-    rate_limit: Option<RateLimitConfig>,
-    cron_scheduler: Option<Arc<CronScheduler>>,
-    channel_manager: Arc<ChannelManager>,
+    options: ChannelRouterOptions,
 ) -> ChannelResult<Router> {
+    let ChannelRouterOptions {
+        runtimes,
+        interaction_timeout_secs,
+        bearer_auth,
+        rate_limit,
+        cron_scheduler,
+        channel_manager,
+    } = options;
     let mut state = GatewayAppState::with_channel_runtimes_and_control_plane(
         session_service,
         session_control_plane.clone(),
@@ -793,18 +806,24 @@ async fn capabilities() -> Json<GatewayCapabilitiesResponse> {
 /// so any HTTP request claiming the prefix is a forged attempt to bypass the
 /// lease-holder check. Returns `Ok(())` for absent / non-prefixed ids, or
 /// `Err(400 response)` when the prefix is forged.
-fn reject_forged_daemon_principal(client_id: Option<&str>) -> Result<(), Response> {
+///
+/// The rejection response is boxed: `axum::response::Response` is ~128 bytes
+/// and this helper's `Err` would otherwise be carried on every guard's
+/// `Result` (`result_large_err`).
+fn reject_forged_daemon_principal(client_id: Option<&str>) -> Result<(), Box<Response>> {
     if let Some(cid) = client_id.filter(|s| is_daemon_principal(s)) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(GatewayErrorResponse {
-                error: format!(
-                    "client_id prefix `daemon:` is reserved for daemon-internal callers; \
-                     HTTP clients must not claim it (got `{cid}`)"
-                ),
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(GatewayErrorResponse {
+                    error: format!(
+                        "client_id prefix `daemon:` is reserved for daemon-internal callers; \
+                         HTTP clients must not claim it (got `{cid}`)"
+                    ),
+                }),
+            )
+                .into_response(),
+        ));
     }
     Ok(())
 }
@@ -819,7 +838,7 @@ async fn require_lease_holder(
     session_id: &str,
     client_id: Option<&str>,
 ) -> Result<(), Response> {
-    reject_forged_daemon_principal(client_id)?;
+    reject_forged_daemon_principal(client_id).map_err(|response| *response)?;
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return Ok(());
     };
@@ -910,7 +929,7 @@ async fn handle_session_open(
 ) -> Response {
     // Reject forged daemon-internal principals at the HTTP edge.
     if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
-        return response;
+        return *response;
     }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -1141,7 +1160,7 @@ async fn handle_session_close(
 ) -> Response {
     // Reject forged daemon-internal principals at the HTTP edge.
     if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
-        return response;
+        return *response;
     }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -1179,7 +1198,7 @@ async fn handle_session_heartbeat(
 ) -> Response {
     // Reject forged daemon-internal principals at the HTTP edge.
     if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
-        return response;
+        return *response;
     }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (
@@ -1207,7 +1226,7 @@ async fn handle_session_detach(
 ) -> Response {
     // Reject forged daemon-internal principals at the HTTP edge.
     if let Err(response) = reject_forged_daemon_principal(payload.client_id.as_deref()) {
-        return response;
+        return *response;
     }
     let Some(control_plane) = state.session_control_plane.as_ref() else {
         return (

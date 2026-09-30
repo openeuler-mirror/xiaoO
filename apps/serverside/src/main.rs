@@ -38,8 +38,8 @@ use crate::daemon_config::{resolve_config_path, DaemonConfig};
 use crate::daemon_runtime::ConfiguredRuntimeResolver;
 use crate::httpserver::{
     create_router_with_channel_runtimes_control_plane_and_timeout_and_auth,
-    create_router_with_control_plane_and_auth, dashboard_router, ChannelRuntimeProcessor,
-    DashboardState, HttpBearerAuthConfig,
+    create_router_with_control_plane_and_auth, dashboard_router, ChannelRouterOptions,
+    ChannelRuntimeProcessor, DashboardState, HttpBearerAuthConfig,
 };
 use crate::mcp_server::create_mcp_router;
 use anyhow::{bail, Context, Result};
@@ -490,17 +490,17 @@ async fn main() -> Result<()> {
         }
         CliAction::Serve => {}
     }
-    run_daemon(
-        cli.config,
-        cli.mcp_config,
-        cli.host,
-        cli.port,
-        cli.dashboard_host,
-        cli.dashboard_port,
-        cli.no_dashboard,
-        cli.ready_stdio,
-        cli.bearer_token_env,
-    )
+    run_daemon(DaemonRunOptions {
+        config_path: cli.config,
+        mcp_config_path: cli.mcp_config,
+        host: cli.host,
+        port: cli.port,
+        dashboard_cli_host: cli.dashboard_host,
+        dashboard_cli_port: cli.dashboard_port,
+        no_dashboard: cli.no_dashboard,
+        ready_stdio: cli.ready_stdio,
+        bearer_token_env: cli.bearer_token_env,
+    })
     .await
 }
 
@@ -515,7 +515,8 @@ fn validate_config(config_path: Option<PathBuf>) -> Result<()> {
     }
 }
 
-async fn run_daemon(
+/// Daemon launch options, mirrored one-to-one from the CLI flags.
+struct DaemonRunOptions {
     config_path: Option<PathBuf>,
     mcp_config_path: Option<PathBuf>,
     host: String,
@@ -525,7 +526,20 @@ async fn run_daemon(
     no_dashboard: bool,
     ready_stdio: bool,
     bearer_token_env: Option<String>,
-) -> Result<()> {
+}
+
+async fn run_daemon(options: DaemonRunOptions) -> Result<()> {
+    let DaemonRunOptions {
+        config_path,
+        mcp_config_path,
+        host,
+        port,
+        dashboard_cli_host,
+        dashboard_cli_port,
+        no_dashboard,
+        ready_stdio,
+        bearer_token_env,
+    } = options;
     let config_path = resolve_config_path(config_path)?;
     xiaoo_shared::llm_secrets::inject_llm_secrets_into_env(&config_path).with_context(|| {
         format!(
@@ -670,12 +684,14 @@ async fn run_daemon(
             create_router_with_channel_runtimes_control_plane_and_timeout_and_auth(
                 session_service.clone(),
                 session_control_plane.clone(),
-                channel_runtimes,
-                interaction_timeout_secs,
-                bearer_auth,
-                rate_limit.clone(),
-                cron_scheduler.clone(),
-                channel_manager.clone(),
+                ChannelRouterOptions {
+                    runtimes: channel_runtimes,
+                    interaction_timeout_secs,
+                    bearer_auth,
+                    rate_limit: rate_limit.clone(),
+                    cron_scheduler: cron_scheduler.clone(),
+                    channel_manager: channel_manager.clone(),
+                },
             )
             .map_err(anyhow::Error::new)
             .context("failed to create router with channel runtimes")?

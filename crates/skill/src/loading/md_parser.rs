@@ -124,21 +124,20 @@ fn parse_frontmatter(fm: Option<&str>, path: &Path) -> Result<FrontmatterMeta, S
             message: "frontmatter must be a YAML mapping".into(),
         })?;
 
-    let mut meta = FrontmatterMeta::default();
-
-    meta.name = get_str(obj, "name");
-    meta.description = get_str(obj, "description");
-    meta.version = get_str(obj, "version");
-    meta.author = get_str(obj, "author");
-    meta.argument_hint = get_str(obj, "argument_hint").or_else(|| get_str(obj, "argument-hint"));
-    meta.tags = get_string_list(obj, "tags");
-    meta.arguments = get_string_list(obj, "arguments");
-    meta.paths = get_string_list(obj, "paths");
-
-    meta.user_invocable =
-        get_bool(obj, "user_invocable").or_else(|| get_bool(obj, "user-invocable"));
-    meta.disable_model_invocation = get_bool(obj, "disable_model_invocation")
-        .or_else(|| get_bool(obj, "disable-model-invocation"));
+    let mut meta = FrontmatterMeta {
+        name: get_str(obj, "name"),
+        description: get_str(obj, "description"),
+        version: get_str(obj, "version"),
+        author: get_str(obj, "author"),
+        argument_hint: get_str(obj, "argument_hint").or_else(|| get_str(obj, "argument-hint")),
+        tags: get_string_list(obj, "tags"),
+        arguments: get_string_list(obj, "arguments"),
+        paths: get_string_list(obj, "paths"),
+        user_invocable: get_bool(obj, "user_invocable").or_else(|| get_bool(obj, "user-invocable")),
+        disable_model_invocation: get_bool(obj, "disable_model_invocation")
+            .or_else(|| get_bool(obj, "disable-model-invocation")),
+        ..Default::default()
+    };
 
     if let Some(ctx) = get_str(obj, "context") {
         meta.context = match ctx.as_str() {

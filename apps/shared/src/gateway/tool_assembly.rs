@@ -201,7 +201,6 @@ fn to_runtime_services(
         workspace_root: input.workspace_root.clone(),
         subagent_roles,
         mcp_servers,
-        ..ToolRuntimeServices::default()
     }
 }
 

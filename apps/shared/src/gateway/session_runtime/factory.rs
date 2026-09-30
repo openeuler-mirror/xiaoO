@@ -154,7 +154,7 @@ impl AppRuntimeFactory {
                 Value::String(resolved.descriptor.workspace_root.display().to_string()),
             );
             let trace_recorder = TraceRecorderBuilderImpl::default()
-                .from_json(trace_config)?
+                .with_json(trace_config)?
                 .build()
                 .await?;
             let interaction_handle: Arc<dyn InteractionHandle> = Arc::new(

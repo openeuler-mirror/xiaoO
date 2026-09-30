@@ -861,8 +861,7 @@ fn live_context_snippets(
 
     let window = ctx.snapshot.token_budget_config.total_budget;
     let context_input = ctx.state.token_usage.prompt_tokens;
-    if window > 0 {
-        let pct = context_input.saturating_mul(100) / window;
+    if let Some(pct) = context_input.saturating_mul(100).checked_div(window) {
         if pct >= 25 {
             let mut line =
                 format!("- context window: ~{pct}% used ({context_input}/{window} input tokens)");
@@ -1360,13 +1359,11 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     let first_token_at = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let event_sink = ctx.input.event_sink.clone();
-    let streamed_text = Mutex::new(String::new());
-    let streamed_reasoning = Mutex::new(String::new());
-    // Throttle state for in-stream sink emits (last_emit_len, last_emit_at).
-    // Without throttling, every chunk forces an O(history) clone + filter,
-    // making streaming O(N²) in the response length.
-    let last_text_emit: Mutex<StreamEmitState> = Mutex::new(StreamEmitState::default());
-    let last_reasoning_emit: Mutex<StreamEmitState> = Mutex::new(StreamEmitState::default());
+    // Accumulators + emit throttle state for this one assistant stream. The
+    // throttle state (`last_emit_len`, `last_emit_at`) exists because without
+    // it every chunk forces an O(history) clone + filter, making streaming
+    // O(N²) in the response length.
+    let stream = AssistantStreamState::default();
 
     // Extract secrets under the read guard — no clone of the whole message
     // history is needed. Redaction is display-only (history/snapshots hold
@@ -1375,9 +1372,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     // fallback's filter is a no-op. The daemon inherits
     // `redact_secrets_display = true` from `FeatureFlags::default()`, keeping
     // its SSE path always-redacted.
-    let all_secrets = ctx
-        .state
-        .with_messages(|messages| extract_secrets_from_messages(messages));
+    let all_secrets = ctx.state.with_messages(extract_secrets_from_messages);
     let secrets: Vec<String> = if ctx.snapshot.feature_flags.redact_secrets_display {
         all_secrets
     } else {
@@ -1401,16 +1396,7 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
-            stream_assistant_chunk(
-                event_sink.as_deref(),
-                &agent_id,
-                &streamed_text,
-                &streamed_reasoning,
-                &last_text_emit,
-                &last_reasoning_emit,
-                chunk,
-                &secrets,
-            );
+            stream_assistant_chunk(event_sink.as_deref(), &agent_id, &stream, chunk, &secrets);
         };
         // Race the in-flight stream against cancellation so an Esc lands
         // in milliseconds instead of after the model finishes the whole
@@ -1440,11 +1426,13 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
         {
             Ok(response) => response,
             Err(LlmError::Cancelled) => {
-                let partial_text = streamed_text
+                let partial_text = stream
+                    .text
                     .lock()
                     .map(|text| text.clone())
                     .unwrap_or_default();
-                let partial_reasoning = streamed_reasoning
+                let partial_reasoning = stream
+                    .reasoning
                     .lock()
                     .map(|reasoning| reasoning.clone())
                     .unwrap_or_default();
@@ -1466,7 +1454,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                 // left a tail behind — mirrors the post-stream flush below
                 // so sink consumers see the same text that gets persisted.
                 if let Some(ref sink) = event_sink {
-                    let last_text_len = last_text_emit
+                    let last_text_len = stream
+                        .last_text_emit
                         .lock()
                         .map(|state| state.last_emit_len())
                         .unwrap_or(0);
@@ -1474,7 +1463,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
                         let filtered_text = filter_secrets_in_text(&partial_text, &secrets);
                         sink.on_assistant_message(&agent_id, &filtered_text);
                     }
-                    let last_reasoning_len = last_reasoning_emit
+                    let last_reasoning_len = stream
+                        .last_reasoning_emit
                         .lock()
                         .map(|state| state.last_emit_len())
                         .unwrap_or(0);
@@ -1541,7 +1531,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
     if let Some(ref sink) = event_sink {
         let agent_id = agent_id_or_anonymous(ctx.input.agent_id.as_ref());
         if let Some(ref text) = response.message.text {
-            let last_emit_len = last_text_emit
+            let last_emit_len = stream
+                .last_text_emit
                 .lock()
                 .map(|state| state.last_emit_len())
                 .unwrap_or(0);
@@ -1551,7 +1542,8 @@ async fn llm_call(ctx: &mut LoopContext<'_>) -> Result<(), LlmError> {
             }
         }
         if let Some(ref reasoning) = response.message.reasoning_content {
-            let last_emit_len = last_reasoning_emit
+            let last_emit_len = stream
+                .last_reasoning_emit
                 .lock()
                 .map(|state| state.last_emit_len())
                 .unwrap_or(0);
@@ -1749,6 +1741,19 @@ struct StreamEmitState {
     last_emit_at: Option<std::time::Instant>,
 }
 
+/// Accumulated content and emit throttle state for a single assistant stream.
+///
+/// The text/reasoning buffers are always filled, even without a sink: the
+/// cancel branch of `llm_call` (Esc racing the in-flight stream) synthesizes
+/// the partial assistant message from them.
+#[derive(Default)]
+struct AssistantStreamState {
+    text: Mutex<String>,
+    reasoning: Mutex<String>,
+    last_text_emit: Mutex<StreamEmitState>,
+    last_reasoning_emit: Mutex<StreamEmitState>,
+}
+
 impl StreamEmitState {
     fn should_emit(&mut self, current_len: usize) -> bool {
         let now = std::time::Instant::now();
@@ -1776,10 +1781,7 @@ impl StreamEmitState {
 fn stream_assistant_chunk(
     sink: Option<&dyn LoopEventSink>,
     agent_id: &AgentId,
-    streamed_text: &Mutex<String>,
-    streamed_reasoning: &Mutex<String>,
-    last_text_emit: &Mutex<StreamEmitState>,
-    last_reasoning_emit: &Mutex<StreamEmitState>,
+    stream: &AssistantStreamState,
     chunk: StreamChunk,
     secrets: &[String],
 ) {
@@ -1803,7 +1805,8 @@ fn stream_assistant_chunk(
             reasoning_len = delta_reasoning.len();
         }
         let current_len = {
-            let mut full_reasoning = streamed_reasoning
+            let mut full_reasoning = stream
+                .reasoning
                 .lock()
                 .expect("assistant stream reasoning mutex should not be poisoned");
             full_reasoning.push_str(&delta_reasoning);
@@ -1821,12 +1824,14 @@ fn stream_assistant_chunk(
             if sink.supports_message_delta() && secrets.is_empty() {
                 sink.on_assistant_reasoning_delta(agent_id, &delta_reasoning);
             } else {
-                let should_emit = last_reasoning_emit
+                let should_emit = stream
+                    .last_reasoning_emit
                     .lock()
                     .expect("assistant stream reasoning emit state mutex should not be poisoned")
                     .should_emit(current_len);
                 if should_emit {
-                    let snapshot = streamed_reasoning
+                    let snapshot = stream
+                        .reasoning
                         .lock()
                         .expect("assistant stream reasoning mutex should not be poisoned")
                         .clone();
@@ -1843,7 +1848,8 @@ fn stream_assistant_chunk(
             text_len = delta_text.len();
         }
         let current_len = {
-            let mut full_text = streamed_text
+            let mut full_text = stream
+                .text
                 .lock()
                 .expect("assistant stream text mutex should not be poisoned");
             full_text.push_str(&delta_text);
@@ -1853,12 +1859,14 @@ fn stream_assistant_chunk(
             if sink.supports_message_delta() && secrets.is_empty() {
                 sink.on_assistant_message_delta(agent_id, &delta_text);
             } else {
-                let should_emit = last_text_emit
+                let should_emit = stream
+                    .last_text_emit
                     .lock()
                     .expect("assistant stream text emit state mutex should not be poisoned")
                     .should_emit(current_len);
                 if should_emit {
-                    let snapshot = streamed_text
+                    let snapshot = stream
+                        .text
                         .lock()
                         .expect("assistant stream text mutex should not be poisoned")
                         .clone();
@@ -1875,7 +1883,7 @@ fn stream_assistant_chunk(
         delta_text_len = text_len,
         delta_reasoning_len = reasoning_len,
         supports_delta = sink.is_some_and(|s| s.supports_message_delta()),
-        accumulated_text_len = streamed_text.lock().map(|t| t.len()).unwrap_or(0),
+        accumulated_text_len = stream.text.lock().map(|t| t.len()).unwrap_or(0),
         elapsed_us = _start.elapsed().as_micros(),
         "stream_assistant_chunk"
     );

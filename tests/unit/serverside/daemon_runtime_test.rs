@@ -507,7 +507,7 @@ async fn minimal_test_config() -> (DaemonConfig, TempDir) {
     let workspace_str = workspace.to_string_lossy().replace('\\', "\\\\");
     std::fs::write(
         &config_path,
-        &format!(
+        format!(
             "[llm]\n\
                  provider = \"ollama\"\n\
                  model = \"llama3\"\n\

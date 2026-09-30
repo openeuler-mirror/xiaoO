@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 mod backend_manager;
@@ -77,7 +77,7 @@ struct BackendLineageEntry {
     forked_at_ms: Option<u64>,
 }
 
-fn workspace_root_string(path: &PathBuf) -> Result<String, OperationBackendBuildError> {
+fn workspace_root_string(path: &Path) -> Result<String, OperationBackendBuildError> {
     path.to_str()
         .map(str::to_string)
         .ok_or_else(|| OperationBackendBuildError::InvalidConfig {

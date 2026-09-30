@@ -292,7 +292,7 @@ fn build_summary_lines(
             text: "- Previously compacted context:".to_string(),
             kind: SummaryLineKind::PreviousSectionHeader,
         });
-        lines.extend(previous_lines.iter().cloned().map(|line| SummaryLine {
+        lines.extend(previous_lines.iter().map(|line| SummaryLine {
             text: format!("  - {line}"),
             kind: SummaryLineKind::PreviousDetail,
         }));
@@ -302,7 +302,7 @@ fn build_summary_lines(
         text: "- Newly compacted context:".to_string(),
         kind: SummaryLineKind::NewSectionHeader,
     });
-    lines.extend(new_lines.iter().cloned().map(|line| SummaryLine {
+    lines.extend(new_lines.iter().map(|line| SummaryLine {
         text: format!("  - {line}"),
         kind: SummaryLineKind::NewDetail,
     }));

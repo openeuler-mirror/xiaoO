@@ -5,7 +5,6 @@ use crate::channels::{
 use crate::httpserver::rate_limit::RateLimitConfig;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use serde_json;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;

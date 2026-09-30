@@ -156,10 +156,10 @@ impl DeclarativeToolExecutor {
         command
             .args(&args)
             .kill_on_drop(true)
-            .current_dir(&workspace_root)
+            .current_dir(workspace_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env("XIAOO_WORKSPACE_ROOT", &workspace_root)
+            .env("XIAOO_WORKSPACE_ROOT", workspace_root)
             .env("XIAOO_TOOL_MANIFEST", &self.manifest_path)
             .env("XIAOO_TOOL_DIR", &self.tool_dir);
 

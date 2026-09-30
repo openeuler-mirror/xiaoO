@@ -290,7 +290,7 @@ fn test_extract_secrets_from_messages() {
         estimated_tokens: None,
     };
 
-    let secrets2 = extract_secrets_from_messages(&vec![message_multiple]);
+    let secrets2 = extract_secrets_from_messages(&[message_multiple]);
     assert_eq!(secrets2.len(), 1);
     assert_eq!(secrets2[0], "pass123");
     assert!(!secrets2.contains(&"admin".to_string()));
@@ -311,7 +311,7 @@ fn test_extract_secrets_from_messages() {
         estimated_tokens: None,
     };
 
-    let secrets3 = extract_secrets_from_messages(&vec![message_other_tool]);
+    let secrets3 = extract_secrets_from_messages(&[message_other_tool]);
     assert_eq!(secrets3.len(), 0);
 }
 

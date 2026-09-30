@@ -285,9 +285,11 @@ fn sample_prompt_request() -> PromptRequest {
 
 #[test]
 fn plan_panel_scroll_clamps_to_content_bounds() {
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 10;
-    plan_panel.last_visible_height = 4;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 10,
+        last_visible_height: 4,
+        ..Default::default()
+    };
     assert_eq!(plan_panel.max_scroll_offset(), 6);
 
     for _ in 0..10 {
@@ -303,9 +305,11 @@ fn plan_panel_scroll_clamps_to_content_bounds() {
 
 #[test]
 fn plan_panel_set_scroll_offset_clamps_and_repositions_thumb() {
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 12;
-    plan_panel.last_visible_height = 4;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 12,
+        last_visible_height: 4,
+        ..Default::default()
+    };
 
     plan_panel.set_scroll_offset(999);
     assert_eq!(plan_panel.scroll_offset, 8, "set_scroll_offset must clamp");
@@ -316,9 +320,11 @@ fn plan_panel_set_scroll_offset_clamps_and_repositions_thumb() {
 
 #[test]
 fn plan_panel_reset_scroll_returns_to_top() {
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 20;
-    plan_panel.last_visible_height = 5;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 20,
+        last_visible_height: 5,
+        ..Default::default()
+    };
     plan_panel.scroll_down();
     plan_panel.scroll_down();
     assert!(plan_panel.scroll_offset > 0);
@@ -334,10 +340,12 @@ fn plan_panel_content_shrink_clamps_stale_offset() {
     // Mirrors the render-time clamp: content shrinks (new plan snapshot
     // or sidebar resize), so a stale offset must be re-clamped instead
     // of pointing past the end.
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 30;
-    plan_panel.last_visible_height = 10;
-    plan_panel.scroll_offset = 15;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 30,
+        last_visible_height: 10,
+        scroll_offset: 15,
+        ..Default::default()
+    };
 
     plan_panel.total_lines = 12;
     plan_panel.last_visible_height = 10;
@@ -348,9 +356,11 @@ fn plan_panel_content_shrink_clamps_stale_offset() {
 
 #[test]
 fn plan_panel_not_scrollable_when_content_fits() {
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 3;
-    plan_panel.last_visible_height = 10;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 3,
+        last_visible_height: 10,
+        ..Default::default()
+    };
     assert_eq!(plan_panel.max_scroll_offset(), 0);
     plan_panel.scroll_down();
     assert_eq!(plan_panel.scroll_offset, 0);

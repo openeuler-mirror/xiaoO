@@ -8,6 +8,7 @@ use agent_contracts::backend::{
     BackendLifecycle, BackendLifecycleState, BackendPath, BackendPauseMode, BackendPauseRequest,
 };
 use serde_json::json;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 fn local_request(

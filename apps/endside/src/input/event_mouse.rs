@@ -135,14 +135,13 @@ impl App {
             // Auto-copy only when the drag actually started inside the input
             // box; releasing just outside still copies (anchor and cursor
             // were both set while inside).
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.input_drag_active {
+            MouseEventKind::Up(MouseButton::Left)
+                if self.input_drag_active => {
                     self.input_drag_active = false;
                     if self.state.chat_state.input.selected_range().is_some() {
                         self.copy_active_selection();
                     }
                 }
-            }
             _ => {}
         }
     }

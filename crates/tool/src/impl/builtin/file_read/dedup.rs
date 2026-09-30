@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileReadState {
     pub timestamp: i64,
     pub offset: Option<u64>,
@@ -58,17 +58,6 @@ impl DedupStateStore {
                     && state.is_partial_view == is_partial_view
             }
             None => false,
-        }
-    }
-}
-
-impl Default for FileReadState {
-    fn default() -> Self {
-        Self {
-            timestamp: 0,
-            offset: None,
-            limit: None,
-            is_partial_view: false,
         }
     }
 }

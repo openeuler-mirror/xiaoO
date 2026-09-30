@@ -44,7 +44,7 @@ fn zero_burst_yields_no_layer() {
 #[test]
 fn empty_toml_uses_defaults() {
     let cfg: RateLimitConfig = toml::from_str("").unwrap();
-    assert_eq!(cfg.enabled, true);
+    assert!(cfg.enabled);
     assert_eq!(cfg.requests_per_second, 2);
     assert_eq!(cfg.burst, 10);
 }

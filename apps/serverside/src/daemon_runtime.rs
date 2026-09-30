@@ -313,11 +313,10 @@ impl ConfiguredRuntimeResolver {
             llm_config,
             llm_provider,
             token_budget,
-            feature_flags: {
-                let mut flags = FeatureFlags::default();
-                flags.kvcache_enabled = effective.kvcache_enabled;
-                flags.kvcache_debug_enabled = effective.kvcache_debug_enabled;
-                flags
+            feature_flags: FeatureFlags {
+                kvcache_enabled: effective.kvcache_enabled,
+                kvcache_debug_enabled: effective.kvcache_debug_enabled,
+                ..Default::default()
             },
             compression_pipeline: Some(compression_pipeline),
         })
@@ -554,7 +553,7 @@ impl ConfiguredRuntimeResolver {
             .map_err(|error| SessionRuntimeResolveError::ResolveFailed {
                 message: format!("failed to build tool registry: {error}"),
             })?;
-        Ok(Some(Arc::from(registry)))
+        Ok(Some(registry))
     }
 
     /// Translate this resolver's per-session inputs into the shared
@@ -1098,7 +1097,7 @@ fn build_system_prompt(
     );
 
     if !is_subagent {
-        if let Some(rules) = compose_subagent_delegation_rules(&subagent_roles) {
+        if let Some(rules) = compose_subagent_delegation_rules(subagent_roles) {
             // Insert Subagent Delegation after identity introduction
             // Find the first double newline after the identity line
             if let Some(pos) = base_prompt.find("\n\n") {

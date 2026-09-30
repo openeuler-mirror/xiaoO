@@ -552,10 +552,12 @@ impl ChatbotMcpServer {
         let workspace = self.state.chatbot_workspace.clone();
         run_mcp_turn(
             &self.state,
-            McpEndpoint::Chatbot,
-            input.message,
-            input.session_id,
-            Some(workspace),
+            McpTurnInput {
+                endpoint: McpEndpoint::Chatbot,
+                message: input.message,
+                supplied_session_id: input.session_id,
+                supplied_workspace: Some(workspace),
+            },
             meta,
             peer,
             cancellation_token,
@@ -771,16 +773,27 @@ fn current_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-async fn run_mcp_turn(
-    state: &McpRuntimeState,
+/// Inbound MCP turn payload plus the caller-supplied session overrides.
+struct McpTurnInput {
     endpoint: McpEndpoint,
     message: String,
     supplied_session_id: Option<String>,
     supplied_workspace: Option<PathBuf>,
+}
+
+async fn run_mcp_turn(
+    state: &McpRuntimeState,
+    input: McpTurnInput,
     meta: Meta,
     peer: Peer<RoleServer>,
     cancellation_token: CancellationToken,
 ) -> Result<McpTurnOutput, String> {
+    let McpTurnInput {
+        endpoint,
+        message,
+        supplied_session_id,
+        supplied_workspace,
+    } = input;
     let prepared = prepare_mcp_turn(
         state,
         endpoint,

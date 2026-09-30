@@ -67,8 +67,7 @@ pub fn parse_skill_toml_content(
     let prompt = if let Some(content) = prompt_md {
         // Extract body after frontmatter if present
         let trimmed = content.trim_start();
-        if trimmed.starts_with("---") {
-            let after_first = &trimmed[3..];
+        if let Some(after_first) = trimmed.strip_prefix("---") {
             if let Some(end_pos) = after_first.find("\n---") {
                 let rest_start = end_pos + 4;
                 if rest_start < after_first.len() {

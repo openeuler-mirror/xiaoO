@@ -90,7 +90,7 @@ impl GatewayRuntime {
                         let has_content = self
                             .stream_message_index
                             .and_then(|index| state.chat_state.messages.get(index))
-                            .map_or(false, |message| {
+                            .is_some_and(|message| {
                                 !message.content.trim().is_empty()
                                     || !message.thinking_content.trim().is_empty()
                             });
@@ -824,7 +824,7 @@ impl GatewayRuntime {
         // updates of the same list keep the user's scroll position (it is
         // clamped against the new content at render time).
         let plan_replaced = !update.items.is_empty()
-            && state.plan_state.as_ref().map_or(true, |old| {
+            && state.plan_state.as_ref().is_none_or(|old| {
                 old.title != update.title
                     || old.items.len() != update.items.len()
                     || old

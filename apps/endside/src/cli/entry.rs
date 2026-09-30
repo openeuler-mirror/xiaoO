@@ -53,6 +53,14 @@ struct Args {
 }
 
 #[derive(clap::Subcommand)]
+// The `Run` variant carries every `run` flag inline (271 bytes vs 50 for the
+// next largest). The usual remedy — boxing the variant payload — is not
+// available here: `clap::Subcommand`'s derive requires the inner type to
+// implement `Subcommand`/`Args` itself, and `clap_derive` has no support for
+// unwrapping `Box<T>`, so `Run(Box<RunArgs>)` does not compile. Shrinking the
+// fields (`Option<Box<str>>` and friends) would only trade a few bytes on a
+// one-shot stack value for unidiomatic CLI plumbing.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run a single prompt through the AgentLoop
     Run {
@@ -292,9 +300,11 @@ where
                 debug,
                 format,
                 session_title,
-                session,
-                agent,
-                attach,
+                RunOnceTarget {
+                    session,
+                    agent,
+                    attach,
+                },
             )
             .await;
         }
@@ -317,16 +327,27 @@ where
     }
 }
 
+/// Where a `run` invocation routes: session id, agent id, and an optional
+/// daemon URL to attach to instead of running locally.
+struct RunOnceTarget {
+    session: Option<String>,
+    agent: Option<String>,
+    attach: Option<String>,
+}
+
 async fn run_once(
     config: CliConfig,
     prompt: String,
     debug: bool,
     format: OutputFormat,
     title: Option<String>,
-    session: Option<String>,
-    agent: Option<String>,
-    attach: Option<String>,
+    target: RunOnceTarget,
 ) {
+    let RunOnceTarget {
+        session,
+        agent,
+        attach,
+    } = target;
     if debug {
         eprintln!(
             "[config] provider={}, model={}, max_turns={}, format={:?}",
@@ -379,12 +400,7 @@ async fn run_once(
 
     let runtime_config = HostedSessionRuntimeConfig {
         descriptor: SessionRuntimeDescriptor {
-            agent_id: AgentId(
-                agent
-                    .as_ref()
-                    .map(|a| a.clone())
-                    .unwrap_or_else(|| "defaultagent".into()),
-            ),
+            agent_id: AgentId(agent.clone().unwrap_or_else(|| "defaultagent".into())),
             model: config.model.clone(),
             llm: Some(LlmRuntimeConfig {
                 profile_id: None,

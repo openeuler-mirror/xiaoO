@@ -79,17 +79,12 @@ impl TelegramConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TelegramEventTransport {
+    #[default]
     Webhook,
     Polling,
-}
-
-impl Default for TelegramEventTransport {
-    fn default() -> Self {
-        Self::Webhook
-    }
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]

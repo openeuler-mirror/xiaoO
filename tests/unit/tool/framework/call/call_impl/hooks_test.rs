@@ -10,7 +10,6 @@ fn hooker_visible_call_strips_accumulated_extra() {
         extra: Some(serde_json::json!([
             {"hooker_id": "plugin_a", "file": []}
         ])),
-        ..Default::default()
     };
 
     let visible = hooker_visible_call(&final_call);
@@ -31,7 +30,6 @@ fn plugin_visible_call_serializes_without_extra_key() {
         extra: Some(serde_json::json!([
             {"hooker_id": "plugin_a", "file": []}
         ])),
-        ..Default::default()
     };
 
     let visible = hooker_visible_call(&final_call);

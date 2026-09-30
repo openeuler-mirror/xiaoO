@@ -1,16 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LivecrawlMode {
+    #[default]
     Fallback,
     Preferred,
-}
-
-impl Default for LivecrawlMode {
-    fn default() -> Self {
-        LivecrawlMode::Fallback
-    }
 }
 
 impl std::fmt::Display for LivecrawlMode {
@@ -22,18 +17,13 @@ impl std::fmt::Display for LivecrawlMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchType {
+    #[default]
     Auto,
     Fast,
     Deep,
-}
-
-impl Default for SearchType {
-    fn default() -> Self {
-        SearchType::Auto
-    }
 }
 
 impl std::fmt::Display for SearchType {

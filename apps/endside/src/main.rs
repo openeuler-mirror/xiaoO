@@ -10,7 +10,7 @@ use crossterm::terminal::{
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 pub use xiaoo_shared::{backend, gateway};
@@ -212,9 +212,9 @@ fn print_usage(program: &std::ffi::OsStr) {
 fn default_config_path() -> Result<PathBuf> {
     #[cfg(unix)]
     {
-        return dirs::home_dir()
+        dirs::home_dir()
             .map(|home| home.join(".config").join("xiaoo").join("config.toml"))
-            .ok_or_else(|| anyhow::anyhow!("unable to resolve ~/.config/xiaoo/config.toml"));
+            .ok_or_else(|| anyhow::anyhow!("unable to resolve ~/.config/xiaoo/config.toml"))
     }
 
     #[cfg(windows)]
@@ -330,7 +330,7 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
 /// Validate configuration for TUI
 fn validate_config_for_tui(
     config: &config::Config,
-    config_path: &PathBuf,
+    config_path: &Path,
 ) -> (Vec<String>, Vec<String>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();

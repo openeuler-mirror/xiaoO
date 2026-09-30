@@ -143,7 +143,7 @@ impl DurableMemoryStore for FilesystemDurableMemoryStore {
                 updated_at: memory.updated_at,
             });
         }
-        entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at));
         Ok(entries)
     }
 

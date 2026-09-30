@@ -14,8 +14,11 @@ impl ToolStateStoreBuilderImpl {
     pub fn new() -> Self {
         Self { config: None }
     }
+}
 
-    pub fn default() -> Self {
+impl Default for ToolStateStoreBuilderImpl {
+    /// Defaults to the `stdout` state store backend.
+    fn default() -> Self {
         Self {
             config: Some(ToolStateStoreConfig {
                 backend: Value::String("stdout".to_string()),

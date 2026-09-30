@@ -100,31 +100,31 @@ impl FileConfig {
     }
 
     pub fn load_from_path(path: &Path, debug: bool) -> Self {
-        match std::fs::read_to_string(&path) {
+        match std::fs::read_to_string(path) {
             Ok(content) => match toml::from_str::<toml::Value>(&content) {
                 Ok(root) => {
                     if debug {
                         eprintln!("[config] loaded {}", path.display());
                     }
                     Self {
-                        llm: parse_optional_section(&root, "llm", &path, debug),
-                        compact: parse_optional_section(&root, "compact", &path, debug),
-                        trace: parse_optional_section(&root, "trace", &path, debug),
-                        skills: parse_optional_section(&root, "skills", &path, debug),
-                        hooker: parse_optional_section(&root, "hooker", &path, debug),
+                        llm: parse_optional_section(&root, "llm", path, debug),
+                        compact: parse_optional_section(&root, "compact", path, debug),
+                        trace: parse_optional_section(&root, "trace", path, debug),
+                        skills: parse_optional_section(&root, "skills", path, debug),
+                        hooker: parse_optional_section(&root, "hooker", path, debug),
                         operation_backend: parse_optional_section(
                             &root,
                             "operation_backend",
-                            &path,
+                            path,
                             debug,
                         ),
-                        subagent: parse_optional_section(&root, "subagent", &path, debug)
+                        subagent: parse_optional_section(&root, "subagent", path, debug)
                             .unwrap_or_default(),
-                        mcp: parse_optional_section(&root, "mcp", &path, debug).unwrap_or_default(),
+                        mcp: parse_optional_section(&root, "mcp", path, debug).unwrap_or_default(),
                         memory_automation: parse_optional_section(
                             &root,
                             "memory_automation",
-                            &path,
+                            path,
                             debug,
                         )
                         .unwrap_or_default(),

@@ -90,7 +90,7 @@ pub fn resolve_config(input: ResolveInput) -> Result<ResolvedConfig, ResolveErro
     let protocol = resolve_protocol(&input.protocol, profile.as_ref())?;
 
     if let (Some(ref profile), Some(ref explicit_protocol)) = (&profile, &input.protocol) {
-        let explicit_family = ProtocolFamily::from_str(explicit_protocol);
+        let explicit_family = ProtocolFamily::parse(explicit_protocol);
         if let Some(explicit) = explicit_family {
             if explicit != profile.protocol_family {
                 return Err(ResolveError::ProtocolMismatch {
@@ -130,7 +130,7 @@ fn resolve_protocol(
     profile: Option<&ProviderProfile>,
 ) -> Result<ProtocolFamily, ResolveError> {
     if let Some(ref proto) = explicit {
-        return ProtocolFamily::from_str(proto).ok_or(ResolveError::MissingProtocol);
+        return ProtocolFamily::parse(proto).ok_or(ResolveError::MissingProtocol);
     }
     if let Some(p) = profile {
         return Ok(p.protocol_family);

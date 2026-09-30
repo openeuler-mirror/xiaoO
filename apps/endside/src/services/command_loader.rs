@@ -92,7 +92,7 @@ fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
 }
 
 /// Extract a simple `key: value` field from YAML-like frontmatter text.
-fn extract_field<'a>(frontmatter: &'a str, key: &str) -> Option<String> {
+fn extract_field(frontmatter: &str, key: &str) -> Option<String> {
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some((k, v)) = line.split_once(':') {

@@ -85,40 +85,16 @@ fn stream_chunk_bench() {
     // ---- Warmup ----
     let old_sink = OldPathSink::default();
     let new_sink = NewPathSink::default();
-    let old_text = Mutex::new(String::new());
-    let old_reasoning = Mutex::new(String::new());
-    let old_text_emit = Mutex::new(StreamEmitState::default());
-    let old_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let old_stream = AssistantStreamState::default();
     for _ in 0..5 {
         for chunk in &chunks {
-            stream_assistant_chunk(
-                Some(&old_sink),
-                &agent_id,
-                &old_text,
-                &old_reasoning,
-                &old_text_emit,
-                &old_reasoning_emit,
-                chunk.clone(),
-                &[],
-            );
+            stream_assistant_chunk(Some(&old_sink), &agent_id, &old_stream, chunk.clone(), &[]);
         }
     }
-    let new_text = Mutex::new(String::new());
-    let new_reasoning = Mutex::new(String::new());
-    let new_text_emit = Mutex::new(StreamEmitState::default());
-    let new_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let new_stream = AssistantStreamState::default();
     for _ in 0..5 {
         for chunk in &chunks {
-            stream_assistant_chunk(
-                Some(&new_sink),
-                &agent_id,
-                &new_text,
-                &new_reasoning,
-                &new_text_emit,
-                &new_reasoning_emit,
-                chunk.clone(),
-                &[],
-            );
+            stream_assistant_chunk(Some(&new_sink), &agent_id, &new_stream, chunk.clone(), &[]);
         }
     }
 
@@ -130,43 +106,19 @@ fn stream_chunk_bench() {
     // the measurement emits (each 40-char chunk must clear the 32-char delta
     // gate from a zero baseline).
     let old_sink = OldPathSink::default();
-    let old_text = Mutex::new(String::new());
-    let old_reasoning = Mutex::new(String::new());
-    let old_text_emit = Mutex::new(StreamEmitState::default());
-    let old_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let old_stream = AssistantStreamState::default();
     let old_start = Instant::now();
     for chunk in &chunks {
-        stream_assistant_chunk(
-            Some(&old_sink),
-            &agent_id,
-            &old_text,
-            &old_reasoning,
-            &old_text_emit,
-            &old_reasoning_emit,
-            chunk.clone(),
-            &[],
-        );
+        stream_assistant_chunk(Some(&old_sink), &agent_id, &old_stream, chunk.clone(), &[]);
     }
     let old_elapsed = old_start.elapsed();
 
     // ---- Measure new path (delta) ----
     let new_sink = NewPathSink::default();
-    let new_text = Mutex::new(String::new());
-    let new_reasoning = Mutex::new(String::new());
-    let new_text_emit = Mutex::new(StreamEmitState::default());
-    let new_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let new_stream = AssistantStreamState::default();
     let new_start = Instant::now();
     for chunk in &chunks {
-        stream_assistant_chunk(
-            Some(&new_sink),
-            &agent_id,
-            &new_text,
-            &new_reasoning,
-            &new_text_emit,
-            &new_reasoning_emit,
-            chunk.clone(),
-            &[],
-        );
+        stream_assistant_chunk(Some(&new_sink), &agent_id, &new_stream, chunk.clone(), &[]);
     }
     let new_elapsed = new_start.elapsed();
 
@@ -257,10 +209,7 @@ impl LoopEventSink for DeltaSink {
 #[test]
 fn stream_secret_split_across_text_chunk_boundary_does_not_leak() {
     let sink = DeltaSink::default();
-    let streamed_text = Mutex::new(String::new());
-    let streamed_reasoning = Mutex::new(String::new());
-    let last_text_emit = Mutex::new(StreamEmitState::default());
-    let last_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let stream = AssistantStreamState::default();
     let agent_id = AgentId("test".to_string());
     let secrets = vec!["password123".to_string()];
 
@@ -278,16 +227,7 @@ fn stream_secret_split_across_text_chunk_boundary_does_not_leak() {
     ];
 
     for chunk in chunks {
-        stream_assistant_chunk(
-            Some(&sink),
-            &agent_id,
-            &streamed_text,
-            &streamed_reasoning,
-            &last_text_emit,
-            &last_reasoning_emit,
-            chunk,
-            &secrets,
-        );
+        stream_assistant_chunk(Some(&sink), &agent_id, &stream, chunk, &secrets);
         // The full secret must never be present in the accumulated text.
         assert!(
             !sink.text.lock().unwrap().contains("password123"),
@@ -307,10 +247,7 @@ fn stream_secret_split_across_text_chunk_boundary_does_not_leak() {
 #[test]
 fn stream_secret_split_across_reasoning_chunk_boundary_does_not_leak() {
     let sink = DeltaSink::default();
-    let streamed_text = Mutex::new(String::new());
-    let streamed_reasoning = Mutex::new(String::new());
-    let last_text_emit = Mutex::new(StreamEmitState::default());
-    let last_reasoning_emit = Mutex::new(StreamEmitState::default());
+    let stream = AssistantStreamState::default();
     let agent_id = AgentId("test".to_string());
     let secrets = vec!["password123".to_string()];
 
@@ -328,16 +265,7 @@ fn stream_secret_split_across_reasoning_chunk_boundary_does_not_leak() {
     ];
 
     for chunk in chunks {
-        stream_assistant_chunk(
-            Some(&sink),
-            &agent_id,
-            &streamed_text,
-            &streamed_reasoning,
-            &last_text_emit,
-            &last_reasoning_emit,
-            chunk,
-            &secrets,
-        );
+        stream_assistant_chunk(Some(&sink), &agent_id, &stream, chunk, &secrets);
         assert!(
             !sink.reasoning.lock().unwrap().contains("password123"),
             "secret leaked after reasoning chunk"

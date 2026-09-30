@@ -626,7 +626,7 @@ fn load_snapshot_in_dir(
     name: &str,
 ) -> Result<Vec<(String, TuiSessionSnapshot, Vec<String>)>> {
     validate_snapshot_name(name)?;
-    let entries = match fs::read_dir(&dir) {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             bail!("snapshot '{}' not found", name)
@@ -705,7 +705,7 @@ pub fn list_session_snapshots() -> Result<SessionSnapshotCatalog> {
 }
 
 fn list_session_snapshots_in_dir(dir: &Path) -> Result<SessionSnapshotCatalog> {
-    let entries = match fs::read_dir(&dir) {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SessionSnapshotCatalog::default())

@@ -142,7 +142,7 @@ impl OperationSearch for LocalSearch {
                 }
                 GrepMode::Content => {
                     for line in matched_lines {
-                        entries.push(format!("{}:{}", backend_path.native().to_string(), line));
+                        entries.push(format!("{}:{}", backend_path.native(), line));
                         if request
                             .head_limit
                             .is_some_and(|limit| entries.len() >= limit)
@@ -158,11 +158,7 @@ impl OperationSearch for LocalSearch {
                     }
                 }
                 GrepMode::Count => {
-                    entries.push(format!(
-                        "{}:{}",
-                        backend_path.native().to_string(),
-                        matched_lines.len()
-                    ));
+                    entries.push(format!("{}:{}", backend_path.native(), matched_lines.len()));
                     if request
                         .head_limit
                         .is_some_and(|limit| entries.len() >= limit)

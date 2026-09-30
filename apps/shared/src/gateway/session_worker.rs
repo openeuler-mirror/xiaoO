@@ -90,10 +90,7 @@ impl SessionWorker {
             .as_ref()
             .map(|snapshot| snapshot.session_id.clone())
             .unwrap_or_else(|| input.session.session_id.clone());
-        let cancel = input
-            .cancellation_token
-            .clone()
-            .unwrap_or_else(CancellationToken::new);
+        let cancel = input.cancellation_token.clone().unwrap_or_default();
         // Root lanes with an external cancel token wrap their interaction
         // handle so a parked `ask` (e.g. the bash tool blocked on a
         // dyn-sandbox AUTH_REQ permission prompt, or `ask_user_question`)
@@ -196,8 +193,8 @@ impl SessionWorker {
 
                 return Err(SessionServiceError::CoreRunWithState {
                     message: error.to_string(),
-                    partial_loop_state: loop_state.to_snapshot(),
-                    partial_memory_snapshot: memory_manager.snapshot().clone(),
+                    partial_loop_state: Box::new(loop_state.to_snapshot()),
+                    partial_memory_snapshot: Box::new(memory_manager.snapshot().clone()),
                     tool_manifest,
                 });
             }
@@ -219,8 +216,8 @@ impl SessionWorker {
             memory_manager.sync_from_loop_state(&loop_state.messages.read(), current_time_ms());
             return Err(SessionServiceError::CoreRunWithState {
                 message: format!("runtime shutdown failed: {error}"),
-                partial_loop_state: loop_state.to_snapshot(),
-                partial_memory_snapshot: memory_manager.snapshot().clone(),
+                partial_loop_state: Box::new(loop_state.to_snapshot()),
+                partial_memory_snapshot: Box::new(memory_manager.snapshot().clone()),
                 tool_manifest,
             });
         }

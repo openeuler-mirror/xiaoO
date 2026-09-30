@@ -206,7 +206,7 @@ pub fn interaction_prompt_outer_height(req: &PromptRequest, inner_width: u16) ->
     } else {
         1
     };
-    let body_h = if req.body.as_ref().map_or(false, |s| !s.is_empty()) {
+    let body_h = if req.body.as_ref().is_some_and(|s| !s.is_empty()) {
         1
     } else {
         0
@@ -286,7 +286,7 @@ pub fn render_interaction_prompt(
     let mut constraints: Vec<Constraint> = Vec::new();
     // Title area
     constraints.push(Constraint::Length(title_lines));
-    if state.request.body.as_ref().map_or(false, |s| !s.is_empty()) {
+    if state.request.body.as_ref().is_some_and(|s| !s.is_empty()) {
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Length(list_h));
@@ -318,7 +318,7 @@ pub fn render_interaction_prompt(
     f.render_widget(title, chunks[idx]);
     idx += 1;
 
-    if state.request.body.as_ref().map_or(false, |s| !s.is_empty()) {
+    if state.request.body.as_ref().is_some_and(|s| !s.is_empty()) {
         let body = state.request.body.as_deref().unwrap_or_default();
         let line = if body.chars().count() > 256 {
             let s: String = body.chars().take(253).chain("...".chars()).collect();

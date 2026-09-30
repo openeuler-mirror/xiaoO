@@ -11,7 +11,7 @@ pub enum ProtocolFamily {
 }
 
 impl ProtocolFamily {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "openai" | "openai-compatible" => Some(Self::OpenAiCompatible),
             "anthropic" | "claude" => Some(Self::Anthropic),
@@ -88,9 +88,11 @@ pub fn provider_catalog() -> Vec<ProviderMetadata> {
             continue;
         }
 
-        let aliases = (*candidate != profile.provider_name)
-            .then(|| vec![(*candidate).to_string()])
-            .unwrap_or_default();
+        let aliases = if *candidate != profile.provider_name {
+            vec![(*candidate).to_string()]
+        } else {
+            Default::default()
+        };
         indexes.insert(name.clone(), catalog.len());
         catalog.push(ProviderMetadata {
             name,
@@ -312,7 +314,7 @@ pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
 }
 
 pub fn resolve_protocol_family(name: &str) -> Option<ProtocolFamily> {
-    if let Some(protocol) = ProtocolFamily::from_str(name) {
+    if let Some(protocol) = ProtocolFamily::parse(name) {
         return Some(protocol);
     }
     resolve_provider_profile(name).map(|p| p.protocol_family)

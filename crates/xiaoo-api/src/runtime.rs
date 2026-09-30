@@ -344,7 +344,7 @@ impl RuntimeBuilder {
             .tool_registry()
             .list_specs()
             .into_iter()
-            .map(|spec| ToolSpecSnapshot::from(spec))
+            .map(ToolSpecSnapshot::from)
             .map(|spec| Arc::new(spec) as Arc<dyn ToolSpecView>)
             .collect();
 

@@ -87,7 +87,6 @@ impl FileReadExecutor {
     async fn process_notebook(
         &self,
         file_path: &str,
-        _ext: &str,
         bytes: &[u8],
         input: &FileReadInput,
         max_size_bytes: u64,
@@ -439,7 +438,6 @@ impl ToolExecutor for FileReadExecutor {
         let result = if Self::is_notebook_extension(&ext) {
             self.process_notebook(
                 &resolved_str,
-                &ext,
                 &bytes,
                 &input,
                 DEFAULT_MAX_SIZE_BYTES,

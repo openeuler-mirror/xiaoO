@@ -59,8 +59,9 @@ pub enum CronDialogMode {
     EditForm {
         /// Index in the jobs vec if editing existing; `None` if adding new.
         editing_index: Option<usize>,
-        /// The form field values.
-        form: CronEditForm,
+        /// The form field values. Boxed: `CronEditForm` is eight owned strings
+        /// and would otherwise dominate this enum's size.
+        form: Box<CronEditForm>,
         /// Currently focused field.
         focus: CronEditField,
         /// Validation error message, if any.
@@ -69,7 +70,7 @@ pub enum CronDialogMode {
 }
 
 /// Form fields for editing a cron job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CronEditForm {
     pub name: String,
     pub cron: String,
@@ -79,21 +80,6 @@ pub struct CronEditForm {
     pub timeout_secs: String,
     pub max_retries: String,
     pub retry_delay: String,
-}
-
-impl Default for CronEditForm {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            cron: String::new(),
-            prompt: String::new(),
-            description: String::new(),
-            agent_role: String::new(),
-            timeout_secs: String::new(),
-            max_retries: String::new(),
-            retry_delay: String::new(),
-        }
-    }
 }
 
 impl CronEditForm {
@@ -212,7 +198,9 @@ impl CronDialog {
     ) -> Self {
         Self {
             mode: CronDialogMode::List,
-            selected: if jobs.is_empty() { 0 } else { 0 },
+            // Always opens on the first job; `selected` is clamped by the
+            // navigation helpers when the list is empty.
+            selected: 0,
             jobs,
             jobs_file,
             default_timeout_secs,
@@ -247,7 +235,7 @@ impl CronDialog {
     pub fn start_add(&mut self) {
         self.mode = CronDialogMode::EditForm {
             editing_index: None,
-            form: CronEditForm::default(),
+            form: Box::new(CronEditForm::default()),
             focus: CronEditField::Name,
             error: None,
         };
@@ -259,7 +247,7 @@ impl CronDialog {
             let form = CronEditForm::from_entry(entry);
             self.mode = CronDialogMode::EditForm {
                 editing_index: Some(self.selected),
-                form,
+                form: Box::new(form),
                 focus: CronEditField::Name,
                 error: None,
             };

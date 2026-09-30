@@ -12,6 +12,12 @@ pub struct HookerRegistryBuilderImpl {
     config: HookerRegistryConfig,
 }
 
+impl Default for HookerRegistryBuilderImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HookerRegistryBuilderImpl {
     pub fn new() -> Self {
         Self {

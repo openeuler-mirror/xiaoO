@@ -1,17 +1,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FeishuEventTransport {
+    #[default]
     Webhook,
     Websocket,
-}
-
-impl Default for FeishuEventTransport {
-    fn default() -> Self {
-        Self::Webhook
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,7 +105,9 @@ pub struct FeishuChatInfo {
 #[serde(untagged)]
 pub(crate) enum FeishuEventEnvelope {
     Challenge(FeishuChallengeEvent),
-    Event(FeishuWebhookEvent),
+    /// Boxed: the webhook event body is far larger than the challenge variant,
+    /// and this enum is built for every inbound Feishu payload.
+    Event(Box<FeishuWebhookEvent>),
 }
 
 #[derive(Debug, Deserialize)]

@@ -503,8 +503,8 @@ impl SessionSupervisor {
 
                 self.persist_lane_state(
                     &root_agent_id,
-                    Some(partial_loop_state),
-                    Some(partial_memory_snapshot),
+                    Some(*partial_loop_state),
+                    Some(*partial_memory_snapshot),
                     Some(tool_manifest),
                     None,
                 )
@@ -640,7 +640,7 @@ impl SessionSupervisor {
 
                     let join_ids: Vec<String> = suspended_calls
                         .iter()
-                        .map(|call| suspended_join_id(call))
+                        .map(suspended_join_id)
                         .collect::<Result<Vec<_>, SessionServiceError>>()?;
 
                     let receivers: Vec<oneshot::Receiver<SubagentTerminalSnapshot>> =

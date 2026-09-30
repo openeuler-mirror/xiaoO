@@ -339,9 +339,9 @@ fn span_kind_to_moirai_type(kind: TraceSpanKind) -> &'static str {
 
 /// Expand `~` to home directory in path string.
 fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
+    if let Some(stripped) = path.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&path[2..]).to_string_lossy().into_owned();
+            return home.join(stripped).to_string_lossy().into_owned();
         }
     }
     path.to_string()

@@ -427,7 +427,7 @@ fn try_lock_file(file: &File) -> Result<bool, MemoryAutomationError> {
         if matches!(error.kind(), ErrorKind::WouldBlock) {
             return Ok(false);
         }
-        return Err(error.into());
+        Err(error.into())
     }
     #[cfg(not(unix))]
     {

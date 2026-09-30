@@ -54,7 +54,7 @@ fn audit_directory_contents(
         report.files_scanned += 1;
 
         // Reject symlinks without following them.
-        if path.symlink_metadata().map_or(false, |m| m.is_symlink()) {
+        if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
             report.add_finding(format!("symlink detected: {}", path.display()));
             continue;
         }
@@ -110,7 +110,7 @@ fn audit_directory_contents(
                 }
 
                 // For SKILL.toml, check tool commands for shell chaining
-                if path.file_name().map_or(false, |n| n == "SKILL.toml") {
+                if path.file_name().is_some_and(|n| n == "SKILL.toml") {
                     audit_toml_tool_commands(text, report);
                 }
             }

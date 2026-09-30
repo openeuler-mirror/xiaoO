@@ -35,7 +35,9 @@ pub fn channel_session_id(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionInput {
     Turn {
-        request: AppTurnRequest,
+        /// Boxed: `AppTurnRequest` dominates this enum's size, and `SessionInput`
+        /// is carried across the daemon boundary as a whole.
+        request: Box<AppTurnRequest>,
     },
     Interaction {
         response: InteractionResponse,
