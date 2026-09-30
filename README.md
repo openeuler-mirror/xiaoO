@@ -254,12 +254,18 @@ See [docs/skill_usage.md](./docs/skill_usage.md) for the full skill workflow.
 xiaoO can run as a daemon and expose a REST API for external systems such as Feishu, Telegram, or custom services.
 
 ```bash
-# Default address: 0.0.0.0:18080
+# Default address: 127.0.0.1:18080 (loopback only)
 xiaoo-daemon
 
 # Specify configuration file, host, and port
 xiaoo-daemon --config /path/to/config.toml --host 127.0.0.1 --port 18080
 ```
+
+The runtime API can execute commands and read/write files, so it binds loopback
+by default. To expose it on another interface you must configure a bearer token
+(`[http].bearer_token` / `[http].bearer_token_env` or `--bearer-token-env`);
+the daemon refuses to start on a non-loopback address without one. See
+[docs/daemon_config.md](./docs/daemon_config.md).
 
 HTTP requests can select an agent role preset by passing `runtime_profile_id` inside the `entry` object of the JSON body:
 

@@ -117,10 +117,18 @@ docker build -t xiaoo:latest .
 
 ### Daemon 模式（默认）
 
+> 镜像默认以 `--host 0.0.0.0` 启动（容器内绑回环时 `-p` 端口映射无法到达），
+> 因此 `my.toml` **必须**配置 bearer token（`[http].bearer_token` 或
+> `[http].bearer_token_env`）。未配置时 daemon 会拒绝在非回环地址上启动并
+> 立即退出，容器不会静默地不可达。
+
 ```bash
+# my.toml 中：[http]
+#            bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
 docker run --rm -d -p 18080:18080 -p 28081:28081 \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest
 ```
 
@@ -133,6 +141,7 @@ daemon flags（显式写 `xiaoo-daemon` 覆盖默认 `CMD`）：
 docker run --rm -d -p 18099:18080 -p 28081:28081 \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest xiaoo-daemon --host 0.0.0.0 --dashboard-host 0.0.0.0
 ```
 
@@ -147,6 +156,7 @@ docker run --rm -d -p 18099:18099 -p 28081:28081 \
   --health-cmd "curl -fsS http://127.0.0.1:18099/api/v1/health || exit 1" \
   -v $PWD/my.toml:/root/.config/xiaoo/config.toml:ro \
   -e OPENROUTER_API_KEY=sk-or-... \
+  -e XIAOO_HTTP_BEARER_TOKEN=change-me \
   xiaoo:latest xiaoo-daemon --host 0.0.0.0 --port 18099 --dashboard-host 0.0.0.0
 ```
 

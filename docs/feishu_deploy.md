@@ -561,18 +561,17 @@ Important:
 ## 9. Why Reverse Proxy Is Needed for Webhook Mode
 
 > ⚠️ **Security-relevant correction.** An earlier revision of this document
-> claimed xiaoO "does not bind directly on the public interface". **That is
-> wrong.** The daemon's built-in defaults are `--host 0.0.0.0 --port 18080`
-> (`apps/serverside/src/main.rs:1052-1053`, echoed in the usage text at
-> `apps/serverside/src/main.rs:1339`). Started with no flags, xiaoO is reachable
-> on **every** interface. The localhost-only layout below is what you get
-> **only when you pass `--host 127.0.0.1` explicitly.**
+> claimed xiaoO "does not bind directly on the public interface". The built-in
+> default is now `--host 127.0.0.1 --port 18080` (loopback only), and the daemon
+> refuses to start on a non-loopback address unless a bearer token is configured
+> (`[http].bearer_token` / `[http].bearer_token_env`). Started with no flags,
+> xiaoO is therefore reachable only from the local host. The localhost-only
+> layout below is what you get by default.
 
-In the recommended secure webhook deployment, xiaoO is deliberately made to
-listen on loopback only, by passing the flag explicitly:
+In the recommended secure webhook deployment, xiaoO listens on loopback:
 
 - xiaoO listens on:
-  - `127.0.0.1:18080` (requires `--host 127.0.0.1`; **not** the default)
+  - `127.0.0.1:18080` (the default; `--host 127.0.0.1`)
 - nginx listens publicly on:
   - `0.0.0.0:80` or `0.0.0.0:443`
 
@@ -853,10 +852,9 @@ WantedBy=multi-user.target
 
 A few important details:
 
-- `--host 127.0.0.1` makes xiaoO loopback-only — this is an **explicit opt-in**,
-  not the daemon default (`apps/serverside/src/main.rs:1052-1053` starts at
-  `0.0.0.0`). Do not omit it unless a reverse proxy or firewall is genuinely in
-  front of the port.
+- `--host 127.0.0.1` makes xiaoO loopback-only — this is also the daemon
+  default. Exposing a non-loopback address requires a configured bearer token;
+  without one the daemon refuses to start.
 - nginx is responsible for public exposure in webhook mode
 - `EnvironmentFile` is where `FEISHU_APP_SECRET` and `OPENROUTER_API_KEY` are loaded from
 

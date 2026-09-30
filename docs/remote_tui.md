@@ -30,27 +30,22 @@ In remote mode, all tool execution happens on Machine A. The workspace shown in 
 
 ## 2. Start Machine A
 
-Start the daemon on Machine A:
-
-```bash
-xiaoo-daemon \
-  --host 0.0.0.0 \
-  --port 18080 \
-  --config ~/.config/xiaoo/config.toml
-```
-
-Recommended daemon auth configuration:
+Start the daemon on Machine A. Remote mode binds a non-loopback interface, so a
+bearer token is required first — the daemon refuses to start on a non-loopback
+address without one:
 
 ```toml
+# ~/.config/xiaoo/config.toml
 [http]
 bearer_token_env = "XIAOO_HTTP_BEARER_TOKEN"
 ```
 
-Then export the token before starting the daemon:
-
 ```bash
 export XIAOO_HTTP_BEARER_TOKEN="change-me"
-xiaoo-daemon --host 0.0.0.0 --port 18080
+xiaoo-daemon \
+  --host 0.0.0.0 \
+  --port 18080 \
+  --config ~/.config/xiaoo/config.toml
 ```
 
 Health check:
@@ -240,9 +235,10 @@ catalogue and document the additions in this section.
 ## 8. Quick Checklist
 
 1. Machine A has daemon config and provider credentials.
-2. Machine A starts `xiaoo-daemon --host 0.0.0.0 --port 18080`.
+2. Machine A configures `[http].bearer_token_env` and starts
+   `xiaoo-daemon --host 0.0.0.0 --port 18080` (a non-loopback bind requires the token).
 3. Machine B can reach `http://A:18080/api/v1/health`.
-4. If auth is enabled, Machine B exports `XIAOO_REMOTE_TOKEN`.
+4. Machine B exports `XIAOO_REMOTE_TOKEN` with the same token.
 5. Machine B starts `xiaoo`.
 6. In TUI, run `/remote http://A:18080`.
 7. Send a message and confirm the status bar shows `Remote: http://A:18080`.
