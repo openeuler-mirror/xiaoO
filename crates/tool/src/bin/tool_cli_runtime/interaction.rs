@@ -22,10 +22,22 @@ impl InteractionHandle for CliInteractionHandle {
                     },
                 }
             }
-            InteractionRequest::TextInput { prompt, .. } => {
+            InteractionRequest::TextInput {
+                prompt, is_secret, ..
+            } => {
                 let input = prompt_input(&format!("[tool-cli][interaction.text] {}: ", prompt));
+                // `display_value` is the downstream secret marker: the core loop
+                // only treats a text answer as a secret when this field is
+                // present, so a secret input must carry `<SECRET>` here just
+                // like the other interaction backends.
+                let display_value = if *is_secret {
+                    Some("<SECRET>".to_string())
+                } else {
+                    None
+                };
                 InteractionResponse::Text {
                     value: input.filter(|value| !value.is_empty()),
+                    display_value,
                 }
             }
             InteractionRequest::Choice {
