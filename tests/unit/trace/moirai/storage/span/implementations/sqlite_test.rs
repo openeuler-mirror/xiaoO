@@ -1,6 +1,255 @@
 use super::SqliteStorage;
 use crate::{Span, SpanStorage};
 
+fn request_counts(storage: &SqliteStorage) -> (i64, i64, i64) {
+    let conn = storage.conn.lock().unwrap();
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM request_blobs_v1),
+                (SELECT COUNT(*) FROM request_prefixes_v1),
+                (SELECT COUNT(*) FROM span_requests_v1)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn growing_requests_store_linear_prefixes_and_round_trip_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("requests.db");
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let mut messages = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0..100 {
+        messages.push(serde_json::json!({"role": "user", "content": format!("message {i}")}));
+        let extras = serde_json::json!({
+            "phase": "started",
+            "effective_request": {"messages": messages, "tools": [{"name": "shell"}], "temperature": 0.5}
+        });
+        storage
+            .insert_span(&span(
+                &format!("s{i}"),
+                "trace",
+                None,
+                "LLM_CALL",
+                i,
+                None,
+                extras.clone(),
+            ))
+            .await
+            .unwrap();
+        expected.push(extras);
+    }
+    // 100 unique messages + one tools blob + one metadata blob. No per-turn
+    // message ID arrays: each request stores exactly one head reference.
+    assert_eq!(request_counts(&storage), (102, 100, 100));
+    {
+        let conn = storage.conn.lock().unwrap();
+        let inline: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM spans WHERE json_type(extras, '$.effective_request') IS NOT NULL",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(inline, 0);
+    }
+    drop(storage);
+    let storage = SqliteStorage::new(path.to_str().unwrap()).unwrap();
+    let spans = storage.get_trace_spans("trace").await.unwrap();
+    assert_eq!(spans.len(), expected.len());
+    for (span, extras) in spans.iter().zip(&expected) {
+        assert_eq!(&span.extras, extras);
+    }
+    assert_eq!(
+        storage.get_span("s99").await.unwrap().unwrap().extras,
+        expected[99]
+    );
+    assert_eq!(
+        storage
+            .get_trace_spans_with_related_segments("trace")
+            .await
+            .unwrap()
+            .len(),
+        100
+    );
+}
+
+#[tokio::test]
+async fn request_rewrites_branch_and_status_updates_keep_references() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    for (id, messages) in [
+        ("a", vec!["a", "b", "c"]),
+        ("b", vec!["a", "changed", "c"]),
+        ("c", vec!["a", "b", "c", "d"]),
+    ] {
+        storage
+            .insert_span(&span(
+                id,
+                id,
+                None,
+                "LLM_CALL",
+                1,
+                None,
+                serde_json::json!({"effective_request": {"messages": messages}}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(request_counts(&storage), (6, 6, 3));
+    storage
+        .update_span_extras("b", serde_json::json!({"phase": "done"}), 2, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(request_counts(&storage), (6, 6, 3));
+    let read = storage.get_span("b").await.unwrap().unwrap();
+    assert_eq!(
+        read.extras["effective_request"]["messages"],
+        serde_json::json!(["a", "changed", "c"])
+    );
+    assert_eq!(read.end_time, Some(2));
+    storage
+        .update_span_extras(
+            "b",
+            serde_json::json!({"effective_request": {"messages": [], "tools": null}}),
+            3,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_span("b").await.unwrap().unwrap().extras["effective_request"],
+        serde_json::json!({"messages": [], "tools": null})
+    );
+    storage
+        .update_span_extras("b", serde_json::json!({"effective_request": null}), 4, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_span("b").await.unwrap().unwrap().extras["effective_request"],
+        serde_json::Value::Null
+    );
+    assert_eq!(request_counts(&storage).2, 2);
+}
+
+#[tokio::test]
+async fn legacy_requests_read_and_migrate_on_update_without_changing_json() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    let extras = serde_json::json!({"effective_request": {"messages": [{"z": 1, "a": {"y": 2, "b": 3}}], "tools": []}});
+    storage
+        .insert_span(&span(
+            "old",
+            "trace",
+            None,
+            "LLM_CALL",
+            1,
+            None,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    storage
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE spans SET extras = ?1 WHERE span_id='old'",
+            [extras.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        storage.get_span("old").await.unwrap().unwrap().extras,
+        extras
+    );
+    assert_eq!(request_counts(&storage), (0, 0, 0));
+    storage
+        .update_span_extras("old", serde_json::json!({"phase": "done"}), 2, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.get_span("old").await.unwrap().unwrap().extras["effective_request"],
+        extras["effective_request"]
+    );
+    let reordered = serde_json::from_str(
+        r#"{"effective_request":{"tools":[],"messages":[{"a":{"b":3,"y":2},"z":1}]}}"#,
+    )
+    .unwrap();
+    storage
+        .insert_span(&span("new", "trace", None, "LLM_CALL", 2, None, reordered))
+        .await
+        .unwrap();
+    assert_eq!(request_counts(&storage), (3, 1, 2));
+}
+
+#[tokio::test]
+async fn failed_insert_rolls_back_request_objects_and_reference_changes() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    let original = span(
+        "a",
+        "trace",
+        None,
+        "LLM_CALL",
+        1,
+        None,
+        serde_json::json!({"effective_request": {"messages": ["original"]}}),
+    );
+    storage.insert_span(&original).await.unwrap();
+    let counts = request_counts(&storage);
+    let replacement = span(
+        "a",
+        "trace",
+        None,
+        "LLM_CALL",
+        1,
+        None,
+        serde_json::json!({"effective_request": {"messages": ["different"], "tools": [1]}}),
+    );
+    assert!(storage.insert_span(&replacement).await.is_err());
+    assert_eq!(request_counts(&storage), counts);
+    assert_eq!(
+        storage.get_span("a").await.unwrap().unwrap().extras,
+        original.extras
+    );
+    assert!(storage
+        .update_span_extras("missing", replacement.extras, 2, None)
+        .await
+        .is_err());
+    assert_eq!(request_counts(&storage), counts);
+}
+
+#[tokio::test]
+async fn deletion_keeps_shared_prefixes_and_collects_unreferenced_payloads() {
+    let storage = SqliteStorage::new(":memory:").unwrap();
+    for (id, time, messages) in [("old", 1, vec!["a", "b"]), ("new", 2, vec!["a", "b", "c"])] {
+        storage
+            .insert_span(&span(
+                id,
+                id,
+                None,
+                "LLM_CALL",
+                time,
+                None,
+                serde_json::json!({"effective_request": {"messages": messages}}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(storage.delete_old_spans(2).await.unwrap(), 1);
+    assert_eq!(request_counts(&storage), (4, 3, 1));
+    assert_eq!(
+        storage.get_span("new").await.unwrap().unwrap().extras["effective_request"]["messages"],
+        serde_json::json!(["a", "b", "c"])
+    );
+    storage
+        .update_span_extras(
+            "new",
+            serde_json::json!({"effective_request": {"messages": ["replacement"]}}),
+            3,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(storage.delete_trace("new").await.unwrap(), 1);
+    assert_eq!(request_counts(&storage), (0, 0, 0));
+}
+
 fn span(
     span_id: &str,
     trace_id: &str,
