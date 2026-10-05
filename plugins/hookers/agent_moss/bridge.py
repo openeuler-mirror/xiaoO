@@ -355,7 +355,12 @@ def _handle_hook_payload(data: dict) -> int:
         "a_next": a_next,
         "reason": reason,
         "os_type": "",      # 让 AgentMoss 自动检测
-        "cwd": data.get("cwd", ""),
+        # 宿主 payload 里工作区字段叫 `workspace`（crates/hook/.../tool/adaptor.rs 的
+        # build_pre_payload）。老写法只读 `cwd`，而宿主从不发这个字段，于是这里的取值
+        # 恒为空串 —— AgentMoss 的层2「间接文件访问检测」因此在 xiaoO 场景下静默失效
+        # （见 TECH_WIKI.md「关于 cwd 的已知缺口」）。优先 `cwd` 以兼容仍自带该字段的
+        # 调用方，缺失时回落到 `workspace`。
+        "cwd": data.get("cwd") or data.get("workspace", ""),
         "agent_id": "xiaoo",  # 告知 AgentMoss 加载 xiaoO 专属规则
         # per-request 注入 xiaoo 的 LLM 配置 + 日志路径（只在 xiaoo 调用场景生效）。
         # bridge 读 xiaoo config.toml + 解析 env 拿真实 key，服务端用它覆盖全局，
