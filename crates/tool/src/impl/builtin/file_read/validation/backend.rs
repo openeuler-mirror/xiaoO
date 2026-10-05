@@ -155,6 +155,57 @@ fn parse_pages(pages: &str) -> Result<(u32, u32), &'static str> {
     }
 }
 
+/// Total number of pages a page-range string selects, counting **every**
+/// comma-separated segment.
+///
+/// `parse_pages` only inspects the first segment (it returns a single
+/// `(start, end)` pair), but `readers::pdf::parse_page_range` expands the whole
+/// string, so the size that actually gets materialised has to be measured over
+/// the whole string too. Duplicates are not subtracted: the reader dedups as it
+/// expands, and an over-count here can only reject earlier, never admit more.
+fn total_pages(pages: &str) -> Result<u64, &'static str> {
+    let mut total: u64 = 0;
+    for part in pages.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err("Empty pages range");
+        }
+        let (start, end) = if part.contains('-') {
+            let mut sides = part.split('-');
+            let start: u32 = sides
+                .next()
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| "Invalid start page")?;
+            let end: u32 = sides
+                .next()
+                .unwrap_or("")
+                .trim()
+                .parse()
+                .map_err(|_| "Invalid end page")?;
+            if sides.next().is_some() {
+                return Err("Invalid range format");
+            }
+            if start == 0 || end == 0 {
+                return Err("Page numbers must be > 0");
+            }
+            if start > end {
+                return Err("Start page must be <= end page");
+            }
+            (start, end)
+        } else {
+            let page: u32 = part.parse().map_err(|_| "Invalid page number")?;
+            if page == 0 {
+                return Err("Page numbers must be > 0");
+            }
+            (page, page)
+        };
+        total = total.saturating_add(u64::from(end - start) + 1);
+    }
+    Ok(total)
+}
+
 /// Validates the pages parameter.
 ///
 /// Checks:
@@ -167,21 +218,23 @@ fn parse_pages(pages: &str) -> Result<(u32, u32), &'static str> {
 /// # Returns
 /// * `ValidationResult` indicating success or failure with error details
 fn validate_pages(pages: &str) -> ValidationResult {
-    match parse_pages(pages) {
-        Ok((start, end)) => {
-            let range_size = end - start + 1;
-            if range_size > PDF_MAX_PAGES_PER_READ {
-                ValidationResult::error(
-                    format!(
-                        "Pages range too large: {} pages requested, maximum is {}",
-                        range_size, PDF_MAX_PAGES_PER_READ
-                    ),
-                    error_code::PAGES_RANGE_TOO_LARGE,
-                )
-            } else {
-                ValidationResult::ok()
-            }
+    if let Err(msg) = parse_pages(pages) {
+        return ValidationResult::error(
+            format!("Invalid pages format: {}", msg),
+            error_code::INVALID_PAGES_FORMAT,
+        );
+    }
+    match total_pages(pages) {
+        Ok(range_size) if range_size > u64::from(PDF_MAX_PAGES_PER_READ) => {
+            ValidationResult::error(
+                format!(
+                    "Pages range too large: {} pages requested, maximum is {}",
+                    range_size, PDF_MAX_PAGES_PER_READ
+                ),
+                error_code::PAGES_RANGE_TOO_LARGE,
+            )
         }
+        Ok(_) => ValidationResult::ok(),
         Err(msg) => ValidationResult::error(
             format!("Invalid pages format: {}", msg),
             error_code::INVALID_PAGES_FORMAT,
@@ -220,3 +273,7 @@ pub fn validate_input_with_base_from_bytes(
 
     ValidationResult::ok()
 }
+
+#[cfg(test)]
+#[path = "../../../../../../../tests/unit/tool/impl/builtin/file_read/validation/backend_test.rs"]
+mod tests;
