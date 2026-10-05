@@ -358,6 +358,18 @@ impl LocalExec {
             &self._state.policy,
             command_cwd.as_deref(),
         );
+        // daemon 在启动时把密钥库里的全部明文凭据 `set_var` 进了自己的环境
+        // （`inject_llm_secrets_into_env`），而这条后端默认继承父进程环境 ——
+        // 两者叠加，一次 `env` 就能把整台部署的 provider / 渠道凭据打印出来。
+        // 这里从空环境起，再放回运行本身需要的少数几个变量，以及请求显式指定的那些。
+        // 放在调用点而不是 `command_from_spec` 里，是因为那里有四条分支
+        // （sandbox-exec / dyn-sandbox / bwrap / 裸执行），逐个 return 加容易漏。
+        command.env_clear();
+        for inherited in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER"] {
+            if let Ok(value) = std::env::var(inherited) {
+                command.env(inherited, value);
+            }
+        }
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {
                 command.env(k, v);
@@ -613,3 +625,7 @@ impl LocalExec {
         let _ = child.wait().await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../../../tests/unit/operation_backend/backends/local/exec/daemon_env_test.rs"]
+mod daemon_env_tests;
