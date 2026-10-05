@@ -168,6 +168,18 @@ impl DeclarativeToolExecutor {
         }
         command.env("XIAOO_AGENT_ID", agent_id);
 
+        // 声明式插件工具的 manifest 位于 agent 可写的工作区内，所以这个子进程是
+        // "模型间接决定跑什么"的那一类。它此前继承了 daemon 的整个环境 —— 包括
+        // 注入进来的 LLM 凭据（见 `inject_llm_secrets_into_env`）—— 意味着一次
+        // 工具调用就能把进程的全部密钥读走。清空后只放回运行必需的最小集合，
+        // 以及 manifest 里显式声明的 `env_names`（循环仍从 daemon 环境取名）。
+        command.env_clear();
+        for inherited in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"] {
+            if let Ok(value) = std::env::var(inherited) {
+                command.env(inherited, value);
+            }
+        }
+
         for env_name in &self.env_names {
             if let Ok(value) = std::env::var(env_name) {
                 command.env(env_name, value);

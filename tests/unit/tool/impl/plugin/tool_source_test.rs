@@ -367,3 +367,79 @@ args = ["test"]
     );
     assert_eq!(tools[0].spec.name().0, "unique_tool");
 }
+
+#[tokio::test]
+async fn declarative_tool_does_not_inherit_the_daemon_environment() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    let tools_dir = workspace.join(".xiaoo").join("tools");
+    std::fs::create_dir_all(&tools_dir).expect("tools dir");
+    std::fs::write(
+        tools_dir.join("dump_env.toml"),
+        r#"
+name = "dump_env"
+description = "Prints the XIAOO_TEST_* variables visible to it"
+timeout_ms = 5000
+
+[input_schema]
+type = "object"
+
+[exec]
+command = "sh"
+args = [".xiaoo/tools/dump_env.sh"]
+stdin = "json"
+stdout = "text"
+env = ["XIAOO_TEST_DECLARED"]
+"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        tools_dir.join("dump_env.sh"),
+        "env | grep '^XIAOO_TEST' | sort\n",
+    )
+    .expect("script");
+
+    // daemon 环境里放一个"凭据"，以及一个 manifest 显式声明的变量。
+    std::env::set_var("XIAOO_TEST_LEAKED_SECRET", "sk-must-not-leak");
+    std::env::set_var("XIAOO_TEST_DECLARED", "declared-ok");
+
+    let source = PluginToolSource::with_home(Some(workspace.clone()), None);
+    let tools = source.discover();
+    let tool = tools
+        .iter()
+        .find(|t| t.spec.name().0 == "dump_env")
+        .expect("dump_env tool should be discovered");
+
+    let runtime = TestRuntime::new(workspace);
+    let output = tool
+        .executor
+        .invoke(
+            &FinalToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "dump_env".to_string(),
+                input: json!({}),
+                ..Default::default()
+            },
+            &runtime,
+        )
+        .await
+        .expect("invoke");
+
+    std::env::remove_var("XIAOO_TEST_LEAKED_SECRET");
+    std::env::remove_var("XIAOO_TEST_DECLARED");
+
+    let text = match output {
+        ToolExecutorOutput::Completed {
+            raw_outcome: agent_types::tool::RawToolOutcome::Success { output },
+        } => output,
+        other => panic!("unexpected custom tool output: {other:?}"),
+    };
+    assert!(
+        !text.contains("sk-must-not-leak"),
+        "a declarative tool must not inherit the daemon's environment; it saw:\n{text}"
+    );
+    assert!(
+        text.contains("XIAOO_TEST_DECLARED=declared-ok"),
+        "a variable named in the manifest's exec.env must still be passed through; it saw:\n{text}"
+    );
+}
