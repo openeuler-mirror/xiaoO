@@ -818,7 +818,7 @@ impl GatewayRuntime {
         // `plan_state.is_some()` (see `App::ui`), so a Some<->None transition
         // must invalidate the cached layout split. Content-only updates
         // (still `Some`) don't change sidebar visibility, so the cache stays.
-        let plan_presence_changed = state.plan_state.is_some() != !update.items.is_empty();
+        let plan_presence_changed = state.plan_state.is_some() == update.items.is_empty();
         // A freshly shown or replaced task list (different title or items
         // than the previous one) starts scrolled to the top; status-only
         // updates of the same list keep the user's scroll position (it is

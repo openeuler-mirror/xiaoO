@@ -7,6 +7,9 @@ pub struct ProviderDialog {
     pub selected_model: usize,
     pub focus: DialogFocus,
     pub local_models_loading: bool,
+    /// 本次对话框会话中已完成后台拉取的 provider 名单，防止上下移动时
+    /// 对同一 provider 重复发起请求（关闭重开对话框即重新拉取）。
+    pub fetched_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,6 +26,7 @@ impl ProviderDialog {
             selected_model: 0,
             focus: DialogFocus::Providers,
             local_models_loading: false,
+            fetched_providers: Vec::new(),
         }
     }
 
@@ -115,17 +119,22 @@ impl ProviderDialog {
         self.local_models_loading = true;
     }
 
-    pub fn apply_fetched_local_models(&mut self, models: Vec<ModelInfo>) {
+    /// 用后台拉取结果替换指定 provider 的模型列表。
+    ///
+    /// 空结果保留静态列表（离线兜底）——`local` 除外，它回落到占位条目，
+    /// 保证对话框永不出现死空列。
+    pub fn apply_fetched_models(&mut self, provider_name: &str, models: Vec<ModelInfo>) {
         self.local_models_loading = false;
-        if let Some(provider) = self.providers.iter_mut().find(|p| p.name == "local") {
-            if !models.is_empty() {
-                provider.models = models;
-            } else {
-                provider.models = vec![ModelInfo {
-                    id: "glm4.7".to_string(),
-                    name: "glm4.7".to_string(),
-                }];
-            }
+        let Some(provider) = self.providers.iter_mut().find(|p| p.name == provider_name) else {
+            return;
+        };
+        if !models.is_empty() {
+            provider.models = models;
+        } else if provider_name == "local" {
+            provider.models = vec![ModelInfo {
+                id: "glm4.7".to_string(),
+                name: "glm4.7".to_string(),
+            }];
         }
     }
 }

@@ -21,6 +21,7 @@ pub use llm_client::{resolve_config, ResolveInput};
 #[doc(inline)]
 pub use llm_client::{
     provider_catalog, resolve_provider_profile, ProviderMetadata, ProviderProfile,
+    ReasoningDialect,
 };
 
 // ---- 上下文窗口探测链 ----

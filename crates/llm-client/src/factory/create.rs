@@ -83,14 +83,20 @@ fn create_provider_by_protocol(
             } else {
                 api_key.unwrap_or_default()
             };
+            // reasoning_effort 方言来自 provider 注册表声明（zai-coding-plan
+            // 等端点为 Zhipu API 的 OpenAI 兼容 provider 在此声明 Zhipu 方言），
+            // 新增 provider 无需改工厂代码。
             Ok(LlmProviderWrapper::new(
-                Arc::new(OpenAiFamilyProvider::new(
-                    api_key,
-                    api_base,
-                    model,
-                    OpenAiFamilyAuthStyle::Bearer,
-                    vec![],
-                )),
+                Arc::new(
+                    OpenAiFamilyProvider::new(
+                        api_key,
+                        api_base,
+                        model,
+                        OpenAiFamilyAuthStyle::Bearer,
+                        vec![],
+                    )
+                    .with_reasoning_dialect(profile.reasoning_dialect),
+                ),
                 agent_id,
                 runtime_view,
             ))
@@ -192,5 +198,9 @@ fn default_profile(protocol: ProtocolFamily) -> ProviderProfile {
         default_api_key_env: None,
         api_key_required: true,
         supports_model_catalog: false,
+        // 无需按协议特判方言：Zhipu 协议族由 ZhipuProvider 原生内置 Zhipu
+        // 方言（不读此字段），其余协议均为默认 OpenAi 方言，由
+        // `..default()` 补齐。
+        ..ProviderProfile::default()
     }
 }

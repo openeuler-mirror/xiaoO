@@ -178,22 +178,20 @@ pub fn validate_input_backend(
                 );
             }
         }
-    } else {
-        if stat.exists {
-            let file_empty = match content {
-                Some(c) => c.is_empty(),
-                None => true,
-            };
+    } else if stat.exists {
+        let file_empty = match content {
+            Some(c) => c.is_empty(),
+            None => true,
+        };
 
-            if !file_empty {
-                return ValidationResult::error(
-                    format!(
-                        "Cannot create file with content when file exists and is not empty: {}",
-                        resolved_path
-                    ),
-                    error_code::FILE_EXISTS,
-                );
-            }
+        if !file_empty {
+            return ValidationResult::error(
+                format!(
+                    "Cannot create file with content when file exists and is not empty: {}",
+                    resolved_path
+                ),
+                error_code::FILE_EXISTS,
+            );
         }
     }
 

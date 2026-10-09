@@ -294,12 +294,12 @@ fn plan_panel_scroll_clamps_to_content_bounds() {
     assert_eq!(plan_panel.max_scroll_offset(), 6);
 
     for _ in 0..10 {
-        plan_panel.scroll_down();
+        plan_panel.scroll_down_by(1);
     }
     assert_eq!(plan_panel.scroll_offset, 6, "scroll down must clamp at max");
 
     for _ in 0..10 {
-        plan_panel.scroll_up();
+        plan_panel.scroll_up_by(1);
     }
     assert_eq!(plan_panel.scroll_offset, 0, "scroll up must clamp at 0");
 }
@@ -308,9 +308,11 @@ fn plan_panel_scroll_clamps_to_content_bounds() {
 /// Plan panel, clamped at both ends.
 #[test]
 fn plan_panel_wheel_step_scrolls_three_lines_and_clamps() {
-    let mut plan_panel = PlanPanelState::default();
-    plan_panel.total_lines = 10;
-    plan_panel.last_visible_height = 4;
+    let mut plan_panel = PlanPanelState {
+        total_lines: 10,
+        last_visible_height: 4,
+        ..Default::default()
+    };
     assert_eq!(plan_panel.max_scroll_offset(), 6);
 
     // One notch down moves three lines: 0 → 3.
@@ -353,8 +355,8 @@ fn plan_panel_reset_scroll_returns_to_top() {
         last_visible_height: 5,
         ..Default::default()
     };
-    plan_panel.scroll_down();
-    plan_panel.scroll_down();
+    plan_panel.scroll_down_by(1);
+    plan_panel.scroll_down_by(1);
     assert!(plan_panel.scroll_offset > 0);
     plan_panel.scrollbar_dragging = true;
 
@@ -390,7 +392,7 @@ fn plan_panel_not_scrollable_when_content_fits() {
         ..Default::default()
     };
     assert_eq!(plan_panel.max_scroll_offset(), 0);
-    plan_panel.scroll_down();
+    plan_panel.scroll_down_by(1);
     assert_eq!(plan_panel.scroll_offset, 0);
 }
 

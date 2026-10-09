@@ -35,8 +35,23 @@ pub(crate) struct OpenAiFamilyProvider {
     api_base: String,
     auth_style: OpenAiFamilyAuthStyle,
     default_headers: Vec<(String, String)>,
+    reasoning_dialect: ReasoningDialect,
     capabilities: ProviderCapabilities,
     cached_endpoint_url: Arc<RwLock<Option<String>>>,
+}
+
+/// `reasoning_effort` 取值的协议方言。
+///
+/// OpenAI 兼容端点普遍接受 `xhigh`；Zhipu 的 chat-completions API 只文档化
+/// 了 `low`/`high`/`max`（`xhigh` 会被拒），且新模型（glm-5.3+）无法禁用
+/// 思考——Off 只能不发参数、走服务端默认。由 provider 注册表以
+/// [`crate::provider_registry::ProviderProfile::reasoning_dialect`] 声明，
+/// 按端点而非模型名区分，新增 provider / GLM 模型无需改代码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningDialect {
+    #[default]
+    OpenAi,
+    Zhipu,
 }
 
 impl OpenAiFamilyProvider {
@@ -65,6 +80,7 @@ impl OpenAiFamilyProvider {
             api_base,
             auth_style,
             default_headers,
+            reasoning_dialect: ReasoningDialect::default(),
             capabilities: ProviderCapabilities {
                 supports_streaming: true,
                 supports_tool_calls: true,
@@ -76,6 +92,12 @@ impl OpenAiFamilyProvider {
         }
     }
 
+    /// 覆盖默认（OpenAI）方言；Zhipu 协议端点须传 [`ReasoningDialect::Zhipu`]。
+    pub(crate) fn with_reasoning_dialect(mut self, dialect: ReasoningDialect) -> Self {
+        self.reasoning_dialect = dialect;
+        self
+    }
+
     fn build_body(
         &self,
         request: &LlmRequest,
@@ -83,14 +105,13 @@ impl OpenAiFamilyProvider {
     ) -> Result<serde_json::Value, LlmError> {
         let wire = llm_request_to_wire(request, &self.capabilities.model_name);
         let mut body = serde_json::to_value(&wire).map_err(map_serde_error)?;
+        let family = classify_model(&self.capabilities.model_name);
         if let Some(reasoning_effort) =
-            reasoning_effort_for_model(&self.capabilities.model_name, request.reasoning_effort)
+            reasoning_effort_for_model(self.reasoning_dialect, family, request.reasoning_effort)
         {
             body["reasoning_effort"] = serde_json::json!(reasoning_effort);
         }
-        if request.reasoning_effort == ReasoningEffort::Off
-            && is_glm_5_2_model(&self.capabilities.model_name)
-        {
+        if request.reasoning_effort == ReasoningEffort::Off && family == ModelFamily::Glm52 {
             body["thinking"] = serde_json::json!({ "type": "disabled" });
         }
         if force_stream {
@@ -326,59 +347,66 @@ impl OpenAiFamilyProvider {
     }
 }
 
-fn openai_reasoning_effort(effort: ReasoningEffort) -> Option<&'static str> {
-    match effort {
-        ReasoningEffort::Off => None,
-        ReasoningEffort::High => Some("high"),
-        ReasoningEffort::Max => Some("xhigh"),
+/// OpenAI 兼容端点上 `reasoning_effort` 取值存在已知差异的模型家族，
+/// 按 id 末段（去 vendor 前缀、大小写不敏感）判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelFamily {
+    Gpt56,
+    KimiK3,
+    Glm52,
+    Standard,
+}
+
+fn classify_model(model: &str) -> ModelFamily {
+    let name = model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.starts_with("gpt-5.6") {
+        ModelFamily::Gpt56
+    } else if name == "kimi-k3" {
+        ModelFamily::KimiK3
+    } else if name == "glm-5.2" {
+        ModelFamily::Glm52
+    } else {
+        ModelFamily::Standard
     }
 }
 
-fn reasoning_effort_for_model(model: &str, effort: ReasoningEffort) -> Option<&'static str> {
-    match effort {
-        ReasoningEffort::Off if is_gpt_5_6_model(model) => Some("none"),
-        ReasoningEffort::Off if is_kimi_k3_model(model) => None,
-        ReasoningEffort::Off if is_glm_5_2_model(model) => None,
-        ReasoningEffort::High
-            if is_gpt_5_6_model(model) || is_kimi_k3_model(model) || is_glm_5_2_model(model) =>
-        {
-            Some("high")
-        }
-        ReasoningEffort::Max
-            if is_gpt_5_6_model(model) || is_kimi_k3_model(model) || is_glm_5_2_model(model) =>
-        {
-            Some("max")
-        }
-        _ => openai_reasoning_effort(effort),
+/// `reasoning_effort` 档位 → 请求体取值。High 一律 `high`；差异集中在
+/// Off（是否显式下发）与 Max（`xhigh` vs `max`）两端：
+///
+/// | 端点 / 模型            | Off    | Max     |
+/// |------------------------|--------|---------|
+/// | 通用 OpenAI 兼容端点    | 不发   | `xhigh` |
+/// | GPT-5.6                | `none` | `max`   |
+/// | Kimi K3 / GLM-5.2      | 不发   | `max`   |
+/// | Zhipu 方言（任意模型）  | 不发   | `max`   |
+fn reasoning_effort_for_model(
+    dialect: ReasoningDialect,
+    family: ModelFamily,
+    effort: ReasoningEffort,
+) -> Option<&'static str> {
+    if dialect == ReasoningDialect::Zhipu {
+        // Zhipu 官方仅文档化 low/high/max：`xhigh` 会被拒绝；Off 不发参数，
+        // 由服务端默认接管（glm-5.3+ 不支持 thinking.type: disabled）。
+        return match effort {
+            ReasoningEffort::Off => None,
+            ReasoningEffort::High => Some("high"),
+            ReasoningEffort::Max => Some("max"),
+        };
     }
-}
-
-fn is_gpt_5_6_model(model: &str) -> bool {
-    model
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .starts_with("gpt-5.6")
-}
-
-fn is_kimi_k3_model(model: &str) -> bool {
-    model
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .eq_ignore_ascii_case("kimi-k3")
-}
-
-fn is_glm_5_2_model(model: &str) -> bool {
-    model
-        .trim()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .eq_ignore_ascii_case("glm-5.2")
+    match (effort, family) {
+        // GPT-5.6 须显式发 `none` 关闭，其余模型不发参数。
+        (ReasoningEffort::Off, ModelFamily::Gpt56) => Some("none"),
+        (ReasoningEffort::Off, _) => None,
+        (ReasoningEffort::High, _) => Some("high"),
+        // 新模型家族只认 `max`；通用端点用 `xhigh`。
+        (ReasoningEffort::Max, ModelFamily::Standard) => Some("xhigh"),
+        (ReasoningEffort::Max, _) => Some("max"),
+    }
 }
 
 #[async_trait]

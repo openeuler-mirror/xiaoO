@@ -117,8 +117,8 @@ impl WhiteBoxKeyProvider {
     fn transform_block(block: &[u8; 4]) -> [u8; 4] {
         let mut result = [0u8; 4];
         for i in 0..4 {
-            for j in 0..4 {
-                result[i] ^= Self::galois_mul(block[j], TRANSFORM_MATRIX[i][j]);
+            for (j, &value) in block.iter().enumerate() {
+                result[i] ^= Self::galois_mul(value, TRANSFORM_MATRIX[i][j]);
             }
         }
         result

@@ -16,7 +16,7 @@ use crate::gateway_runtime::GatewayRuntime;
 pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
-    pending_local_model_fetch: Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
+    pending_model_fetch: Option<tokio::sync::oneshot::Receiver<FetchedModels>>,
     /// Deadline for discarding stray character events after an ESC key.
     ///
     /// When an ESC byte lands next to a mouse/scroll escape sequence
@@ -39,6 +39,12 @@ pub struct App {
     pub(crate) animation_origin: Instant,
 }
 
+/// 后台模型列表拉取结果：目标 provider + 模型条目。
+pub(crate) struct FetchedModels {
+    pub provider: String,
+    pub models: Vec<crate::chat::ModelInfo>,
+}
+
 impl App {
     pub fn new_with_config(
         config: &Config,
@@ -50,7 +56,7 @@ impl App {
         Ok(Self {
             state,
             gateway,
-            pending_local_model_fetch: None,
+            pending_model_fetch: None,
             esc_discard_until: None,
             input_drag_active: false,
             animation_origin: Instant::now(),
@@ -113,7 +119,8 @@ impl App {
         clock_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         clock_refresh_interval.tick().await;
         let mut corruption_recovery_interval = tokio::time::interval(Duration::from_secs(30));
-        corruption_recovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        corruption_recovery_interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         corruption_recovery_interval.tick().await;
 
         #[cfg(unix)]
@@ -212,11 +219,11 @@ impl App {
                                 handled_event = Some(event);
                             }
                         }
-                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
-                            self.pending_local_model_fetch = None;
-                            if let Some(models) = models {
+                        fetched = wait_for_fetched_models(&mut self.pending_model_fetch) => {
+                            self.pending_model_fetch = None;
+                            if let Some(fetched) = fetched {
                                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
-                                    dialog.apply_fetched_local_models(models);
+                                    dialog.apply_fetched_models(&fetched.provider, fetched.models);
                                 }
                             }
                             needs_redraw = true;
@@ -281,11 +288,11 @@ impl App {
                                 handled_event = Some(event);
                             }
                         }
-                        models = wait_for_local_models(&mut self.pending_local_model_fetch) => {
-                            self.pending_local_model_fetch = None;
-                            if let Some(models) = models {
+                        fetched = wait_for_fetched_models(&mut self.pending_model_fetch) => {
+                            self.pending_model_fetch = None;
+                            if let Some(fetched) = fetched {
                                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
-                                    dialog.apply_fetched_local_models(models);
+                                    dialog.apply_fetched_models(&fetched.provider, fetched.models);
                                 }
                             }
                             needs_redraw = true;
@@ -419,12 +426,20 @@ impl App {
         Ok(())
     }
 
-    pub fn start_local_model_fetch(&mut self, api_base: String) {
+    /// 为指定 provider 启动后台模型列表拉取（对话框打开 / 切换 provider 时
+    /// 调用）。单在途请求：新的拉取会覆盖旧的 receiver，被覆盖请求的结果
+    /// 直接丢弃（用户已切走，不再关心）。
+    pub fn start_model_fetch(
+        &mut self,
+        provider: String,
+        api_base: String,
+        api_key_env: Option<String>,
+    ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_local_model_fetch = Some(rx);
+        self.pending_model_fetch = Some(rx);
         tokio::spawn(async move {
-            let models = fetch_models_from_local_api(&api_base).await;
-            let _ = tx.send(models);
+            let models = fetch_models_for_provider(&provider, &api_base, api_key_env).await;
+            let _ = tx.send(FetchedModels { provider, models });
         });
     }
 
@@ -725,14 +740,11 @@ impl App {
     }
 }
 
-async fn wait_for_local_models(
-    rx: &mut Option<tokio::sync::oneshot::Receiver<Vec<crate::chat::ModelInfo>>>,
-) -> Option<Vec<crate::chat::ModelInfo>> {
+async fn wait_for_fetched_models(
+    rx: &mut Option<tokio::sync::oneshot::Receiver<FetchedModels>>,
+) -> Option<FetchedModels> {
     match rx {
-        Some(inner) => match inner.await {
-            Ok(models) => models.into(),
-            Err(_) => None,
-        },
+        Some(inner) => inner.await.ok(),
         None => std::future::pending().await,
     }
 }
@@ -771,6 +783,50 @@ async fn fetch_models_from_local_api(api_base: &str) -> Vec<crate::chat::ModelIn
         return vec![];
     }
     models
+}
+
+/// 按 provider 分发模型列表拉取：`local` 走无鉴权 OpenAI 兼容端点（原逻辑
+/// 不变），其余 provider 复用 shared 的 `list_llm_models`（自动鉴权、按协议
+/// 族分发 Anthropic/Gemini/Ollama/Zhipu）。失败返回空列表，由对话框保留
+/// 静态列表兜底。
+async fn fetch_models_for_provider(
+    provider: &str,
+    api_base: &str,
+    api_key_env: Option<String>,
+) -> Vec<crate::chat::ModelInfo> {
+    if provider == "local" {
+        return fetch_models_from_local_api(api_base).await;
+    }
+
+    use xiaoo_shared::gateway::llm_assembly::{list_llm_models, LlmAssemblyInput};
+
+    let input = LlmAssemblyInput {
+        provider: provider.to_string(),
+        model: String::new(),
+        api_base: (!api_base.trim().is_empty()).then(|| api_base.to_string()),
+        api_key: None,
+        api_key_env,
+        context_window_override: None,
+        agent_id: None,
+    };
+    match list_llm_models(input).await {
+        Ok(models) => models
+            .into_iter()
+            .map(|model| {
+                let id = model.id;
+                let name = model.display_name.unwrap_or_else(|| id.clone());
+                crate::chat::ModelInfo { id, name }
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider,
+                error = %error,
+                "dynamic model list fetch failed; keeping static list"
+            );
+            vec![]
+        }
+    }
 }
 
 /// Coalesce a mouse-wheel (or pointer-motion) burst into a single redraw.

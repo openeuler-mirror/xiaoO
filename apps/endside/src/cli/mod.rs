@@ -11,8 +11,8 @@ use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_api::events::{LoopEndSummary, ToolResultEvent};
 use xiaoo_api::llm::CompressionPipeline;
 use xiaoo_api::llm::{
-    build_context_manager, create_llm_provider, resolve_config, resolve_model_context_length,
-    CompactOverrides, LlmProviderConfig, LlmProviderWrapper, ResolveInput,
+    build_context_manager, create_llm_provider, CompactOverrides, LlmProviderConfig,
+    LlmProviderWrapper,
 };
 // ---------------------------------------------------------------------------
 // CliEventSink
@@ -176,50 +176,22 @@ pub fn build_compression_pipeline(
     Ok(pipeline)
 }
 
+/// CLI 上下文窗口解析：动态探测链优先（与 TUI 网关共用
+/// `probe_dynamic_context_window`），失败回落 provider 构造时的静态值。
 pub async fn resolve_effective_context_window(
     config: &CliConfig,
     llm_provider: &Arc<LlmProviderWrapper>,
 ) -> usize {
-    let resolved = resolve_config(ResolveInput {
-        provider: Some(config.provider.clone()),
-        protocol: None,
-        api_key: config.api_key.clone(),
-        api_key_env: config.api_key_env.clone(),
-        base_url: config.api_base.clone(),
-    });
-
-    match resolved {
-        Ok(resolved) => match resolve_model_context_length(&resolved, &config.model).await {
-            Ok(Some(context_window)) => match usize::try_from(context_window) {
-                Ok(value) if value > 0 => return value,
-                Ok(_) => {}
-                Err(_) => {
-                    tracing::warn!(
-                        provider = %config.provider,
-                        model = %config.model,
-                        context_window,
-                        "dynamic CLI context window does not fit usize; falling back"
-                    );
-                }
-            },
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    provider = %config.provider,
-                    model = %config.model,
-                    error = %error,
-                    "failed to dynamically resolve CLI context window; falling back"
-                );
-            }
-        },
-        Err(error) => {
-            tracing::warn!(
-                provider = %config.provider,
-                model = %config.model,
-                error = %error,
-                "failed to resolve CLI provider config for dynamic context window lookup; falling back"
-            );
-        }
+    if let Some(window) = crate::gateway_api::runtime_request::probe_dynamic_context_window(
+        &config.provider,
+        &config.model,
+        config.api_key.clone(),
+        config.api_key_env.clone(),
+        config.api_base.clone(),
+    )
+    .await
+    {
+        return window;
     }
 
     llm_provider.capabilities().max_context_window.max(1)

@@ -2,6 +2,12 @@
 # Format: model_pattern = context_window
 # Matching is case-insensitive, model name contains pattern -> match
 #
+# 本表只是运行时解析链的兜底之一，完整优先级见
+# crates/llm-client/src/models/mod.rs 的 resolve_model_context_length：
+#   provider 动态 catalog > OpenRouter 公共模型库 > 本表 > provider 构造默认值
+# 未收录的新模型会先经 OpenRouter 动态解析（无需改代码）；OpenRouter 可用
+# XIAOO_DISABLE_OPENROUTER_LOOKUP=1 禁用或 XIAOO_OPENROUTER_MODELS_URL 指定镜像。
+#
 # Only add entries with official documentation links.
 # Unknown models should be excluded and rely on runtime detection.
 

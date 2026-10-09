@@ -42,6 +42,8 @@ fn known_model_context_matches_provider_prefixed_new_models() {
     );
 }
 
+/// OpenRouter 查询会触网，单测一律通过 `XIAOO_DISABLE_OPENROUTER_LOOKUP`
+/// 关闭，聚焦验证 provider catalog → 静态表 的回落顺序。
 #[tokio::test]
 async fn known_model_context_survives_catalog_failure() {
     let mut server = mockito::Server::new_async().await;
@@ -59,9 +61,12 @@ async fn known_model_context_survives_catalog_failure() {
         supports_model_catalog: true,
     };
 
-    let resolved = resolve_model_context_length(&config, "gpt-5.6-sol")
-        .await
-        .unwrap();
+    let resolved = temp_env::async_with_vars(
+        [("XIAOO_DISABLE_OPENROUTER_LOOKUP", Some("1"))],
+        resolve_model_context_length(&config, "gpt-5.6-sol"),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resolved, Some(1_050_000));
     mock.assert_async().await;

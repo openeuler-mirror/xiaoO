@@ -1,5 +1,7 @@
-use std::collections::BTreeSet;
-use std::time::Instant;
+use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -34,6 +36,63 @@ pub(crate) fn session_taken_over_notice_plain() -> String {
 
 const DEFAULT_SYSTEM_PROMPT: &str = include_str!("../prompts/tui_default_system_prompt.txt");
 const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
+
+/// 静态回落值与否定结果的缓存有效期：动态探测不可用（如 API key 未设、
+/// 断网）时回落静态值并短期缓存，到期后自动重试动态链——用户补设 key 或
+/// 网络恢复后至多 5 分钟内自我纠正。动态探测成功的结果不过期。
+const STATIC_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// turn 路径内联等待动态探测的总时限。探测链各 HTTP 客户端自身超时之和
+/// 可达 ~40s（provider catalog 30s + OpenRouter 10s），TUI 事件循环不可
+/// 承受无界等待；超限立即回落静态值放行当前 turn，探测任务转后台继续，
+/// 成功后自写缓存供后续 turn 使用（见 [`resolve_total_token_budget`]）。
+const PROBE_INLINE_DEADLINE: Duration = Duration::from_secs(3);
+
+/// 进程级动态上下文窗口缓存，键为 `provider|model|api_base`：
+/// `build_runtime_config` 每个本地 turn 都执行且探测可能触网，缓存后
+/// 每个组合至多探测一次；切 provider / model / api_base 自动换键。
+fn dynamic_context_window_cache() -> &'static Mutex<HashMap<String, CachedWindow>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedWindow>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 缓存条目：
+/// - `Dynamic`：动态探测成功，永不过期；
+/// - `Static`：静态回落值，按 [`STATIC_FALLBACK_CACHE_TTL`] 过期后重试动态链；
+/// - `Unresolved`：动态探测与静态估算均失败，同样按 TTL 过期——期间后续
+///   turn 快速失败不再触网，避免逐 turn 重复等待探测后报同一错误。
+#[derive(Clone, Copy)]
+enum CachedWindow {
+    Dynamic {
+        window: usize,
+    },
+    Static {
+        window: usize,
+        cached_at: Instant,
+    },
+    Unresolved {
+        cached_at: Instant,
+    },
+}
+
+impl CachedWindow {
+    fn still_valid(&self) -> bool {
+        match self {
+            Self::Dynamic { .. } => true,
+            Self::Static { cached_at, .. } | Self::Unresolved { cached_at } => {
+                cached_at.elapsed() < STATIC_FALLBACK_CACHE_TTL
+            }
+        }
+    }
+
+    /// 命中缓存时的解析结果；`Unresolved` 表示探测与静态估算均失败。
+    fn resolved_window(&self) -> Option<usize> {
+        match self {
+            Self::Dynamic { window } | Self::Static { window, .. } => Some(*window),
+            Self::Unresolved { .. } => None,
+        }
+    }
+}
 
 impl GatewayRuntime {
     pub async fn start_turn(&mut self, state: &mut AppState, prompt: String) -> Result<(), String> {
@@ -231,8 +290,10 @@ impl GatewayRuntime {
                     .trim_end_matches(['\r', '\n'])
                     .to_string()
             });
-        let total_budget =
-            crate::config::resolve_context_window(&state.agent_config).ok_or_else(|| {
+        let total_budget = self
+            .resolve_total_token_budget(state)
+            .await
+            .ok_or_else(|| {
                 "invalid TUI runtime state: unable to resolve context window".to_string()
             })?;
         let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
@@ -319,6 +380,29 @@ impl GatewayRuntime {
             mcp_servers: state.agent_config.mcp_servers().to_vec(),
             memory_automation: state.agent_config.memory_automation.clone(),
         })
+    }
+
+    /// 解析会话 token 总预算：动态探测链优先，失败/超时回落同步静态估算。
+    /// turn 路径只内联等待 [`PROBE_INLINE_DEADLINE`]——探测链各 HTTP 超时
+    /// 之和可达 ~40s，TUI 事件循环不能无界 await；超时后探测转后台自写
+    /// 缓存，下一个 turn 即自我纠正。结果按 `provider|model|api_base` 缓存
+    /// （静态回落值与"双失败"结果短期缓存以支持 key 补设/网络恢复后自动
+    /// 重试，见 [`STATIC_FALLBACK_CACHE_TTL`]）。
+    async fn resolve_total_token_budget(&self, state: &AppState) -> Option<usize> {
+        let llm = &state.agent_config.llm;
+        let provider = llm.provider.clone();
+        let model = llm.model.clone();
+        let api_key_env = llm.api_key_env.clone();
+        let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
+        resolve_window_with_probe(
+            format!("{}|{}|{}", llm.provider, llm.model, llm.api_base),
+            crate::config::resolve_context_window(&state.agent_config),
+            async move {
+                probe_dynamic_context_window(&provider, &model, None, api_key_env, api_base).await
+            },
+            PROBE_INLINE_DEADLINE,
+        )
+        .await
     }
 
     fn session_open_request(&self, state: &AppState) -> Result<SessionOpenRequest, String> {
@@ -408,6 +492,137 @@ pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfi
         api_key_env: state.agent_config.llm.api_key_env.clone(),
         api_key: None,
         reasoning_effort: Some(state.reasoning_effort),
+    }
+}
+
+/// 动态上下文窗口探测：构造 `ResolvedConfig` 并走共享解析链
+/// （provider catalog > OpenRouter > 静态表）。CLI 与 TUI 网关共用，
+/// 任一步失败仅记 warn 并返回 `None`，由调用方回落各自的静态估算。
+pub(crate) async fn probe_dynamic_context_window(
+    provider: &str,
+    model: &str,
+    api_key: Option<String>,
+    api_key_env: Option<String>,
+    api_base: Option<String>,
+) -> Option<usize> {
+    use xiaoo_api::llm::{resolve_config, resolve_model_context_length, ResolveInput};
+
+    if provider.trim().is_empty() {
+        return None;
+    }
+    let input = ResolveInput {
+        provider: Some(provider.to_string()),
+        protocol: None,
+        api_key,
+        api_key_env,
+        base_url: api_base,
+    };
+    let resolved = match resolve_config(input) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                %error,
+                "failed to resolve provider config for dynamic context window; falling back"
+            );
+            return None;
+        }
+    };
+    match resolve_model_context_length(&resolved, model).await {
+        Ok(Some(context)) => usize::try_from(context).ok().filter(|value| *value > 0),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(
+                provider = %provider,
+                model = %model,
+                %error,
+                "dynamic context window probe failed; falling back"
+            );
+            None
+        }
+    }
+}
+
+/// [`GatewayRuntime::resolve_total_token_budget`] 的状态机核心（提取为
+/// 自由函数以便单测：注入合成 probe 与短 deadline，不触网）：
+///
+/// 1. 缓存命中（`Dynamic` 永久，`Static`/`Unresolved` 在 TTL 内）直接返回；
+/// 2. 探测 spawn 到后台任务，任务成功时**自写** `Dynamic` 缓存——turn 侧
+///    超时放弃等待后任务仍在后台完成并纠正缓存，慢端点不损失动态精度；
+/// 3. turn 侧只内联等待 `inline_deadline`：期内完成即用动态值；
+/// 4. 超时/失败回落静态值：持锁写入前先检查后台任务是否已迟到写入
+///    `Dynamic`（让位，不得覆盖）；静态也失败则写 `Unresolved`，TTL 内
+///    后续 turn 快速失败不再触网。
+async fn resolve_window_with_probe(
+    cache_key: String,
+    static_window: Option<usize>,
+    probe: impl Future<Output = Option<usize>> + Send + 'static,
+    inline_deadline: Duration,
+) -> Option<usize> {
+    if let Some(cached) = dynamic_context_window_cache()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.get(&cache_key).copied())
+        .filter(|cached| cached.still_valid())
+    {
+        return cached.resolved_window();
+    }
+
+    let probe_key = cache_key.clone();
+    let probe = tokio::spawn(async move {
+        let window = probe.await;
+        if let Some(window) = window {
+            if let Ok(mut guard) = dynamic_context_window_cache().lock() {
+                guard.insert(probe_key, CachedWindow::Dynamic { window });
+            }
+        }
+        window
+    });
+
+    // Ok(Ok(Some(..)))：期内完成，缓存已由任务写入；
+    // Ok(Ok(None)) / Ok(Err(_))：探测快速失败/任务 panic，无后台续跑；
+    // Err(_)：turn 侧超时——JoinHandle 被 drop，任务脱离后在后台自写缓存。
+    match tokio::time::timeout(inline_deadline, probe).await {
+        Ok(Ok(Some(window))) => return Some(window),
+        Ok(Ok(None)) | Ok(Err(_)) => {}
+        Err(_) => {
+            tracing::debug!(
+                key = %cache_key,
+                "dynamic context window probe exceeded inline deadline; \
+                 using static estimate for this turn (probe continues in background)"
+            );
+        }
+    }
+
+    let Ok(mut guard) = dynamic_context_window_cache().lock() else {
+        // 锁中毒：放弃缓存，直接给静态结果。
+        return static_window;
+    };
+    // 后台探测可能在超时后、取锁前迟到写入 Dynamic——让位。
+    if let Some(CachedWindow::Dynamic { window }) = guard.get(&cache_key) {
+        return Some(*window);
+    }
+    match static_window {
+        Some(window) => {
+            guard.insert(
+                cache_key,
+                CachedWindow::Static {
+                    window,
+                    cached_at: Instant::now(),
+                },
+            );
+            Some(window)
+        }
+        None => {
+            guard.insert(
+                cache_key,
+                CachedWindow::Unresolved {
+                    cached_at: Instant::now(),
+                },
+            );
+            None
+        }
     }
 }
 
