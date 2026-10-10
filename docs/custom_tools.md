@@ -117,7 +117,7 @@ call at runtime.
 | `args` | No | `[]` | Argument list |
 | `stdin` | No | `"json"` | `"json"` writes the payload to stdin; `"none"` closes stdin |
 | `stdout` | No | `"text"` | `"text"` returns output as text; `"json"` parses it as JSON |
-| `env` | No | `[]` | Host environment variable names to forward |
+| `env` | No | `[]` | Declared but **not** forwarded; see [Environment](#environment) |
 
 `crates/tool/src/impl/plugin/manifest.rs:38-47`; the mode enums are `StdinMode` (`json` | `none`) and
 `StdoutMode` (`text` | `json`) at `crates/tool/src/impl/plugin/manifest.rs:50-63`. Any other value is
@@ -173,11 +173,15 @@ xiaoO always sets (`crates/tool/src/impl/plugin/executor.rs:160-169`):
 - `XIAOO_AGENT_ID`
 - `XIAOO_SESSION_ID` when available
 
-To forward additional host environment variables, list their names:
+Nothing else is inherited: the child is spawned with a cleared environment, and only
+`PATH`, `HOME`, `LANG`, `LC_ALL` and `TMPDIR` are put back so the program can start and run.
 
-```toml
-[exec]
-command = "python3"
-args = [".xiaoo/tools/query.py"]
-env = ["DATABASE_URL"]
-```
+`[exec] env` is **no longer forwarded**. The field is still accepted for compatibility, but
+entries are ignored (a warning is logged) — a manifest must not be able to name a host variable and
+read it back. The manifest lives in the agent-writable workspace, while the daemon injects every
+plaintext provider credential into its own environment
+(`apps/shared/src/llm_secrets.rs`, `inject_llm_secrets_into_env`), so forwarding names such as
+`ANTHROPIC_API_KEY` would hand those credentials to a process the workspace controls. Treat the
+standard variables above as the complete environment contract; if a tool needs configuration, pass
+it through the JSON stdin payload (which itself is derived from the call arguments) rather than the
+host environment.

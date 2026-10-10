@@ -399,7 +399,10 @@ env = ["XIAOO_TEST_DECLARED"]
     )
     .expect("script");
 
-    // daemon 环境里放一个"凭据"，以及一个 manifest 显式声明的变量。
+    // Two daemon-side variables: an unmistakable credential, and one the
+    // manifest names in `exec.env`. Neither may reach the child: the manifest
+    // is agent-writable input, so it must not be able to name a host variable
+    // and read it back after `env_clear()`.
     std::env::set_var("XIAOO_TEST_LEAKED_SECRET", "sk-must-not-leak");
     std::env::set_var("XIAOO_TEST_DECLARED", "declared-ok");
 
@@ -439,7 +442,8 @@ env = ["XIAOO_TEST_DECLARED"]
         "a declarative tool must not inherit the daemon's environment; it saw:\n{text}"
     );
     assert!(
-        text.contains("XIAOO_TEST_DECLARED=declared-ok"),
-        "a variable named in the manifest's exec.env must still be passed through; it saw:\n{text}"
+        !text.contains("XIAOO_TEST_DECLARED=declared-ok"),
+        "a variable named in the manifest's exec.env must not be resolved out of the \
+         daemon environment; it saw:\n{text}"
     );
 }
