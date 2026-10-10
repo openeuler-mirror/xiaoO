@@ -1307,7 +1307,7 @@ impl App {
         let mut selection_to_apply = None;
         let mut need_api_key_dialog = None;
         let mut close_dialog = false;
-        let mut check_local_fetch = false;
+        let mut check_model_fetch = false;
 
         if let Some(dialog) = self.state.provider_dialog.as_mut() {
             match key.code {
@@ -1341,11 +1341,11 @@ impl App {
                 }
                 KeyCode::Up => {
                     dialog.move_up();
-                    check_local_fetch = true;
+                    check_model_fetch = true;
                 }
                 KeyCode::Down => {
                     dialog.move_down();
-                    check_local_fetch = true;
+                    check_model_fetch = true;
                 }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
@@ -1360,8 +1360,8 @@ impl App {
             }
         }
 
-        if check_local_fetch {
-            self.attempt_local_model_fetch();
+        if check_model_fetch {
+            self.attempt_model_fetch();
         }
 
         if let Some(dialog) = need_api_key_dialog {
@@ -1566,24 +1566,46 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
-        self.attempt_local_model_fetch();
+        self.attempt_model_fetch();
     }
 
-    fn attempt_local_model_fetch(&mut self) {
-        let should_fetch = self.state.provider_dialog.as_ref().is_some_and(|d| {
-            !d.local_models_loading
-                && d.providers.get(d.selected_provider).is_some_and(|p| {
-                    p.name == "local" && p.models.len() == 1 && p.models[0].name.contains("(Local)")
-                })
-        });
-        if !should_fetch {
+    /// 对对话框当前选中的 provider 触发后台模型列表拉取：仅限
+    /// `supports_model_catalog` 的 provider（`local` 走无鉴权老路径，其余
+    /// 走 shared 的 `list_llm_models`，失败保留静态列表兜底）。
+    /// `fetched_providers` 防止同一对话框会话内重复拉取；切换 provider 时
+    /// 由 Up/Down 的 `check_model_fetch` 再次触发。
+    fn attempt_model_fetch(&mut self) {
+        let Some(dialog) = self.state.provider_dialog.as_ref() else {
+            return;
+        };
+        let Some(provider) = dialog.providers.get(dialog.selected_provider) else {
+            return;
+        };
+        let provider_name = provider.name.clone();
+        if dialog.local_models_loading
+            || dialog
+                .fetched_providers
+                .iter()
+                .any(|name| name == &provider_name)
+        {
             return;
         }
-        if let Some(dialog) = self.state.provider_dialog.as_mut() {
-            dialog.set_local_models_loading();
+        let supports_catalog = provider_name == "local"
+            || xiaoo_api::llm::resolve_provider_profile(&provider_name)
+                .is_some_and(|profile| profile.supports_model_catalog);
+        if !supports_catalog {
+            return;
         }
-        let api_base = crate::provider_service::default_api_base_for_provider("local");
-        self.start_local_model_fetch(api_base);
+
+        if let Some(dialog) = self.state.provider_dialog.as_mut() {
+            dialog.fetched_providers.push(provider_name.clone());
+            if provider_name == "local" {
+                dialog.set_local_models_loading();
+            }
+        }
+        let (api_key_env, api_base) =
+            persisted_selection_settings(&self.state.agent_config, &provider_name);
+        self.start_model_fetch(provider_name, api_base, api_key_env);
     }
 
     async fn handle_turn_delete_key(&mut self, key: KeyEvent) -> Result<()> {

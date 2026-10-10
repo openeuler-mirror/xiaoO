@@ -1,5 +1,6 @@
+use crate::providers::ReasoningDialect;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolFamily {
@@ -43,7 +44,7 @@ pub fn normalize_api_base(api_base: &str) -> String {
     api_base.trim().trim_end_matches('/').to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ProviderProfile {
     pub provider_name: &'static str,
     pub display_name: &'static str,
@@ -52,6 +53,11 @@ pub struct ProviderProfile {
     pub default_api_key_env: Option<&'static str>,
     pub api_key_required: bool,
     pub supports_model_catalog: bool,
+    /// `reasoning_effort` 取值方言。端点为 Zhipu API 但走 OpenAI 兼容协议
+    /// 的 provider（如 zai-coding-plan，api.z.ai/api/coding/paas/v4）必须
+    /// 声明 `Zhipu`，其余保持默认 `OpenAi`。由工厂的 OpenAI 兼容分支消费；
+    /// Zhipu 协议族由 `ZhipuProvider` 原生内置，不读此字段。
+    pub reasoning_dialect: ReasoningDialect,
 }
 
 impl ProviderProfile {
@@ -59,6 +65,338 @@ impl ProviderProfile {
         self.api_key_required
     }
 }
+
+/// 注册表条目的结构体更新基底（`..BASE_PROFILE`）：`reasoning_dialect` 缺省
+/// 为 OpenAi，仅 Zhipu 端点（zhipu / zai-coding-plan）显式声明
+/// `ReasoningDialect::Zhipu`。其余字段值只是占位——每条注册表条目都须
+/// 显式设置，不落缺省。
+const BASE_PROFILE: ProviderProfile = ProviderProfile {
+    provider_name: "",
+    display_name: "",
+    protocol_family: ProtocolFamily::OpenAiCompatible,
+    default_base_url: None,
+    default_api_key_env: None,
+    api_key_required: true,
+    supports_model_catalog: true,
+    reasoning_dialect: ReasoningDialect::OpenAi,
+};
+
+impl Default for ProviderProfile {
+    fn default() -> Self {
+        BASE_PROFILE
+    }
+}
+
+/// 单个 provider 的注册声明：`aliases` 为全部可识别名（小写，含规范名且
+/// 规范名 `profile.provider_name` 居首），`profile` 为装配档案。
+struct ProviderSpec {
+    aliases: &'static [&'static str],
+    profile: ProviderProfile,
+}
+
+/// 全部 provider 注册表，解析（`resolve_provider_profile`）、目录
+/// （`provider_catalog`）与支持名单（`supported_providers`）均由本表派生。
+/// **新增 provider 只需在表中增加一条**，不存在需要同步维护的第二份名单。
+/// 表序即目录展示序（常用 provider 在前）。
+const PROVIDER_SPECS: &[ProviderSpec] = &[
+    ProviderSpec {
+        aliases: &["openai"],
+        profile: ProviderProfile {
+            provider_name: "openai",
+            display_name: "OpenAI",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.openai.com/v1"),
+            default_api_key_env: Some("OPENAI_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["other"],
+        profile: ProviderProfile {
+            provider_name: "other",
+            display_name: "Other",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://openrouter.ai/api/v1"),
+            default_api_key_env: Some("OPENROUTER_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["anthropic", "claude"],
+        profile: ProviderProfile {
+            provider_name: "anthropic",
+            display_name: "Anthropic",
+            protocol_family: ProtocolFamily::Anthropic,
+            default_base_url: Some("https://api.anthropic.com/v1"),
+            default_api_key_env: Some("ANTHROPIC_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["gemini", "google"],
+        profile: ProviderProfile {
+            provider_name: "gemini",
+            display_name: "Gemini",
+            protocol_family: ProtocolFamily::Gemini,
+            default_base_url: Some("https://generativelanguage.googleapis.com"),
+            default_api_key_env: Some("GEMINI_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["ollama"],
+        profile: ProviderProfile {
+            provider_name: "ollama",
+            display_name: "Ollama",
+            protocol_family: ProtocolFamily::Ollama,
+            default_base_url: Some("http://localhost:11434"),
+            default_api_key_env: None,
+            api_key_required: false,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &[
+            "zhipu",
+            "zai-cn",
+            "zai-china",
+            "glm-cn",
+            "bigmodel",
+            "zai",
+            "z-ai",
+            "z.ai",
+            "zai-global",
+        ],
+        profile: ProviderProfile {
+            provider_name: "zhipu",
+            display_name: "Zhipu",
+            protocol_family: ProtocolFamily::Zhipu,
+            default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
+            default_api_key_env: Some("ZHIPU_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            reasoning_dialect: ReasoningDialect::Zhipu,
+        },
+    },
+    ProviderSpec {
+        aliases: &["deepseek"],
+        profile: ProviderProfile {
+            provider_name: "deepseek",
+            display_name: "DeepSeek",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.deepseek.com/v1"),
+            default_api_key_env: Some("DEEPSEEK_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["openrouter"],
+        profile: ProviderProfile {
+            provider_name: "openrouter",
+            display_name: "OpenRouter",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://openrouter.ai/api/v1"),
+            default_api_key_env: Some("OPENROUTER_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["openai-compatible"],
+        profile: ProviderProfile {
+            provider_name: "openai-compatible",
+            display_name: "OpenAI-compatible",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: None,
+            default_api_key_env: Some("OPENAI_COMPATIBLE_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["groq"],
+        profile: ProviderProfile {
+            provider_name: "groq",
+            display_name: "Groq",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.groq.com/openai/v1"),
+            default_api_key_env: Some("GROQ_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["mistral"],
+        profile: ProviderProfile {
+            provider_name: "mistral",
+            display_name: "Mistral",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.mistral.ai/v1"),
+            default_api_key_env: Some("MISTRAL_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["together"],
+        profile: ProviderProfile {
+            provider_name: "together",
+            display_name: "Together",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.together.xyz/v1"),
+            default_api_key_env: Some("TOGETHER_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["xai", "xai-grok"],
+        profile: ProviderProfile {
+            provider_name: "xai",
+            display_name: "xAI",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.x.ai/v1"),
+            default_api_key_env: Some("XAI_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["minimax", "minimax-openai"],
+        profile: ProviderProfile {
+            provider_name: "minimax",
+            display_name: "MiniMax",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.minimaxi.com/v1"),
+            default_api_key_env: Some("MINIMAX_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: false,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["minimax-anthropic"],
+        profile: ProviderProfile {
+            provider_name: "minimax-anthropic",
+            display_name: "MiniMax (Anthropic)",
+            protocol_family: ProtocolFamily::Anthropic,
+            default_base_url: Some("https://api.minimaxi.com/anthropic/v1"),
+            default_api_key_env: Some("MINIMAX_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: false,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["kimi", "moonshot", "moonshot-ai"],
+        profile: ProviderProfile {
+            provider_name: "kimi",
+            display_name: "Kimi",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.moonshot.cn/v1"),
+            default_api_key_env: Some("MOONSHOT_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &[
+            "minimax-coding-plan",
+            "minimax-code-plan",
+            "minimax-token-plan",
+        ],
+        profile: ProviderProfile {
+            provider_name: "minimax-coding-plan",
+            display_name: "MiniMax Coding Plan",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.minimax.io/v1"),
+            default_api_key_env: Some("MINIMAX_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &[
+            "kimi-coding-plan",
+            "kimi-code-plan",
+            "kimi-code",
+            "kimi-for-coding",
+        ],
+        profile: ProviderProfile {
+            provider_name: "kimi-coding-plan",
+            display_name: "Kimi Coding Plan",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.kimi.com/coding/v1"),
+            default_api_key_env: Some("KIMI_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["gitcode"],
+        profile: ProviderProfile {
+            provider_name: "gitcode",
+            display_name: "GitCode AI",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api-ai.gitcode.com/v1"),
+            default_api_key_env: Some("GITCODE_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: false,
+            ..BASE_PROFILE
+        },
+    },
+    ProviderSpec {
+        aliases: &["local"],
+        profile: ProviderProfile {
+            provider_name: "local",
+            display_name: "Local Model",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("http://localhost:8080/v1"),
+            default_api_key_env: None,
+            api_key_required: false,
+            supports_model_catalog: true,
+            ..BASE_PROFILE
+        },
+    },
+    // Z.AI Coding Plan (zhipu coding plan) — OpenAI-compatible endpoint at api.z.ai
+    ProviderSpec {
+        aliases: &[
+            "zai-coding-plan",
+            "zhipu-coding-plan",
+            "zhipuai-coding-plan",
+        ],
+        profile: ProviderProfile {
+            provider_name: "zai-coding-plan",
+            display_name: "Z.AI Coding Plan",
+            protocol_family: ProtocolFamily::OpenAiCompatible,
+            default_base_url: Some("https://api.z.ai/api/coding/paas/v4"),
+            default_api_key_env: Some("ZHIPU_API_KEY"),
+            api_key_required: true,
+            supports_model_catalog: true,
+            reasoning_dialect: ReasoningDialect::Zhipu,
+        },
+    },
+];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProviderMetadata {
@@ -73,244 +411,35 @@ pub struct ProviderMetadata {
 }
 
 pub fn provider_catalog() -> Vec<ProviderMetadata> {
-    let mut catalog = Vec::<ProviderMetadata>::new();
-    let mut indexes = HashMap::<String, usize>::new();
-
-    for candidate in supported_providers() {
-        let Some(profile) = resolve_provider_profile(candidate) else {
-            continue;
-        };
-        let name = profile.provider_name.to_string();
-        if let Some(index) = indexes.get(&name).copied() {
-            if *candidate != profile.provider_name {
-                catalog[index].aliases.push((*candidate).to_string());
+    PROVIDER_SPECS
+        .iter()
+        .map(|spec| {
+            let profile = &spec.profile;
+            ProviderMetadata {
+                name: profile.provider_name.to_string(),
+                display_name: profile.display_name.to_string(),
+                protocol_family: profile.protocol_family.as_str().to_string(),
+                default_base_url: profile.default_base_url.map(str::to_string),
+                default_api_key_env: profile.default_api_key_env.map(str::to_string),
+                api_key_required: profile.api_key_required,
+                supports_model_catalog: profile.supports_model_catalog,
+                aliases: spec
+                    .aliases
+                    .iter()
+                    .filter(|alias| **alias != profile.provider_name)
+                    .map(|alias| alias.to_string())
+                    .collect(),
             }
-            continue;
-        }
-
-        let aliases = if *candidate != profile.provider_name {
-            vec![(*candidate).to_string()]
-        } else {
-            Default::default()
-        };
-        indexes.insert(name.clone(), catalog.len());
-        catalog.push(ProviderMetadata {
-            name,
-            display_name: profile.display_name.to_string(),
-            protocol_family: profile.protocol_family.as_str().to_string(),
-            default_base_url: profile.default_base_url.map(str::to_string),
-            default_api_key_env: profile.default_api_key_env.map(str::to_string),
-            api_key_required: profile.api_key_required,
-            supports_model_catalog: profile.supports_model_catalog,
-            aliases,
-        });
-    }
-
-    catalog
+        })
+        .collect()
 }
 
 pub fn resolve_provider_profile(name: &str) -> Option<ProviderProfile> {
     let name = name.to_lowercase();
-
-    match name.as_str() {
-        "openai" => Some(ProviderProfile {
-            provider_name: "openai",
-            display_name: "OpenAI",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.openai.com/v1"),
-            default_api_key_env: Some("OPENAI_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "anthropic" | "claude" => Some(ProviderProfile {
-            provider_name: "anthropic",
-            display_name: "Anthropic",
-            protocol_family: ProtocolFamily::Anthropic,
-            default_base_url: Some("https://api.anthropic.com/v1"),
-            default_api_key_env: Some("ANTHROPIC_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "gemini" | "google" => Some(ProviderProfile {
-            provider_name: "gemini",
-            display_name: "Gemini",
-            protocol_family: ProtocolFamily::Gemini,
-            default_base_url: Some("https://generativelanguage.googleapis.com"),
-            default_api_key_env: Some("GEMINI_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "ollama" => Some(ProviderProfile {
-            provider_name: "ollama",
-            display_name: "Ollama",
-            protocol_family: ProtocolFamily::Ollama,
-            default_base_url: Some("http://localhost:11434"),
-            default_api_key_env: None,
-            api_key_required: false,
-            supports_model_catalog: true,
-        }),
-        "zai-cn" | "zai-china" | "zhipu" | "glm-cn" | "bigmodel" | "zai" | "z-ai" | "z.ai"
-        | "zai-global" => Some(ProviderProfile {
-            provider_name: "zhipu",
-            display_name: "Zhipu",
-            protocol_family: ProtocolFamily::Zhipu,
-            default_base_url: Some("https://open.bigmodel.cn/api/paas/v4"),
-            default_api_key_env: Some("ZHIPU_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "deepseek" => Some(ProviderProfile {
-            provider_name: "deepseek",
-            display_name: "DeepSeek",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.deepseek.com/v1"),
-            default_api_key_env: Some("DEEPSEEK_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "openrouter" => Some(ProviderProfile {
-            provider_name: "openrouter",
-            display_name: "OpenRouter",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://openrouter.ai/api/v1"),
-            default_api_key_env: Some("OPENROUTER_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "openai-compatible" => Some(ProviderProfile {
-            provider_name: "openai-compatible",
-            display_name: "OpenAI-compatible",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: None,
-            default_api_key_env: Some("OPENAI_COMPATIBLE_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "groq" => Some(ProviderProfile {
-            provider_name: "groq",
-            display_name: "Groq",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.groq.com/openai/v1"),
-            default_api_key_env: Some("GROQ_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "mistral" => Some(ProviderProfile {
-            provider_name: "mistral",
-            display_name: "Mistral",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.mistral.ai/v1"),
-            default_api_key_env: Some("MISTRAL_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "together" => Some(ProviderProfile {
-            provider_name: "together",
-            display_name: "Together",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.together.xyz/v1"),
-            default_api_key_env: Some("TOGETHER_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "xai" | "xai-grok" => Some(ProviderProfile {
-            provider_name: "xai",
-            display_name: "xAI",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.x.ai/v1"),
-            default_api_key_env: Some("XAI_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "minimax" | "minimax-openai" => Some(ProviderProfile {
-            provider_name: "minimax",
-            display_name: "MiniMax",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.minimaxi.com/v1"),
-            default_api_key_env: Some("MINIMAX_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: false,
-        }),
-        "minimax-anthropic" => Some(ProviderProfile {
-            provider_name: "minimax-anthropic",
-            display_name: "MiniMax (Anthropic)",
-            protocol_family: ProtocolFamily::Anthropic,
-            default_base_url: Some("https://api.minimaxi.com/anthropic/v1"),
-            default_api_key_env: Some("MINIMAX_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: false,
-        }),
-        "kimi" | "moonshot" | "moonshot-ai" => Some(ProviderProfile {
-            provider_name: "kimi",
-            display_name: "Kimi",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.moonshot.cn/v1"),
-            default_api_key_env: Some("MOONSHOT_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "minimax-coding-plan" | "minimax-code-plan" | "minimax-token-plan" => {
-            Some(ProviderProfile {
-                provider_name: "minimax-coding-plan",
-                display_name: "MiniMax Coding Plan",
-                protocol_family: ProtocolFamily::OpenAiCompatible,
-                default_base_url: Some("https://api.minimax.io/v1"),
-                default_api_key_env: Some("MINIMAX_API_KEY"),
-                api_key_required: true,
-                supports_model_catalog: true,
-            })
-        }
-        "kimi-coding-plan" | "kimi-code-plan" | "kimi-code" | "kimi-for-coding" => {
-            Some(ProviderProfile {
-                provider_name: "kimi-coding-plan",
-                display_name: "Kimi Coding Plan",
-                protocol_family: ProtocolFamily::OpenAiCompatible,
-                default_base_url: Some("https://api.kimi.com/coding/v1"),
-                default_api_key_env: Some("KIMI_API_KEY"),
-                api_key_required: true,
-                supports_model_catalog: true,
-            })
-        }
-        "gitcode" => Some(ProviderProfile {
-            provider_name: "gitcode",
-            display_name: "GitCode AI",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api-ai.gitcode.com/v1"),
-            default_api_key_env: Some("GITCODE_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: false,
-        }),
-        // Z.AI Coding Plan (zhipu coding plan) — OpenAI-compatible endpoint at api.z.ai
-        // Aliases: zai-coding-plan, zhipu-coding-plan, zhipuai-coding-plan
-        "zai-coding-plan" | "zhipu-coding-plan" | "zhipuai-coding-plan" => Some(ProviderProfile {
-            provider_name: "zai-coding-plan",
-            display_name: "Z.AI Coding Plan",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://api.z.ai/api/coding/paas/v4"),
-            default_api_key_env: Some("ZHIPU_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        "local" => Some(ProviderProfile {
-            provider_name: "local",
-            display_name: "Local Model",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("http://localhost:8080/v1"),
-            default_api_key_env: None,
-            api_key_required: false,
-            supports_model_catalog: true,
-        }),
-        "other" => Some(ProviderProfile {
-            provider_name: "other",
-            display_name: "Other",
-            protocol_family: ProtocolFamily::OpenAiCompatible,
-            default_base_url: Some("https://openrouter.ai/api/v1"),
-            default_api_key_env: Some("OPENROUTER_API_KEY"),
-            api_key_required: true,
-            supports_model_catalog: true,
-        }),
-        _ => None,
-    }
+    PROVIDER_SPECS
+        .iter()
+        .find(|spec| spec.aliases.contains(&name.as_str()))
+        .map(|spec| spec.profile)
 }
 
 pub fn resolve_protocol_family(name: &str) -> Option<ProtocolFamily> {
@@ -320,50 +449,16 @@ pub fn resolve_protocol_family(name: &str) -> Option<ProtocolFamily> {
     resolve_provider_profile(name).map(|p| p.protocol_family)
 }
 
+static SUPPORTED_PROVIDERS: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// 全部可识别 provider 名（含别名），由 [`PROVIDER_SPECS`] 派生。
 pub fn supported_providers() -> &'static [&'static str] {
-    &[
-        "openai",
-        "other",
-        "anthropic",
-        "claude",
-        "gemini",
-        "google",
-        "ollama",
-        "zai",
-        "zai-global",
-        "z.ai",
-        "zai-cn",
-        "zai-china",
-        "zhipu",
-        "glm-cn",
-        "bigmodel",
-        "deepseek",
-        "openrouter",
-        "openai-compatible",
-        "groq",
-        "mistral",
-        "together",
-        "xai",
-        "xai-grok",
-        "minimax",
-        "minimax-openai",
-        "minimax-anthropic",
-        "kimi",
-        "moonshot",
-        "moonshot-ai",
-        "minimax-coding-plan",
-        "minimax-code-plan",
-        "minimax-token-plan",
-        "kimi-coding-plan",
-        "kimi-code-plan",
-        "kimi-code",
-        "kimi-for-coding",
-        "gitcode",
-        "local",
-        "zai-coding-plan",
-        "zhipu-coding-plan",
-        "zhipuai-coding-plan",
-    ]
+    SUPPORTED_PROVIDERS.get_or_init(|| {
+        PROVIDER_SPECS
+            .iter()
+            .flat_map(|spec| spec.aliases.iter().copied())
+            .collect()
+    })
 }
 
 #[cfg(test)]

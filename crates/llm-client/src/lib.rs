@@ -33,7 +33,7 @@ pub use provider_registry::{
     normalize_api_base, provider_catalog, resolve_protocol_family, resolve_provider_profile,
     supported_providers, ProtocolFamily, ProviderMetadata, ProviderProfile,
 };
-pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig};
+pub use providers::{OpenAiCompatibleProvider, OpenAiCompatibleProviderConfig, ReasoningDialect};
 pub use resolver::{resolve_config, ResolveError, ResolveInput, ResolvedConfig};
 pub use url_fallback::{
     build_base_url_candidates, build_final_candidates, is_configuration_error,

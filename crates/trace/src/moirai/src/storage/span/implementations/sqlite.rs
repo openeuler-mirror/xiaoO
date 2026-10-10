@@ -267,7 +267,7 @@ impl SqliteStorage {
         )?;
 
         let rows = stmt.query_map(rusqlite::params![trace_id], |row| {
-            Ok(SqliteStorage::span_from_row(&conn, row))
+            Ok(SqliteStorage::span_from_row(conn, row))
         })?;
 
         let mut spans = Vec::new();

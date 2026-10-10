@@ -188,19 +188,6 @@ impl PlanPanelState {
             .position(self.scroll_offset.min(max_scroll));
     }
 
-    pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        self.sync_scrollbar_state();
-    }
-
-    pub fn scroll_down(&mut self) {
-        let max = self.max_scroll_offset();
-        if self.scroll_offset < max {
-            self.scroll_offset = (self.scroll_offset + 1).min(max);
-        }
-        self.sync_scrollbar_state();
-    }
-
     /// Scroll up by `lines` lines in one step (mouse wheel notch),
     /// clamped at the top so offset never underflows.
     pub fn scroll_up_by(&mut self, lines: usize) {

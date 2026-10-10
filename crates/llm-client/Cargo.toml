@@ -30,4 +30,5 @@ toml.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 mockito = "1"
-temp-env = "0.3"
+# async_closure：单测中 async_with_vars 临时改环境变量（串行保护内建）。
+temp-env = { version = "0.3", features = ["async_closure"] }

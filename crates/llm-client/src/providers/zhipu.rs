@@ -5,7 +5,7 @@ use agent_contracts::{LlmProvider, ProviderCapabilities};
 use agent_llm::ChatMessageExt;
 use agent_types::{ChatMessage, LlmRequest, LlmResponse, MessageRole, ResponseFormat, StreamChunk};
 
-use super::openai_family::{OpenAiFamilyAuthStyle, OpenAiFamilyProvider};
+use super::openai_family::{OpenAiFamilyAuthStyle, OpenAiFamilyProvider, ReasoningDialect};
 
 pub(crate) struct ZhipuProvider {
     inner: OpenAiFamilyProvider,
@@ -20,7 +20,8 @@ impl ZhipuProvider {
                 model,
                 OpenAiFamilyAuthStyle::Bearer,
                 vec![],
-            ),
+            )
+            .with_reasoning_dialect(ReasoningDialect::Zhipu),
         }
     }
 

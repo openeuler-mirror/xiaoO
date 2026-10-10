@@ -2,6 +2,7 @@ mod anthropic;
 mod gemini;
 mod ollama;
 mod openai_family;
+mod openrouter;
 
 use std::sync::OnceLock;
 
@@ -70,38 +71,59 @@ pub trait ModelCatalog: Send + Sync {
     async fn list_models(&self) -> Result<Vec<ModelSummary>, LlmError>;
 }
 
+/// 解析模型上下文窗口，优先级：provider 动态 catalog > OpenRouter 公共模型库
+/// > `known_models.toml` 静态表 > Ollama `/api/show`。
+///
+/// 全链 fail-soft：任一级失败只记 warn 并落穿到下一级，绝不因网络问题
+/// 阻塞 provider 装配（调用方在全部未命中时使用 provider 构造 fallback）。
+///
+/// OpenRouter 位于静态表**之前**：静态表的 contains 模糊匹配会给未收录的
+/// 新模型错误答案（如 `glm-5.3` 会命中 `glm-5` 条目得到 200k，实际 1M），
+/// 只有让动态数据先行才能做到新模型零代码改动。
 pub async fn resolve_model_context_length(
     config: &ResolvedConfig,
     model: &str,
 ) -> Result<Option<u64>, LlmError> {
-    let known = get_known_model_context_length(model);
-    let dynamic_from_catalog = if config.supports_model_catalog {
-        let catalog = match create_model_catalog(config) {
-            Ok(catalog) => catalog,
-            Err(_) if known.is_some() => return Ok(known),
-            Err(error) => return Err(error),
+    if config.supports_model_catalog {
+        let catalog_result = match create_model_catalog(config) {
+            Ok(catalog) => catalog.list_models().await,
+            Err(error) => {
+                tracing::warn!(
+                    model = %model,
+                    error = %error,
+                    "provider model catalog unavailable; continuing resolution chain"
+                );
+                Ok(Vec::new())
+            }
         };
-        match catalog.list_models().await {
-            Ok(models) => find_model_summary(&models, model).and_then(|summary| {
-                summary.context_length.or_else(|| {
-                    summary
-                        .raw
-                        .as_ref()
-                        .and_then(extract_context_length_from_raw)
-                })
-            }),
-            Err(_) if known.is_some() => return Ok(known),
-            Err(error) => return Err(error),
+        match catalog_result {
+            Ok(models) => {
+                if let Some(context) = find_model_summary(&models, model).and_then(|summary| {
+                    summary.context_length.or_else(|| {
+                        summary
+                            .raw
+                            .as_ref()
+                            .and_then(extract_context_length_from_raw)
+                    })
+                }) {
+                    return Ok(Some(context));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    model = %model,
+                    error = %error,
+                    "provider model catalog request failed; continuing resolution chain"
+                );
+            }
         }
-    } else {
-        None
-    };
-
-    if dynamic_from_catalog.is_some() {
-        return Ok(dynamic_from_catalog);
     }
 
-    if let Some(known) = known {
+    if let Some(context) = openrouter::lookup_context_length(model).await {
+        return Ok(Some(context));
+    }
+
+    if let Some(known) = get_known_model_context_length(model) {
         return Ok(Some(known));
     }
 

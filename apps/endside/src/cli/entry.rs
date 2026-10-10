@@ -637,10 +637,8 @@ async fn run_once(
                     .unwrap()
                 );
                 let _ = std::io::stdout().flush();
-            } else {
-                if !result.raw_reply.is_empty() {
-                    println!("{}", result.raw_reply);
-                }
+            } else if !result.raw_reply.is_empty() {
+                println!("{}", result.raw_reply);
             }
         }
         Err(e) => {

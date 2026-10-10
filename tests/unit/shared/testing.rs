@@ -3,8 +3,8 @@
 //! 应用测试用它，无需自己 `impl LlmProvider`——也就不需要 `LlmRequest` /
 //! `LlmResponse` / `StreamChunk` / `LlmError` 等底层词汇进入应用测试代码。
 //! 这些词汇仅在本模块内部使用，不向应用导出。
-
-#![cfg(feature = "test-support")]
+//!
+//! （feature 门控在 `lib.rs` 的 `#[cfg]` mod 声明上，文件内不再重复。）
 
 use std::sync::Arc;
 
