@@ -101,3 +101,76 @@ async fn init_mcp_tools_surfaces_mock_server() {
     assert_eq!(servers[0].tools.len(), 1);
     assert_eq!(servers[0].tools[0].name, "echo");
 }
+
+/// End-to-end regression test for the stdio environment isolation.
+///
+/// A real stdio server is spawned and asked to dump its own environment to a
+/// file. The daemon's environment carries every provider credential
+/// (`inject_llm_secrets_into_env`), so a server started from a workspace
+/// `.mcp.json` must not be able to read them.
+#[tokio::test]
+async fn stdio_server_does_not_inherit_daemon_credentials() {
+    const LEAK_PROBE: &str = "XIAOO_MCP_ENV_ISOLATION_PROBE";
+
+    // A variable that exists only in this (host) process, standing in for the
+    // credentials the daemon injects into its own environment.
+    std::env::set_var(LEAK_PROBE, "must-not-reach-the-child");
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let out_path = out_dir.path().join("child_env.txt");
+
+    let config = McpServerConfig {
+        name: "env-probe".to_string(),
+        transport: Transport::Stdio,
+        command: Some("/bin/sh".to_string()),
+        args: vec![
+            "-c".to_string(),
+            "printenv > \"$MCP_ENV_PROBE_OUT\"".to_string(),
+        ],
+        env: HashMap::from([(
+            "MCP_ENV_PROBE_OUT".to_string(),
+            out_path.to_string_lossy().into_owned(),
+        )]),
+        url: None,
+        bearer_token_env: None,
+        agent_id: None,
+        headers: std::collections::BTreeMap::new(),
+        enabled: Some(true),
+        timeout_ms: 10_000,
+        effect: mcp::EffectSection::default(),
+    };
+
+    let _client = mcp::McpClient::connect(&config)
+        .await
+        .expect("connect env-probe server");
+
+    let dumped = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // The redirection creates the file before `printenv` writes to it,
+            // so wait for content rather than mere existence.
+            if let Ok(text) = std::fs::read_to_string(&out_path) {
+                if !text.is_empty() {
+                    break text;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("stdin/stdout probe server did not write its environment");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+
+    assert!(
+        dumped.contains("PATH="),
+        "the child should still be able to start programs; env was:\n{dumped}"
+    );
+    assert!(
+        dumped.contains("MCP_ENV_PROBE_OUT="),
+        "explicitly configured env must still reach the child; env was:\n{dumped}"
+    );
+    assert!(
+        !dumped.contains(LEAK_PROBE),
+        "a stdio MCP server must not inherit the daemon environment; env was:\n{dumped}"
+    );
+}

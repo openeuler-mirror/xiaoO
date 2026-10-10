@@ -29,6 +29,37 @@ pub struct StdioTransport {
     timeout_ms: u64,
 }
 
+/// Environment variables a stdio MCP server inherits from the host process.
+///
+/// Everything else is dropped by [`child_env`]. Provider credentials are
+/// injected into the daemon's own environment (`inject_llm_secrets_into_env`),
+/// so inheriting the whole environment would hand every API key to a process
+/// whose `command` may come from a workspace-scoped, agent-writable file such
+/// as `.mcp.json`.
+const INHERITED_ENV_NAMES: [&str; 5] = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"];
+
+/// Build the environment for a stdio MCP server.
+///
+/// `parent` is the host environment (normally `std::env::vars()`); only
+/// [`INHERITED_ENV_NAMES`] are carried over from it. The server's explicitly
+/// configured `configured` variables are applied afterwards, so an operator
+/// can still opt a server into a specific variable — and those entries win on
+/// conflict, matching the previous `Command::envs` behaviour.
+fn child_env<I>(parent: I, configured: &HashMap<String, String>) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env: Vec<(String, String)> = parent
+        .into_iter()
+        .filter(|(key, _)| INHERITED_ENV_NAMES.contains(&key.as_str()))
+        .collect();
+    for (key, value) in configured {
+        env.retain(|(existing, _)| existing != key);
+        env.push((key.clone(), value.clone()));
+    }
+    env
+}
+
 impl StdioTransport {
     pub async fn spawn(
         command: &str,
@@ -38,7 +69,8 @@ impl StdioTransport {
     ) -> Result<Self, McpError> {
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .envs(env)
+            .env_clear()
+            .envs(child_env(std::env::vars(), env))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -274,3 +306,7 @@ impl McpTransport for StdioTransport {
 
 // Note: no custom `Drop` — `Command::kill_on_drop(true)` ensures the child is
 // killed when `Child` (held inside the `Mutex<Option<Child>>`) drops.
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/mcp/transport/stdio_test.rs"]
+mod tests;
