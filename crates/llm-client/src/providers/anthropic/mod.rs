@@ -28,9 +28,8 @@ pub(crate) struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub(crate) fn new(api_key: String, base_url: String, model: String) -> Self {
-        let max_context_window = crate::models::get_known_model_context_length(&model)
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(200000);
+        let max_context_window =
+            crate::provider_registry::ProtocolFamily::Anthropic.static_context_window();
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))

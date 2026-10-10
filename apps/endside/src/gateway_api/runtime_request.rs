@@ -496,8 +496,8 @@ pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfi
 }
 
 /// 动态上下文窗口探测：构造 `ResolvedConfig` 并走共享解析链
-/// （provider catalog > OpenRouter > 静态表）。CLI 与 TUI 网关共用，
-/// 任一步失败仅记 warn 并返回 `None`，由调用方回落各自的静态估算。
+/// （provider catalog > OpenRouter > Ollama `/api/show`）。CLI 与 TUI 网关
+/// 共用，任一步失败仅记 warn 并返回 `None`，由调用方回落各自的静态估算。
 pub(crate) async fn probe_dynamic_context_window(
     provider: &str,
     model: &str,

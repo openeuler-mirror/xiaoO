@@ -4,8 +4,6 @@ mod ollama;
 mod openai_family;
 mod openrouter;
 
-use std::sync::OnceLock;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -72,14 +70,10 @@ pub trait ModelCatalog: Send + Sync {
 }
 
 /// 解析模型上下文窗口，优先级：provider 动态 catalog > OpenRouter 公共模型库
-/// > `known_models.toml` 静态表 > Ollama `/api/show`。
+/// > Ollama `/api/show`。
 ///
 /// 全链 fail-soft：任一级失败只记 warn 并落穿到下一级，绝不因网络问题
 /// 阻塞 provider 装配（调用方在全部未命中时使用 provider 构造 fallback）。
-///
-/// OpenRouter 位于静态表**之前**：静态表的 contains 模糊匹配会给未收录的
-/// 新模型错误答案（如 `glm-5.3` 会命中 `glm-5` 条目得到 200k，实际 1M），
-/// 只有让动态数据先行才能做到新模型零代码改动。
 pub async fn resolve_model_context_length(
     config: &ResolvedConfig,
     model: &str,
@@ -123,10 +117,6 @@ pub async fn resolve_model_context_length(
         return Ok(Some(context));
     }
 
-    if let Some(known) = get_known_model_context_length(model) {
-        return Ok(Some(known));
-    }
-
     match config.protocol {
         ProtocolFamily::Ollama => {
             OllamaModelCatalog::new(config.base_url.clone())
@@ -135,45 +125,6 @@ pub async fn resolve_model_context_length(
         }
         _ => Ok(None),
     }
-}
-
-pub fn get_known_model_context_length(model: &str) -> Option<u64> {
-    static KNOWN_MODELS: OnceLock<Vec<(String, u64)>> = OnceLock::new();
-
-    let models = KNOWN_MODELS.get_or_init(|| {
-        let content = include_str!("known_models.toml");
-        let parsed: toml::Value = toml::from_str(content).expect("Invalid known_models.toml");
-        let mut models: Vec<_> = parsed
-            .get("models")
-            .and_then(|v| v.as_table())
-            .expect("known_models.toml must have a [models] section")
-            .iter()
-            .map(|(pattern, value)| {
-                let context = value
-                    .as_integer()
-                    .expect("model context must be an integer")
-                    as u64;
-                (normalize_model_id(pattern), context)
-            })
-            .collect();
-
-        // Model IDs may include provider prefixes or provider-specific suffixes,
-        // so matching intentionally uses `contains`. Prefer the most specific
-        // pattern to keep a family entry such as `glm-5` from shadowing
-        // versioned entries such as `glm-5.2`.
-        models.sort_by(|(left, _), (right, _)| {
-            right.len().cmp(&left.len()).then_with(|| left.cmp(right))
-        });
-        models
-    });
-
-    let normalized = normalize_model_id(model);
-    for (pattern, context) in models {
-        if normalized.contains(pattern) {
-            return Some(*context);
-        }
-    }
-    None
 }
 
 pub fn create_model_catalog(config: &ResolvedConfig) -> Result<Box<dyn ModelCatalog>, LlmError> {

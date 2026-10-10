@@ -11,6 +11,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use xiaoo_shared::backend::ProcessGroupCleanupGuard;
 pub use xiaoo_shared::{backend, gateway};
@@ -48,6 +49,10 @@ pub(crate) use support::error_log;
 
 const CONFIG_ENV_VAR: &str = "XIAOO_CONFIG";
 const CLI_SWITCH: &str = "--cli";
+
+/// 启动校验等待动态上下文窗口探测的总时限：探测链各 HTTP 客户端自身超时
+/// 之和可达 ~40s，启动阶段不可无界等待；超限回落协议族静态兜底值放行。
+const CONFIG_PROBE_DEADLINE: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -234,7 +239,8 @@ fn default_config_path() -> Result<PathBuf> {
 }
 
 async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBuf) -> Result<()> {
-    let (validation_errors, validation_warnings) = validate_config_for_tui(&config, &config_path);
+    let (validation_errors, validation_warnings) =
+        validate_config_for_tui(&config, &config_path).await;
 
     for warning in &validation_warnings {
         tracing::warn!("Config validation warning: {}", warning);
@@ -330,16 +336,52 @@ async fn run_tui(config: config::Config, config_path: PathBuf, workspace: PathBu
     result
 }
 
-/// Validate configuration for TUI
-fn validate_config_for_tui(
+/// Validate configuration for TUI.
+///
+/// 上下文窗口优先走动态探测链（[`crate::gateway_api::runtime_request::probe_dynamic_context_window`]，
+/// 与 TUI 网关同一链），以内联 deadline 封顶，超时/失败回落协议族静态兜底
+/// 值（[`config::resolve_context_window`]）。这样大上下文模型配大 `max_tokens`
+/// 不会因静态兜底 128k/200k 低估而误判为错误、阻断启动。
+async fn validate_config_for_tui(
     config: &config::Config,
+    config_path: &Path,
+) -> (Vec<String>, Vec<String>) {
+    let resolved_context_window = resolve_context_window_for_validation(config).await;
+    validate_max_tokens_against_window(
+        config.llm.max_tokens,
+        &config.llm.model,
+        resolved_context_window,
+        config_path,
+    )
+}
+
+/// 启动校验专用的窗口解析：动态探测优先（有界等待），回落静态兜底。
+async fn resolve_context_window_for_validation(config: &config::Config) -> usize {
+    let llm = &config.llm;
+    let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
+    let probe = crate::gateway_api::runtime_request::probe_dynamic_context_window(
+        &llm.provider,
+        &llm.model,
+        None,
+        llm.api_key_env.clone(),
+        api_base,
+    );
+    match tokio::time::timeout(CONFIG_PROBE_DEADLINE, probe).await {
+        Ok(Some(window)) if window > 0 => window,
+        _ => config::resolve_context_window(config).unwrap_or(128_000),
+    }
+}
+
+/// 纯函数：给定解析出的上下文窗口与配置，产出 `(errors, warnings)`。
+/// 抽离为独立函数以便单测注入合成窗口，不触网。
+fn validate_max_tokens_against_window(
+    max_tokens: u32,
+    model: &str,
+    resolved_context_window: usize,
     config_path: &Path,
 ) -> (Vec<String>, Vec<String>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-
-    let resolved_context_window = config::resolve_context_window(config).unwrap_or(128_000);
-    let max_tokens = config.llm.max_tokens;
 
     let max_reasonable_output_ratio = 0.5;
     let max_reasonable_output_tokens =
@@ -349,7 +391,7 @@ fn validate_config_for_tui(
         warnings.push(format!(
             "max_tokens {} exceeds 50% of the estimated context window for model {}. \
             This may limit input space.",
-            max_tokens, config.llm.model
+            max_tokens, model
         ));
     }
 

@@ -40,7 +40,8 @@ impl GeminiProvider {
                 supports_streaming: true,
                 supports_tool_calls: true,
                 supports_json_mode: true,
-                max_context_window: 1000000,
+                max_context_window: crate::provider_registry::ProtocolFamily::Gemini
+                    .static_context_window(),
                 model_name: model,
             },
         }

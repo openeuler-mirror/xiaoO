@@ -65,9 +65,8 @@ impl OpenAiFamilyProvider {
         let skip_tls_verify = std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
             .map(|v| v.trim() == "0")
             .unwrap_or(false);
-        let max_context_window = crate::models::get_known_model_context_length(&model)
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(128000);
+        let max_context_window =
+            crate::provider_registry::ProtocolFamily::OpenAiCompatible.static_context_window();
         Self {
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))

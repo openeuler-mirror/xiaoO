@@ -28,7 +28,8 @@ impl OllamaProvider {
                 supports_streaming: true,
                 supports_tool_calls: true,
                 supports_json_mode: true,
-                max_context_window: 128000,
+                max_context_window: crate::provider_registry::ProtocolFamily::Ollama
+                    .static_context_window(),
                 model_name: model,
             },
         }

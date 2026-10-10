@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xiaoo_api::chat::HookerRegistryConfig;
 use xiaoo_api::chat::ReasoningEffort;
-use xiaoo_api::llm::ProtocolFamily;
 use xiaoo_shared::builtin_agent_roles::{PLAN_AGENT_DESCRIPTION, PLAN_AGENT_ID, PLAN_AGENT_PROMPT};
 use xiaoo_shared::gateway::MemoryAutomationConfig;
 use xiaoo_shared::lsp_support::{AutoInstall, LspServiceRegistry, ServerConfig};
@@ -512,18 +511,12 @@ fn default_llm_max_tokens() -> u32 {
     DEFAULT_LLM_MAX_TOKENS
 }
 
+/// 协议族的静态兜底上下文窗口：仅用于同步启动校验与运行时动态探测失败
+/// 后的粗估。真实窗口以动态探测链（provider catalog > OpenRouter > Ollama
+/// `/api/show`）为准，见 `gateway_api::runtime_request::probe_dynamic_context_window`。
 pub fn resolve_context_window(config: &Config) -> Option<usize> {
-    if let Some(known) = xiaoo_api::llm::get_known_model_context_length(&config.llm.model) {
-        return usize::try_from(known).ok();
-    }
-
-    match xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)? {
-        ProtocolFamily::OpenAiCompatible | ProtocolFamily::Ollama | ProtocolFamily::Zhipu => {
-            Some(128_000)
-        }
-        ProtocolFamily::Anthropic => Some(200_000),
-        ProtocolFamily::Gemini => Some(1_000_000),
-    }
+    xiaoo_api::llm::resolve_protocol_family(&config.llm.provider)
+        .map(|family| family.static_context_window())
 }
 
 #[cfg(test)]
