@@ -1,6 +1,6 @@
-//! OpenRouter 公共模型库查询：为静态表未收录的新模型在运行时补齐上下文
-//! 窗口数据（链路位置见 `models::resolve_model_context_length`：provider
-//! catalog > OpenRouter > 静态表）。
+//! OpenRouter 公共模型库查询：在运行时动态解析模型上下文窗口数据
+//! （链路位置见 `models::resolve_model_context_length`：provider
+//! catalog > OpenRouter > Ollama `/api/show`）。
 //!
 //! 请求为匿名 GET 公开端点，不携带用户数据与 API key；全链 fail-soft：
 //! 内存缓存（TTL 24h）→ 新鲜磁盘缓存 → HTTP → 过期磁盘缓存 → 过期内存
@@ -88,8 +88,8 @@ impl OpenRouterCatalog {
 
     /// 加载条目：新鲜内存缓存 → 新鲜磁盘缓存 → HTTP → 过期磁盘缓存 →
     /// 过期内存缓存。新鲜磁盘缓存优先于 HTTP——进程冷启动（内存为空）
-    /// 时命中未过期的磁盘缓存即零网络返回；过期数据仍比编译期内嵌的
-    /// 静态表新，作为离线兜底。
+    /// 时命中未过期的磁盘缓存即零网络返回；过期缓存仍比裸协议族静态兜底
+    /// 值更接近真实窗口，作为离线兜底。
     async fn load_entries(&self) -> Option<Vec<CatalogEntry>> {
         if let Some(cached) = self.memory.read().ok().and_then(|guard| guard.clone()) {
             if cached.fresh() {

@@ -261,13 +261,6 @@ fn build_body_omits_thinking_when_reasoning_effort_is_off() {
 }
 
 #[test]
-fn claude_5_capability_uses_known_context_window() {
-    let provider = make_provider_for_model("claude-sonnet-5");
-
-    assert_eq!(provider.capabilities.max_context_window, 1_000_000);
-}
-
-#[test]
 fn sonnet_5_disables_thinking_when_reasoning_effort_is_off() {
     let provider = make_provider_for_model("claude-sonnet-5");
     let request = LlmRequest::new(vec![agent_types::ChatMessage::user("hello")]);

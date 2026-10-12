@@ -24,11 +24,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 regex = "1"
 chrono = "0.4"
 dirs = "5"
-toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 mockito = "1"
-# async_closure：单测中 async_with_vars 临时改环境变量（串行保护内建）。
-temp-env = { version = "0.3", features = ["async_closure"] }
+temp-env = "0.3"

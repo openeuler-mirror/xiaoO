@@ -32,6 +32,18 @@ impl ProtocolFamily {
             Self::Zhipu => "zhipu",
         }
     }
+
+    /// 协议族的静态兜底上下文窗口：动态探测链（provider catalog >
+    /// OpenRouter > Ollama `/api/show`）全部未命中时，provider 构造默认值
+    /// 与 TUI 同步校验共用此值，避免两处魔法数字漂移。仅作粗估下限，
+    /// 不代表真实窗口（真实值以动态探测为准）。
+    pub fn static_context_window(&self) -> usize {
+        match self {
+            Self::OpenAiCompatible | Self::Ollama | Self::Zhipu => 128_000,
+            Self::Anthropic => 200_000,
+            Self::Gemini => 1_000_000,
+        }
+    }
 }
 
 impl std::fmt::Display for ProtocolFamily {

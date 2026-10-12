@@ -34,19 +34,6 @@ fn build_body_omits_reasoning_effort_when_off() {
 }
 
 #[test]
-fn new_model_capability_uses_known_context_window() {
-    let provider = OpenAiFamilyProvider::new(
-        "test-key".to_string(),
-        "https://api.openai.com/v1".to_string(),
-        "gpt-5.6-sol".to_string(),
-        OpenAiFamilyAuthStyle::Bearer,
-        vec![],
-    );
-
-    assert_eq!(provider.capabilities.max_context_window, 1_050_000);
-}
-
-#[test]
 fn gpt_5_6_with_tools_sets_none_reasoning_effort_when_off() {
     let provider = OpenAiFamilyProvider::new(
         "test-key".to_string(),
