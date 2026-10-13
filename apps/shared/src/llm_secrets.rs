@@ -121,6 +121,12 @@ fn load_secrets_store(path: &Path, use_sdf: bool) -> Result<SecretsStore> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read secrets file {}", path.display()))?;
 
+    // A zero-byte store explicitly contains no secrets; malformed nonempty
+    // encrypted data still fails instead of masking errors with environment values.
+    if bytes.is_empty() {
+        return Ok(SecretsStore::default());
+    }
+
     let decrypted = if use_sdf {
         use vault::sdf::{decrypt_secret, init_sdf_provider};
         if let Err(e) = init_sdf_provider("/usr/local/sdf/lib/libsdf.so") {
