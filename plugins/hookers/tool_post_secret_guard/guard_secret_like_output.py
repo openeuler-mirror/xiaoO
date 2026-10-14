@@ -134,9 +134,21 @@ def main() -> int:
         json.dump({"result": "accept"}, sys.stdout)
         return 0
 
-    stdout_value = bash_output.get("stdout")
-    stderr_value = bash_output.get("stderr")
-    if not isinstance(stdout_value, str) or not isinstance(stderr_value, str):
+    # 不同工具的正文放在不同字段：bash 是 stdout/stderr，file_read 是 content。
+    # 只认 stdout/stderr 时，file_read 的正文永远取到 None，于是落到下方的 accept ——
+    # 同一段密钥走 bash 会被拦下询问，走 file_read 却直接放行。
+    TEXT_FIELDS = {
+        "bash": ("stdout", "stderr"),
+        "file_read": ("content",),
+        "read_file": ("content",),
+    }
+    field_names = TEXT_FIELDS.get(call.get("tool_name"), ("stdout", "stderr"))
+    scanned = {
+        name: bash_output.get(name)
+        for name in field_names
+        if isinstance(bash_output.get(name), str)
+    }
+    if not scanned:
         json.dump({"result": "accept"}, sys.stdout)
         return 0
 
@@ -149,10 +161,9 @@ def main() -> int:
             return 0
 
         sanitized_output = dict(bash_output)
-        if contains_secret_like_value(stdout_value):
-            sanitized_output["stdout"] = redact_secret_like_values(stdout_value)
-        if contains_secret_like_value(stderr_value):
-            sanitized_output["stderr"] = redact_secret_like_values(stderr_value)
+        for name, value in scanned.items():
+            if contains_secret_like_value(value):
+                sanitized_output[name] = redact_secret_like_values(value)
 
         json.dump(
             {
@@ -164,18 +175,18 @@ def main() -> int:
         )
         return 0
 
-    fields = []
-    if contains_secret_like_value(stdout_value):
-        fields.append("stdout")
-    if contains_secret_like_value(stderr_value):
-        fields.append("stderr")
+    fields = [
+        name for name, value in scanned.items() if contains_secret_like_value(value)
+    ]
 
     if not fields:
         json.dump({"result": "accept"}, sys.stdout)
         return 0
 
     field_list = ", ".join(fields)
-    descriptions = get_matched_descriptions(stdout_value) + get_matched_descriptions(stderr_value)
+    descriptions = []
+    for value in scanned.values():
+        descriptions += get_matched_descriptions(value)
     desc_list = ", ".join(dict.fromkeys(descriptions))
 
     json.dump(
