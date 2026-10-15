@@ -1307,7 +1307,14 @@ impl App {
         let mut selection_to_apply = None;
         let mut need_api_key_dialog = None;
         let mut close_dialog = false;
-        let mut check_model_fetch = false;
+        let mut check_model_refresh = false;
+        // 上下键只有在高亮 provider 真的变了时才值得拉取；在 Models 栏内
+        // 移动只是换模型，不触发任何请求（TTL 也只按 provider 记）。
+        let previous_provider = self
+            .state
+            .provider_dialog
+            .as_ref()
+            .map(|dialog| dialog.selected_provider);
 
         if let Some(dialog) = self.state.provider_dialog.as_mut() {
             match key.code {
@@ -1341,11 +1348,11 @@ impl App {
                 }
                 KeyCode::Up => {
                     dialog.move_up();
-                    check_model_fetch = true;
+                    check_model_refresh = true;
                 }
                 KeyCode::Down => {
                     dialog.move_down();
-                    check_model_fetch = true;
+                    check_model_refresh = true;
                 }
                 KeyCode::Left => dialog.switch_to_providers(),
                 KeyCode::Right => dialog.switch_to_models(),
@@ -1360,8 +1367,14 @@ impl App {
             }
         }
 
-        if check_model_fetch {
-            self.attempt_model_fetch();
+        let provider_changed = previous_provider
+            != self
+                .state
+                .provider_dialog
+                .as_ref()
+                .map(|dialog| dialog.selected_provider);
+        if check_model_refresh && provider_changed {
+            self.maybe_refresh_selected_provider();
         }
 
         if let Some(dialog) = need_api_key_dialog {
@@ -1566,46 +1579,9 @@ impl App {
             Some(&self.state.agent_config.llm.provider),
             Some(&self.state.agent_config.llm.model),
         ));
-        self.attempt_model_fetch();
-    }
-
-    /// 对对话框当前选中的 provider 触发后台模型列表拉取：仅限
-    /// `supports_model_catalog` 的 provider（`local` 走无鉴权老路径，其余
-    /// 走 shared 的 `list_llm_models`，失败保留静态列表兜底）。
-    /// `fetched_providers` 防止同一对话框会话内重复拉取；切换 provider 时
-    /// 由 Up/Down 的 `check_model_fetch` 再次触发。
-    fn attempt_model_fetch(&mut self) {
-        let Some(dialog) = self.state.provider_dialog.as_ref() else {
-            return;
-        };
-        let Some(provider) = dialog.providers.get(dialog.selected_provider) else {
-            return;
-        };
-        let provider_name = provider.name.clone();
-        if dialog.local_models_loading
-            || dialog
-                .fetched_providers
-                .iter()
-                .any(|name| name == &provider_name)
-        {
-            return;
-        }
-        let supports_catalog = provider_name == "local"
-            || xiaoo_api::llm::resolve_provider_profile(&provider_name)
-                .is_some_and(|profile| profile.supports_model_catalog);
-        if !supports_catalog {
-            return;
-        }
-
-        if let Some(dialog) = self.state.provider_dialog.as_mut() {
-            dialog.fetched_providers.push(provider_name.clone());
-            if provider_name == "local" {
-                dialog.set_local_models_loading();
-            }
-        }
-        let (api_key_env, api_base) =
-            persisted_selection_settings(&self.state.agent_config, &provider_name);
-        self.start_model_fetch(provider_name, api_base, api_key_env);
+        // 打开即按需拉取当前高亮 provider 的官方模型列表：从未拉过
+        // （Builtin）或已过 TTL 才打请求，命中缓存则直接复用。
+        self.maybe_refresh_selected_provider();
     }
 
     async fn handle_turn_delete_key(&mut self, key: KeyEvent) -> Result<()> {

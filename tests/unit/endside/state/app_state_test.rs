@@ -665,6 +665,8 @@ impl super::AppState {
             reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,
             workspace: workspace.clone(),
+            model_fetch_session: 0,
+            model_fetch_inflight: std::collections::HashSet::new(),
             session_messages: Vec::new(),
             plan_state: None,
             plan_panel: PlanPanelState::default(),
@@ -982,4 +984,30 @@ mod clipboard_report_tests {
             "exactly one of the copy/copy-error toasts must be active"
         );
     }
+}
+
+#[test]
+fn model_fetch_accounting_is_global_and_survives_session_rebuild() {
+    let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from(".")).expect("构造 AppState");
+
+    assert!(state.begin_model_fetch("openai"));
+    assert!(state.begin_model_fetch("deepseek"));
+    assert!(
+        !state.begin_model_fetch("kimi"),
+        "全局上限 2：第三个必须被拒，否则并发上限形同虚设"
+    );
+    assert!(!state.begin_model_fetch("openai"), "同 provider 不重复在飞");
+
+    state.finish_model_fetch("openai");
+    assert!(state.begin_model_fetch("kimi"), "名额释放后应可再拉");
+
+    // 计数放在 AppState 就是为了不随会话重建清空：否则 `/new` 之后又会放进来两个，
+    // 实际在飞超过上限（旧任务仍在跑）。
+    let before = state.model_fetch_session;
+    state.reset_for_new_session();
+    assert_eq!(state.model_fetch_session, before + 1, "重建会话必须推进世代");
+    assert!(
+        !state.begin_model_fetch("qwen"),
+        "旧会话的在飞任务仍占名额（它们的回传会被世代检查丢弃）"
+    );
 }

@@ -46,7 +46,7 @@ redact_secrets_display = false                      # Optional, default false
 
 Sources: `apps/endside/src/support/config.rs:80-91` (`TuiConfig`), `:89-90`
 (`redact_secrets_display` defaults to `false`), tab ordering and the `core`
-sentinel in `apps/endside/src/state/app_state.rs:1324-1378`, display wiring in
+sentinel in `apps/endside/src/state/app_state.rs:1353-1416`, display wiring in
 `apps/endside/src/gateway_api/runtime_request.rs:252`.
 
 ### [tui.remote] - Remote TUI Configuration
@@ -120,7 +120,7 @@ The complete slash-command set (canonical names, `Tab`-completable):
 | `/remote off` | Disconnect and return to local mode |
 | `/remote close` | Close the current remote session on the daemon |
 | `/sessions [session_id]` | List sessions on the connected daemon in a dialog, or switch directly to `session_id` |
-| `/connect` | Open the provider/model selection dialog |
+| `/connect` | Open the provider/model selection dialog; the model list is fetched live from the provider's official model-list endpoint |
 | `/new` | Clear the current conversation context and create a new session |
 | `/mcp` | List configured MCP servers |
 | `/skills` | List available skills |
@@ -136,6 +136,41 @@ Sources: `/remote` argument handling `apps/endside/src/input/event_key.rs:945-10
 `/connect` `:815`, `/mcp` `:849`, `/skills` `:837`, `/sandbox` `:831`,
 `/cron` `:861`, `/save` `:702`, `/load` `:754`, `/delete` `:585`, `/dir`
 `:874`.
+
+#### Provider / model list refresh (`/connect`)
+
+The dialog shows two panes (providers | models) and **no longer relies on a
+hard-coded model table** as the only source: when it opens, and whenever the highlighted provider
+changes, the TUI asks that provider for its own official model list
+(`GET {api_base}/models` for OpenAI-compatible providers, and the provider's
+native shape for Anthropic / Gemini / Ollama) and replaces the provider's list
+with the result.
+
+- Refresh policy: 5-minute TTL after a successful fetch, a 30-second back-off
+  after a failure, and no retry at all for providers whose profile declares no
+  model catalog (`minimax`, `minimax-anthropic`, `gitcode`). At most two fetches
+  are in flight at any time (counted globally, so the cap also holds across
+  `/new`); providers beyond the cap keep the list they already have and are fetched the
+  next time they are highlighted.
+- The models pane reports where its list came from: the title carries the row
+  count (and `refreshing…` while a fetch is in flight), and a status line under
+  the panes names the official list size, why a fetch failed, or that the
+  provider has no model catalog at all.
+- Before the first successful fetch the built-in list is shown, so the dialog is
+  usable offline. Once an official list has been fetched it stays in effect for
+  the rest of the session — a later failure shows a hint line but never restores
+  or clears the list.
+- The list is not cached on disk: restarting the TUI re-fetches it.
+
+Sources: fetch pipeline `apps/endside/src/services/provider.rs` (request/outcome
+types + `fetch_provider_models`, which calls the `xiaoo-shared` facade
+`apps/shared/src/gateway/llm_assembly.rs:207`); state
+`apps/endside/src/state/chat.rs` (`ModelListState`, TTL/back-off constants);
+orchestration `apps/endside/src/app/core.rs` (`start_model_fetch`,
+`apply_model_fetch_outcome`); triggers `apps/endside/src/input/event_key.rs`
+(`open_provider_selection_dialog`, and the
+provider-changed guard in `handle_provider_selection_key`); rendering
+`apps/endside/src/render/overlay.rs` (`render_provider_dialog`).
 
 ---
 
@@ -316,7 +351,7 @@ In TUI:
 All TUI keybindings are **hard-coded**. There is no keymap configuration table,
 no config-file section for keys, and no validation layer: the readline/emacs
 editing chords live in `handle_input_key`
-(`apps/endside/src/input/core.rs:631-690`) and the app-level chords in
+(`apps/endside/src/input/core.rs:690-733`) and the app-level chords in
 `apps/endside/src/input/event_key.rs`. The source itself states "These bindings
 are hard-coded — there is no keymap configuration"
 (`apps/endside/src/input/core.rs:638`).
@@ -336,7 +371,7 @@ are hard-coded — there is no keymap configuration"
 > selection uses `Shift+Left`/`Shift+Right`/`Shift+Home`/`Shift+End` instead
 > (`apps/endside/src/input/core.rs:495-527`).
 
-Source: `apps/endside/src/input/core.rs:631-690`.
+Source: `apps/endside/src/input/core.rs:690-733`.
 
 ### App-level chords
 
@@ -354,11 +389,11 @@ Source: `apps/endside/src/input/core.rs:631-690`.
 | `PageUp` / `PageDown` | Scroll the transcript a page |
 | `Esc` | Clear an active transcript selection |
 
-Sources: submit `apps/endside/src/input/event_key.rs:1808-1815`; soft newline
-`:1822-1832`; history `:1826-1836`; copy `:1838-1846`; cut `:1848-1851`;
+Sources: submit `apps/endside/src/input/event_key.rs:1806-1809`; soft newline
+`:1817-1821`; history `:1824-1831`; copy `:1836-1843`; cut `:1846-1848`;
 `Ctrl+C` / `Ctrl+Insert` copy-vs-quit split `:55-98`; `Ctrl+T` `:403`; `Tab`
 `:378-399`; `Up`/`Down` `:480-520`; `PageUp`/`PageDown` `:525-530`; `Esc`
-`:498-501`.
+`:498-501`; `Ctrl+R` (dialog-scoped) `:1369-1371`.
 
 > `Shift+Enter` only reaches the app on terminals that report key modifiers
 > (kitty keyboard / CSI u); mainstream unix terminals fold it onto the same
@@ -529,8 +564,8 @@ Detailed instructions: [remote_tui.md](./remote_tui.md)
 
 **A**: No. The editing chords (`Ctrl+A/E/B/F`, `Alt+B/F`, `Ctrl+D/W/U/K`), the
 submit/newline keys, history keys, and copy/cut chords are hard-coded with no
-configuration surface (`apps/endside/src/input/core.rs:631-690`,
-`apps/endside/src/input/event_key.rs:1804-1851`). Adding a keymap is a known gap,
+configuration surface (`apps/endside/src/input/core.rs:690-733`,
+`apps/endside/src/input/event_key.rs:1801-1856`). Adding a keymap is a known gap,
 not a configuration option.
 
 ---

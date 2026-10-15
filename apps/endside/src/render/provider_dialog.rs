@@ -6,10 +6,6 @@ pub struct ProviderDialog {
     pub selected_provider: usize,
     pub selected_model: usize,
     pub focus: DialogFocus,
-    pub local_models_loading: bool,
-    /// 本次对话框会话中已完成后台拉取的 provider 名单，防止上下移动时
-    /// 对同一 provider 重复发起请求（关闭重开对话框即重新拉取）。
-    pub fetched_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,8 +21,6 @@ impl ProviderDialog {
             selected_provider: 0,
             selected_model: 0,
             focus: DialogFocus::Providers,
-            local_models_loading: false,
-            fetched_providers: Vec::new(),
         }
     }
 
@@ -59,6 +53,15 @@ impl ProviderDialog {
         }
 
         dialog
+    }
+
+    /// 借出当前高亮 provider 的模型列表。渲染每帧都要用它，不该 clone 整份
+    /// （官方列表 openrouter 300+；条数上限见 `provider.rs` 的 `MAX_MODELS_PER_PROVIDER`）。
+    pub fn current_models_ref(&self) -> &[ModelInfo] {
+        self.providers
+            .get(self.selected_provider)
+            .map(|p| p.models.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn current_models(&self) -> Vec<ModelInfo> {
@@ -115,27 +118,36 @@ impl ProviderDialog {
         Some((provider.name.clone(), model.id.clone()))
     }
 
-    pub fn set_local_models_loading(&mut self) {
-        self.local_models_loading = true;
+    /// 当前高亮 provider 的名字（官方列表拉取的触发对象）。
+    pub fn selected_provider_name(&self) -> Option<&str> {
+        self.providers
+            .get(self.selected_provider)
+            .map(|provider| provider.name.as_str())
     }
 
-    /// 用后台拉取结果替换指定 provider 的模型列表。
+    /// 用官方列表替换某 provider 的模型。
     ///
-    /// 空结果保留静态列表（离线兜底）——`local` 除外，它回落到占位条目，
-    /// 保证对话框永不出现死空列。
-    pub fn apply_fetched_models(&mut self, provider_name: &str, models: Vec<ModelInfo>) {
-        self.local_models_loading = false;
-        let Some(provider) = self.providers.iter_mut().find(|p| p.name == provider_name) else {
-            return;
-        };
-        if !models.is_empty() {
-            provider.models = models;
-        } else if provider_name == "local" {
-            provider.models = vec![ModelInfo {
-                id: "glm4.7".to_string(),
-                name: "glm4.7".to_string(),
-            }];
+    /// 空列表视为无效（调用方按失败处理），返回 `false` 且不改动任何状态；
+    /// provider 名未命中同样返回 `false`。被替换的是当前高亮 provider 时，
+    /// 选中下标收敛到新列表范围内，避免指向越界。
+    pub fn replace_models(&mut self, provider: &str, models: Vec<ModelInfo>) -> bool {
+        if models.is_empty() {
+            return false;
         }
+        let Some(index) = self
+            .providers
+            .iter()
+            .position(|entry| entry.name == provider)
+        else {
+            return false;
+        };
+
+        if index == self.selected_provider {
+            self.selected_model = self.selected_model.min(models.len().saturating_sub(1));
+        }
+
+        self.providers[index].models = models;
+        true
     }
 }
 

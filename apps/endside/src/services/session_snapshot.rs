@@ -795,6 +795,9 @@ pub fn apply_snapshot(
     state.slash = Default::default();
     state.render_state = Default::default();
     state.external_commands = crate::services::command_loader::load_external_commands();
+    // 载入快照同样重建了整个 ChatState：在飞的模型拉取结果属于上一个会话，必须作废
+    // （否则会把旧列表写进刚载入的会话并置 Ready）。
+    state.next_model_fetch_session();
     let input_history = state.chat_state.input_history.clone();
     state.chat_state = chat_state_with_messages(&state.agent_config, snapshot.chat_messages);
     state.chat_state.set_input_history(input_history);

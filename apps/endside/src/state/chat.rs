@@ -1,6 +1,7 @@
 use crate::input::Input;
 use ratatui::widgets::ScrollbarState;
 use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 use xiaoo_shared::session_diff::FileChangeDelta as SharedFileChangeDelta;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -389,6 +390,9 @@ pub struct ChatState {
     pub scrollbar_state: ScrollbarState,
     pub is_loading: bool,
     pub available_providers: Vec<ProviderInfo>,
+    /// 每个 provider 的官方 model list 拉取状态（缺省视为 `Builtin`）。
+    /// 与 `available_providers` 一样由 `build_chat_state` 在会话/工作区切换时复位。
+    pub provider_model_status: BTreeMap<String, ModelListState>,
     /// When true, view stays at bottom when new content arrives (e.g. streaming).
     pub stick_to_bottom: bool,
     /// Total line count of the message list (updated each render).
@@ -535,6 +539,83 @@ pub struct ProviderInfo {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+}
+
+/// 某个 provider 的官方 model list 拉取状态，按 provider 名索引在
+/// [`ChatState::provider_model_status`] 中。
+///
+/// 状态与列表本身分离：`models` 只在拉取成功时被替换，失败永远不动它，
+/// 因此"官方列表成功一次后永久替换内置列表"是数据结构保证的语义，
+/// 不需要额外的 `replaced` 标志位。
+#[derive(Debug, Clone, Default)]
+pub enum ModelListState {
+    /// 从未成功拉取过：显示内置列表（[`default_provider_list`]）。
+    #[default]
+    Builtin,
+    /// 拉取进行中；`since` 用于判定"陈旧"（见 [`Self::is_stale_loading`]）。
+    Loading { since: Instant },
+    /// 官方列表已替换内置列表；`fetched_at` 用于 TTL 判定。
+    Ready { fetched_at: Instant },
+    /// 最近一次拉取失败：列表保持不变（可能是内置，也可能是上次成功结果）。
+    /// `hint_only` 表示这只是配置提示（例如缺 API key），渲染用 muted 而非错误色。
+    Failed {
+        message: String,
+        failed_at: Instant,
+        hint_only: bool,
+    },
+    /// provider profile 未声明官方 catalog 接口（`supports_model_catalog=false`），
+    /// 不发起请求、也不重试。
+    Unsupported,
+}
+
+/// `Ready` 之后的正常刷新间隔：打开弹窗 / 切换 provider 时超过它才重新拉取。
+/// `Loading` 超过这个时长就视为"结果不会再回来了"，允许重新拉取。
+pub const MODEL_LIST_STALE_AFTER: Duration = Duration::from_secs(60);
+
+pub const MODEL_LIST_TTL: Duration = Duration::from_secs(300);
+/// `Failed` 之后的最小重试间隔，避免在坏端点上反复打请求。
+pub const MODEL_LIST_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+
+impl ModelListState {
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading { .. })
+    }
+
+    /// `Loading` 已经等了太久：视为"结果永远不会回来了"。
+    ///
+    /// 回传的结果是唯一能把状态推走 `Loading` 的输入；一旦任务在回传前消失，状态就会
+    /// 永久停在 `Loading`（`needs_refresh` 为假、守卫拦住重试）。这道兜底让陈旧的
+    /// `Loading` 重新可拉取。阈值取 facade 超时（20s）的 3 倍，正常慢请求不会误判。
+    pub fn is_stale_loading(&self, now: Instant) -> bool {
+        match self {
+            Self::Loading { since } => now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER,
+            _ => false,
+        }
+    }
+
+    /// 是否应当在"按需刷新"路径上重新拉取。
+    ///
+    /// - `Builtin`：从未成功 → 要拉；
+    /// - `Loading`：已在飞 → 不重复拉；
+    /// - `Unsupported`：profile 静态声明没有 catalog → 永不重试；
+    /// - `Ready` / `Failed`：超过各自间隔才拉。
+    ///
+    /// 用 `saturating_duration_since`：`now` 若早于记录时刻（理论上不会发生）
+    /// 按 0 处理，不 panic。
+    pub fn needs_refresh(&self, now: Instant) -> bool {
+        match self {
+            Self::Builtin => true,
+            // 陈旧的 `Loading` 视为可重拉（结果已经不可能回来了）。
+            Self::Loading { since } => now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER,
+            Self::Unsupported => false,
+            Self::Ready { fetched_at } => {
+                now.saturating_duration_since(*fetched_at) >= MODEL_LIST_TTL
+            }
+            Self::Failed { failed_at, .. } => {
+                now.saturating_duration_since(*failed_at) >= MODEL_LIST_FAILURE_BACKOFF
+            }
+        }
+    }
 }
 
 /// Default provider and model list shown in the TUI.
@@ -907,6 +988,7 @@ impl Default for ChatState {
             scrollbar_state: ScrollbarState::default(),
             is_loading: false,
             available_providers: default_provider_list(),
+            provider_model_status: BTreeMap::new(),
             stick_to_bottom: true,
             total_lines: 0,
             last_visible_height: 0,
@@ -920,6 +1002,38 @@ impl Default for ChatState {
 impl ChatState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 该 provider 的官方 model list 拉取状态；未记录过时视为 `Builtin`
+    /// （即"只显示内置列表"）。
+    pub fn model_list_state(&self, provider: &str) -> ModelListState {
+        self.provider_model_status
+            .get(provider)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_model_list_state(&mut self, provider: &str, state: ModelListState) {
+        self.provider_model_status
+            .insert(provider.to_string(), state);
+    }
+
+
+
+    /// 用官方列表替换某 provider 的模型（按名精确匹配，未命中返回 `false`）。
+    ///
+    /// 这是唯一写入官方结果的路径——失败路径不经过这里，列表因此不会被
+    /// 回退覆盖，`Unsupported` / 网络失败都只是"不写"。
+    pub fn replace_provider_models(&mut self, provider: &str, models: Vec<ModelInfo>) -> bool {
+        let Some(entry) = self
+            .available_providers
+            .iter_mut()
+            .find(|entry| entry.name == provider)
+        else {
+            return false;
+        };
+        entry.models = models;
+        true
     }
 
     pub fn set_input_history(&mut self, history: Vec<String>) {

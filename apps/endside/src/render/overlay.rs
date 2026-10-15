@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode, SandboxDialog};
+use crate::chat::ModelListState;
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
 use crate::remote_sessions_service::{
@@ -402,7 +403,7 @@ impl App {
         } else if self.state.delete_dialog.is_some() {
             " ↑↓ 选择 | Enter 确认 | Esc 取消 "
         } else if self.state.provider_dialog.is_some() {
-            " ↑↓ 切换 | ←→ 分栏 | Enter 选择 | Esc 关闭 "
+            " ↑↓ select | ←→ panes | Enter apply | Esc cancel "
         } else if readonly_subagent_view {
             " Subagent view is read-only | ← Back "
         } else if self.state.chat_state.is_loading {
@@ -528,10 +529,19 @@ impl App {
         let inner = dialog_block.inner(dialog_area);
         frame.render_widget(dialog_block, dialog_area);
 
+        // 底部固定一行状态行：列表只占剩余空间，状态文案不会挤压或盖住列表
+        // 内容（对齐 sandbox / snapshot 弹窗的做法）。
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(4), Constraint::Length(1)])
+            .split(inner);
+        let list_area = rows[0];
+        let status_area = rows[1];
+
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(inner);
+            .split(list_area);
         let left = horizontal[0];
         let right = horizontal[1];
 
@@ -562,12 +572,20 @@ impl App {
         );
         frame.render_widget(provider_list, left);
 
-        let models = dialog.current_models();
-        let model_lines: Vec<Line> = if dialog.local_models_loading {
+        let provider_name = dialog.selected_provider_name().unwrap_or_default();
+        let status = self.state.chat_state.model_list_state(provider_name);
+        let models = dialog.current_models_ref();
+
+        let model_lines: Vec<Line> = if models.is_empty() {
+            let placeholder = if status.is_loading() {
+                "Loading models..."
+            } else {
+                "(no models available)"
+            };
             vec![Line::from(Span::styled(
-                "Loading models...",
+                placeholder,
                 Style::default()
-                    .fg(self.state.theme.foreground)
+                    .fg(self.state.theme.muted)
                     .add_modifier(Modifier::ITALIC),
             ))]
         } else {
@@ -588,15 +606,60 @@ impl App {
                 .collect()
         };
 
+        let models_title = if status.is_loading() && !models.is_empty() {
+            format!(" Models ({}) · refreshing… ", models.len())
+        } else {
+            format!(" Models ({}) ", models.len())
+        };
         let model_list = List::new(model_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(self.state.theme.border_style(true))
-                .title(" Models ")
+                .title(models_title)
                 .padding(Padding::horizontal(1)),
         );
         frame.render_widget(model_list, right);
+
+        // 状态行按拉取状态给一句话：成功报数量、失败报原因、缺 key 只提示。
+        let (status_text, status_style) = match &status {
+            ModelListState::Builtin => (String::new(), Style::default().fg(self.state.theme.muted)),
+            ModelListState::Loading { .. } => (
+                "Fetching the model list from the provider…".to_string(),
+                Style::default().fg(self.state.theme.muted),
+            ),
+            ModelListState::Ready { .. } => (
+                format!("Official model list · {} models", models.len()),
+                Style::default().fg(self.state.theme.muted),
+            ),
+            ModelListState::Failed {
+                message,
+                hint_only: true,
+                ..
+            } => (
+                format!("{message} (showing the existing list)"),
+                Style::default().fg(self.state.theme.muted),
+            ),
+            ModelListState::Failed {
+                message,
+                hint_only: false,
+                ..
+            } => (
+                format!("Failed to fetch the official model list: {message}"),
+                Style::default().fg(self.state.theme.error),
+            ),
+            ModelListState::Unsupported => (
+                "This provider has no model catalog (showing the built-in list)".to_string(),
+                Style::default().fg(self.state.theme.muted),
+            ),
+        };
+        frame.render_widget(
+            Paragraph::new(status_text)
+                .style(status_style)
+                .wrap(Wrap { trim: true }),
+            status_area,
+        );
+
     }
 
     pub(crate) fn render_sandbox_dialog(

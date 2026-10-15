@@ -425,6 +425,12 @@ pub struct FileMentionState {
 
 pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeStats};
 
+/// 全局在飞的模型拉取上限（按 provider 名去重后计数）。
+///
+/// 计数放在 `AppState` 而不是 `ChatState`：后者会被 `/new`、`/load`、`/remote` 重建，
+/// 放在里面会让"最多两个在飞"失效。
+pub const MAX_INFLIGHT_MODEL_FETCHES: usize = 2;
+
 pub struct AppState {
     pub theme: Theme,
     pub chat_state: ChatState,
@@ -446,6 +452,11 @@ pub struct AppState {
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
     pub workspace: PathBuf,
+    /// 模型拉取的"会话世代"：会话重建后，在飞的旧任务结果必须丢弃，否则会把旧会话的
+    /// 官方列表写进新会话并置 `Ready`（TTL 内不再刷新）。
+    pub model_fetch_session: u64,
+    /// 全局在飞的模型拉取（provider 名去重）；无论结果是否被采纳，回传时都要释放。
+    pub model_fetch_inflight: std::collections::HashSet<String>,
     pub session_messages: Vec<xiaoo_api::chat::ChatMessage>,
     pub plan_state: Option<TodoMessageState>,
     /// Scroll state for the sidebar Plan panel (current task list).
@@ -505,6 +516,8 @@ impl AppState {
             reasoning_effort: config.llm.reasoning_effort,
             config_path,
             workspace: workspace.clone(),
+            model_fetch_session: 0,
+            model_fetch_inflight: std::collections::HashSet::new(),
             session_messages: Vec::new(),
             plan_state: None,
             plan_panel: PlanPanelState::default(),
@@ -526,7 +539,29 @@ impl AppState {
         })
     }
 
+    /// 标记一次模型拉取开始；`false` 表示被拒（同 provider 已在飞，或已达全局上限）。
+    pub(crate) fn begin_model_fetch(&mut self, provider: &str) -> bool {
+        if self.model_fetch_inflight.contains(provider)
+            || self.model_fetch_inflight.len() >= MAX_INFLIGHT_MODEL_FETCHES
+        {
+            return false;
+        }
+        self.model_fetch_inflight.insert(provider.to_string());
+        true
+    }
+
+    /// 任务回传（或被丢弃）时释放名额。
+    pub(crate) fn finish_model_fetch(&mut self, provider: &str) {
+        self.model_fetch_inflight.remove(provider);
+    }
+
+    /// 会话重建：让在飞任务的结果作废（名额仍由任务回传时释放）。
+    pub(crate) fn next_model_fetch_session(&mut self) {
+        self.model_fetch_session = self.model_fetch_session.wrapping_add(1);
+    }
+
     pub fn reset_for_new_session(&mut self) {
+        self.next_model_fetch_session();
         let input_history = self.chat_state.input_history.clone();
         self.chat_state = build_chat_state(&self.agent_config);
         self.chat_state.set_input_history(input_history);
