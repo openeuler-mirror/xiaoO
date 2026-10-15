@@ -132,6 +132,11 @@ xiaoo --cli run --no-tools -p "Just answer this question"
 > `--provider`, `--model`, `--api-key`, and `--api-base` override only the
 > top-level `[llm]` keys; they are not profile-aware.
 
+> Behind a gateway with an untrusted certificate, every LLM request — chat, model
+> list, embeddings — fails the TLS handshake until the CLI is run with
+> `NODE_TLS_REJECT_UNAUTHORIZED=0`. Scope and caveats:
+> [Self-signed gateways](./config_file_guide.md#self-signed-gateways-node_tls_reject_unauthorized).
+
 ### Subcommands
 
 | Subcommand | Description |

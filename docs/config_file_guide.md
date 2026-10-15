@@ -227,6 +227,30 @@ The effective context window is resolved dynamically:
    `deepseek`, `openrouter`, and others; not just gemini/anthropic/ollama
 2. Local fallback defaults
 
+### Self-signed Gateways: `NODE_TLS_REJECT_UNAUTHORIZED`
+
+An internal LLM gateway often presents a certificate the machine does not trust
+(self-signed, or signed by a private CA that is not installed). Every TLS
+handshake then fails while the client silently keeps its built-in model list —
+the UI looks exactly like "nothing happened". Export the Node-style switch to
+skip certificate verification:
+
+```bash
+export NODE_TLS_REJECT_UNAUTHORIZED=0   # daemon / CLI / TUI that talks to the gateway
+```
+
+- Read when a client is constructed. Only an explicit `0` (surrounding
+  whitespace tolerated) disables verification; `1`, an empty value and "unset"
+  all keep strict verification.
+- It applies to every LLM client the process builds — the chat providers of all
+  protocol families, the model catalogs and the OpenAI-compatible embedding
+  provider — and to **every host those LLM clients talk to**, including public
+  ones such as `openrouter.ai`. Other HTTP clients in the process (e.g. web
+  fetch, daemon RPC, MCP transports) keep strict verification. Set it only in the
+  environment that actually needs it, not globally in a shared container or CI
+  profile.
+- Implementation: `crates/llm-client/src/http.rs`.
+
 ### Provider Types
 
 Supported providers (see `crates/llm-client/src/provider_registry.rs` for the

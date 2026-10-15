@@ -62,9 +62,7 @@ impl OpenAiFamilyProvider {
         auth_style: OpenAiFamilyAuthStyle,
         default_headers: Vec<(String, String)>,
     ) -> Self {
-        let skip_tls_verify = std::env::var("NODE_TLS_REJECT_UNAUTHORIZED")
-            .map(|v| v.trim() == "0")
-            .unwrap_or(false);
+        let skip_tls_verify = crate::http::tls_verification_disabled();
         let max_context_window =
             crate::provider_registry::ProtocolFamily::OpenAiCompatible.static_context_window();
         Self {
@@ -74,7 +72,7 @@ impl OpenAiFamilyProvider {
                 .danger_accept_invalid_certs(skip_tls_verify)
                 .http1_only()
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .unwrap_or_else(crate::http::client_build_failed),
             api_key,
             api_base,
             auth_style,

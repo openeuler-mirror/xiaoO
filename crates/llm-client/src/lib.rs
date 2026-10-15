@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod error;
 pub mod factory;
+pub mod http;
 pub mod models;
 pub mod provider_registry;
 pub mod resolver;
