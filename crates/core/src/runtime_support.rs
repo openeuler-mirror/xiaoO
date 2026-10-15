@@ -329,6 +329,7 @@ impl NoopRuntimeView {
                     agent_id: String::new(),
                     model: String::new(),
                     session_id: None,
+                    task_label: None,
                 },
             ),
             interaction: Box::new(NoopInteractionHandle),

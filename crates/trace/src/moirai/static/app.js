@@ -89,6 +89,7 @@ function renderTraceList(traces, animate = false) {
             <thead>
                 <tr class="bg-gray-200">
                     <th class="border p-2 text-left">Trace ID</th>
+                    <th class="border p-2 text-left">Task</th>
                     <th class="border p-2 text-left">Spans</th>
                     <th class="border p-2 text-left">Started</th>
                     <th class="border p-2 text-left">Status</th>
@@ -98,9 +99,13 @@ function renderTraceList(traces, animate = false) {
             <tbody>
                 ${traces.map((trace, idx) => {
                     const isNew = newIds.includes(trace.trace_id);
+                    const taskCell = trace.task_description
+                        ? `<span class="block truncate max-w-md" title="${escapeAttr(trace.task_description)}">${escapeHtml(trace.task_description)}</span>`
+                        : '<span class="text-gray-400">-</span>';
                     return `
                     <tr class="hover:bg-gray-100 trace-row ${isNew ? 'new-trace-row' : ''}" data-id="${trace.trace_id}">
                         <td class="border p-2 font-mono text-sm cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${trace.trace_id.substring(0, 12)}</td>
+                        <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${taskCell}</td>
                         <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${trace.span_count}</td>
                         <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">${formatTime(trace.start_time)}</td>
                         <td class="border p-2 cursor-pointer" onclick="viewTrace('${trace.trace_id}')">
@@ -221,6 +226,11 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// escapeHtml leaves quotes intact; escape them for attribute contexts.
+function escapeAttr(text) {
+    return escapeHtml(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 function getSpanTypeColor(type) {

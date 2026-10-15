@@ -2,8 +2,12 @@ use std::borrow::Cow;
 
 use agent_contracts::runtime::RuntimeView;
 use agent_contracts::{TraceOutcome, TraceSpanHandle, TraceSpanKind};
-use agent_types::llm::{LlmError, LlmRequest, LlmResponse, ResponseFormat};
+use agent_types::llm::{LlmError, LlmRequest, LlmResponse, MessageRole, ResponseFormat};
 use serde_json::{json, Value};
+
+/// Cap for the inline `input_preview` extra; mirrors moirai's
+/// `TASK_DESCRIPTION_MAX_CHARS` (keep in sync manually).
+const INPUT_PREVIEW_MAX_CHARS: usize = 200;
 
 #[derive(Default)]
 pub(super) struct StreamTraceStats {
@@ -19,6 +23,13 @@ pub(super) async fn begin_trace_span(
     is_streaming: bool,
 ) -> Option<TraceSpanHandle> {
     let runtime_view = runtime_view?;
+    let input_preview = runtime_view
+        .agent_context()
+        .metadata()
+        .task_label
+        .as_deref()
+        .and_then(single_line_preview)
+        .or_else(|| user_input_preview(request));
     Some(
         runtime_view
             .trace_recorder()
@@ -29,6 +40,7 @@ pub(super) async fn begin_trace_span(
                     "agent_id": runtime_view.agent_context().metadata().agent_id,
                     "runtime_model": runtime_view.agent_context().metadata().model,
                     "session_id": runtime_view.agent_context().metadata().session_id,
+                    "input_preview": input_preview,
                     "provider_model": provider_model_name,
                     "request_message_count": request.messages.len(),
                     "tool_count": request.tools.len(),
@@ -158,12 +170,62 @@ pub(super) fn merge_trace_fields(base: Value, extra: Value) -> Value {
     }
 }
 
-fn response_format_name(response_format: &ResponseFormat) -> &'static str {
+pub(super) fn response_format_name(response_format: &ResponseFormat) -> &'static str {
     match response_format {
         ResponseFormat::Text => "text",
         ResponseFormat::JsonObject => "json_object",
         ResponseFormat::JsonSchema { .. } => "json_schema",
     }
+}
+
+/// Collapse `text` into a bounded single-line preview: `\n`/`\r`/`\t` become
+/// spaces, other control chars are dropped, and the result is capped at
+/// `INPUT_PREVIEW_MAX_CHARS` with an ellipsis. `None` if nothing visible
+/// remains. Mirrors moirai's `normalize_task_preview`; keep in sync manually.
+pub(super) fn single_line_preview(text: &str) -> Option<String> {
+    let mut preview = String::new();
+    let mut truncated = false;
+    for (index, ch) in text.chars().enumerate() {
+        if index >= INPUT_PREVIEW_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        if ch.is_control() {
+            match ch {
+                '\n' | '\r' | '\t' => preview.push(' '),
+                _ => {}
+            }
+            continue;
+        }
+        preview.push(ch);
+    }
+    let preview = preview.trim();
+    if preview.is_empty() {
+        return None;
+    }
+    let mut preview = preview.to_string();
+    if truncated {
+        preview.push('…');
+    }
+    Some(preview)
+}
+
+/// Single-line preview of the last user message, stored inline in span extras
+/// so trace lists need no request-blob decoding. Mirrors moirai's
+/// `task_preview_from_span`; keep in sync manually.
+pub(super) fn user_input_preview(request: &LlmRequest) -> Option<String> {
+    let text = request
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == MessageRole::User)
+        .find_map(|message| {
+            message.blocks.iter().find_map(|block| match block {
+                agent_types::llm::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+        })?;
+    single_line_preview(text)
 }
 
 fn request_trace_payload(request: &LlmRequest) -> Value {

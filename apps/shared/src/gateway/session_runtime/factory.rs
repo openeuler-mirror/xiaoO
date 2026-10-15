@@ -137,6 +137,7 @@ impl AppRuntimeFactory {
                     agent_id: resolved.descriptor.agent_id.0.clone(),
                     model: resolved.descriptor.model.clone(),
                     session_id: Some(session.session_id.clone()),
+                    task_label: subagent_task_label(session, &resolved.descriptor.agent_id),
                 },
             );
             let mut trace_config = resolved.trace.clone();
@@ -229,6 +230,17 @@ fn tool_state_store_config_for_entry_kind(
         backend: Value::String(backend.to_string()),
         retention: Value::Null,
     }
+}
+
+/// Subagent spawn description, used to label the lane in trace views.
+/// `None` for root lanes or blank descriptions.
+fn subagent_task_label(session: &SessionRecord, agent_id: &AgentId) -> Option<String> {
+    session
+        .subagent_state
+        .agents
+        .get(&agent_id.0)
+        .map(|record| record.description.trim().to_string())
+        .filter(|label| !label.is_empty())
 }
 
 struct SharedToolEventSink {

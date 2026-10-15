@@ -11,6 +11,9 @@ pub struct TraceSummary {
     pub start_time: i64,
     pub end_time: Option<i64>,
     pub root_span_type: String,
+    /// Task preview from the `trace_tasks` table; `None` when unlabeled.
+    #[serde(default)]
+    pub task_description: Option<String>,
 }
 
 /// Trait for storing and retrieving spans

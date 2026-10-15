@@ -30,8 +30,8 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sig
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-unicode-width = "0.1.14"
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+unicode-width.workspace = true
 uuid.workspace = true
 textwrap = "0.16"
 

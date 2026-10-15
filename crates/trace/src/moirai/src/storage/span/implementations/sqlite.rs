@@ -10,6 +10,23 @@ use crate::{MoiraiError, Result, Span};
 
 const SPAN_PREFIX_SUGGESTION_LIMIT: usize = 5;
 
+/// Only LLM_CALL spans may materialize `trace_tasks` rows: the
+/// `input_preview` extra is an LLM_CALL-only contract.
+const LLM_CALL_SPAN_TYPE: &str = "LLM_CALL";
+
+/// `PRAGMA user_version` marker for one-time migrations; v1 = `trace_tasks`
+/// backfill. Bump and chain new steps in `run_migrations` for future ones.
+const TRACE_TASKS_MIGRATION_VERSION: i64 = 1;
+
+/// `task_description` projection for trace-list queries, backed by the
+/// write-time-materialized `trace_tasks` table.
+const TRACE_TASK_DESCRIPTION_SQL: &str =
+    "(SELECT tt.task_description FROM trace_tasks tt WHERE tt.trace_id = s.trace_id) as task_description";
+
+/// Cap for materialized task descriptions; mirrors llm-client's
+/// `INPUT_PREVIEW_MAX_CHARS` (keep in sync manually).
+const TASK_DESCRIPTION_MAX_CHARS: usize = 200;
+
 #[derive(Clone)]
 pub struct SqliteStorage {
     conn: Arc<Mutex<Connection>>,
@@ -27,9 +44,9 @@ struct TraceSegment {
 
 impl SqliteStorage {
     pub fn new(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         Self::apply_pragmas(&conn)?;
-        Self::init_schema(&conn)?;
+        Self::init_schema(&mut conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -59,7 +76,7 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn init_schema(conn: &Connection) -> Result<()> {
+    fn init_schema(conn: &mut Connection) -> Result<()> {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS spans (
@@ -76,6 +93,11 @@ impl SqliteStorage {
             CREATE INDEX IF NOT EXISTS idx_trace_id ON spans(trace_id);
             CREATE INDEX IF NOT EXISTS idx_parent_span_id ON spans(parent_span_id);
             CREATE INDEX IF NOT EXISTS idx_created_at ON spans(created_at DESC);
+            CREATE TABLE IF NOT EXISTS trace_tasks (
+                trace_id TEXT PRIMARY KEY,
+                task_description TEXT NOT NULL,
+                start_time INTEGER NOT NULL
+            );
             "#,
         )?;
         request_store::init(conn)?;
@@ -88,7 +110,212 @@ impl SqliteStorage {
                 return Err(error.into());
             }
         }
+        Self::run_migrations(conn)
+    }
+
+    /// Run one-time migrations gated by `PRAGMA user_version`: interrupted
+    /// migrations are retried on the next open, completed ones never run
+    /// again. Steps must be idempotent so retries are safe.
+    fn run_migrations(conn: &mut Connection) -> Result<()> {
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version < TRACE_TASKS_MIGRATION_VERSION {
+            Self::backfill_trace_tasks(conn)?;
+            conn.pragma_update(None, "user_version", TRACE_TASKS_MIGRATION_VERSION)?;
+        }
         Ok(())
+    }
+
+    /// One-time migration for databases that predate `trace_tasks`: backfill
+    /// a task description per trace from its earliest usable LLM_CALL span
+    /// (via `effective_request` for spans written before `input_preview`
+    /// existed). Each trace is backfilled in its own transaction so
+    /// interrupted runs resume incrementally and concurrent runs converge;
+    /// unreadable spans are skipped with a warning.
+    fn backfill_trace_tasks(conn: &mut Connection) -> Result<()> {
+        let started_at = std::time::Instant::now();
+        let trace_ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT trace_id FROM spans
+                 WHERE span_type = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM trace_tasks tt WHERE tt.trace_id = spans.trace_id
+                   )",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![LLM_CALL_SPAN_TYPE], |row| row.get(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if trace_ids.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            trace_count = trace_ids.len(),
+            "backfilling trace_tasks for existing traces"
+        );
+        let mut backfilled_traces = 0usize;
+        let mut unlabeled_traces = 0usize;
+        let mut unreadable_spans = 0usize;
+        for trace_id in trace_ids {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut span_stmt = tx.prepare_cached(
+                "SELECT span_id, trace_id, parent_span_id, span_type, start_time,
+                        last_updated_at, end_time, extras, created_at
+                 FROM spans
+                 WHERE trace_id = ?1 AND span_type = ?2
+                 ORDER BY start_time ASC, created_at ASC, span_id ASC",
+            )?;
+            let mut rows = span_stmt.query(rusqlite::params![trace_id, LLM_CALL_SPAN_TYPE])?;
+            let mut labeled = false;
+            while let Some(row) = rows.next()? {
+                let span_id: String = row.get(0)?;
+                let span = match Self::span_from_row(&tx, row) {
+                    Ok(span) => span,
+                    Err(error) => {
+                        tracing::warn!(
+                            trace_id = %trace_id,
+                            span_id = %span_id,
+                            %error,
+                            "skipping unreadable span while backfilling trace_tasks"
+                        );
+                        unreadable_spans += 1;
+                        continue;
+                    }
+                };
+                if let Some(task) = Self::task_preview_from_span(&span) {
+                    Self::upsert_trace_task(&tx, &trace_id, &task, span.start_time)?;
+                    labeled = true;
+                    break;
+                }
+            }
+            drop(rows);
+            drop(span_stmt);
+            tx.commit()?;
+            if labeled {
+                backfilled_traces += 1;
+            } else {
+                unlabeled_traces += 1;
+            }
+        }
+        tracing::info!(
+            backfilled_traces,
+            unlabeled_traces,
+            unreadable_spans,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "trace_tasks backfill complete"
+        );
+        Ok(())
+    }
+
+    /// Upsert a task description, keeping the earliest-starting contributor.
+    fn upsert_trace_task(
+        conn: &Connection,
+        trace_id: &str,
+        task_description: &str,
+        start_time: i64,
+    ) -> Result<()> {
+        conn.prepare_cached(
+            "INSERT INTO trace_tasks (trace_id, task_description, start_time)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(trace_id) DO UPDATE SET
+                 task_description = excluded.task_description,
+                 start_time = excluded.start_time
+             WHERE excluded.start_time < trace_tasks.start_time",
+        )?
+        .execute(rusqlite::params![trace_id, task_description, start_time])?;
+        Ok(())
+    }
+
+    /// On the span write path, record a non-empty LLM_CALL `input_preview`
+    /// extra as the trace's task description unless an earlier span did.
+    fn materialize_trace_task(
+        conn: &Connection,
+        trace_id: &str,
+        span_type: &str,
+        extras: &serde_json::Value,
+        start_time: i64,
+    ) -> Result<()> {
+        if span_type != LLM_CALL_SPAN_TYPE {
+            return Ok(());
+        }
+        let Some(preview) = extras
+            .get("input_preview")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Self::normalize_task_preview)
+        else {
+            return Ok(());
+        };
+        Self::upsert_trace_task(conn, trace_id, &preview, start_time)
+    }
+
+    /// First `text` block of a serialized message, falling back to the
+    /// legacy `content` string.
+    fn message_text(message: &serde_json::Value) -> Option<&str> {
+        message
+            .get("blocks")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|blocks| {
+                blocks
+                    .iter()
+                    .find_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+            })
+            .or_else(|| message.get("content").and_then(serde_json::Value::as_str))
+    }
+
+    /// Task preview from a recorded span: prefer the inline `input_preview`
+    /// extra, then the last user message of `effective_request`. Mirrors
+    /// llm-client's `user_input_preview`; keep in sync manually.
+    fn task_preview_from_span(span: &Span) -> Option<String> {
+        if let Some(preview) = span
+            .extras
+            .get("input_preview")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Self::normalize_task_preview)
+        {
+            return Some(preview);
+        }
+        span.extras
+            .get("effective_request")?
+            .get("messages")?
+            .as_array()?
+            .iter()
+            .rev()
+            .filter(|message| {
+                message.get("role").and_then(serde_json::Value::as_str) == Some("user")
+            })
+            .find_map(Self::message_text)
+            .and_then(Self::normalize_task_preview)
+    }
+
+    /// Normalize text into a bounded single-line preview: collapse
+    /// `\n`/`\r`/`\t` to spaces, drop other control chars, trim, and cap at
+    /// `TASK_DESCRIPTION_MAX_CHARS` with an ellipsis. `None` if nothing
+    /// visible remains. Mirrors llm-client's `single_line_preview`; keep in
+    /// sync manually.
+    fn normalize_task_preview(text: &str) -> Option<String> {
+        let mut preview = String::new();
+        let mut truncated = false;
+        for (index, ch) in text.chars().enumerate() {
+            if index >= TASK_DESCRIPTION_MAX_CHARS {
+                truncated = true;
+                break;
+            }
+            if ch.is_control() {
+                match ch {
+                    '\n' | '\r' | '\t' => preview.push(' '),
+                    _ => {}
+                }
+                continue;
+            }
+            preview.push(ch);
+        }
+        let preview = preview.trim();
+        if preview.is_empty() {
+            return None;
+        }
+        let mut preview = preview.to_string();
+        if truncated {
+            preview.push('…');
+        }
+        Some(preview)
     }
 
     fn span_from_row(conn: &Connection, row: &Row) -> Result<Span> {
@@ -309,6 +536,13 @@ impl SpanStorage for SqliteStorage {
                     span.created_at,
                 ],
             )?;
+            Self::materialize_trace_task(
+                &tx,
+                &span.trace_id,
+                &span.span_type,
+                &extras,
+                span.start_time,
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -363,9 +597,26 @@ impl SpanStorage for SqliteStorage {
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let current_extras_str: String = tx.query_row(
-                "SELECT extras FROM spans WHERE span_id = ?1", [&span_id], |row| row.get(0),
-            ).optional()?.ok_or_else(|| MoiraiError::NotFound(format!("Span not found: {}", span_id)))?;
+            let (current_extras_str, span_start_time, span_trace_id, span_type): (
+                String,
+                i64,
+                String,
+                String,
+            ) = tx
+                .query_row(
+                    "SELECT extras, start_time, trace_id, span_type FROM spans WHERE span_id = ?1",
+                    [&span_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| MoiraiError::NotFound(format!("Span not found: {}", span_id)))?;
 
             let mut current_extras: serde_json::Value = serde_json::from_str(&current_extras_str)?;
 
@@ -390,6 +641,13 @@ impl SpanStorage for SqliteStorage {
                 )?;
             }
 
+            Self::materialize_trace_task(
+                &tx,
+                &span_trace_id,
+                &span_type,
+                &extras,
+                span_start_time,
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -460,7 +718,7 @@ impl SpanStorage for SqliteStorage {
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 r#"
                 SELECT
                     s.trace_id,
@@ -469,13 +727,14 @@ impl SpanStorage for SqliteStorage {
                     (SELECT end_time FROM spans
                      WHERE trace_id = s.trace_id AND span_type = 'END'
                      LIMIT 1) as end_time,
-                    (SELECT span_type FROM spans WHERE trace_id = s.trace_id AND parent_span_id IS NULL LIMIT 1) as root_span_type
+                    (SELECT span_type FROM spans WHERE trace_id = s.trace_id AND parent_span_id IS NULL LIMIT 1) as root_span_type,
+                    {TRACE_TASK_DESCRIPTION_SQL}
                 FROM spans s
                 GROUP BY s.trace_id
                 ORDER BY start_time DESC
                 LIMIT ?1
                 "#,
-            )?;
+            ))?;
 
             let rows = stmt.query_map(rusqlite::params![limit], |row| {
                 Ok(TraceSummary {
@@ -484,6 +743,7 @@ impl SpanStorage for SqliteStorage {
                     start_time: row.get(2)?,
                     end_time: row.get(3)?,
                     root_span_type: row.get(4)?,
+                    task_description: row.get(5)?,
                 })
             })?;
 
@@ -505,14 +765,15 @@ impl SpanStorage for SqliteStorage {
                 .lock()
                 .map_err(|e| MoiraiError::Storage(e.to_string()))?;
 
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare(&format!(
                 r#"
                 SELECT
                     s.trace_id,
                     COUNT(*) as span_count,
                     MIN(s.start_time) as start_time,
                     MAX(s.end_time) as end_time,
-                    (SELECT span_type FROM spans WHERE trace_id = s.trace_id AND parent_span_id IS NULL LIMIT 1) as root_span_type
+                    (SELECT span_type FROM spans WHERE trace_id = s.trace_id AND parent_span_id IS NULL LIMIT 1) as root_span_type,
+                    {TRACE_TASK_DESCRIPTION_SQL}
                 FROM spans s
                 WHERE s.trace_id NOT IN (
                     SELECT DISTINCT trace_id FROM spans WHERE span_type = 'END'
@@ -521,7 +782,7 @@ impl SpanStorage for SqliteStorage {
                 ORDER BY start_time DESC
                 LIMIT ?1
                 "#,
-            )?;
+            ))?;
 
             let rows = stmt.query_map(rusqlite::params![limit], |row| {
                 Ok(TraceSummary {
@@ -530,6 +791,7 @@ impl SpanStorage for SqliteStorage {
                     start_time: row.get(2)?,
                     end_time: row.get(3)?,
                     root_span_type: row.get(4)?,
+                    task_description: row.get(5)?,
                 })
             })?;
 
@@ -818,6 +1080,12 @@ impl SqliteStorage {
                 rusqlite::params![cutoff_timestamp_ms],
             )?;
 
+            tx.execute(
+                "DELETE FROM trace_tasks WHERE NOT EXISTS (
+                    SELECT 1 FROM spans s WHERE s.trace_id = trace_tasks.trace_id
+                )",
+                [],
+            )?;
             request_store::collect_unused(&tx)?;
             tx.commit()?;
             Ok(deleted)
@@ -841,6 +1109,10 @@ impl SqliteStorage {
                 rusqlite::params![trace_id],
             )?;
 
+            tx.execute(
+                "DELETE FROM trace_tasks WHERE trace_id = ?1",
+                rusqlite::params![trace_id],
+            )?;
             request_store::collect_unused(&tx)?;
             tx.commit()?;
             Ok(deleted)

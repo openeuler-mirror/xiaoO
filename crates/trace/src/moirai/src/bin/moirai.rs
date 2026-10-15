@@ -3,6 +3,7 @@ use moirai::{Span, SpanStorage, SqliteStorage};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[path = "../cli_api.rs"]
 mod api;
@@ -100,6 +101,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Log to stderr (RUST_LOG) so progress messages don't pollute stdout.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -135,6 +142,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Column widths for the `list` table. The Task column can hold CJK text and
+/// is padded by display width (`pad_to_width`); other cells are ASCII-only.
+const TRACE_ID_COLUMN_WIDTH: usize = 14;
+const TASK_COLUMN_WIDTH: usize = 32;
+const SPANS_COLUMN_WIDTH: usize = 6;
+const STARTED_COLUMN_WIDTH: usize = 20;
+const STATUS_COLUMN_WIDTH: usize = 10;
+/// Separator width derived from the column widths (5 columns + 4 gaps).
+const LIST_SEPARATOR_WIDTH: usize = TRACE_ID_COLUMN_WIDTH
+    + TASK_COLUMN_WIDTH
+    + SPANS_COLUMN_WIDTH
+    + STARTED_COLUMN_WIDTH
+    + STATUS_COLUMN_WIDTH
+    + 4;
+
 async fn cmd_list(
     db_path: &Path,
     limit: usize,
@@ -164,10 +186,19 @@ async fn cmd_list(
     };
 
     println!(
-        "{:<14} {:<6} {:<20} {:<10}",
-        "TRACE_ID", "SPANS", "STARTED", "STATUS"
+        "{:<id_w$} {:<task_w$} {:<spans_w$} {:<started_w$} {:<status_w$}",
+        "TRACE_ID",
+        "TASK",
+        "SPANS",
+        "STARTED",
+        "STATUS",
+        id_w = TRACE_ID_COLUMN_WIDTH,
+        task_w = TASK_COLUMN_WIDTH,
+        spans_w = SPANS_COLUMN_WIDTH,
+        started_w = STARTED_COLUMN_WIDTH,
+        status_w = STATUS_COLUMN_WIDTH,
     );
-    println!("{}", "-".repeat(50));
+    println!("{}", "-".repeat(LIST_SEPARATOR_WIDTH));
 
     for trace in traces {
         let trace_id_short = &trace.trace_id[..std::cmp::min(12, trace.trace_id.len())];
@@ -177,14 +208,62 @@ async fn cmd_list(
         } else {
             "ended"
         };
+        let task = trace
+            .task_description
+            .as_deref()
+            .map(truncate_task)
+            .unwrap_or_else(|| "-".to_string());
 
+        // The Task column can hold CJK text; pad by display width.
         println!(
-            "{:<14} {:<6} {:<20} {:<10}",
-            trace_id_short, trace.span_count, start_time, status
+            "{:<id_w$} {} {:<spans_w$} {:<started_w$} {:<status_w$}",
+            trace_id_short,
+            pad_to_width(&task, TASK_COLUMN_WIDTH),
+            trace.span_count,
+            start_time,
+            status,
+            id_w = TRACE_ID_COLUMN_WIDTH,
+            spans_w = SPANS_COLUMN_WIDTH,
+            started_w = STARTED_COLUMN_WIDTH,
+            status_w = STATUS_COLUMN_WIDTH,
         );
     }
 
     Ok(())
+}
+
+const CLI_TASK_MAX_WIDTH: usize = TASK_COLUMN_WIDTH - 1;
+
+/// Truncate to the Task column's display width (CJK counts as two columns),
+/// reserving one column for the ellipsis.
+fn truncate_task(task: &str) -> String {
+    if task.width() > CLI_TASK_MAX_WIDTH {
+        let mut truncated = String::new();
+        let mut width = 0;
+        for ch in task.chars() {
+            let char_width = ch.width().unwrap_or(0);
+            if width + char_width > CLI_TASK_MAX_WIDTH {
+                break;
+            }
+            width += char_width;
+            truncated.push(ch);
+        }
+        truncated.push('…');
+        truncated
+    } else {
+        task.to_string()
+    }
+}
+
+/// Left-align `text` in `width` display columns; `format!` padding counts
+/// chars and misaligns double-width content.
+fn pad_to_width(text: &str, width: usize) -> String {
+    let text_width = text.width();
+    if text_width >= width {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(width - text_width))
+    }
 }
 
 async fn cmd_log(
