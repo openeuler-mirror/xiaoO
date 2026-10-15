@@ -149,8 +149,9 @@ with the result.
 - `Ctrl+R` — force a refresh of the highlighted provider's list, ignoring both
   the cache TTL and the failure back-off (e.g. right after entering an API key).
 - Refresh policy: 5-minute TTL after a successful fetch, a 30-second back-off
-  after a failure, and no retry at all for providers whose profile declares no
-  model catalog (`minimax`, `minimax-anthropic`, `gitcode`). At most two fetches
+  after a failure, and no automatic retry for providers whose profile declares no
+  model catalog (`minimax`, `minimax-anthropic`, `gitcode`) — `Ctrl+R` still runs
+  that decision once, short-circuiting before any HTTP request. At most two fetches
   are in flight at any time (counted globally, so the cap also holds across
   `/new`); providers beyond the cap keep the list they already have and are fetched the
   next time they are highlighted.

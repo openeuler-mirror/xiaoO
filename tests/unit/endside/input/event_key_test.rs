@@ -733,7 +733,8 @@ async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
     );
 }
 
-/// `Ctrl+R` 是唯一能绕过退避的路径：用户刚补完 API key 时不该等 30s。
+/// 同一会话内 `Ctrl+R` 是唯一能绕过退避的路径：用户刚补完 API key 时不该等 30s
+/// （会话重建会把状态重置成 `Builtin`，那是另一条路）。
 #[tokio::test]
 async fn ctrl_r_force_refreshes_past_failure_backoff() {
     let mut server = mockito::Server::new_async().await;
