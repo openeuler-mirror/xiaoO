@@ -159,6 +159,9 @@ with the result.
   usable offline. Once an official list has been fetched it stays in effect for
   the rest of the session — a later failure shows a hint line but never restores
   or clears the list.
+- The active model is pinned to the top (`<id> (configured)`) when the official
+  list does not contain it, so Enter can never silently switch you off the model
+  you are already using.
 - The list is not cached on disk: restarting the TUI re-fetches it.
 
 Sources: fetch pipeline `apps/endside/src/services/provider.rs` (request/outcome

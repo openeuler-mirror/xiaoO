@@ -672,8 +672,8 @@ async fn fetched_official_list_replaces_dialog_models_end_to_end() {
 
     assert_eq!(
         dialog_ids,
-        vec!["official-a", "official-b"],
-        "官方列表替换内置列表"
+        vec!["pin-me", "official-a", "official-b"],
+        "官方列表替换内置列表，配置模型补首位"
     );
     assert_eq!(
         chat_ids, dialog_ids,

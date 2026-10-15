@@ -645,6 +645,32 @@ pub fn model_infos_from_summaries(summaries: Vec<LlmModelSummary>) -> Vec<ModelI
         .collect()
 }
 
+/// 官方列表不含"当前激活模型"时，把它补到首位（标注来源），避免该模型
+/// 在弹窗里变成不可选、进而在用户随手 Enter 时被动切走。
+///
+/// `configured` 为空（未配置 / 全空白）或已在列表里（忽略大小写）时原样返回，
+/// 因此对"官方列表就是全量"的常见情形没有任何副作用。弹窗副本与
+/// `ChatState::available_providers` 必须用同一个结果，保证两处一致。
+pub fn pin_configured_model(mut models: Vec<ModelInfo>, configured: Option<&str>) -> Vec<ModelInfo> {
+    let Some(configured) = configured.map(str::trim).filter(|id| !id.is_empty()) else {
+        return models;
+    };
+    if models
+        .iter()
+        .any(|model| model.id.eq_ignore_ascii_case(configured))
+    {
+        return models;
+    }
+    models.insert(
+        0,
+        ModelInfo {
+            id: configured.to_string(),
+            name: format!("{configured} (configured)"),
+        },
+    );
+    models
+}
+
 fn map_model_fetch_error(error: LlmAssemblyError) -> ModelFetchError {
     match error {
         LlmAssemblyError::MissingApiKeyEnv(name) => {

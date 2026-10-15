@@ -575,7 +575,12 @@ impl App {
                 .title(" Providers ")
                 .padding(Padding::horizontal(1)),
         );
-        frame.render_widget(provider_list, left);
+        // ListState 只用于"选中项跟随滚动"：官方列表可能远长于可视高度
+        // （openrouter 300+），无状态的 List 会永远停在列表头部。
+        // 逐行样式仍由上面的 Span 决定，不设 highlight_style。
+        let mut provider_state = ListState::default();
+        provider_state.select(Some(dialog.selected_provider));
+        frame.render_stateful_widget(provider_list, left, &mut provider_state);
 
         let provider_name = dialog.selected_provider_name().unwrap_or_default();
         let status = self.state.chat_state.model_list_state(provider_name);
@@ -624,7 +629,11 @@ impl App {
                 .title(models_title)
                 .padding(Padding::horizontal(1)),
         );
-        frame.render_widget(model_list, right);
+        let mut model_state = ListState::default();
+        model_state.select(Some(
+            dialog.selected_model.min(models.len().saturating_sub(1)),
+        ));
+        frame.render_stateful_widget(model_list, right, &mut model_state);
 
         // 状态行按拉取状态给一句话：成功报数量、失败报原因、缺 key 只提示。
         let (status_text, status_style) = match &status {
