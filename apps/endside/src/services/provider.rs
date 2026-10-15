@@ -505,39 +505,50 @@ const MAX_EXTERNAL_TEXT_CHARS: usize = 200;
 /// 不额外提示。
 const MAX_MODELS_PER_PROVIDER: usize = 2_000;
 
-/// 会被终端"吃掉"或用于视觉欺骗的不可见字符。`char::is_control()` 只覆盖 Cc，而
-/// Cf（格式字符）/Zl/Zp 能穿过 ratatui 的字素过滤：bidi 覆盖（U+202E）可以把模型名
-/// 渲染成完全不同的字符顺序，零宽字符能让两个不同的名字看起来一模一样。
+/// 会被终端"吃掉"或用于视觉欺骗的不可见字符。`char::is_control()` 只覆盖 Cc；
+/// 这里覆盖 Unicode 15 的全部 Cf（格式字符）与 Zl / Zp（行 / 段分隔符）：bidi 覆盖
+/// （U+202E）可以把模型名渲染成完全不同的字符顺序，零宽字符能让两个不同的名字
+/// 看起来一模一样，而此前漏掉的 Cf（U+0600 / U+070F / U+1D173 等）同样不可见——现已一并列入。
 fn is_invisible_or_directional(ch: char) -> bool {
     matches!(ch,
-        '\u{00AD}'                    // 软连字符
-        | '\u{061C}'                  // 阿拉伯字母标记
+        '\u{00AD}'                      // 软连字符
+        | '\u{0600}'..='\u{0605}'       // 阿拉伯数字标记等
+        | '\u{061C}'                    // 阿拉伯字母标记
+        | '\u{06DD}' | '\u{070F}'       // 阿拉伯 / 叙利亚格式标记
+        | '\u{0890}'..='\u{0891}' | '\u{08E2}'
         | '\u{180E}'
-        | '\u{200B}'..='\u{200F}'    // 零宽 + bidi 标记
-        | '\u{2028}' | '\u{2029}'    // 行 / 段分隔符
-        | '\u{202A}'..='\u{202E}'    // bidi 嵌入 / 覆盖
+        | '\u{200B}'..='\u{200F}'       // 零宽 + bidi 标记
+        | '\u{2028}' | '\u{2029}'       // 行 / 段分隔符（Zl / Zp）
+        | '\u{202A}'..='\u{202E}'       // bidi 嵌入 / 覆盖
         | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{2069}'    // bidi 隔离
-        | '\u{FEFF}'
-        | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{2066}'..='\u{206F}'       // bidi 隔离 + 已弃用格式字符
+        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{110BD}' | '\u{110CD}'
+        | '\u{13430}'..='\u{1343F}'     // 埃及圣书体格式控制
+        | '\u{1BCA0}'..='\u{1BCA3}'     // 速记格式控制
+        | '\u{1D173}'..='\u{1D17A}'     // 乐谱格式控制
         | '\u{E0001}' | '\u{E0020}'..='\u{E007F}' // tag 字符
     )
 }
 
-/// URL 只保留 `scheme://host`：从首个 `/` 起（路径、query、fragment）全部抹掉。
-///
-/// 这**不是**"抹掉一切可能的密钥"的保证：没有路径的 URL（形如 `https://host?key=…`）
-/// 整个 authority 会被保留，其中的 query 原样上屏。
+/// URL 只保留 `scheme://` 之后的主机部分（含端口与 IPv6 方括号）：路径、query、
+/// fragment 与 userinfo 全部抹掉。
 ///
 /// 抹 query 是因为 provider 的 key 可能在 query 里（gemini 的 `?key=`）；保留主机名
 /// 是因为"哪个端点失败"是排查 TLS / 网关问题的关键信息——全抹成 `<url>` 会让自签名
-/// 网关这类问题无从下手。
+/// 网关这类问题无从下手。userinfo（`user:pw@`）同理要丢：密码不该上屏。
+///
+/// 顺序：先按 `/` 划出 authority 并剥掉 userinfo，再抹路径 / query / fragment——这样
+/// 畸形 URL（userinfo 里带未编码的 `?`）也不会把用户名与部分口令当成主机留在屏幕上。
 fn redact_url(token: &str) -> String {
     let Some((scheme, rest)) = token.split_once("://") else {
         return "<redacted>".to_string();
     };
-    let host_end = rest.find('/').unwrap_or(rest.len());
-    format!("{scheme}://{}/<redacted>", &rest[..host_end])
+    let slash_end = rest.find('/').unwrap_or(rest.len());
+    let userinfo_end = rest[..slash_end].rfind('@').map_or(0, |at| at + 1);
+    let after = &rest[userinfo_end..];
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    format!("{scheme}://{}/<redacted>", &after[..end])
 }
 
 /// 形如 `key=…` / `api_key: …` / `token=…` 的字段（大小写不敏感）。
@@ -553,8 +564,8 @@ fn looks_like_secret_field(token: &str) -> bool {
 /// 外部端点返回的**标签类**文本（模型 id、显示名、环境变量名）进入 TUI 前的消毒：
 /// 这些字符串会被渲染到弹窗（`overlay.rs`）、状态行与会话消息里，恶意或异常端点
 /// 可以借此注入控制序列（经典 TUI 注入面：`\x1b` 能清屏、改标题、伪造按键），
-/// 因此只保留非控制字符、且不在 `is_invisible_or_directional` 清单内的字符，并限制长度；
-/// 该清单是枚举子集，清单外的 Cf 字符仍会通过。
+/// 因此只保留非控制字符、且不属于 Cf / Zl / Zp 的字符（见 `is_invisible_or_directional`），
+/// 并限制长度。
 fn sanitize_external_label(raw: &str) -> String {
     raw.chars()
         .filter(|ch| !ch.is_control() && !is_invisible_or_directional(*ch))

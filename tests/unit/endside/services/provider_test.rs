@@ -701,3 +701,115 @@ fn redacted_urls_keep_the_host_so_tls_failures_stay_diagnosable() {
     assert!(!message.contains("sk-live-SECRET"), "密钥不得上屏/进日志：{message}");
     assert!(!message.contains("/v1/models"), "路径也应抹掉：{message}");
 }
+
+#[test]
+fn error_urls_without_a_path_do_not_leak_query_or_userinfo() {
+    // 只按首个 `/` 截断时，`https://host?key=…` 这种**没有路径**的 URL 会把整个
+    // authority（含 query）留在屏幕上；`user:pw@` 的 userinfo 同理。
+    let message = sanitize_external_message(
+        "request failed for https://gw.example.com?key=sk-live-NOPATH \
+         and https://user:pw@host.example.com/v1/models?key=sk-live-PATH \
+         and https://host.example.com#token=sk-live-FRAGMENT",
+    );
+
+    assert!(
+        !message.contains("sk-live-NOPATH"),
+        "无路径 URL 的 query 不得上屏：{message}"
+    );
+    assert!(
+        !message.contains("sk-live-PATH"),
+        "带路径 URL 的 query 不得上屏：{message}"
+    );
+    assert!(
+        !message.contains("sk-live-FRAGMENT"),
+        "fragment 不得上屏：{message}"
+    );
+    assert!(!message.contains("pw@"), "userinfo 不得上屏：{message}");
+    assert!(
+        message.contains("https://gw.example.com/<redacted>")
+            && message.contains("https://host.example.com/<redacted>"),
+        "主机名要保留（排查端点用）：{message}"
+    );
+}
+
+/// 实现把 Cf / Zl / Zp 写成 22 个区间（独立复核已用 `unicodedata` 15.1.0 逐码位
+/// 核对过：172 个码位、0 漏 0 多）。这里按**区间驱动**抽样：每个区间的首 / 次 / 中 /
+/// 末前 / 末都要被拒——只测一个代表字符的话，区间被收缩一个码位不会被发现。
+const INVISIBLE_RANGES: &[(u32, u32)] = &[
+    (0x00AD, 0x00AD), // 软连字符
+    (0x0600, 0x0605), // 阿拉伯数字标记等
+    (0x061C, 0x061C), // 阿拉伯字母标记
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F), // 叙利亚缩写标记
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F), // 零宽 + bidi 标记
+    (0x2028, 0x2029), // Zl / Zp
+    (0x202A, 0x202E), // bidi 嵌入 / 覆盖
+    (0x2060, 0x2064),
+    (0x2066, 0x206F), // bidi 隔离 + 已弃用格式字符
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F), // 埃及圣书体格式控制
+    (0x1BCA0, 0x1BCA3), // 速记格式控制
+    (0x1D173, 0x1D17A), // 乐谱格式控制
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F), // tag 字符
+];
+
+#[test]
+fn invisible_format_character_ranges_are_rejected_at_their_ends_and_middle() {
+    for &(start, end) in INVISIBLE_RANGES {
+        let middle = (start + end) / 2;
+        // 取样点必须落在区间内：单码位区间的 start+1 会跑到区间外（U+00AD → U+00AE）。
+        let samples = [
+            start,
+            (start + 1).min(end),
+            middle,
+            end.saturating_sub(1).max(start),
+            end,
+        ];
+        for codepoint in samples {
+            let ch = char::from_u32(codepoint).expect("区间端点都是有效标量值");
+            assert_eq!(
+                sanitize_external_label(&format!("a{ch}b")),
+                "ab",
+                "U+{codepoint:04X} 属于 Cf / Zl / Zp，必须被剥掉"
+            );
+        }
+    }
+
+    // 不得误伤正常字符：CJK、emoji、组合附加符号（Mn，不属于 Cf）都要原样保留。
+    let normal = "模型-🚀-e\u{0301}";
+    assert_eq!(sanitize_external_label(normal), normal);
+
+    // "0 多"同样要钉住：每个区间外紧邻的码位不得被误伤（跳过控制字符与相邻区间的边界）。
+    // 独立复核用 `unicodedata` 逐码位核过实现与 Cf∪Zl∪Zp 精确相等；这条断言让"不越界"
+    // 在 CI 里长期成立——注意它只依赖上面的区间表（规格），不调用实现里的判定函数。
+    let in_table = |codepoint: u32| {
+        INVISIBLE_RANGES
+            .iter()
+            .any(|&(start, end)| (start..=end).contains(&codepoint))
+    };
+    for &(start, end) in INVISIBLE_RANGES {
+        for codepoint in [start.checked_sub(1), end.checked_add(1)]
+            .into_iter()
+            .flatten()
+        {
+            let Some(ch) = char::from_u32(codepoint) else {
+                continue;
+            };
+            if in_table(codepoint) || ch.is_control() {
+                continue;
+            }
+            assert_eq!(
+                sanitize_external_label(&format!("a{ch}b")),
+                format!("a{ch}b"),
+                "U+{codepoint:04X} 不属于 Cf / Zl / Zp，不该被剥掉"
+            );
+        }
+    }
+}
