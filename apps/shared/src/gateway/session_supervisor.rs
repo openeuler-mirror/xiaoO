@@ -40,6 +40,17 @@ struct PendingInteractionWaiter {
     response_tx: oneshot::Sender<InteractionResponse>,
 }
 
+/// Outcome of waiting on one suspended `join_subagent` call: the
+/// subagent's terminal snapshot arrived, the wake channel dropped
+/// before it fired, or the wait was cut short by turn cancellation
+/// (the resume path then synthesizes an error tool result so the
+/// lane's history keeps one result per suspended call).
+enum JoinWaitResult {
+    Terminal(SubagentTerminalSnapshot),
+    Dropped,
+    Cancelled,
+}
+
 /// Root turn's sinks, inherited by spawned subagent lanes in remote
 /// (daemon) mode where the resolver returns default bindings. Set in
 /// `run_root_turn`, read in `run_lane_until_terminal`, cleared on exit.
@@ -92,6 +103,16 @@ pub(crate) struct SessionSupervisor {
     /// on exit. Kept as a single `Mutex<Option<RootTurnSinks>>` so the
     /// pair is always set/cleared atomically.
     current_root_sinks: Mutex<Option<RootTurnSinks>>,
+    /// The root turn's cancellation token, inherited by spawned subagent
+    /// lanes so an Esc/Ctrl+C cancel propagates into every subagent's
+    /// agent loop (their LLM streams race the token — see `llm_call` —
+    /// and `decide()` returns `ReturnCancelled`) and into their pending
+    /// forwarded interactions (see `request_interaction`). Set together
+    /// with `current_root_sinks` in `run_root_turn`, captured by
+    /// `apply_host_actions_internal` BEFORE the subagent task is
+    /// spawned (so a root-turn exit racing task scheduling cannot lose
+    /// it), cleared on `run_root_turn`'s single exit point.
+    current_root_cancel: Mutex<Option<CancellationToken>>,
     /// Optional cap on how long a forwarded subagent interaction
     /// (`ask_user_question`) may wait for the user to reply. Only armed
     /// when the handle does not enforce its own timeout (see
@@ -120,6 +141,7 @@ impl SessionSupervisor {
             interaction_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             root_turn_lock: Mutex::new(()),
             current_root_sinks: Mutex::new(None),
+            current_root_cancel: Mutex::new(None),
             interaction_timeout,
         }
     }
@@ -185,6 +207,16 @@ impl SessionSupervisor {
         snapshot
     }
 
+    /// Forward a subagent's interaction request (`ask_user_question`,
+    /// permission confirms) to the user through the root turn's handle.
+    ///
+    /// `turn_cancel` is the root turn's cancel token, captured when the
+    /// subagent lane was spawned: when it fires while the user has not
+    /// replied, the spawned forwarding task delivers the cancelled
+    /// sentinel instead of parking until `interaction_timeout` (default
+    /// 600 s), releasing the handle's pending entry via `abort_pending`.
+    /// `None` (lane spawned outside a root turn) keeps the pre-existing
+    /// behaviour of waiting for the user or the timeout.
     pub(crate) async fn request_interaction(
         self: &Arc<Self>,
         request_id: String,
@@ -192,6 +224,7 @@ impl SessionSupervisor {
         parent_agent_id: AgentId,
         request: InteractionRequest,
         response_tx: oneshot::Sender<InteractionResponse>,
+        turn_cancel: Option<CancellationToken>,
     ) {
         let supervisor = Arc::clone(self);
         let waiter = PendingInteractionWaiter {
@@ -242,32 +275,63 @@ impl SessionSupervisor {
         if let Some(handle) = interaction_handle {
             tokio::spawn(async move {
                 let _permit = semaphore.acquire().await.unwrap();
-                let response = match outer_timeout {
-                    Some(duration) => {
-                        tokio::select! {
-                            biased;
-                            r = handle.ask(&request) => r,
-                            _ = tokio::time::sleep(duration) => {
-                                tracing::warn!(
-                                    request_id = %request_id,
-                                    timeout_secs = duration.as_secs(),
-                                    "subagent interaction timed out before the user \
-                                     replied; delivering sentinel response"
-                                );
-                                // Drop-then-abort: `handle.ask` future is
-                                // cancelled by `select!` here. Any external
-                                // pending state it registered (e.g. an SSE
-                                // interaction store entry) is released via
-                                // `abort_pending` so a late user reply is
-                                // not silently swallowed by a stale entry.
-                                handle.abort_pending(&request).await;
-                                super::subagent_interaction::interaction_timeout_response(
-                                    &request,
-                                )
-                            }
-                        }
+                // Race the forwarded ask against the turn's cancel token
+                // and, when armed, the outer interaction timeout. The
+                // cancel arm mirrors the root lane's
+                // `CancelAwareInteractionHandle`: an Esc/Ctrl+C unparks a
+                // subagent stuck on `ask_user_question` or a permission
+                // confirm in milliseconds instead of after the
+                // interaction timeout (default 600 s). `biased` with the
+                // cancel arm first means an already-cancelled turn skips
+                // the ask entirely (`abort_pending` on a request that was
+                // never sent is a benign no-op).
+                let response = tokio::select! {
+                    biased;
+                    _ = wait_for_cancel(turn_cancel.as_ref()) => {
+                        tracing::warn!(
+                            request_id = %request_id,
+                            "turn cancelled while a subagent interaction was pending; \
+                             delivering cancelled sentinel response"
+                        );
+                        // Drop-then-abort: `handle.ask` future is
+                        // cancelled by `select!` here. Any external
+                        // pending state it registered (e.g. an SSE
+                        // interaction store entry) is released via
+                        // `abort_pending` so a late user reply is
+                        // not silently swallowed by a stale entry.
+                        handle.abort_pending(&request).await;
+                        super::subagent_interaction::interaction_cancelled_response(
+                            &request,
+                        )
                     }
-                    None => handle.ask(&request).await,
+                    r = async {
+                        match outer_timeout {
+                            Some(duration) => {
+                                tokio::select! {
+                                    r = handle.ask(&request) => r,
+                                    _ = tokio::time::sleep(duration) => {
+                                        tracing::warn!(
+                                            request_id = %request_id,
+                                            timeout_secs = duration.as_secs(),
+                                            "subagent interaction timed out before the user \
+                                             replied; delivering sentinel response"
+                                        );
+                                        // Drop-then-abort: `handle.ask` future is
+                                        // cancelled by `select!` here. Any external
+                                        // pending state it registered (e.g. an SSE
+                                        // interaction store entry) is released via
+                                        // `abort_pending` so a late user reply is
+                                        // not silently swallowed by a stale entry.
+                                        handle.abort_pending(&request).await;
+                                        super::subagent_interaction::interaction_timeout_response(
+                                            &request,
+                                        )
+                                    }
+                                }
+                            }
+                            None => handle.ask(&request).await,
+                        }
+                    } => r,
                 };
                 supervisor
                     .deliver_interaction_response_from_user(request_id, response)
@@ -446,6 +510,10 @@ impl SessionSupervisor {
             interaction_handle: interaction_handle_override.clone(),
         };
         *self.current_root_sinks.lock().await = Some(stored_root_sinks);
+        // Store the root turn's cancel token so subagent lanes spawned
+        // during this turn inherit it (see `current_root_cancel`). The
+        // root lane itself gets the original below via `LaneRunInput`.
+        *self.current_root_cancel.lock().await = cancellation_token.clone();
 
         let root_agent_id = {
             let session = self.session.lock().await;
@@ -481,6 +549,9 @@ impl SessionSupervisor {
         // stale ones. Cleared in all branches since this is the single
         // exit point for `run_root_turn`.
         *self.current_root_sinks.lock().await = None;
+        // Subagent tasks still winding down captured their token clone
+        // at spawn time, so clearing here never strands them.
+        *self.current_root_cancel.lock().await = None;
 
         match result {
             Ok(terminal) => {
@@ -666,36 +737,87 @@ impl SessionSupervisor {
                     }
 
                     use futures::StreamExt;
-                    let mut completed_results: Vec<(
-                        usize,
-                        Result<SubagentTerminalSnapshot, oneshot::error::RecvError>,
-                    )> = Vec::with_capacity(total_count);
+                    let mut completed_results: Vec<(usize, JoinWaitResult)> =
+                        Vec::with_capacity(total_count);
+                    let mut wait_cancelled = false;
 
-                    while let Some((idx, terminal_result)) = futures_stream.next().await {
-                        completed_results.push((idx, terminal_result));
+                    loop {
+                        tokio::select! {
+                            biased;
+                            // Race the join wait against the lane's cancel
+                            // token so an Esc/Ctrl+C during "Waiting for
+                            // subagents..." lands in milliseconds instead of
+                            // after every subagent finishes naturally: the
+                            // subagents themselves also observe the token
+                            // (inherited at spawn) and wind down, but the
+                            // parent must not block the cancelled turn on
+                            // their full wind-down. Both arms are
+                            // cancel-safe (`CancellationToken::cancelled`
+                            // and `FuturesUnordered::next`), so re-creating
+                            // the futures each loop iteration loses nothing.
+                            _ = wait_for_cancel(input.cancellation_token.as_ref()) => {
+                                wait_cancelled = true;
+                                break;
+                            }
+                            item = futures_stream.next() => match item {
+                                Some((idx, terminal_result)) => {
+                                    completed_results.push((
+                                        idx,
+                                        match terminal_result {
+                                            Ok(terminal) => JoinWaitResult::Terminal(terminal),
+                                            Err(_) => JoinWaitResult::Dropped,
+                                        },
+                                    ));
 
+                                    if let Some(sink) = loop_event_sink.as_ref() {
+                                        sink.on_assistant_message(
+                                            &input.agent_id,
+                                            &format!(
+                                                "Progress: {} of {} subagents completed",
+                                                completed_results.len(),
+                                                total_count
+                                            ),
+                                        );
+                                    }
+                                }
+                                None => break,
+                            },
+                        }
+                    }
+
+                    // Drop the still-pending receivers eagerly: their
+                    // entries are removed below and a later `wake_waiter`
+                    // must not send into a half-abandoned channel.
+                    drop(futures_stream);
+
+                    if wait_cancelled {
                         if let Some(sink) = loop_event_sink.as_ref() {
                             sink.on_assistant_message(
                                 &input.agent_id,
-                                &format!(
-                                    "Progress: {} of {} subagents completed",
-                                    completed_results.len(),
-                                    total_count
-                                ),
+                                "Turn cancelled while waiting for subagents; winding down...",
                             );
+                        }
+                        // Synthesize a cancelled result for every join that
+                        // never woke, so the resumed lane carries a tool
+                        // result for each suspended `join_subagent` call
+                        // and the history stays consistent.
+                        for idx in 0..total_count {
+                            if !completed_results.iter().any(|(i, _)| *i == idx) {
+                                completed_results.push((idx, JoinWaitResult::Cancelled));
+                            }
                         }
                     }
 
                     completed_results.sort_by_key(|(idx, _)| *idx);
 
-                    for (idx, terminal_result) in completed_results {
+                    for (idx, wait_result) in completed_results {
                         let suspended_call = &suspended_calls[idx];
                         let join_id = &join_ids[idx];
 
                         self.remove_pending_join(join_id).await;
 
-                        let (tool_result_msg, output_preview, is_error) = match terminal_result {
-                            Ok(terminal) => {
+                        let (tool_result_msg, output_preview, is_error) = match wait_result {
+                            JoinWaitResult::Terminal(terminal) => {
                                 let msg = build_join_tool_result_message(
                                     suspended_call,
                                     terminal.clone(),
@@ -707,9 +829,23 @@ impl SessionSupervisor {
                                 let error = terminal.status == SubagentTerminalKind::Failed;
                                 (msg, preview, error)
                             }
-                            Err(_) => {
+                            JoinWaitResult::Dropped => {
                                 let error_msg =
                                     format!("pending join receiver dropped before wake: {join_id}");
+                                let msg = build_tool_result_message(&ToolExecutionResult::Failed {
+                                    final_call: suspended_call.final_call.clone(),
+                                    pre_hook_results: Vec::new(),
+                                    error_hook_results: Vec::new(),
+                                    execution_error: ToolExecutionError::ExecutionFailed {
+                                        message: error_msg.clone(),
+                                    },
+                                });
+                                (msg, error_msg, true)
+                            }
+                            JoinWaitResult::Cancelled => {
+                                let error_msg = format!(
+                                    "join cancelled: turn was cancelled while waiting for the subagent ({join_id})"
+                                );
                                 let msg = build_tool_result_message(&ToolExecutionResult::Failed {
                                     final_call: suspended_call.final_call.clone(),
                                     pre_hook_results: Vec::new(),
@@ -845,7 +981,19 @@ impl SessionSupervisor {
                     output_schema: _,
                     max_turns,
                 } => {
-                    self.spawn_subagent_task(agent_id, parent_agent_id, prompt, max_turns);
+                    // Capture the root turn's cancel token BEFORE the
+                    // `tokio::spawn` below: reading it inside the spawned
+                    // task would race `run_root_turn`'s exit (which clears
+                    // the field) against task scheduling and could hand
+                    // the subagent lane a lost (None) token.
+                    let cancellation_token = self.current_root_cancel.lock().await.clone();
+                    self.spawn_subagent_task(
+                        agent_id,
+                        parent_agent_id,
+                        prompt,
+                        max_turns,
+                        cancellation_token,
+                    );
                 }
                 HostAction::SuspendWaiter {
                     join_id,
@@ -895,6 +1043,7 @@ impl SessionSupervisor {
         parent_agent_id: AgentId,
         prompt: String,
         max_turns: Option<u32>,
+        cancellation_token: Option<CancellationToken>,
     ) {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
@@ -907,6 +1056,11 @@ impl SessionSupervisor {
                     Arc::clone(&supervisor),
                     agent_id.clone(),
                     parent_agent_id.clone(),
+                    // Same captured token the lane's LLM stream races, so
+                    // an Esc/Ctrl+C unparks this lane's pending
+                    // interactions (`ask_user_question` / permission
+                    // confirms) as well, not just its LLM calls.
+                    cancellation_token.clone(),
                 )) as Arc<dyn InteractionHandle>;
             let result = supervisor
                 .run_lane_until_terminal(LaneRunInput {
@@ -919,7 +1073,12 @@ impl SessionSupervisor {
                     loop_event_sink_override: None,
                     interaction_handle_override: Some(interaction_handle),
                     channel_file_sender_override: None,
-                    cancellation_token: None,
+                    // Inherit the root turn's cancel token (captured by
+                    // `apply_host_actions_internal` before this task was
+                    // spawned) so Esc/Ctrl+C aborts the subagent's
+                    // in-flight LLM stream in milliseconds instead of
+                    // letting it run to natural completion.
+                    cancellation_token,
                     command_context: None,
                 })
                 .await;
@@ -1178,12 +1337,22 @@ impl SessionSupervisor {
         terminal: SubagentTerminalSnapshot,
     ) -> Result<(), SubagentControlError> {
         let mut pending_joins = self.pending_joins.lock().await;
-        let pending_join =
-            pending_joins
-                .get_mut(&join_id)
-                .ok_or_else(|| SubagentControlError::InvalidState {
-                    message: format!("pending join missing during wake: {join_id}"),
-                })?;
+        let pending_join = match pending_joins.get_mut(&join_id) {
+            Some(pending_join) => pending_join,
+            None => {
+                // The waiter lane already gave up on this join — the
+                // parent turn was cancelled while waiting and the resume
+                // path removed it. Nobody is listening; dropping the wake
+                // is benign (the subagent's terminal is still recorded in
+                // the session state by `mark_subagent_terminal` before
+                // this action runs).
+                tracing::warn!(
+                    join_id = %join_id,
+                    "pending join missing during wake; waiter already gave up, dropping wake"
+                );
+                return Ok(());
+            }
+        };
         let sender =
             pending_join
                 .sender
@@ -1191,11 +1360,17 @@ impl SessionSupervisor {
                 .ok_or_else(|| SubagentControlError::InvalidState {
                     message: format!("pending join sender already consumed: {join_id}"),
                 })?;
-        sender
-            .send(terminal)
-            .map_err(|_| SubagentControlError::Unavailable {
-                message: format!("failed to deliver wake signal for join: {join_id}"),
-            })
+        if sender.send(terminal).is_err() {
+            // Receiver dropped: same "waiter gave up" situation as the
+            // missing-entry case above (e.g. the waiter lane errored out
+            // of the join wait after taking the receiver). Warn instead
+            // of failing `mark_subagent_terminal`'s action batch.
+            tracing::warn!(
+                join_id = %join_id,
+                "pending join receiver dropped before wake; nobody is listening"
+            );
+        }
+        Ok(())
     }
 
     async fn remove_pending_join(&self, join_id: &str) {
@@ -1210,6 +1385,18 @@ fn effective_reasoning_effort(
     requested
         .or_else(|| runtime_llm.and_then(|llm| llm.reasoning_effort))
         .unwrap_or_default()
+}
+
+/// Await the lane's cancel token, or pend forever when the lane has
+/// none (a lane spawned outside a root turn). Used as a `select!` arm
+/// so wait sites (the suspended join wait) respond to cancellation;
+/// `CancellationToken::cancelled` is cancel-safe, so re-creating this
+/// future across select iterations is lossless.
+async fn wait_for_cancel(token: Option<&CancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 fn runtime_input_from_session(
