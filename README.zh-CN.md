@@ -12,6 +12,10 @@ AgentOS 的开源智能中枢。
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
+## 社区交流
+
+为提升 xiaoO 开发及维护效率，可以申请加入"xiaoO爱好者交流群"，添加微信: xj756386857 (备注：xiaoO爱好者+atomgit_id)。
+
 ## xiaoO 是什么？
 
 xiaoO 是 AgentOS 的智能中枢，提供面向系统管理、智能体编排、工具执行、记忆、上下文压缩和多渠道接入的自治 Agent 运行时。

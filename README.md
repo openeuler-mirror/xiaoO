@@ -12,6 +12,10 @@ Open-source intelligence hub for AgentOS.
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Version](https://img.shields.io/badge/version-v0.1.0-red.svg)](https://atomgit.com/openeuler/xiaoO)
 
+## Community
+
+To improve the efficiency of developing and maintaining xiaoO, you can apply to join the "xiaoO Enthusiasts Group" by adding WeChat: xj756386857 (remark: xiaoO enthusiast + atomgit_id).
+
 ## What is xiaoO?
 
 xiaoO is the intelligence hub of AgentOS. It provides a self-governing agent runtime for system management, agent orchestration, tool execution, memory, context compression, and multi-channel access.
