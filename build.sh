@@ -3,9 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Check if called from project root
-if [ ! -f "$SCRIPT_DIR/Cargo.toml" ]; then
-    echo "Error: build.sh must be run from the project root directory"
+# Check if called from project root.
+# `$SCRIPT_DIR/Cargo.toml` is the script's OWN directory and always exists, so it
+# could never catch the case this guard is for. What matters is the working
+# directory: `cargo build` and the plugin installer below both run in `$PWD`.
+if [ ! -f Cargo.toml ]; then
+    echo "Error: build.sh must be run from the project root directory (no Cargo.toml in $PWD)" >&2
     exit 1
 fi
 
@@ -99,8 +102,11 @@ echo ""
 echo "═══════════════════════════════════════════════════════════════"
 echo "  Running cargo build $@..."
 echo "═══════════════════════════════════════════════════════════════"
-cargo build "$@"
-BUILD_EXIT_CODE=$?
+# `cargo build` failing would abort the script here under `set -e`, leaving the
+# report below unreachable. `|| CODE=$?` keeps errexit on for everything else
+# while still letting this branch run.
+BUILD_EXIT_CODE=0
+cargo build "$@" || BUILD_EXIT_CODE=$?
 
 if [ $BUILD_EXIT_CODE -ne 0 ]; then
     echo "cargo build failed with exit code $BUILD_EXIT_CODE"
@@ -118,8 +124,8 @@ if [ "$INSTALL_AUDIT" = true ]; then
     # plugins/hookers/install.sh 会自动调用 agent_moss/install.sh
     export AM_ENABLE_LLM="${ENABLE_LLM_ENV:-}"
     cd "$SCRIPT_DIR/plugins/hookers"
-    bash install.sh --non-interactive agent_moss
-    REGISTER_EXIT_CODE=$?
+    REGISTER_EXIT_CODE=0
+    bash install.sh --non-interactive agent_moss || REGISTER_EXIT_CODE=$?
     cd "$SCRIPT_DIR"
 
     if [ $REGISTER_EXIT_CODE -eq 0 ]; then
