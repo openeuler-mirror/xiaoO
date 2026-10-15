@@ -569,7 +569,7 @@ fn model_list_state(app: &App, provider: &str) -> crate::chat::ModelListState {
 
 /// 把 `llm` 指向本地假端点：provider 与 `llm.provider` 一致时
 /// `persisted_selection_settings` 才会用配置里的 api_base（否则回落默认表，
-/// 请求会打到真实厂商）。模型 id 特意与官方列表不同，用来验证"配置模型补首位"。
+/// 请求会打到真实厂商）。模型 id 特意与官方列表不同，便于断言官方结果确实替换了内置表。
 fn test_app_with_llm(provider: &str, model: &str, api_base: &str) -> App {
     let mut config = Config::default();
     config.llm.provider = provider.to_string();
@@ -628,8 +628,8 @@ async fn opening_connect_schedules_fetch_for_active_provider() {
     );
 }
 
-/// 端到端：真实 HTTP 响应 → 结果回传 → 落地。官方列表替换弹窗与 ChatState
-/// 两处副本、配置模型补首位、选中项按 id 保持、状态转 Ready。
+/// 端到端：真实 HTTP 响应 → 结果回传 → 落地。断言官方列表替换弹窗与
+/// `ChatState` 两处副本（顺序保持官方返回序）、状态转 `Ready`。
 ///
 /// provider 用 `local`：它的 profile 不要求 API key（`api_key_required=false`），
 /// 因此请求能真正打到假端点，不需要在测试里摆弄环境变量。
@@ -711,9 +711,10 @@ async fn failed_fetch_keeps_models_and_records_error() {
     }
 }
 
-/// 拉取在飞期间目录被重置（`/new`、快照恢复都会经 `build_chat_state` 重置）
-/// 时写不进目录：此时必须回落 `Builtin`，否则下次打开弹窗会拿着内置列表
-/// 声称"官方模型列表"，并在 TTL 内拒绝重新拉取。
+/// 目录里已经没有该 provider 时写不进目录（防御分支：`/new`、快照恢复与远端会话重建
+/// 都会推进世代，那种结果在世代检查处就被丢弃；本测试直接清空目录构造这一状态）：
+/// 此时必须回落 `Builtin`，否则下次打开弹窗会拿着内置列表声称"官方模型列表"，
+/// 并在 TTL 内拒绝重新拉取。
 #[tokio::test]
 async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
     let mut app = test_app_with_llm("local", "pin-me", "http://127.0.0.1:1/v1");

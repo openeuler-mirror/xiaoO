@@ -427,8 +427,8 @@ pub use xiaoo_shared::session_diff::{SessionFileChangeEntry, SessionFileChangeSt
 
 /// 全局在飞的模型拉取上限（按 provider 名去重后计数）。
 ///
-/// 计数放在 `AppState` 而不是 `ChatState`：后者会被 `/new`、`/load`、`/remote` 重建，
-/// 放在里面会让"最多两个在飞"失效。
+/// 计数放在 `AppState` 而不是 `ChatState`：后者会被 `/new`、`/load` 与 `/remote`
+/// （连接或切换已有远端会话）重建，放在里面会让"最多两个在飞"失效。
 pub const MAX_INFLIGHT_MODEL_FETCHES: usize = 2;
 
 pub struct AppState {

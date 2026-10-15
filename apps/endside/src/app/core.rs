@@ -20,8 +20,9 @@ pub struct App {
     ///
     /// 用 mpsc 而不是 oneshot：拉取按 provider 独立进行，快速上下键切换
     /// provider 时允许多个请求在飞（上限见 `MAX_INFLIGHT_MODEL_FETCHES`），
-    /// 每个任务都必须能把结果回传——否则被顶掉的那个 provider 会永远停在
-    /// `Loading`。结果按 provider 名应用，与顺序无关。
+    /// 每个任务都必须能把结果回传——否则被顶掉的那个 provider 会卡在 `Loading`
+    /// 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期后的下一次触发，见
+    /// `start_model_fetch`。结果按 provider 名应用，与顺序无关。
     pub(crate) model_fetch_tx:
         tokio::sync::mpsc::UnboundedSender<(u64, crate::provider_service::ProviderModelFetchOutcome)>,
     pub(crate) model_fetch_rx:
@@ -507,7 +508,7 @@ impl App {
         // 无论结果是否被采纳，名额都要释放（`join_fetch_outcome` 保证任务一定回传）。
         self.state.finish_model_fetch(&provider);
         if session != self.state.model_fetch_session {
-            // 会话已被重建（`/new`、`/load`）：这是旧会话的结果，丢弃。远端会话切换不重建 ChatState，因此不在此列。
+            // 会话已被重建（`/new`、`/load` 与远端会话的连接/切换都会重建）：这是旧会话的结果，丢弃。
             return;
         }
         match outcome.result {
@@ -515,10 +516,10 @@ impl App {
                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
                     dialog.replace_models(&provider, models.clone());
                 }
-                // 目录里已经没有这个 provider 时（例如拉取在飞期间用户执行了
-                // `/new`，`build_chat_state` 重置了目录与状态）写不进去：这时
-                // 记 `Builtin` 而不是 `Ready`，否则下次打开弹窗会拿着内置列表
-                // 显示"官方模型列表"并在 TTL 内拒绝重新拉取。
+                // 目录里已经没有这个 provider 时写不进去（防御分支：会话重建会同时重置
+                // 目录与状态，那种情形在世代检查处已被丢弃）：这时记 `Builtin` 而不是
+                // `Ready`，否则下次打开弹窗会拿着内置列表显示"官方模型列表"并在 TTL 内
+                // 拒绝重新拉取。
                 let applied_to_catalog = self
                     .state
                     .chat_state

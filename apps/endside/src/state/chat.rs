@@ -568,10 +568,10 @@ pub enum ModelListState {
     Unsupported,
 }
 
-/// `Ready` 之后的正常刷新间隔：打开弹窗 / 切换 provider 时超过它才重新拉取。
 /// `Loading` 超过这个时长就视为"结果不会再回来了"，允许重新拉取。
 pub const MODEL_LIST_STALE_AFTER: Duration = Duration::from_secs(60);
 
+/// `Ready` 之后的正常刷新间隔：打开弹窗 / 切换 provider 时超过它才重新拉取。
 pub const MODEL_LIST_TTL: Duration = Duration::from_secs(300);
 /// `Failed` 之后的最小重试间隔，避免在坏端点上反复打请求。
 pub const MODEL_LIST_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
@@ -583,9 +583,10 @@ impl ModelListState {
 
     /// `Loading` 已经等了太久：视为"结果永远不会回来了"。
     ///
-    /// 回传的结果是唯一能把状态推走 `Loading` 的输入；一旦任务在回传前消失，状态就会
-    /// 永久停在 `Loading`（`needs_refresh` 为假、守卫拦住重试）。这道兜底让陈旧的
-    /// `Loading` 重新可拉取。阈值取 facade 超时（20s）的 3 倍，正常慢请求不会误判。
+    /// 回传的结果是**首选**能把状态推走 `Loading` 的输入；任务若在回传前消失，状态会停在
+    /// `Loading` 直到本窗口到期——窗口内 `needs_refresh` 为假、在飞名额也不释放，谁都拉不动；
+    /// 到期后的下一次触发（打开弹窗 / 切换高亮）会让 `start_model_fetch` 先清掉陈旧登记再重拉。
+    /// 阈值取 facade 超时（20s）的 3 倍，正常慢请求不会误判。
     pub fn is_stale_loading(&self, now: Instant) -> bool {
         match self {
             Self::Loading { since } => now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER,

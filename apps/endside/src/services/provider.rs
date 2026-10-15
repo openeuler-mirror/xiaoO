@@ -401,21 +401,16 @@ pub fn model_fetch_request(config: &Config, provider: &str) -> ProviderModelFetc
     }
 }
 
-/// 调官方 model list 接口。
-///
-/// 经门面 `list_llm_models`（按 protocol family 分派到 OpenAI 兼容 / Anthropic /
-/// Gemini / Ollama / Zhipu），endside 不直接依赖 `llm-client`、也不自己发 HTTP。
-///
-/// 本函数永不返回 `Err`：任何失败都收敛成 [`ProviderModelFetchOutcome`] 里的
-/// `Err`，这样每个 spawn 出去的拉取任务必定回传一个结果，调用方的 `Loading`
-/// 状态不会永远挂着。
 /// 等待拉取任务结束，并把"任务没能正常返回"（panic / 被取消）也转成一个失败结果。
 ///
-/// 任务回传的结果是**唯一**能把状态从 `Loading` 推走的输入（见
-/// `App::apply_model_fetch_outcome`）。若任务 panic 而没有回传，该 provider 会永久停在
-/// `Loading`：`needs_refresh(Loading)` 为假，`start_model_fetch` 的守卫会拦住所有重试，
-/// 并且它还会永久占着在飞名额。
-/// 所以这里保证：无论任务以何种方式结束，都必须有一个结果回传给 UI。
+/// 任务回传的结果是**首选**能把状态从 `Loading` 推走的输入（见
+/// `App::apply_model_fetch_outcome`）。若任务 panic 而没有回传，该 provider 会停在
+/// `Loading` 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期：窗口内
+/// `needs_refresh(Loading)` 为假，而在飞名额也不释放，
+/// 于是任何重发请求的路径都在 `begin_model_fetch` 处被挡回；窗口到期后的下一次触发会让
+/// `start_model_fetch` 先清掉陈旧登记再重拉。
+/// 所以这里保证：无论任务以何种方式结束，都必须有一个结果回传给 UI，
+/// 不让用户白等满这个兜底窗口。
 pub async fn join_fetch_outcome(
     provider: String,
     handle: tokio::task::JoinHandle<ProviderModelFetchOutcome>,
@@ -437,6 +432,15 @@ pub async fn join_fetch_outcome(
     }
 }
 
+/// 调官方 model list 接口。
+///
+/// 经门面 `list_llm_models`（按 protocol family 分派到 OpenAI 兼容 / Anthropic /
+/// Gemini / Ollama / Zhipu），endside 不直接依赖 `llm-client`、也不自己发 HTTP。
+///
+/// 本函数永不返回 `Err`：任何失败都收敛成 [`ProviderModelFetchOutcome`] 里的
+/// `Err`，这样每个 spawn 出去的拉取任务必定回传一个结果，调用方的 `Loading`
+/// 状态不会永远挂着。
+/// 兜底见 `join_fetch_outcome`：陈旧 `Loading` 会在兜底窗口后重新可拉。
 pub async fn fetch_provider_models(
     request: ProviderModelFetchRequest,
 ) -> ProviderModelFetchOutcome {
@@ -497,7 +501,8 @@ const MAX_EXTERNAL_TEXT_CHARS: usize = 200;
 
 /// 单个 provider 最多接受的模型条数。官方目录的正常量级是几十到几百条
 /// （openrouter 300+），几万条只可能是异常端点或攻击载荷——而列表每帧都要建行，
-/// 必须有上限兜住渲染与内存。
+/// 必须有上限兜住渲染与内存。超出即**静默截断**：标题与状态行显示的是截断后的条数，
+/// 不额外提示。
 const MAX_MODELS_PER_PROVIDER: usize = 2_000;
 
 /// 会被终端"吃掉"或用于视觉欺骗的不可见字符。`char::is_control()` 只覆盖 Cc，而
@@ -519,7 +524,10 @@ fn is_invisible_or_directional(ch: char) -> bool {
     )
 }
 
-/// URL 只保留 `scheme://host`，路径 / query / fragment 一律抹掉。
+/// URL 只保留 `scheme://host`：从首个 `/` 起（路径、query、fragment）全部抹掉。
+///
+/// 这**不是**"抹掉一切可能的密钥"的保证：没有路径的 URL（形如 `https://host?key=…`）
+/// 整个 authority 会被保留，其中的 query 原样上屏。
 ///
 /// 抹 query 是因为 provider 的 key 可能在 query 里（gemini 的 `?key=`）；保留主机名
 /// 是因为"哪个端点失败"是排查 TLS / 网关问题的关键信息——全抹成 `<url>` 会让自签名
@@ -545,7 +553,8 @@ fn looks_like_secret_field(token: &str) -> bool {
 /// 外部端点返回的**标签类**文本（模型 id、显示名、环境变量名）进入 TUI 前的消毒：
 /// 这些字符串会被渲染到弹窗（`overlay.rs`）、状态行与会话消息里，恶意或异常端点
 /// 可以借此注入控制序列（经典 TUI 注入面：`\x1b` 能清屏、改标题、伪造按键），
-/// 因此只保留可打印字符，并限制长度。
+/// 因此只保留非控制字符、且不在 `is_invisible_or_directional` 清单内的字符，并限制长度；
+/// 该清单是枚举子集，清单外的 Cf 字符仍会通过。
 fn sanitize_external_label(raw: &str) -> String {
     raw.chars()
         .filter(|ch| !ch.is_control() && !is_invisible_or_directional(*ch))
@@ -556,6 +565,9 @@ fn sanitize_external_label(raw: &str) -> String {
 /// 外部端点返回的**说明类**文本（错误文案）消毒：除控制字符外还要抹掉 URL——底层
 /// 客户端的错误串会带请求 URL，而 provider 的 URL query 可能含 API key（例如
 /// gemini 的 `?key=`），这段文案是要显示在屏幕上的。
+///
+/// 除 URL 外还抹掉：`key=` / `key:` / `token=` / `token:` / `secret=` / `secret:` /
+/// `password=` / `password:` 的整段 token，以及 `Bearer` / `Basic` 之后紧跟的那个 token。
 fn sanitize_external_message(raw: &str) -> String {
     // 控制字符与不可见字符换成空格而不是删掉：`...\nkey=xxx` 若直接删掉换行，会粘成
     // 一个新 token，下面的 token 规则就失效了。

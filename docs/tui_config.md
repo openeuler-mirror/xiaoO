@@ -354,7 +354,7 @@ editing chords live in `handle_input_key`
 (`apps/endside/src/input/core.rs:690-733`) and the app-level chords in
 `apps/endside/src/input/event_key.rs`. The source itself states "These bindings
 are hard-coded — there is no keymap configuration"
-(`apps/endside/src/input/core.rs:638`).
+(`apps/endside/src/input/core.rs:682`).
 
 ### Input-line editing (readline / emacs)
 
@@ -393,7 +393,7 @@ Sources: submit `apps/endside/src/input/event_key.rs:1806-1809`; soft newline
 `:1817-1821`; history `:1824-1831`; copy `:1836-1843`; cut `:1846-1848`;
 `Ctrl+C` / `Ctrl+Insert` copy-vs-quit split `:55-98`; `Ctrl+T` `:403`; `Tab`
 `:378-399`; `Up`/`Down` `:480-520`; `PageUp`/`PageDown` `:525-530`; `Esc`
-`:498-501`; `Ctrl+R` (dialog-scoped) `:1369-1371`.
+`:498-501`.
 
 > `Shift+Enter` only reaches the app on terminals that report key modifiers
 > (kitty keyboard / CSI u); mainstream unix terminals fold it onto the same
@@ -574,7 +574,7 @@ not a configuration option.
 
 - **No configurable keymap.** Keybindings cannot be changed via configuration;
   there is no keymap table and no validation layer
-  (`apps/endside/src/input/core.rs:638`).
+  (`apps/endside/src/input/core.rs:682`).
 - **`lsp.extra_servers.extensions` silently ignores globs.** A wildcard entry
   never matches and produces no warning (`crates/lsp/src/manager.rs:112-120`).
 - **Unknown tool names in `[agent.<name>.tools]` are silently skipped.** The

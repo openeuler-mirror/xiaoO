@@ -497,8 +497,10 @@ fn model_list_state_defaults_to_builtin_and_tracks_loading_staleness() {
     );
     assert!(!state.model_list_state("openai").is_stale_loading(started));
 
-    // 陈旧兜底：任务若在回传前消失，Loading 必须重新可拉，否则该 provider 只能靠
-    // 重建会话脱困（`needs_refresh(Loading)` 恒假 + 守卫拦住包括 Ctrl+R 的重试）。
+    // 陈旧兜底：任务若在回传前消失，Loading 必须在兜底窗口到期后重新可拉——窗口内
+    // `needs_refresh(Loading)` 为假、在飞名额也不释放，谁都拉不动。会话重建（`/new`）
+    // 不是逃生口：它把状态重置成 `Builtin`（`is_stale_loading` 由此恒假）却不清
+    // `model_fetch_inflight`，会把"60s 后自愈"变成"只能重启进程"。
     let later = started + crate::chat::MODEL_LIST_STALE_AFTER + Duration::from_secs(1);
     assert!(state.model_list_state("openai").is_stale_loading(later));
     assert!(

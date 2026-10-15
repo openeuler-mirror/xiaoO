@@ -624,8 +624,10 @@ fn externally_sourced_labels_are_length_capped() {
 
 #[tokio::test]
 async fn a_panicking_fetch_task_still_reports_a_failure() {
-    // 任务 panic 若不回传，provider 会永久停在 Loading：needs_refresh(Loading) 为假，
-    // 且 start_model_fetch 的守卫会拦住包括 Ctrl+R 在内的所有重试。
+    // 任务 panic 若不回传，provider 会停在 Loading，直到陈旧兜底窗口
+    // （MODEL_LIST_STALE_AFTER）到期：窗口内 needs_refresh(Loading) 为假、在飞名额
+    // 也不释放，谁都拉不动。本测试钉住 "panic 也必须折成 Failed"，即不让用户等满
+    // 这个兜底窗口。
     let handle: tokio::task::JoinHandle<ProviderModelFetchOutcome> =
         tokio::spawn(async move { panic!("boom") });
 
