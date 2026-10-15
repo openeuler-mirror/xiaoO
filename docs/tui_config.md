@@ -140,22 +140,20 @@ Sources: `/remote` argument handling `apps/endside/src/input/event_key.rs:945-10
 #### Provider / model list refresh (`/connect`)
 
 The dialog shows two panes (providers | models) and **no longer relies on a
-hard-coded model table** as the only source: when it opens, and whenever the highlighted provider
+hard-coded model table**: when it opens, and whenever the highlighted provider
 changes, the TUI asks that provider for its own official model list
 (`GET {api_base}/models` for OpenAI-compatible providers, and the provider's
 native shape for Anthropic / Gemini / Ollama) and replaces the provider's list
 with the result.
 
+- `Ctrl+R` — force a refresh of the highlighted provider's list, ignoring both
+  the cache TTL and the failure back-off (e.g. right after entering an API key).
 - Refresh policy: 5-minute TTL after a successful fetch, a 30-second back-off
   after a failure, and no retry at all for providers whose profile declares no
   model catalog (`minimax`, `minimax-anthropic`, `gitcode`). At most two fetches
   are in flight at any time (counted globally, so the cap also holds across
   `/new`); providers beyond the cap keep the list they already have and are fetched the
   next time they are highlighted.
-- The models pane reports where its list came from: the title carries the row
-  count (and `refreshing…` while a fetch is in flight), and a status line under
-  the panes names the official list size, why a fetch failed, or that the
-  provider has no model catalog at all.
 - Before the first successful fetch the built-in list is shown, so the dialog is
   usable offline. Once an official list has been fetched it stays in effect for
   the rest of the session — a later failure shows a hint line but never restores
@@ -168,8 +166,8 @@ types + `fetch_provider_models`, which calls the `xiaoo-shared` facade
 `apps/endside/src/state/chat.rs` (`ModelListState`, TTL/back-off constants);
 orchestration `apps/endside/src/app/core.rs` (`start_model_fetch`,
 `apply_model_fetch_outcome`); triggers `apps/endside/src/input/event_key.rs`
-(`open_provider_selection_dialog`, and the
-provider-changed guard in `handle_provider_selection_key`); rendering
+(`open_provider_selection_dialog`, `Ctrl+R` arm in
+`handle_provider_selection_key`); rendering
 `apps/endside/src/render/overlay.rs` (`render_provider_dialog`).
 
 ---
@@ -384,13 +382,14 @@ Source: `apps/endside/src/input/core.rs:690-733`.
 | `Ctrl+X` | Cut the selected input text |
 | `Ctrl+C` | Quit (or copy, when a selection is active) |
 | `Ctrl+T` | Cycle reasoning effort |
+| `Ctrl+R` | Refresh the highlighted provider's model list (provider/model dialog only) |
 | `Tab` | Cycle agent role / complete slash command / accept file mention |
 | `Up` / `Down` | Input history when the input is empty, else caret movement |
 | `PageUp` / `PageDown` | Scroll the transcript a page |
 | `Esc` | Clear an active transcript selection |
 
-Sources: submit `apps/endside/src/input/event_key.rs:1806-1809`; soft newline
-`:1817-1821`; history `:1824-1831`; copy `:1836-1843`; cut `:1846-1848`;
+Sources: submit `apps/endside/src/input/event_key.rs:1814-1817`; soft newline
+`:1825-1829`; history `:1832-1839`; copy `:1844-1851`; cut `:1854-1856`;
 `Ctrl+C` / `Ctrl+Insert` copy-vs-quit split `:55-98`; `Ctrl+T` `:403`; `Tab`
 `:378-399`; `Up`/`Down` `:480-520`; `PageUp`/`PageDown` `:525-530`; `Esc`
 `:498-501`.

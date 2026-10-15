@@ -403,14 +403,11 @@ pub fn model_fetch_request(config: &Config, provider: &str) -> ProviderModelFetc
 
 /// 等待拉取任务结束，并把"任务没能正常返回"（panic / 被取消）也转成一个失败结果。
 ///
-/// 任务回传的结果是**首选**能把状态从 `Loading` 推走的输入（见
-/// `App::apply_model_fetch_outcome`）。若任务 panic 而没有回传，该 provider 会停在
-/// `Loading` 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期：窗口内
-/// `needs_refresh(Loading)` 为假，而在飞名额也不释放，
-/// 于是任何重发请求的路径都在 `begin_model_fetch` 处被挡回；窗口到期后的下一次触发会让
-/// `start_model_fetch` 先清掉陈旧登记再重拉。
-/// 所以这里保证：无论任务以何种方式结束，都必须有一个结果回传给 UI，
-/// 不让用户白等满这个兜底窗口。
+/// 任务回传的结果是**唯一**能把状态从 `Loading` 推走的输入（见
+/// `App::apply_model_fetch_outcome`）。若任务 panic 而没有回传，该 provider 会永久停在
+/// `Loading`：`needs_refresh(Loading)` 为假，`start_model_fetch` 的守卫会拦住包括
+/// `Ctrl+R` 在内的所有重试（force 只绕过 TTL / 退避），并且它还会永久占着在飞名额。
+/// 所以这里保证：无论任务以何种方式结束，都必须有一个结果回传给 UI。
 pub async fn join_fetch_outcome(
     provider: String,
     handle: tokio::task::JoinHandle<ProviderModelFetchOutcome>,

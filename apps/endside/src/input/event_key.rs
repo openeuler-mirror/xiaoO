@@ -1308,6 +1308,7 @@ impl App {
         let mut need_api_key_dialog = None;
         let mut close_dialog = false;
         let mut check_model_refresh = false;
+        let mut force_model_refresh = false;
         // 上下键只有在高亮 provider 真的变了时才值得拉取；在 Models 栏内
         // 移动只是换模型，不触发任何请求（TTL 也只按 provider 记）。
         let previous_provider = self
@@ -1363,6 +1364,11 @@ impl App {
                         dialog.switch_to_providers();
                     }
                 }
+                // Ctrl+R：强制重拉当前 provider 的官方列表，无视 TTL 与失败退避
+                // （刚补完 API key 想立刻看到官方列表就按它）。
+                KeyCode::Char('r') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    force_model_refresh = true;
+                }
                 _ => {}
             }
         }
@@ -1373,8 +1379,10 @@ impl App {
                 .provider_dialog
                 .as_ref()
                 .map(|dialog| dialog.selected_provider);
-        if check_model_refresh && provider_changed {
-            self.maybe_refresh_selected_provider();
+        if force_model_refresh {
+            self.maybe_refresh_selected_provider(true);
+        } else if check_model_refresh && provider_changed {
+            self.maybe_refresh_selected_provider(false);
         }
 
         if let Some(dialog) = need_api_key_dialog {
@@ -1581,7 +1589,7 @@ impl App {
         ));
         // 打开即按需拉取当前高亮 provider 的官方模型列表：从未拉过
         // （Builtin）或已过 TTL 才打请求，命中缓存则直接复用。
-        self.maybe_refresh_selected_provider();
+        self.maybe_refresh_selected_provider(false);
     }
 
     async fn handle_turn_delete_key(&mut self, key: KeyEvent) -> Result<()> {

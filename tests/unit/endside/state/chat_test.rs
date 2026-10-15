@@ -432,7 +432,7 @@ fn ids(models: &[ModelInfo]) -> Vec<&str> {
     models.iter().map(|model| model.id.as_str()).collect()
 }
 
-/// `needs_refresh` 是"按需刷新"的唯一判据，
+/// `needs_refresh` 是"按需刷新"的唯一判据（`Ctrl+R` 强制刷新绕过它），
 /// 五个状态的取值都要能被这条测试钉住——尤其是 `Unsupported` 永不重试与
 /// `Failed` 的退避窗口，它们决定了坏端点上会不会被反复打请求。
 #[test]
