@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -161,7 +162,12 @@ def main() -> int:
         return 0
 
     metadata = payload.get("metadata", {})
-    log_path = config.get(CONFIG_KEY_ALERT_LOG_PATH, DEFAULT_ALERT_LOG_PATH)
+    # 先展开 ~。安装时的提示语就是在问一个路径，用户答 `~/.cache/...` 很自然；
+    # 而 pathlib 不会展开它 —— 于是日志写到「当前工作目录下一个名叫 ~ 的目录」里，
+    # 该看告警的地方什么都没有，工作目录里还多个 ~ 目录。
+    log_path = os.path.expanduser(
+        config.get(CONFIG_KEY_ALERT_LOG_PATH, DEFAULT_ALERT_LOG_PATH)
+    )
     trace_id = metadata.get("trace_id")
     span_id = metadata.get("span_id")
 
