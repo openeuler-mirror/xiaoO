@@ -49,6 +49,7 @@ impl MockAgentContext {
                 agent_id: "tool_cli".to_string(),
                 model: "tool-cli".to_string(),
                 session_id: None,
+                task_label: None,
             },
         }
     }

@@ -2037,7 +2037,9 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber",
  "ulid",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]

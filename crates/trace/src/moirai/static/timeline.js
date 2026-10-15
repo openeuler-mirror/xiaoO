@@ -147,7 +147,7 @@ function getSpanDetailCompatibility(span) {
         compatibleType,
         extras,
         promotedKeys,
-        llmInput: getAliasedExtraValue(extras, ['effective_request', 'input_preview']),
+        llmInput: getAliasedExtraValue(extras, ['effective_request']),
         llmOutput: getAliasedExtraValue(extras, ['final_response', 'output_preview']),
         toolName: getAliasedExtraValue(extras, ['tool_name']),
         toolInput: getAliasedExtraValue(extras, ['effective_input', 'input']),

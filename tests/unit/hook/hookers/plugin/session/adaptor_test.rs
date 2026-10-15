@@ -43,6 +43,7 @@ impl TestAgentContext {
                 agent_id: "test-agent".to_string(),
                 model: "test-model".to_string(),
                 session_id: Some("session-1".to_string()),
+                task_label: None,
             },
         }
     }

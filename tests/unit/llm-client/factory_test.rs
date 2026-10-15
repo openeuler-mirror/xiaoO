@@ -435,6 +435,7 @@ mod wrapper_tests {
                     agent_id: "test-agent".to_string(),
                     model: "test-model".to_string(),
                     session_id: Some("test-session".to_string()),
+                    task_label: None,
                 },
             }
         }

@@ -26,6 +26,10 @@ pub struct AgentMetadata {
     pub agent_id: String,
     pub model: String,
     pub session_id: Option<String>,
+    /// Task label for trace display (e.g. subagent spawn description);
+    /// `None` for root agents.
+    #[serde(default)]
+    pub task_label: Option<String>,
 }
 
 #[cfg(test)]
