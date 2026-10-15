@@ -609,6 +609,24 @@ impl LlmProviderWrapper {
 
         let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
 
+        // Always record the (possibly pre-hook-transformed) request payload so
+        // the web UI can render prompts/history even when no pre-hooks ran.
+        if !has_pre_hooks {
+            update_trace_span(
+                runtime_view,
+                trace_span.as_ref(),
+                merge_trace_fields(
+                    json!({
+                        "phase": "pre_hooks_done",
+                        "pre_hook_count": pre_hook_count,
+                        "pre_hook_error": pre_hook_error,
+                    }),
+                    effective_request_trace_fields(effective_request_ref),
+                ),
+            )
+            .await;
+        }
+
         match self.complete_with_retry(effective_request_ref).await {
             Ok(mut response) => {
                 update_trace_span(
@@ -814,6 +832,24 @@ impl LlmProviderWrapper {
         // Re-borrow the (possibly pre-hook-transformed) request; falls back
         // to the original `request` when no pre-hooks ran.
         let effective_request_ref: &LlmRequest = effective_request.as_ref().unwrap_or(request);
+
+        // Always record the (possibly pre-hook-transformed) request payload so
+        // the web UI can render prompts/history even when no pre-hooks ran.
+        if !has_pre_hooks {
+            update_trace_span(
+                runtime_view,
+                trace_span.as_ref(),
+                merge_trace_fields(
+                    json!({
+                        "phase": "pre_hooks_done",
+                        "pre_hook_count": pre_hook_count,
+                        "pre_hook_error": pre_hook_error,
+                    }),
+                    effective_request_trace_fields(effective_request_ref),
+                ),
+            )
+            .await;
+        }
 
         // biased: poll the stream first, so a response that completed at the
         // same instant cancellation fired is still delivered in full instead
