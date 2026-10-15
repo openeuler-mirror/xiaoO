@@ -96,6 +96,37 @@ def get_matched_descriptions(text: str) -> list[str]:
     return list(dict.fromkeys(matched))
 
 
+# 一个块里可能承载文本的字段。ContentBlock（crates/agent-types/src/llm/message.rs）
+# 有 text / tool_use / tool_result / image / document 五种，除了 text 之外，
+# tool_result 的 output、image 与 document 的 description 也都是正文，
+# tool_use 的 input 则是任意 JSON（命令行参数常在里面）。
+# 只认 text 时，这些位置里的密钥既不脱敏也不询问，直接随请求发出去。
+TEXT_BEARING_FIELDS = ("text", "output", "description")
+
+
+def block_texts(block: dict) -> list[str]:
+    """取出一个块里所有可能含密钥的文本"""
+    texts = [
+        block[field]
+        for field in TEXT_BEARING_FIELDS
+        if isinstance(block.get(field), str)
+    ]
+    if block.get("type") == "tool_use" and block.get("input") is not None:
+        texts.append(json.dumps(block["input"], ensure_ascii=False))
+    return texts
+
+
+def redact_value(value):
+    """递归脱敏任意 JSON（tool_use.input 是 Value，不是一个字符串）"""
+    if isinstance(value, str):
+        return redact_secret_like_values(value)
+    if isinstance(value, list):
+        return [redact_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: redact_value(v) for k, v in value.items()}
+    return value
+
+
 def extract_text_from_content(content) -> str:
     """从 message content 提取文本
 
@@ -110,8 +141,7 @@ def extract_text_from_content(content) -> str:
         texts = []
         for block in content:
             if isinstance(block, dict):
-                if block.get("type") == "text":
-                    texts.append(block.get("text", ""))
+                texts.extend(block_texts(block))
         return " ".join(texts)
     return ""
 
@@ -125,8 +155,11 @@ def redact_content(content):
         for block in content:
             if isinstance(block, dict):
                 new_block = dict(block)
-                if block.get("type") == "text":
-                    new_block["text"] = redact_secret_like_values(block.get("text", ""))
+                for field in TEXT_BEARING_FIELDS:
+                    if isinstance(new_block.get(field), str):
+                        new_block[field] = redact_secret_like_values(new_block[field])
+                if new_block.get("type") == "tool_use" and new_block.get("input") is not None:
+                    new_block["input"] = redact_value(new_block["input"])
                 result.append(new_block)
             else:
                 result.append(block)
