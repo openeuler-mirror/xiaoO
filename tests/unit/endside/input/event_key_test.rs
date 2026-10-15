@@ -629,7 +629,8 @@ async fn opening_connect_schedules_fetch_for_active_provider() {
 }
 
 /// 端到端：真实 HTTP 响应 → 结果回传 → 落地。断言官方列表替换弹窗与
-/// `ChatState` 两处副本（顺序保持官方返回序）、状态转 `Ready`。
+/// `ChatState` 两处副本（含激活模型补到首位）、状态转 `Ready`；选中项按 id
+/// 保持由 `provider_dialog_test` 覆盖，这里不断言选中项。
 ///
 /// provider 用 `local`：它的 profile 不要求 API key（`api_key_required=false`），
 /// 因此请求能真正打到假端点，不需要在测试里摆弄环境变量。
