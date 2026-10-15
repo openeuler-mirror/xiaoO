@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 import sys
 
@@ -18,10 +19,15 @@ def build_cerberus_command(config: dict, original_command: str) -> str:
     if not isinstance(cerberus_path, str) or not cerberus_path:
         raise ValueError(f"invalid definition.config.{CONFIG_KEY_CERBERUS_PATH}")
 
+    # 先把 ~ 展开，再交给 shlex.quote。否则 `~/.cargo/bin/cerberus`（plugin.json.template
+    # 里的默认值就是这个形状）会被引号保护成字面量，shell 不去展开它，
+    # 于是每次都报找不到文件 —— 引号本身是对的，缺的是展开这一步。
+    cerberus_path = os.path.expanduser(cerberus_path)
+
     if isinstance(policy_file, str) and policy_file:
-        policy_args = f"--policy-file {shlex.quote(policy_file)}"
+        policy_args = f"--policy-file {shlex.quote(os.path.expanduser(policy_file))}"
     elif isinstance(profile, str) and profile:
-        policy_args = f"--profile {shlex.quote(profile)}"
+        policy_args = f"--profile {shlex.quote(os.path.expanduser(profile))}"
     else:
         raise ValueError(
             f"missing definition.config.{CONFIG_KEY_PROFILE} or definition.config.{CONFIG_KEY_POLICY_FILE}"
