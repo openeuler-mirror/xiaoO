@@ -1,4 +1,5 @@
 use super::*;
+use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
@@ -542,5 +543,330 @@ async fn unbound_alt_letter_does_not_type_through_real_dispatch() {
         app.state.chat_state.input.cursor(),
         2,
         "bound Alt+F must still move by word through handle_input_key"
+    );
+}
+
+// ── 官方 model list 拉取的触发与落地 ────────────────────────────────────────
+//
+// 这些用例走真实的按键派发与真实的 HTTP 客户端：mockito 起本地假 `/models`
+// 端点，把 `llm.api_base` 指过去。拉取任务用 `recv().await` 确定性驱动，
+// 不靠 sleep 轮询；只断言"同步写入的状态"的用例则完全不等待网络。
+
+fn model(id: &str) -> crate::chat::ModelInfo {
+    crate::chat::ModelInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+    }
+}
+
+fn model_ids(models: &[crate::chat::ModelInfo]) -> Vec<String> {
+    models.iter().map(|model| model.id.clone()).collect()
+}
+
+fn model_list_state(app: &App, provider: &str) -> crate::chat::ModelListState {
+    app.state.chat_state.model_list_state(provider)
+}
+
+/// 把 `llm` 指向本地假端点：provider 与 `llm.provider` 一致时
+/// `persisted_selection_settings` 才会用配置里的 api_base（否则回落默认表，
+/// 请求会打到真实厂商）。模型 id 特意与官方列表不同，便于断言官方结果确实替换了内置表。
+fn test_app_with_llm(provider: &str, model: &str, api_base: &str) -> App {
+    let mut config = Config::default();
+    config.llm.provider = provider.to_string();
+    config.llm.model = model.to_string();
+    config.llm.api_base = api_base.to_string();
+    App::new_with_config(
+        &config,
+        PathBuf::from("/nonexistent/endside-test-config.toml"),
+        PathBuf::from("/tmp/endside-test-workspace"),
+    )
+    .expect("App::new_with_config must build a headless test app")
+}
+
+fn ready_outcome(provider: &str, ids: &[&str]) -> crate::provider_service::ProviderModelFetchOutcome {
+    crate::provider_service::ProviderModelFetchOutcome {
+        provider: provider.to_string(),
+        result: Ok(ids.iter().map(|id| model(id)).collect()),
+    }
+}
+
+fn failed_outcome(provider: &str, message: &str) -> crate::provider_service::ProviderModelFetchOutcome {
+    crate::provider_service::ProviderModelFetchOutcome {
+        provider: provider.to_string(),
+        result: Err(crate::provider_service::ModelFetchError::Failed(
+            message.to_string(),
+        )),
+    }
+}
+
+/// `/connect` 打开弹窗后必须为当前高亮 provider 起一次拉取（从未拉过 →
+/// `Builtin` → 要拉），并且这一步是同步置位的，UI 立刻能显示 "refreshing…"。
+#[tokio::test]
+async fn opening_connect_schedules_fetch_for_active_provider() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("GET", "/v1/models")
+        .with_status(200)
+        .with_body(r#"{"data":[{"id":"m1"}]}"#)
+        .create_async()
+        .await;
+    let mut app = test_app_with_llm("openai-compatible", "pin-me", &format!("{}/v1", server.url()));
+
+    app.open_provider_selection_dialog();
+
+    assert_eq!(
+        app.state
+            .provider_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.selected_provider_name()),
+        Some("openai-compatible"),
+        "配置里的 provider 会被 merge_config_provider 追加进弹窗并预选"
+    );
+    assert!(
+        model_list_state(&app, "openai-compatible").is_loading(),
+        "打开弹窗应立即进入 Loading"
+    );
+}
+
+/// 端到端：真实 HTTP 响应 → 结果回传 → 落地。断言官方列表替换弹窗与
+/// `ChatState` 两处副本（顺序保持官方返回序）、状态转 `Ready`。
+///
+/// provider 用 `local`：它的 profile 不要求 API key（`api_key_required=false`），
+/// 因此请求能真正打到假端点，不需要在测试里摆弄环境变量。
+#[tokio::test]
+async fn fetched_official_list_replaces_dialog_models_end_to_end() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("GET", "/v1/models")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"data":[{"id":"official-a"},{"id":"official-b"}]}"#)
+        .create_async()
+        .await;
+    let mut app = test_app_with_llm("local", "pin-me", &format!("{}/v1", server.url()));
+
+    app.open_provider_selection_dialog();
+    let (session, outcome) = app
+        .model_fetch_rx
+        .recv()
+        .await
+        .expect("拉取任务必定回传结果（join_fetch_outcome 保证 panic 也折成结果）");
+    app.apply_model_fetch_outcome(session, outcome);
+
+    mock.assert_async().await;
+    let dialog = app
+        .state
+        .provider_dialog
+        .as_ref()
+        .expect("弹窗仍然打开");
+    let dialog_ids = model_ids(&dialog.current_models());
+    let chat_ids = model_ids(
+        &app.state
+            .chat_state
+            .available_providers
+            .iter()
+            .find(|entry| entry.name == "local")
+            .expect("provider 仍在目录中")
+            .models,
+    );
+
+    assert_eq!(
+        dialog_ids,
+        vec!["official-a", "official-b"],
+        "官方列表替换内置列表"
+    );
+    assert_eq!(
+        chat_ids, dialog_ids,
+        "弹窗副本与 ChatState 必须落到同一份结果上"
+    );
+    assert!(matches!(
+        model_list_state(&app, "local"),
+        crate::chat::ModelListState::Ready { .. }
+    ));
+}
+
+/// 失败落地：列表与选中项都不动，只记一条错误状态（"成功一次后永久替换"
+/// 的另一面——失败永远不回退、也不清空）。
+#[tokio::test]
+async fn failed_fetch_keeps_models_and_records_error() {
+    let mut app = test_app_with_llm("openai-compatible", "pin-me", "http://127.0.0.1:1/v1");
+    app.open_provider_selection_dialog();
+    let dialog = app.state.provider_dialog.as_ref().expect("弹窗打开");
+    let before = model_ids(&dialog.current_models());
+    let selected_before = dialog.selected_model;
+
+    let session = app.state.model_fetch_session;
+    app.apply_model_fetch_outcome(session, failed_outcome("openai-compatible", "连接失败"));
+
+    let dialog = app.state.provider_dialog.as_ref().expect("弹窗仍然打开");
+    assert_eq!(model_ids(&dialog.current_models()), before, "失败不得改动列表");
+    assert_eq!(dialog.selected_model, selected_before);
+    match model_list_state(&app, "openai-compatible") {
+        crate::chat::ModelListState::Failed {
+            message,
+            hint_only: false,
+            ..
+        } => assert_eq!(message, "连接失败"),
+        other => panic!("失败应记录为 Failed{{hint_only:false}}，实际 {other:?}"),
+    }
+}
+
+/// 目录里已经没有该 provider 时写不进目录（防御分支：`/new`、快照恢复与远端会话重建
+/// 都会推进世代，那种结果在世代检查处就被丢弃；本测试直接清空目录构造这一状态）：
+/// 此时必须回落 `Builtin`，否则下次打开弹窗会拿着内置列表声称"官方模型列表"，
+/// 并在 TTL 内拒绝重新拉取。
+#[tokio::test]
+async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
+    let mut app = test_app_with_llm("local", "pin-me", "http://127.0.0.1:1/v1");
+    app.open_provider_selection_dialog();
+
+    app.state.chat_state.available_providers.clear();
+    let session = app.state.model_fetch_session;
+    app.apply_model_fetch_outcome(session, ready_outcome("local", &["official-a"]));
+
+    assert!(
+        matches!(
+            model_list_state(&app, "local"),
+            crate::chat::ModelListState::Builtin
+        ),
+        "目录里没有该 provider 时不得记成 Ready"
+    );
+}
+
+/// 切 provider 才拉取：Providers 栏内上下键只在真正换了 provider 时触发；
+/// Models 栏内上下键只换模型，不触发任何请求。
+#[tokio::test]
+async fn provider_switch_refetches_only_when_provider_changes() {
+    let mut server = mockito::Server::new_async().await;
+    let _mock = server
+        .mock("GET", "/v1/models")
+        .with_status(200)
+        .with_body(r#"{"data":[{"id":"m1"}]}"#)
+        .create_async()
+        .await;
+    // openrouter 的下一项是 minimax：profile 声明无 catalog，拉取会在发请求前
+    // 就返回 Unsupported，因此这条用例不会碰到任何真实厂商端点。
+    let mut app = test_app_with_llm("openrouter", "or-pin", &format!("{}/v1", server.url()));
+    app.open_provider_selection_dialog();
+    let session = app.state.model_fetch_session;
+    app.apply_model_fetch_outcome(session, ready_outcome("openrouter", &["or-a"]));
+
+    // Models 栏内移动：provider 未变 → 不重拉（Ready 保持原样）。
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        .await
+        .expect("switch focus to Models");
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .await
+        .expect("move inside Models");
+    assert!(
+        matches!(
+            model_list_state(&app, "openrouter"),
+            crate::chat::ModelListState::Ready { .. }
+        ),
+        "只在 Models 栏内移动不得触发重新拉取"
+    );
+
+    // Providers 栏内移到 minimax：provider 变了 → 从未拉过 → Loading。
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+        .await
+        .expect("switch focus back to Providers");
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .await
+        .expect("move to next provider");
+
+    assert_eq!(
+        app.state
+            .provider_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.selected_provider_name()),
+        Some("minimax")
+    );
+    assert!(
+        model_list_state(&app, "minimax").is_loading(),
+        "换到新 provider 应发起一次拉取"
+    );
+}
+
+#[tokio::test]
+async fn stale_loading_does_not_block_a_new_fetch() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("GET", "/v1/models")
+        .expect(2)
+        .with_status(200)
+        .with_body(r#"{"data":[{"id":"m1"}]}"#)
+        .create_async()
+        .await;
+    // provider 名用 `local`：只有与 `llm.provider` 一致时才会用配置里的 api_base，
+    // 否则请求会打到真实厂商。
+    let mut app = test_app_with_llm("local", "pin-me", &format!("{}/v1", server.url()));
+    app.open_provider_selection_dialog();
+
+    // 先让"打开弹窗"那次拉取正常落地，腾出在飞名额（否则下面的重试会被名额挡住，
+    // 测试会变成竞态）。
+    let (session, outcome) = app.model_fetch_rx.recv().await.expect("首次拉取应回传");
+    app.apply_model_fetch_outcome(session, outcome);
+    assert!(app.state.model_fetch_inflight.is_empty());
+
+    // 模拟"任务 panic 导致结果永不回传"：状态停在 Loading，且已过兜底窗口。
+    app.state.chat_state.set_model_list_state(
+        "local",
+        crate::chat::ModelListState::Loading {
+            since: Instant::now() - (crate::chat::MODEL_LIST_STALE_AFTER + Duration::from_secs(1)),
+        },
+    );
+
+    app.maybe_refresh_selected_provider();
+
+    // 状态是同步置位的：立刻就能看到"新任务"的时间戳（不再是陈旧的）。
+    let state = model_list_state(&app, "local");
+    assert!(state.is_loading(), "重新拉起后仍是 Loading");
+    assert!(
+        !state.is_stale_loading(Instant::now()),
+        "陈旧 Loading 必须能被重新拉起（时间戳应为新任务）"
+    );
+
+    // 等这次重试真的打出去，再核对请求数（否则断言跑在 HTTP 之前，是竞态）。
+    let (session, outcome) = app.model_fetch_rx.recv().await.expect("重试必须回传结果");
+    app.apply_model_fetch_outcome(session, outcome);
+    mock.assert_async().await;
+}
+
+#[test]
+fn outcomes_from_a_previous_session_are_dropped() {
+    let mut app = test_app_with_llm("openai-compatible", "pin-me", "http://127.0.0.1:1/v1");
+    let stale_session = app.state.model_fetch_session;
+    app.state.next_model_fetch_session(); // 模拟 `/new` 重建了会话
+
+    let outcome = || crate::provider_service::ProviderModelFetchOutcome {
+        provider: "openai-compatible".to_string(),
+        result: Ok(vec![crate::chat::ModelInfo {
+            id: "m1".to_string(),
+            name: "m1".to_string(),
+        }]),
+    };
+
+    app.apply_model_fetch_outcome(stale_session, outcome());
+    assert!(
+        !matches!(
+            model_list_state(&app, "openai-compatible"),
+            crate::chat::ModelListState::Ready { .. }
+        ),
+        "旧会话的结果不得写进新会话（否则会带着官方列表并在 TTL 内拒绝刷新）"
+    );
+    assert!(
+        app.state.model_fetch_inflight.is_empty(),
+        "被丢弃的结果同样要释放在飞名额"
+    );
+
+    // 对照组：当代的结果必须照常落地，证明上面的断言不是空转。
+    let current = app.state.model_fetch_session;
+    app.apply_model_fetch_outcome(current, outcome());
+    assert!(
+        matches!(
+            model_list_state(&app, "openai-compatible"),
+            crate::chat::ModelListState::Ready { .. }
+        ),
+        "当代结果必须正常应用"
     );
 }

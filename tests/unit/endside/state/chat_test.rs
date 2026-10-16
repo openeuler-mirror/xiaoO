@@ -1,9 +1,13 @@
-use super::{default_provider_list, ChatState, Input, Message};
+use super::{
+    default_provider_list, ChatState, Input, Message, ModelInfo, ModelListState, ProviderInfo,
+    MODEL_LIST_FAILURE_BACKOFF, MODEL_LIST_TTL,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget},
 };
+use std::time::{Duration, Instant};
 
 #[test]
 fn default_provider_list_contains_latest_models_and_excludes_retired_kimi_models() {
@@ -413,4 +417,146 @@ fn messages_from_chat_messages_marks_failed_tool_results() {
     assert_eq!(tool.detail, "permission denied");
     // No matching ToolUse → tool_name falls back to the ToolResult's name.
     assert_eq!(tool.tool, "file_edit");
+}
+
+// ── 官方 model list 状态 ───────────────────────────────────────────────────
+
+fn model(id: &str) -> ModelInfo {
+    ModelInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+    }
+}
+
+fn ids(models: &[ModelInfo]) -> Vec<&str> {
+    models.iter().map(|model| model.id.as_str()).collect()
+}
+
+/// `needs_refresh` 是"按需刷新"的唯一判据，
+/// 五个状态的取值都要能被这条测试钉住——尤其是 `Unsupported` 永不重试与
+/// `Failed` 的退避窗口，它们决定了坏端点上会不会被反复打请求。
+#[test]
+fn model_list_state_needs_refresh_follows_ttl_and_failure_backoff() {
+    let now = Instant::now();
+
+    assert!(
+        ModelListState::Builtin.needs_refresh(now),
+        "从未成功拉取过 → 要拉"
+    );
+    assert!(
+        !ModelListState::Loading { since: Instant::now() }.needs_refresh(now),
+        "已有请求在飞 → 不重复发起"
+    );
+    assert!(
+        !ModelListState::Unsupported.needs_refresh(now),
+        "profile 静态声明没有官方接口 → 永不重试"
+    );
+
+    let just_fetched = ModelListState::Ready { fetched_at: now };
+    assert!(!just_fetched.needs_refresh(now), "TTL 内直接复用缓存");
+    assert!(!just_fetched.needs_refresh(now + MODEL_LIST_TTL - Duration::from_secs(1)));
+    assert!(just_fetched.needs_refresh(now + MODEL_LIST_TTL), "TTL 到点重拉");
+
+    let failed = ModelListState::Failed {
+        message: "boom".to_string(),
+        failed_at: now,
+        hint_only: false,
+    };
+    assert!(
+        !failed.needs_refresh(now + MODEL_LIST_FAILURE_BACKOFF - Duration::from_secs(1)),
+        "退避窗口内不重试"
+    );
+    assert!(failed.needs_refresh(now + MODEL_LIST_FAILURE_BACKOFF));
+
+    // 记录时刻晚于 now（理论上不会发生）时按 0 处理，不 panic。
+    let future = ModelListState::Ready {
+        fetched_at: now + Duration::from_secs(60),
+    };
+    assert!(!future.needs_refresh(now));
+}
+
+#[test]
+fn model_list_state_defaults_to_builtin_and_tracks_loading_staleness() {
+    let mut state = ChatState::new();
+    let started = Instant::now();
+
+    assert!(matches!(
+        state.model_list_state("openai"),
+        ModelListState::Builtin
+    ));
+    assert!(
+        state.model_list_state("openai").needs_refresh(started),
+        "从未成功 → 要拉"
+    );
+
+    state.set_model_list_state("openai", ModelListState::Loading { since: started });
+    assert!(state.model_list_state("openai").is_loading());
+    assert!(
+        !state.model_list_state("openai").needs_refresh(started),
+        "在飞不重复拉"
+    );
+    assert!(!state.model_list_state("openai").is_stale_loading(started));
+
+    // 陈旧兜底：任务若在回传前消失，Loading 必须在兜底窗口到期后重新可拉——窗口内
+    // `needs_refresh(Loading)` 为假、在飞名额也不释放，谁都拉不动。会话重建（`/new`）
+    // 不是逃生口：它把状态重置成 `Builtin`（`is_stale_loading` 由此恒假）却不清
+    // `model_fetch_inflight`，会把"60s 后自愈"变成"只能重启进程"。
+    let later = started + crate::chat::MODEL_LIST_STALE_AFTER + Duration::from_secs(1);
+    assert!(state.model_list_state("openai").is_stale_loading(later));
+    assert!(
+        state.model_list_state("openai").needs_refresh(later),
+        "陈旧 Loading 必须可重拉"
+    );
+
+    state.set_model_list_state("kimi", ModelListState::Unsupported);
+    assert!(
+        !state.model_list_state("kimi").needs_refresh(later),
+        "无官方 catalog 的 provider 永不重试"
+    );
+}
+
+#[test]
+fn replace_provider_models_replaces_only_the_named_provider() {
+    let mut state = ChatState::new();
+    state.available_providers = vec![
+        ProviderInfo {
+            name: "openai".to_string(),
+            models: vec![model("gpt")],
+        },
+        ProviderInfo {
+            name: "deepseek".to_string(),
+            models: vec![model("deepseek-chat")],
+        },
+    ];
+
+    assert!(state.replace_provider_models("deepseek", vec![model("a"), model("b")]));
+
+    assert_eq!(
+        ids(&state.available_providers[0].models),
+        vec!["gpt"],
+        "其他 provider 的列表不得被牵连"
+    );
+    assert_eq!(ids(&state.available_providers[1].models), vec!["a", "b"]);
+}
+
+#[test]
+fn replace_provider_models_returns_false_for_unknown_provider() {
+    let mut state = ChatState::new();
+    let before: Vec<String> = state.available_providers[0]
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect();
+
+    assert!(!state.replace_provider_models("no-such-provider", vec![model("x")]));
+
+    let after: Vec<String> = state.available_providers[0]
+        .models
+        .iter()
+        .map(|model| model.id.clone())
+        .collect();
+    assert_eq!(
+        after, before,
+        "未命中时不得改动任何 provider（失败路径不写列表由此保证）"
+    );
 }

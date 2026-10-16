@@ -26,7 +26,10 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shellexpand.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+# `sync` 显式声明：模型列表拉取用 tokio::sync::mpsc 回传结果。此前
+# tokio::sync 能编译只是靠 workspace 特征联合（xiaoo-api / xiaoo-shared 开了
+# sync），这里不再隐式依赖上游；显式声明也让特性开关变化时不会突然编译失败。
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -41,4 +44,8 @@ xiaoo-shared = { path = "../shared" }                      # 应用装配门面
 
 [dev-dependencies]
 tempfile.workspace = true
+# 模型列表拉取的 HTTP 级测试：起本地假 `/models` 端点，覆盖成功 / 401 /
+# 空列表 / 缺 key 四条路径。仅测试依赖；外部 crate 不受 check-facade.sh
+# 的 [APP-DEPS] 约束（该检查只比对仓内底层 crate），与既有 tempfile 同理。
+mockito = "1"
 xiaoo-shared = { path = "../shared", features = ["test-support"] }

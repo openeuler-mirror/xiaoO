@@ -4839,6 +4839,7 @@ dependencies = [
  "crossterm",
  "dirs 6.0.0",
  "futures-util",
+ "mockito",
  "ratatui",
  "reqwest",
  "serde",

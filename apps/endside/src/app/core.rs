@@ -16,7 +16,17 @@ use crate::gateway_runtime::GatewayRuntime;
 pub struct App {
     pub(crate) state: AppState,
     pub(crate) gateway: GatewayRuntime,
-    pending_model_fetch: Option<tokio::sync::oneshot::Receiver<FetchedModels>>,
+    /// 官方 model list 拉取结果的回传通道。
+    ///
+    /// 用 mpsc 而不是 oneshot：拉取按 provider 独立进行，快速上下键切换
+    /// provider 时允许多个请求在飞（上限见 `MAX_INFLIGHT_MODEL_FETCHES`），
+    /// 每个任务都必须能把结果回传——否则被顶掉的那个 provider 会卡在 `Loading`
+    /// 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期后的下一次触发，见
+    /// `start_model_fetch`。结果按 provider 名应用，与顺序无关。
+    pub(crate) model_fetch_tx:
+        tokio::sync::mpsc::UnboundedSender<(u64, crate::provider_service::ProviderModelFetchOutcome)>,
+    pub(crate) model_fetch_rx:
+        tokio::sync::mpsc::UnboundedReceiver<(u64, crate::provider_service::ProviderModelFetchOutcome)>,
     /// Deadline for discarding stray character events after an ESC key.
     ///
     /// When an ESC byte lands next to a mouse/scroll escape sequence
@@ -39,12 +49,6 @@ pub struct App {
     pub(crate) animation_origin: Instant,
 }
 
-/// 后台模型列表拉取结果：目标 provider + 模型条目。
-pub(crate) struct FetchedModels {
-    pub provider: String,
-    pub models: Vec<crate::chat::ModelInfo>,
-}
-
 impl App {
     pub fn new_with_config(
         config: &Config,
@@ -53,10 +57,12 @@ impl App {
     ) -> Result<Self, anyhow::Error> {
         let state = AppState::new_with_config(config, config_path, workspace)?;
         let gateway = GatewayRuntime::new(state.client_id.clone());
+        let (model_fetch_tx, model_fetch_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             state,
             gateway,
-            pending_model_fetch: None,
+            model_fetch_tx,
+            model_fetch_rx,
             esc_discard_until: None,
             input_drag_active: false,
             animation_origin: Instant::now(),
@@ -119,8 +125,7 @@ impl App {
         clock_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         clock_refresh_interval.tick().await;
         let mut corruption_recovery_interval = tokio::time::interval(Duration::from_secs(30));
-        corruption_recovery_interval
-            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        corruption_recovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         corruption_recovery_interval.tick().await;
 
         #[cfg(unix)]
@@ -219,12 +224,9 @@ impl App {
                                 handled_event = Some(event);
                             }
                         }
-                        fetched = wait_for_fetched_models(&mut self.pending_model_fetch) => {
-                            self.pending_model_fetch = None;
-                            if let Some(fetched) = fetched {
-                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
-                                    dialog.apply_fetched_models(&fetched.provider, fetched.models);
-                                }
+                        outcome = self.model_fetch_rx.recv() => {
+                            if let Some((session, outcome)) = outcome {
+                                self.apply_model_fetch_outcome(session, outcome);
                             }
                             needs_redraw = true;
                         }
@@ -288,12 +290,9 @@ impl App {
                                 handled_event = Some(event);
                             }
                         }
-                        fetched = wait_for_fetched_models(&mut self.pending_model_fetch) => {
-                            self.pending_model_fetch = None;
-                            if let Some(fetched) = fetched {
-                                if let Some(dialog) = self.state.provider_dialog.as_mut() {
-                                    dialog.apply_fetched_models(&fetched.provider, fetched.models);
-                                }
+                        outcome = self.model_fetch_rx.recv() => {
+                            if let Some((session, outcome)) = outcome {
+                                self.apply_model_fetch_outcome(session, outcome);
                             }
                             needs_redraw = true;
                         }
@@ -426,21 +425,151 @@ impl App {
         Ok(())
     }
 
-    /// 为指定 provider 启动后台模型列表拉取（对话框打开 / 切换 provider 时
-    /// 调用）。单在途请求：新的拉取会覆盖旧的 receiver，被覆盖请求的结果
-    /// 直接丢弃（用户已切走，不再关心）。
-    pub fn start_model_fetch(
-        &mut self,
-        provider: String,
-        api_base: String,
-        api_key_env: Option<String>,
-    ) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending_model_fetch = Some(rx);
+    /// 发起一次官方 model list 拉取（`provider` 为弹窗里的 provider 名）。
+    ///
+    /// 守卫两条：目标 provider 已有请求在飞时不重复发起；在飞请求数达到
+    /// [`MAX_INFLIGHT_MODEL_FETCHES`] 时跳过（超出的 provider 保持 `Builtin`，
+    /// 下次高亮时再拉）。任务只负责回传结果，`apply_model_fetch_outcome`
+    /// 负责落地，因此这里可以先同步把状态置为 `Loading` 让 UI 立刻反应。
+    pub(crate) fn start_model_fetch(&mut self, provider: String) {
+        if provider.trim().is_empty() {
+            return;
+        }
+        // 陈旧的 `Loading`（结果不会再回来）先清掉在飞登记，否则它既拉不动、又永久
+        // 占着名额。
+        let now = Instant::now();
+        if self
+            .state
+            .chat_state
+            .model_list_state(&provider)
+            .is_stale_loading(now)
+        {
+            self.state.finish_model_fetch(&provider);
+        }
+        if !self.state.begin_model_fetch(&provider) {
+            return;
+        }
+        self.state
+            .chat_state
+            .set_model_list_state(&provider, crate::chat::ModelListState::Loading { since: now });
+        let request =
+            crate::provider_service::model_fetch_request(&self.state.agent_config, &provider);
+        let session = self.state.model_fetch_session;
+        let tx = self.model_fetch_tx.clone();
         tokio::spawn(async move {
-            let models = fetch_models_for_provider(&provider, &api_base, api_key_env).await;
-            let _ = tx.send(FetchedModels { provider, models });
+            // 内层任务单独 spawn 再 await，是为了拿到 `JoinHandle`：任务 panic 时
+            // `handle.await` 返回 `Err`，`join_fetch_outcome` 据此合成失败结果，保证状态
+            // 一定能离开 `Loading`。
+            let handle = tokio::spawn(crate::provider_service::fetch_provider_models(request));
+            let outcome = crate::provider_service::join_fetch_outcome(provider, handle).await;
+            // 接收端随 App 一同存活；发送失败只说明 TUI 正在退出。
+            let _ = tx.send((session, outcome));
         });
+    }
+
+    /// 按需刷新当前高亮 provider 的官方列表。
+    ///
+    /// 是否真的发请求由 [`ModelListState::needs_refresh`] 决定（TTL / 失败退避）。
+    pub(crate) fn maybe_refresh_selected_provider(&mut self) {
+        let Some(provider) = self
+            .state
+            .provider_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.selected_provider_name().map(str::to_string))
+        else {
+            return;
+        };
+        if self
+            .state
+            .chat_state
+            .model_list_state(&provider)
+            .needs_refresh(Instant::now())
+        {
+            self.start_model_fetch(provider);
+        }
+    }
+
+    /// 落地一次拉取结果。
+    ///
+    /// 结果按 provider 名应用，因此弹窗已关闭、或用户已经切到别的 provider
+    /// 都不会错位：`ChatState` 始终更新（下次 `/connect` 直接看到官方列表），
+    /// 弹窗副本只在它还持有该 provider 时更新，且选中项只在被替换的 provider
+    /// 就是当前高亮项时才重算。
+    ///
+    /// 成功路径把同一份列表写进两处（弹窗 + `available_providers`），失败路径
+    /// 一律不碰列表——"成功一次后永久替换内置列表"由此成立。
+    pub(crate) fn apply_model_fetch_outcome(
+        &mut self,
+        session: u64,
+        outcome: crate::provider_service::ProviderModelFetchOutcome,
+    ) {
+        use crate::provider_service::ModelFetchError;
+        let provider = outcome.provider;
+        // 无论结果是否被采纳，名额都要释放（`join_fetch_outcome` 保证任务一定回传）。
+        self.state.finish_model_fetch(&provider);
+        if session != self.state.model_fetch_session {
+            // 会话已被重建（`/new`、`/load` 与远端会话的连接/切换都会重建）：这是旧会话的结果，丢弃。
+            return;
+        }
+        match outcome.result {
+            Ok(models) if !models.is_empty() => {
+                if let Some(dialog) = self.state.provider_dialog.as_mut() {
+                    dialog.replace_models(&provider, models.clone());
+                }
+                // 目录里已经没有这个 provider 时写不进去（防御分支：会话重建会同时重置
+                // 目录与状态，那种情形在世代检查处已被丢弃）：这时记 `Builtin` 而不是
+                // `Ready`，否则下次打开弹窗会拿着内置列表显示"官方模型列表"并在 TTL 内
+                // 拒绝重新拉取。
+                let applied_to_catalog = self
+                    .state
+                    .chat_state
+                    .replace_provider_models(&provider, models);
+                let state = if applied_to_catalog {
+                    crate::chat::ModelListState::Ready {
+                        fetched_at: Instant::now(),
+                    }
+                } else {
+                    crate::chat::ModelListState::Builtin
+                };
+                self.state.chat_state.set_model_list_state(&provider, state);
+            }
+            Ok(_) => {
+                // 官方返回空数组：不清空列表，只记录失败。
+                self.state.chat_state.set_model_list_state(
+                    &provider,
+                    crate::chat::ModelListState::Failed {
+                        message: "the provider returned no models".to_string(),
+                        failed_at: Instant::now(),
+                        hint_only: false,
+                    },
+                );
+            }
+            Err(ModelFetchError::MissingApiKey(env)) => {
+                self.state.chat_state.set_model_list_state(
+                    &provider,
+                    crate::chat::ModelListState::Failed {
+                        message: format!("set {env}"),
+                        failed_at: Instant::now(),
+                        hint_only: true,
+                    },
+                );
+            }
+            Err(ModelFetchError::Unsupported) => {
+                self.state
+                    .chat_state
+                    .set_model_list_state(&provider, crate::chat::ModelListState::Unsupported);
+            }
+            Err(ModelFetchError::Failed(message)) => {
+                self.state.chat_state.set_model_list_state(
+                    &provider,
+                    crate::chat::ModelListState::Failed {
+                        message,
+                        failed_at: Instant::now(),
+                        hint_only: false,
+                    },
+                );
+            }
+        }
     }
 
     /// Periodic attach-lease heartbeat. Runs every 15 s while the TUI is in
@@ -737,95 +866,6 @@ impl App {
             .messages
             .push(crate::chat::Message::system(system_message));
         self.state.chat_state.stick_to_bottom = true;
-    }
-}
-
-async fn wait_for_fetched_models(
-    rx: &mut Option<tokio::sync::oneshot::Receiver<FetchedModels>>,
-) -> Option<FetchedModels> {
-    match rx {
-        Some(inner) => inner.await.ok(),
-        None => std::future::pending().await,
-    }
-}
-
-async fn fetch_models_from_local_api(api_base: &str) -> Vec<crate::chat::ModelInfo> {
-    let url = format!("{}/models", api_base.trim_end_matches('/'));
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return vec![],
-    };
-    let response = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(_) => return vec![],
-    };
-    let body: serde_json::Value = match response.json().await {
-        Ok(b) => b,
-        Err(_) => return vec![],
-    };
-    let models = body["data"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|model| {
-                    model["id"].as_str().map(|id| crate::chat::ModelInfo {
-                        id: id.to_string(),
-                        name: id.to_string(),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if models.is_empty() {
-        return vec![];
-    }
-    models
-}
-
-/// 按 provider 分发模型列表拉取：`local` 走无鉴权 OpenAI 兼容端点（原逻辑
-/// 不变），其余 provider 复用 shared 的 `list_llm_models`（自动鉴权、按协议
-/// 族分发 Anthropic/Gemini/Ollama/Zhipu）。失败返回空列表，由对话框保留
-/// 静态列表兜底。
-async fn fetch_models_for_provider(
-    provider: &str,
-    api_base: &str,
-    api_key_env: Option<String>,
-) -> Vec<crate::chat::ModelInfo> {
-    if provider == "local" {
-        return fetch_models_from_local_api(api_base).await;
-    }
-
-    use xiaoo_shared::gateway::llm_assembly::{list_llm_models, LlmAssemblyInput};
-
-    let input = LlmAssemblyInput {
-        provider: provider.to_string(),
-        model: String::new(),
-        api_base: (!api_base.trim().is_empty()).then(|| api_base.to_string()),
-        api_key: None,
-        api_key_env,
-        context_window_override: None,
-        agent_id: None,
-    };
-    match list_llm_models(input).await {
-        Ok(models) => models
-            .into_iter()
-            .map(|model| {
-                let id = model.id;
-                let name = model.display_name.unwrap_or_else(|| id.clone());
-                crate::chat::ModelInfo { id, name }
-            })
-            .collect(),
-        Err(error) => {
-            tracing::warn!(
-                provider = %provider,
-                error = %error,
-                "dynamic model list fetch failed; keeping static list"
-            );
-            vec![]
-        }
     }
 }
 

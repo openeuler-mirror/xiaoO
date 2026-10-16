@@ -160,8 +160,9 @@ Remote TUI directly consumes `open` / `input` / `interaction` / `cancel` /
 that lets a second TUI detect a takeover. `detach` is issued on exit / `/new` /
 `/remote off` (`apps/endside/src/gateway_api/remote.rs:413-431`); `heartbeat`
 is issued every 15 s by the app event loop
-(`apps/endside/src/gateway_api/remote.rs:461-473`, driven from
-`apps/endside/src/app/core.rs:425-429`). The remaining endpoints
+(`apps/endside/src/gateway_api/remote.rs:461-473`, driven from the
+`heartbeat_interval.tick()` arm at `apps/endside/src/app/core.rs:232` /
+`:298`, interval defined at `:94`). The remaining endpoints
 (`checkpoint`, `checkout`, `pause`, `resume`, `exec`, `read-file`,
 `write-file`, the catalogs, cron and channels) are programmatic control-plane
 endpoints exposed on the same protected route group for other clients. See
