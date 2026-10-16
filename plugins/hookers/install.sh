@@ -141,7 +141,6 @@ except FileNotFoundError:
     print('{}')
     sys.exit(0)
 
-# Simple TOML parser for [hooker] section only - handles multi-line arrays
 import re
 hooker_section = re.search(r'^\[hooker\](.*?)(?=^\[|\Z)', content, re.MULTILINE | re.DOTALL)
 if not hooker_section:
@@ -150,6 +149,30 @@ if not hooker_section:
 
 section_text = hooker_section.group(1)
 result = {}
+
+DQ = '\x22'
+SQ = chr(39)
+
+def strip_trailing_comment(value):
+    # 值的尾注释在这里一次性剥掉，之后才按类型分派。
+    # 先前是每个类型各管各的，数字、内联表这类没有分支的值整行匹配不上，
+    # key 就丢了；写入端又只重建它认识的几个 key，用户的设置便静默消失。
+    # 引号内部的 # 不是注释，所以按引号状态走。
+    out = []
+    quote = None
+    for ch in value:
+        if quote is not None:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch == DQ or ch == SQ:
+            quote = ch
+            out.append(ch)
+        elif ch == '#':
+            break
+        else:
+            out.append(ch)
+    return ''.join(out).strip()
 
 # Parse lines, handling multi-line arrays
 lines = section_text.strip().split('\n')
@@ -160,31 +183,36 @@ while i < len(lines):
         i += 1
         continue
     match = re.match(r'^(\w+)\s*=\s*(.*)$', line)
-    if match:
-        key, value = match.groups()
-        # Handle string values
-        if value.startswith('\"') and value.endswith('\"'):
-            result[key] = value[1:-1]
-        # Handle arrays (may be multi-line)
-        elif value.startswith('['):
-            if value == '[]':
-                result[key] = []
-            else:
-                # Collect all lines until array closes
-                array_lines = [line]
-                while i + 1 < len(lines) and ']' not in ''.join(array_lines):
-                    i += 1
-                    array_lines.append(lines[i])
-                # Extract items from all lines
-                combined = ' '.join(array_lines)
-                items = re.findall(r'\"([^\"]+)\"', combined)
-                result[key] = items
-        # Handle objects
-        elif value.startswith('{'):
-            result[key] = {}
+    if not match:
         i += 1
+        continue
+    key, value = match.groups()
+    value = strip_trailing_comment(value)
+
+    # Handle string values
+    if value.startswith(DQ):
+        end = value.find(DQ, 1)
+        result[key] = value[1:end] if end > 0 else value
+    elif value.startswith(SQ):
+        end = value.find(SQ, 1)
+        result[key] = value[1:end] if end > 0 else value
+    # Handle arrays (may be multi-line)
+    elif value.startswith('['):
+        if value == '[]':
+            result[key] = []
+        else:
+            # Collect all lines until array closes
+            array_lines = [value]
+            while i + 1 < len(lines) and ']' not in ''.join(array_lines):
+                i += 1
+                array_lines.append(lines[i].strip())
+            combined = ' '.join(array_lines)
+            result[key] = re.findall(r'\"([^\"]+)\"', combined)
     else:
-        i += 1
+        # 内联表、数字、布尔以及其它标量：原样保留文本，写入端照原文回写。
+        # 这里不再逐类型打补丁，凡是 strip_trailing_comment 之后剩下的都留着。
+        result[key] = value
+    i += 1
 
 import json
 print(json.dumps(result))
@@ -196,7 +224,12 @@ CURRENT_CONFIG=$(read_hooker_config)
 CURRENT_DEFAULT=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('default', 'All'))")
 CURRENT_ENABLED=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enabled', []))")
 CURRENT_DISABLED=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('disabled', []); print(d if isinstance(d, list) else [])")
-CURRENT_POLICIES=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('policies', {}); print('{}' if isinstance(d, dict) else d)")
+CURRENT_POLICIES=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin).get('policies', '{}'); print(d if isinstance(d, str) else json.dumps(d))")
+# 解析器没专门管的 key（例如 max_prompt_chain_depth）原样带过去，
+# 写入端照原文回写 —— 否则这些 key 会在每次安装/卸载时被重建逻辑抹掉。
+CURRENT_EXTRA=$(echo "$CURRENT_CONFIG" | python3 -c "import json,sys; d=json.load(sys.stdin); managed={'default','enabled','disabled','plugins','policies'}; print(json.dumps({k: v for k, v in d.items() if k not in managed and isinstance(v, str)}))")
+export CURRENT_POLICIES_RAW="$CURRENT_POLICIES"
+export CURRENT_EXTRA_JSON="$CURRENT_EXTRA"
 
 echo ""
 echo "Current [hooker] default = \"$CURRENT_DEFAULT\""
@@ -299,7 +332,9 @@ default_val = '$DEFAULT_VAL'
 plugins = $(printf '%s\n' "${SELECTED[@]}" | python3 -c 'import json,sys; print(json.dumps([line.strip() for line in sys.stdin if line.strip()]))')
 enabled = $CURRENT_ENABLED
 disabled = $CURRENT_DISABLED
-policies = $CURRENT_POLICIES
+import os
+policies = os.environ.get('CURRENT_POLICIES_RAW', '{}')
+extra = json.loads(os.environ.get('CURRENT_EXTRA_JSON', '{}'))
 
 # Read existing config
 try:
@@ -322,7 +357,10 @@ for i, p in enumerate(plugins):
 hooker_lines.append(']')
 hooker_lines.append(f'enabled = {json.dumps(enabled)}')
 hooker_lines.append(f'disabled = {json.dumps(disabled)}')
-hooker_lines.append('policies = ' + json.dumps(policies))
+hooker_lines.append('policies = ' + policies)
+# 非受管 key 原样回写，安装/卸载不再顺手把它们删掉。
+for extra_key, extra_value in extra.items():
+    hooker_lines.append(f'{extra_key} = {extra_value}')
 
 new_hooker = '\n\n'.join(['', '\n'.join(hooker_lines), ''])
 
