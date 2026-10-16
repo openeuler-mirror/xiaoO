@@ -33,10 +33,11 @@ fn persist_active_provider_selection_writes_llm_to_app_config_path() {
 #[test]
 fn persisted_selection_settings_switching_provider_uses_new_provider_defaults() {
     let (_temp_dir, mut state) = temp_state();
-    state.agent_config.llm.provider = "openai".to_string();
-    state.agent_config.llm.model = "gpt-4o".to_string();
-    state.agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
-    state.agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = "openai".to_string();
+    agent_config.llm.model = "gpt-4o".to_string();
+    agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
+    agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
 
     let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "deepseek");
 
@@ -47,10 +48,11 @@ fn persisted_selection_settings_switching_provider_uses_new_provider_defaults() 
 #[test]
 fn persisted_selection_settings_same_provider_preserves_existing_config() {
     let (_temp_dir, mut state) = temp_state();
-    state.agent_config.llm.provider = "openai".to_string();
-    state.agent_config.llm.model = "gpt-4o".to_string();
-    state.agent_config.llm.api_key_env = Some("CUSTOM_OPENAI_KEY".to_string());
-    state.agent_config.llm.api_base = "https://proxy.example/v1".to_string();
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = "openai".to_string();
+    agent_config.llm.model = "gpt-4o".to_string();
+    agent_config.llm.api_key_env = Some("CUSTOM_OPENAI_KEY".to_string());
+    agent_config.llm.api_base = "https://proxy.example/v1".to_string();
 
     let (api_key_env, api_base) = persisted_selection_settings(&state.agent_config, "openai");
 

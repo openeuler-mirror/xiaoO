@@ -355,21 +355,17 @@ async fn validate_config_for_tui(
     )
 }
 
-/// 启动校验专用的窗口解析：动态探测优先（有界等待），回落静态兜底。
+/// 启动校验专用的窗口解析：走 TUI 网关同一份进程级缓存与探测链
+/// （`resolve_window_with_shared_cache`），探测直接写缓存，首个 turn
+/// 命中即免重复等待。
 async fn resolve_context_window_for_validation(config: &config::Config) -> usize {
-    let llm = &config.llm;
-    let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
-    let probe = crate::gateway_api::runtime_request::probe_dynamic_context_window(
-        &llm.provider,
-        &llm.model,
-        None,
-        llm.api_key_env.clone(),
-        api_base,
-    );
-    match tokio::time::timeout(CONFIG_PROBE_DEADLINE, probe).await {
-        Ok(Some(window)) if window > 0 => window,
-        _ => config::resolve_context_window(config).unwrap_or(128_000),
-    }
+    crate::gateway_api::runtime_request::resolve_window_with_shared_cache(
+        &config.llm,
+        config::resolve_context_window(config),
+        CONFIG_PROBE_DEADLINE,
+    )
+    .await
+    .unwrap_or(128_000)
 }
 
 /// 纯函数：给定解析出的上下文窗口与配置，产出 `(errors, warnings)`。

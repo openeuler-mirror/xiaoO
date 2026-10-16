@@ -328,7 +328,10 @@ impl GatewayRuntime {
             self.remote_turn_request(state, prompt.clone(), command_context, chain_depth)?;
 
         state.chat_state.stick_to_bottom = true;
-        self.request_start = Some(std::time::Instant::now());
+        // Remote dispatches synchronously from the event loop — write directly.
+        if let Ok(mut turn_clock) = self.turn_clock.lock() {
+            turn_clock.set_dispatch(std::time::Instant::now());
+        }
         self.first_token_latency_recorded = false;
         if append_user_message {
             state.chat_state.messages.push(Message::user(prompt));

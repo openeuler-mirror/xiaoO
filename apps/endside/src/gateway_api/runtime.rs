@@ -34,6 +34,63 @@ pub(super) struct PendingStreamDone {
     pub(super) messages: Vec<xiaoo_api::chat::ChatMessage>,
 }
 
+/// First-token latency clock shared with the turn's spawned task. The
+/// generation counter is the stale-task guard: submit, cancel, and reset
+/// all advance it, so a task whose turn was cancelled or superseded cannot
+/// overwrite the active turn's timestamp. Lock poisoning is not expected
+/// (no awaits, no panic sources inside the lock); callers skip on poison.
+///
+/// Pure state holder: the clock never reads the wall clock itself — both
+/// writers pass the dispatch instant, so tests can inject fixed values.
+#[derive(Default)]
+pub(super) struct TurnClock {
+    /// Turn ordinal, advanced by every [`TurnClock::invalidate`].
+    generation: u64,
+    /// Dispatch timestamp of the current generation's turn; `None` until
+    /// dispatched and cleared again by [`TurnClock::invalidate`].
+    dispatch_instant: Option<Instant>,
+}
+
+impl TurnClock {
+    /// Advance the generation and clear the timestamp, revoking write
+    /// access of tasks holding an older generation. Submit captures the
+    /// returned generation for its spawned task.
+    pub(super) fn invalidate(&mut self) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.dispatch_instant = None;
+        self.generation
+    }
+
+    /// Unconditional dispatch write for callers running on the event loop
+    /// (the remote path dispatches synchronously) and for tests, which
+    /// inject a fixed instant.
+    pub(super) fn set_dispatch(&mut self, at: Instant) {
+        self.dispatch_instant = Some(at);
+    }
+
+    /// Generation-guarded dispatch write for the spawned task: a task
+    /// whose turn was cancelled or superseded (stale generation) cannot
+    /// overwrite the active turn's timestamp.
+    pub(super) fn record_dispatch(&mut self, generation: u64, at: Instant) {
+        if self.generation == generation {
+            self.dispatch_instant = Some(at);
+        }
+    }
+
+    /// Dispatch timestamp of the current turn, if it was dispatched.
+    /// Borrowing read for the first-token latency calculation.
+    pub(super) fn dispatch_instant(&self) -> Option<Instant> {
+        self.dispatch_instant
+    }
+
+    /// Consume the dispatch marker and report whether the current turn
+    /// was dispatched. The terminal `Done` handler gates per-turn usage
+    /// metrics on this; consuming the marker keeps the report one-shot.
+    pub(super) fn take_dispatched(&mut self) -> bool {
+        self.dispatch_instant.take().is_some()
+    }
+}
+
 pub struct GatewayRuntime {
     pub(super) session_gateway: SessionGateway,
     pub(super) stream_rx: Option<UnboundedReceiver<SessionTurnUpdate>>,
@@ -55,7 +112,12 @@ pub struct GatewayRuntime {
     /// Cleared when the drain ends, when a new turn starts, and on
     /// `reset_for_new_session`.
     pub(super) draining_after_cancel: bool,
-    pub(super) request_start: Option<Instant>,
+    /// Per-turn dispatch clock shared with the turn's spawned task. Two
+    /// writers: the event loop (remote path, synchronous dispatch) and
+    /// the spawned task (local path, after the config build so the probe
+    /// wait is excluded from first-token latency) — both go through it,
+    /// generation-guarded against stale tasks.
+    pub(super) turn_clock: Arc<Mutex<TurnClock>>,
     pub(super) first_token_latency_recorded: bool,
     pub(super) interaction_reply_tx: Option<UnboundedSender<UserPromptResult>>,
     pub(super) pending_user_messages: Arc<Mutex<VecDeque<String>>>,
@@ -114,7 +176,7 @@ impl GatewayRuntime {
             pending_stream_done: None,
             cancel_token: None,
             draining_after_cancel: false,
-            request_start: None,
+            turn_clock: Arc::new(Mutex::new(TurnClock::default())),
             first_token_latency_recorded: false,
             interaction_reply_tx: None,
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
@@ -140,7 +202,9 @@ impl GatewayRuntime {
         self.pending_stream_done = None;
         self.cancel_token = None;
         self.draining_after_cancel = false;
-        self.request_start = None;
+        if let Ok(mut turn_clock) = self.turn_clock.lock() {
+            turn_clock.invalidate();
+        }
         self.first_token_latency_recorded = false;
         self.interaction_reply_tx = None;
         if let Ok(mut pending) = self.pending_user_messages.lock() {
