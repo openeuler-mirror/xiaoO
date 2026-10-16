@@ -64,11 +64,12 @@ impl ProviderDialog {
             .unwrap_or(&[])
     }
 
-    pub fn current_models(&self) -> Vec<ModelInfo> {
+    /// 当前高亮 provider 的模型条数。取长度不该 clone 整份列表：官方列表
+    /// （openrouter 300+）下，方向键每按一次 clone 一遍是纯浪费。
+    pub fn current_model_count(&self) -> usize {
         self.providers
             .get(self.selected_provider)
-            .map(|p| p.models.clone())
-            .unwrap_or_default()
+            .map_or(0, |provider| provider.models.len())
     }
 
     pub fn move_up(&mut self) {
@@ -96,10 +97,8 @@ impl ProviderDialog {
                 }
             }
             DialogFocus::Models => {
-                let models = self.current_models();
-                if self.selected_model < models.len().saturating_sub(1) {
-                    self.selected_model += 1;
-                }
+                let last = self.current_model_count().saturating_sub(1);
+                self.selected_model = self.selected_model.saturating_add(1).min(last);
             }
         }
     }

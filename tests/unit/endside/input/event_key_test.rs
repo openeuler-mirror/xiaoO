@@ -661,12 +661,12 @@ async fn fetched_official_list_replaces_dialog_models_end_to_end() {
         .model_fetch_rx
         .recv()
         .await
-        .expect("拉取任务必定回传结果（fetch_provider_models 不返回 Err）");
+        .expect("拉取任务必定回传结果（join_fetch_outcome 保证 panic 也折成结果）");
     app.apply_model_fetch_outcome(session, outcome);
 
     mock.assert_async().await;
     let dialog = app.state.provider_dialog.as_ref().expect("弹窗仍然打开");
-    let dialog_ids = model_ids(&dialog.current_models());
+    let dialog_ids = model_ids(dialog.current_models_ref());
     let chat_ids = model_ids(
         &app.state
             .chat_state
@@ -699,7 +699,7 @@ async fn failed_fetch_keeps_models_and_records_error() {
     let mut app = test_app_with_llm("openai-compatible", "pin-me", "http://127.0.0.1:1/v1");
     app.open_provider_selection_dialog();
     let dialog = app.state.provider_dialog.as_ref().expect("弹窗打开");
-    let before = model_ids(&dialog.current_models());
+    let before = model_ids(dialog.current_models_ref());
     let selected_before = dialog.selected_model;
 
     let session = app.state.model_fetch_session;
@@ -707,7 +707,7 @@ async fn failed_fetch_keeps_models_and_records_error() {
 
     let dialog = app.state.provider_dialog.as_ref().expect("弹窗仍然打开");
     assert_eq!(
-        model_ids(&dialog.current_models()),
+        model_ids(dialog.current_models_ref()),
         before,
         "失败不得改动列表"
     );
