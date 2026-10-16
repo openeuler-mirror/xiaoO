@@ -125,11 +125,15 @@ impl ProviderDialog {
             .map(|provider| provider.name.as_str())
     }
 
-    /// 用官方列表替换某 provider 的模型。
+    /// 用官方列表替换某 provider 的模型，并尽量保持当前选中项。
+    ///
+    /// 选中项按 **id** 保持（不是按下标），因为官方列表的顺序与内置表不同：
+    /// 替换前的选中 id 若仍在新列表里就选中它，否则回到首位——注意"首位是激活模型"
+    /// 只在官方列表不含激活模型时成立（调用方会先 `pin_configured_model` 补到首位）；
+    /// 官方列表本来含它时，首位就是官方列表的第一行。
     ///
     /// 空列表视为无效（调用方按失败处理），返回 `false` 且不改动任何状态；
-    /// provider 名未命中同样返回 `false`。被替换的是当前高亮 provider 时，
-    /// 选中下标收敛到新列表范围内，避免指向越界。
+    /// provider 名未命中同样返回 `false`。
     pub fn replace_models(&mut self, provider: &str, models: Vec<ModelInfo>) -> bool {
         if models.is_empty() {
             return false;
@@ -142,8 +146,19 @@ impl ProviderDialog {
             return false;
         };
 
+        // 选中下标只在被替换的 provider 就是当前高亮项时才重算，否则别动
+        // 用户在另一个 provider 上的选择（下标是相对当前高亮项而言的）。
         if index == self.selected_provider {
-            self.selected_model = self.selected_model.min(models.len().saturating_sub(1));
+            let previous_id = self.providers[index]
+                .models
+                .get(self.selected_model)
+                .map(|model| model.id.clone());
+            let kept_index = previous_id.as_deref().and_then(|previous_id| {
+                models
+                    .iter()
+                    .position(|model| model.id.eq_ignore_ascii_case(previous_id))
+            });
+            self.selected_model = kept_index.unwrap_or(0).min(models.len().saturating_sub(1));
         }
 
         self.providers[index].models = models;

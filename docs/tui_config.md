@@ -159,6 +159,12 @@ with the result.
   usable offline. Once an official list has been fetched it stays in effect for
   the rest of the session — a later failure shows a hint line but never restores
   or clears the list.
+- The active model is pinned to the top (`<id> (configured)`) when the official
+  list does not contain it. The selection follows the model id across a refresh, so
+  the cursor only moves when the highlighted model disappeared from the new list;
+  it then falls back to the first row (the pinned entry, when the official list did
+  not contain the configured model). Moving the provider highlight away and back
+  also resets the cursor to the first row.
 - The list is not cached on disk: restarting the TUI re-fetches it.
 
 Sources: fetch pipeline `apps/endside/src/services/provider.rs` (request/outcome

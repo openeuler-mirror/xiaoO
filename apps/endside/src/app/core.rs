@@ -509,6 +509,18 @@ impl App {
         }
         match outcome.result {
             Ok(models) if !models.is_empty() => {
+                // 官方列表不含当前激活模型时补到首位（两家副本用同一份结果）。
+                let configured = self
+                    .state
+                    .agent_config
+                    .llm
+                    .provider
+                    .eq_ignore_ascii_case(&provider)
+                    .then(|| self.state.agent_config.llm.model.clone());
+                let models = crate::provider_service::pin_configured_model(
+                    models,
+                    configured.as_deref(),
+                );
                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
                     dialog.replace_models(&provider, models.clone());
                 }

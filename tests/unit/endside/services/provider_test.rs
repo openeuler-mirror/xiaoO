@@ -254,6 +254,13 @@ fn clipboard_outcome_osc52_delivery_follows_terminal_heuristic() {
 
 // ── 官方 model list 拉取 ───────────────────────────────────────────────────
 
+fn model(id: &str) -> ModelInfo {
+    ModelInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+    }
+}
+
 fn summary(id: &str, display_name: Option<&str>) -> LlmModelSummary {
     LlmModelSummary {
         id: id.to_string(),
@@ -361,6 +368,32 @@ fn model_infos_from_summaries_prefers_display_name_and_dedupes_and_skips_empty_i
     assert_eq!(
         with_control[0].name, "shown[2Jname",
         "display_name 与 id 走同一套消毒：控制字符必须剥掉"
+    );
+}
+
+#[test]
+fn pin_configured_model_inserts_missing_active_model_at_front() {
+    let pinned = pin_configured_model(vec![model("a"), model("b")], Some("gateway-model"));
+
+    assert_eq!(ids(&pinned), vec!["gateway-model", "a", "b"]);
+    assert_eq!(pinned[0].name, "gateway-model (configured)");
+}
+
+#[test]
+fn pin_configured_model_keeps_list_untouched_when_present_or_blank() {
+    assert_eq!(
+        ids(&pin_configured_model(vec![model("a"), model("b")], Some("B"))),
+        vec!["a", "b"],
+        "已在列表里（忽略大小写）时不插入"
+    );
+    assert_eq!(
+        ids(&pin_configured_model(vec![model("a")], Some("   "))),
+        vec!["a"],
+        "全空白的配置模型视为未配置"
+    );
+    assert_eq!(
+        ids(&pin_configured_model(vec![model("a")], None)),
+        vec!["a"]
     );
 }
 

@@ -83,6 +83,29 @@ fn selected_provider_name_returns_none_when_empty() {
     assert_eq!(dialog.selected_provider_name(), Some("deepseek"));
 }
 
+/// 官方列表顺序与内置表不同，因此选中项必须按 **id** 保持而不是按下标。
+#[test]
+fn replace_models_keeps_selection_by_id() {
+    let mut dialog = ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4-turbo"));
+    assert_eq!(dialog.selected_model, 1);
+
+    // 官方列表把 gpt-4-turbo 挪到了最后一位。
+    assert!(dialog.replace_models(
+        "openai",
+        vec![model("gpt-4o"), model("o3"), model("gpt-4-turbo")],
+    ));
+
+    assert_eq!(
+        ids(&dialog.current_models()),
+        vec!["gpt-4o", "o3", "gpt-4-turbo"]
+    );
+    assert_eq!(
+        dialog.selected(),
+        Some(("openai".to_string(), "gpt-4-turbo".to_string())),
+        "选中项要跟着 id 走，不能被下标带偏"
+    );
+}
+
 #[test]
 fn replace_models_clamps_selection_when_id_disappears() {
     let mut dialog =
