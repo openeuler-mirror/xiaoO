@@ -4,6 +4,7 @@ use agent_types::interaction::{InteractionRequest, InteractionResponse};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::session_supervisor::SessionSupervisor;
 
@@ -14,6 +15,14 @@ use super::session_supervisor::SessionSupervisor;
 /// can stop waiting and wind the lane down instead of hanging forever.
 pub(crate) const INTERACTION_TIMEOUT_SENTINEL: &str =
     "[INTERACTION_TIMEOUT] The user did not reply in time.";
+
+/// Sentinel text delivered to a subagent when its forwarded interaction
+/// (`ask_user_question` / a permission confirm) is cut short because the
+/// root turn was cancelled (Esc/Ctrl+C) before the user replied. Distinct
+/// from [`INTERACTION_TIMEOUT_SENTINEL`] so the persisted history shows
+/// why no real answer arrived.
+pub(crate) const INTERACTION_CANCELLED_SENTINEL: &str =
+    "[INTERACTION_CANCELLED] The turn was cancelled before the user replied.";
 
 /// Build the sentinel [`InteractionResponse`] for a timed-out forwarded
 /// interaction. Shared between:
@@ -37,10 +46,34 @@ pub(crate) fn interaction_timeout_response(request: &InteractionRequest) -> Inte
     }
 }
 
+/// Build the sentinel [`InteractionResponse`] for a cancelled forwarded
+/// interaction: delivered by [`SessionSupervisor::request_interaction`]'s
+/// cancel `select!` branch when the root turn's token fires while the
+/// user has not replied yet. Mirrors [`interaction_timeout_response`]:
+/// `Confirm` maps to `Unanswered` (not an explicit denial), free-text
+/// variants carry the sentinel so the model can wind down.
+pub(crate) fn interaction_cancelled_response(request: &InteractionRequest) -> InteractionResponse {
+    match request {
+        InteractionRequest::Confirm { .. } => InteractionResponse::Unanswered,
+        InteractionRequest::TextInput { .. } => InteractionResponse::Text {
+            value: Some(INTERACTION_CANCELLED_SENTINEL.to_string()),
+            display_value: None,
+        },
+        InteractionRequest::Choice { .. } => InteractionResponse::Choice {
+            value: Some(INTERACTION_CANCELLED_SENTINEL.to_string()),
+        },
+    }
+}
+
 pub(crate) struct SubagentInteractionHandle {
     supervisor: Arc<SessionSupervisor>,
     agent_id: AgentId,
     parent_agent_id: AgentId,
+    /// The root turn's cancel token, captured when the subagent lane was
+    /// spawned (see `spawn_subagent_task`). Forwarded to
+    /// `request_interaction` so a pending `ask` unparks the moment the
+    /// turn is cancelled, instead of waiting out the interaction timeout.
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl SubagentInteractionHandle {
@@ -48,11 +81,13 @@ impl SubagentInteractionHandle {
         supervisor: Arc<SessionSupervisor>,
         agent_id: AgentId,
         parent_agent_id: AgentId,
+        cancellation_token: Option<CancellationToken>,
     ) -> Self {
         Self {
             supervisor,
             agent_id,
             parent_agent_id,
+            cancellation_token,
         }
     }
 }
@@ -70,6 +105,7 @@ impl InteractionHandle for SubagentInteractionHandle {
                 self.parent_agent_id.clone(),
                 request.clone(),
                 response_tx,
+                self.cancellation_token.clone(),
             )
             .await;
 
