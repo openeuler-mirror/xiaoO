@@ -529,14 +529,19 @@ impl App {
         let inner = dialog_block.inner(dialog_area);
         frame.render_widget(dialog_block, dialog_area);
 
-        // 底部固定一行状态行：列表只占剩余空间，状态文案不会挤压或盖住列表
-        // 内容（对齐 sandbox / snapshot 弹窗的做法）。
+        // 底部固定两行：官方列表状态行 + 快捷键行。列表只占剩余空间，状态
+        // 文案不会挤压或盖住列表内容（对齐 sandbox / snapshot 弹窗的做法）。
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(4), Constraint::Length(1)])
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
             .split(inner);
         let list_area = rows[0];
         let status_area = rows[1];
+        let hint_area = rows[2];
 
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
@@ -660,6 +665,12 @@ impl App {
             status_area,
         );
 
+        // 快捷键行只有一行高（`Length(1)`），文案必须窄于弹窗最小内宽
+        // （dialog_width 下限 60 → 内宽 58），否则 Wrap 会把尾部裁掉。
+        let hint = Paragraph::new("↑↓ select | Ctrl+R refresh | Enter apply | Esc cancel")
+            .style(Style::default().fg(self.state.theme.muted))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(hint, hint_area);
     }
 
     pub(crate) fn render_sandbox_dialog(

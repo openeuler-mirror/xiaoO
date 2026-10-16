@@ -1,10 +1,10 @@
 use super::*;
-use std::time::{Duration, Instant};
 use crate::config::Config;
 use crate::input::Input;
 use crate::services::command_loader::ExternalCommand;
 use crossterm::event::KeyModifiers;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 fn external_commands() -> Vec<ExternalCommand> {
     vec![ExternalCommand {
@@ -650,7 +650,7 @@ async fn fetched_official_list_replaces_dialog_models_end_to_end() {
         .model_fetch_rx
         .recv()
         .await
-        .expect("拉取任务必定回传结果（join_fetch_outcome 保证 panic 也折成结果）");
+        .expect("拉取任务必定回传结果（fetch_provider_models 不返回 Err）");
     app.apply_model_fetch_outcome(session, outcome);
 
     mock.assert_async().await;
@@ -731,6 +731,50 @@ async fn outcome_for_provider_missing_from_catalog_falls_back_to_builtin() {
         ),
         "目录里没有该 provider 时不得记成 Ready"
     );
+}
+
+/// 同一会话内 `Ctrl+R` 是唯一能绕过退避的路径：用户刚补完 API key 时不该等 30s
+/// （会话重建会把状态重置成 `Builtin`，那是另一条路）。
+#[tokio::test]
+async fn ctrl_r_force_refreshes_past_failure_backoff() {
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("GET", "/v1/models")
+        .expect(2)
+        .with_status(200)
+        .with_body(r#"{"data":[{"id":"m1"}]}"#)
+        .create_async()
+        .await;
+    // provider 名用 `local`：只有与 `llm.provider` 一致时才会用配置里的 api_base，
+    // 否则请求会打到真实厂商（这条测试过去只断言 is_loading()，弱 oracle 掩盖了这点）。
+    let mut app = test_app_with_llm("local", "pin-me", &format!("{}/v1", server.url()));
+    app.open_provider_selection_dialog();
+    // 先让打开弹窗那次拉取落地并释放在飞名额（同 provider 在飞时不重复发请求）。
+    let (session, outcome) = app.model_fetch_rx.recv().await.expect("首次拉取应回传");
+    app.apply_model_fetch_outcome(session, outcome);
+    // 模拟"刚失败、仍在 30s 退避窗口内"的状态。
+    app.state.chat_state.set_model_list_state(
+        "local",
+        crate::chat::ModelListState::Failed {
+            message: "set XIAOO_TEST_UNSET_KEY".to_string(),
+            failed_at: Instant::now(),
+            hint_only: true,
+        },
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+        .await
+        .expect("dispatch Ctrl+R");
+
+    assert!(
+        model_list_state(&app, "local").is_loading(),
+        "Ctrl+R 必须无视退避直接重拉"
+    );
+
+    // 等这次重试真的打出去再核对请求数（否则断言跑在 HTTP 之前，是竞态）。
+    let (session, outcome) = app.model_fetch_rx.recv().await.expect("重试应回传");
+    app.apply_model_fetch_outcome(session, outcome);
+    mock.assert_async().await;
 }
 
 /// 切 provider 才拉取：Providers 栏内上下键只在真正换了 provider 时触发；
@@ -816,7 +860,7 @@ async fn stale_loading_does_not_block_a_new_fetch() {
         },
     );
 
-    app.maybe_refresh_selected_provider();
+    app.maybe_refresh_selected_provider(false);
 
     // 状态是同步置位的：立刻就能看到"新任务"的时间戳（不再是陈旧的）。
     let state = model_list_state(&app, "local");

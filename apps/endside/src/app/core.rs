@@ -469,8 +469,9 @@ impl App {
 
     /// 按需刷新当前高亮 provider 的官方列表。
     ///
-    /// 是否真的发请求由 [`ModelListState::needs_refresh`] 决定（TTL / 失败退避）。
-    pub(crate) fn maybe_refresh_selected_provider(&mut self) {
+    /// `force` 来自 `Ctrl+R`：无视 TTL/失败退避强制重拉（用户刚补完 API key
+    /// 就按它，不必等 30s 退避）。非强制路径走 [`ModelListState::needs_refresh`]。
+    pub(crate) fn maybe_refresh_selected_provider(&mut self, force: bool) {
         let Some(provider) = self
             .state
             .provider_dialog
@@ -479,12 +480,7 @@ impl App {
         else {
             return;
         };
-        if self
-            .state
-            .chat_state
-            .model_list_state(&provider)
-            .needs_refresh(Instant::now())
-        {
+        if force || self.state.chat_state.model_list_state(&provider).needs_refresh(Instant::now()) {
             self.start_model_fetch(provider);
         }
     }
