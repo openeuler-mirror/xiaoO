@@ -1,7 +1,16 @@
 use super::*;
+use crate::app::App;
+use crate::app_state::InputMode;
+use crate::chat::{ModelInfo, ProviderInfo};
+use crate::config::Config;
+use crate::provider_dialog::ProviderDialog;
+use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::Terminal;
+use std::path::PathBuf;
 
 #[test]
 fn test_basic() {
@@ -154,4 +163,75 @@ fn diff_long_paragraph() {
 #[test]
 fn diff_consecutive_newlines() {
     assert_matches_ratatui("a\n\nb", 4);
+}
+
+// ── provider / model 弹窗：渲染时量出的一屏行数 ─────────────────────────────
+
+/// 把整屏还原成文本，用来断言"当前可见的窗口"而不是内部状态。
+///
+/// 宽字符（CJK）后面的那个 cell 是 ratatui `Buffer::set_stringn` 重置出来的
+/// 填充格（symbol 是空格），按真实终端那样跳过它，否则 "翻页" 会被读成
+/// "翻 页"、中文断言全部失效。
+fn screen_text(terminal: &Terminal<TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    (0..area.height)
+        .map(|y| {
+            let mut line = String::new();
+            let mut x = 0;
+            while x < area.width {
+                let symbol = buffer[(x, y)].symbol();
+                line.push_str(symbol);
+                x += Line::from(symbol).width().max(1) as u16;
+            }
+            line.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 弹窗里放一条 provider + `count` 个 `model-XX`。
+fn app_with_models(count: usize) -> App {
+    let mut config = Config::default();
+    config.llm.provider = "openrouter".to_string();
+    config.llm.model = "pinned-model".to_string();
+    let mut app = App::new_with_config(
+        &config,
+        PathBuf::from("/nonexistent/endside-overlay-test-config.toml"),
+        PathBuf::from("/tmp/endside-overlay-test-workspace"),
+    )
+    .expect("headless test app");
+    // 弹窗只在该模式下接收按键；本用例只渲染、不派发按键，这行是为了让状态
+    // 与真实使用时一致（后续实现翻页的那一层会在这里真的按键）。
+    app.state.input_mode = InputMode::ProviderSelection;
+    app.state.provider_dialog = Some(ProviderDialog::new(vec![ProviderInfo {
+        name: "openrouter".to_string(),
+        models: (0..count)
+            .map(|index| ModelInfo {
+                id: format!("model-{index:02}"),
+                name: format!("model-{index:02}"),
+            })
+            .collect(),
+    }]));
+    app
+}
+
+/// 渲染时量出的可见行数必须等于弹窗里列表内容区的实际行数——这个值就是
+/// "一屏"的定义。这里的 14 = 弹窗高 20（42 行终端）− 2 边框 − 2（状态行/
+/// 快捷键行）− 2（左右两栏各自的边框）。
+#[tokio::test]
+async fn rendering_measures_the_list_viewport() {
+    let mut app = app_with_models(40);
+    let mut terminal = Terminal::new(TestBackend::new(130, 42)).expect("test terminal");
+
+    terminal.draw(|frame| app.ui(frame)).expect("first draw");
+    assert_eq!(
+        app.state.provider_dialog.as_ref().unwrap().page_height,
+        14,
+        "渲染必须把一屏行数写回弹窗状态"
+    );
+
+    let first = screen_text(&terminal);
+    assert!(first.contains("model-00"), "首屏从第一项开始");
+    assert!(!first.contains("model-14"), "首屏放不下第二屏的内容");
 }

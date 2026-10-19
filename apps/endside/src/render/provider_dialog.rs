@@ -6,6 +6,12 @@ pub struct ProviderDialog {
     pub selected_provider: usize,
     pub selected_model: usize,
     pub focus: DialogFocus,
+    /// 列表内容区最近一次渲染出的可见行数，由 `render_provider_dialog` 回写。
+    ///
+    /// 弹窗高度随终端在 12..20 行之间浮动，一屏放得下几行只有渲染时才知道，
+    /// 所以由渲染侧量好写回来。`0` 表示这次弹窗创建后还没有任何一帧回写过；
+    /// 读取方应按"至少 1 行"兜底，不要假设它一定会被回写成非零。
+    pub page_height: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +27,7 @@ impl ProviderDialog {
             selected_provider: 0,
             selected_model: 0,
             focus: DialogFocus::Providers,
+            page_height: 0,
         }
     }
 

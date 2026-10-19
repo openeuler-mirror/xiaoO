@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::app_state::{ApiKeyDialogState, InputMode, SandboxDialog};
-use crate::chat::ModelListState;
+use crate::chat::{ChatState, ModelListState};
 use crate::interaction_prompt::{interaction_prompt_outer_height, render_interaction_prompt};
 use crate::provider_dialog::ProviderDialog;
 use crate::remote_sessions_service::{
@@ -21,6 +21,7 @@ use crate::services::turn_delete::DeleteDialog;
 use crate::session_snapshot_service::{
     format_snapshot_time, SessionSnapshotDialog, SessionSnapshotListEntry, SessionSnapshotPane,
 };
+use crate::theme::Theme;
 
 use super::utils::{line_prefix_width, sanitize_terminal_text};
 
@@ -504,10 +505,11 @@ impl App {
     }
 
     pub(crate) fn render_provider_dialog(
-        &self,
         frame: &mut Frame,
         area: Rect,
-        dialog: &ProviderDialog,
+        dialog: &mut ProviderDialog,
+        theme: &Theme,
+        chat_state: &ChatState,
     ) {
         let dialog_width = area.width.clamp(60, 80);
         let dialog_height = area.height.clamp(12, 20);
@@ -520,12 +522,12 @@ impl App {
             height: dialog_height,
         };
 
-        render_popup_backdrop(frame, dialog_area, area, self.state.theme.background);
+        render_popup_backdrop(frame, dialog_area, area, theme.background);
         let dialog_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(self.state.theme.border_active))
-            .style(Style::default().bg(self.state.theme.background));
+            .border_style(Style::default().fg(theme.border_active))
+            .style(Style::default().bg(theme.background));
         let inner = dialog_block.inner(dialog_area);
         frame.render_widget(dialog_block, dialog_area);
 
@@ -543,6 +545,10 @@ impl App {
         let status_area = rows[1];
         let hint_area = rows[2];
 
+        // 翻页步长的唯一真相源：列表栏内容区行数（去掉上下边框）。量好写回
+        // 弹窗状态，一屏到底有多少行就不必靠常量去猜。
+        dialog.page_height = usize::from(list_area.height.saturating_sub(2));
+
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -557,11 +563,11 @@ impl App {
             .map(|(index, provider)| {
                 let style = if index == dialog.selected_provider {
                     Style::default()
-                        .fg(self.state.theme.foreground)
-                        .bg(self.state.theme.selection)
+                        .fg(theme.foreground)
+                        .bg(theme.selection)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(self.state.theme.foreground)
+                    Style::default().fg(theme.foreground)
                 };
                 Line::from(Span::styled(provider.name.clone(), style))
             })
@@ -571,7 +577,7 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(self.state.theme.border_style(true))
+                .border_style(theme.border_style(true))
                 .title(" Providers ")
                 .padding(Padding::horizontal(1)),
         );
@@ -583,7 +589,7 @@ impl App {
         frame.render_stateful_widget(provider_list, left, &mut provider_state);
 
         let provider_name = dialog.selected_provider_name().unwrap_or_default();
-        let status = self.state.chat_state.model_list_state(provider_name);
+        let status = chat_state.model_list_state(provider_name);
         let models = dialog.current_models_ref();
 
         let model_lines: Vec<Line> = if models.is_empty() {
@@ -595,7 +601,7 @@ impl App {
             vec![Line::from(Span::styled(
                 placeholder,
                 Style::default()
-                    .fg(self.state.theme.muted)
+                    .fg(theme.muted)
                     .add_modifier(Modifier::ITALIC),
             ))]
         } else {
@@ -605,11 +611,11 @@ impl App {
                 .map(|(index, model)| {
                     let style = if index == dialog.selected_model {
                         Style::default()
-                            .fg(self.state.theme.foreground)
-                            .bg(self.state.theme.selection)
+                            .fg(theme.foreground)
+                            .bg(theme.selection)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(self.state.theme.foreground)
+                        Style::default().fg(theme.foreground)
                     };
                     Line::from(Span::styled(model.name.clone(), style))
                 })
@@ -625,7 +631,7 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(self.state.theme.border_style(true))
+                .border_style(theme.border_style(true))
                 .title(models_title)
                 .padding(Padding::horizontal(1)),
         );
@@ -637,14 +643,14 @@ impl App {
 
         // 状态行按拉取状态给一句话：成功报数量、失败报原因、缺 key 只提示。
         let (status_text, status_style) = match &status {
-            ModelListState::Builtin => (String::new(), Style::default().fg(self.state.theme.muted)),
+            ModelListState::Builtin => (String::new(), Style::default().fg(theme.muted)),
             ModelListState::Loading { .. } => (
                 "Fetching the model list from the provider…".to_string(),
-                Style::default().fg(self.state.theme.muted),
+                Style::default().fg(theme.muted),
             ),
             ModelListState::Ready { .. } => (
                 format!("Official model list · {} models", models.len()),
-                Style::default().fg(self.state.theme.muted),
+                Style::default().fg(theme.muted),
             ),
             ModelListState::Failed {
                 message,
@@ -652,7 +658,7 @@ impl App {
                 ..
             } => (
                 format!("{message} (showing the existing list)"),
-                Style::default().fg(self.state.theme.muted),
+                Style::default().fg(theme.muted),
             ),
             ModelListState::Failed {
                 message,
@@ -660,13 +666,14 @@ impl App {
                 ..
             } => (
                 format!("Failed to fetch the official model list: {message}"),
-                Style::default().fg(self.state.theme.error),
+                Style::default().fg(theme.error),
             ),
             ModelListState::Unsupported => (
                 "This provider has no model catalog (showing the built-in list)".to_string(),
-                Style::default().fg(self.state.theme.muted),
+                Style::default().fg(theme.muted),
             ),
         };
+
         frame.render_widget(
             Paragraph::new(status_text)
                 .style(status_style)
@@ -677,7 +684,7 @@ impl App {
         // 快捷键行只有一行高（`Length(1)`），文案必须窄于弹窗最小内宽
         // （dialog_width 下限 60 → 内宽 58），否则 Wrap 会把尾部裁掉。
         let hint = Paragraph::new("↑↓ select | Ctrl+R refresh | Enter apply | Esc cancel")
-            .style(Style::default().fg(self.state.theme.muted))
+            .style(Style::default().fg(theme.muted))
             .wrap(Wrap { trim: true });
         frame.render_widget(hint, hint_area);
     }
