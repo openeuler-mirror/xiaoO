@@ -137,13 +137,12 @@ impl App {
             // Auto-copy only when the drag actually started inside the input
             // box; releasing just outside still copies (anchor and cursor
             // were both set while inside).
-            MouseEventKind::Up(MouseButton::Left)
-                if self.input_drag_active => {
-                    self.input_drag_active = false;
-                    if self.state.chat_state.input.selected_range().is_some() {
-                        self.copy_active_selection();
-                    }
+            MouseEventKind::Up(MouseButton::Left) if self.input_drag_active => {
+                self.input_drag_active = false;
+                if self.state.chat_state.input.selected_range().is_some() {
+                    self.copy_active_selection();
                 }
+            }
             _ => {}
         }
     }
@@ -202,7 +201,8 @@ impl App {
                 Ok(true)
             }
             MouseEventKind::ScrollDown => {
-                self.state.plan_panel_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+                self.state
+                    .plan_panel_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                 Ok(true)
             }
             MouseEventKind::Down(MouseButton::Left) if in_scrollbar_zone => {
@@ -368,7 +368,8 @@ impl App {
                 // auto-copy on release) content beyond the visible viewport,
                 // not just what is on screen.
                 if self.state.transcript_drag_active() {
-                    self.state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+                    self.state
+                        .active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
                     self.state.extend_transcript_selection_to(
                         mouse_event.column,
                         mouse_event.row,
@@ -376,13 +377,15 @@ impl App {
                     );
                 } else {
                     self.state.transcript_selection = None;
-                    self.state.active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
+                    self.state
+                        .active_transcript_scroll_up_by(MOUSE_WHEEL_SCROLL_LINES);
                 }
             }
             MouseEventKind::ScrollDown => {
                 // See ScrollUp: wheel-step scroll-and-extend while a drag is active.
                 if self.state.transcript_drag_active() {
-                    self.state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+                    self.state
+                        .active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                     self.state.extend_transcript_selection_to(
                         mouse_event.column,
                         mouse_event.row,
@@ -390,7 +393,8 @@ impl App {
                     );
                 } else {
                     self.state.transcript_selection = None;
-                    self.state.active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
+                    self.state
+                        .active_transcript_scroll_down_by(MOUSE_WHEEL_SCROLL_LINES);
                 }
             }
             // Shift+wheel commonly arrives as ScrollLeft/ScrollRight; when the

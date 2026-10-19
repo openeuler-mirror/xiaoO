@@ -276,9 +276,9 @@ pub fn copy_to_clipboard(text: &str) -> Result<ClipboardOutcome> {
             .ok()
             .map(|o| o.status.success())
             == Some(true)
-        {
-            return Ok(ClipboardOutcome::Native);
-        }
+    {
+        return Ok(ClipboardOutcome::Native);
+    }
     // X11: xclip (only if DISPLAY is set)
     if std::env::var("DISPLAY").is_ok() {
         if let Ok(mut child) = Command::new("xclip")
@@ -559,7 +559,14 @@ fn redact_url(token: &str) -> String {
 fn looks_like_secret_field(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     [
-        "key=", "key:", "token=", "token:", "secret=", "secret:", "password=", "password:",
+        "key=",
+        "key:",
+        "token=",
+        "token:",
+        "secret=",
+        "secret:",
+        "password=",
+        "password:",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -653,7 +660,10 @@ pub fn model_infos_from_summaries(summaries: Vec<LlmModelSummary>) -> Vec<ModelI
 /// `configured` 为空（未配置 / 全空白）或已在列表里（忽略大小写）时原样返回，
 /// 因此对"官方列表就是全量"的常见情形没有任何副作用。弹窗副本与
 /// `ChatState::available_providers` 必须用同一个结果，保证两处一致。
-pub fn pin_configured_model(mut models: Vec<ModelInfo>, configured: Option<&str>) -> Vec<ModelInfo> {
+pub fn pin_configured_model(
+    mut models: Vec<ModelInfo>,
+    configured: Option<&str>,
+) -> Vec<ModelInfo> {
     let Some(configured) = configured.map(str::trim).filter(|id| !id.is_empty()) else {
         return models;
     };

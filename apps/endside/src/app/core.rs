@@ -23,10 +23,14 @@ pub struct App {
     /// 每个任务都必须能把结果回传——否则被顶掉的那个 provider 会卡在 `Loading`
     /// 直到陈旧兜底窗口（`MODEL_LIST_STALE_AFTER`）到期后的下一次触发，见
     /// `start_model_fetch`。结果按 provider 名应用，与顺序无关。
-    pub(crate) model_fetch_tx:
-        tokio::sync::mpsc::UnboundedSender<(u64, crate::provider_service::ProviderModelFetchOutcome)>,
-    pub(crate) model_fetch_rx:
-        tokio::sync::mpsc::UnboundedReceiver<(u64, crate::provider_service::ProviderModelFetchOutcome)>,
+    pub(crate) model_fetch_tx: tokio::sync::mpsc::UnboundedSender<(
+        u64,
+        crate::provider_service::ProviderModelFetchOutcome,
+    )>,
+    pub(crate) model_fetch_rx: tokio::sync::mpsc::UnboundedReceiver<(
+        u64,
+        crate::provider_service::ProviderModelFetchOutcome,
+    )>,
     /// Deadline for discarding stray character events after an ESC key.
     ///
     /// When an ESC byte lands next to a mouse/scroll escape sequence
@@ -125,7 +129,8 @@ impl App {
         clock_refresh_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         clock_refresh_interval.tick().await;
         let mut corruption_recovery_interval = tokio::time::interval(Duration::from_secs(30));
-        corruption_recovery_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        corruption_recovery_interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         corruption_recovery_interval.tick().await;
 
         #[cfg(unix)]
@@ -449,9 +454,10 @@ impl App {
         if !self.state.begin_model_fetch(&provider) {
             return;
         }
-        self.state
-            .chat_state
-            .set_model_list_state(&provider, crate::chat::ModelListState::Loading { since: now });
+        self.state.chat_state.set_model_list_state(
+            &provider,
+            crate::chat::ModelListState::Loading { since: now },
+        );
         let request =
             crate::provider_service::model_fetch_request(&self.state.agent_config, &provider);
         let session = self.state.model_fetch_session;
@@ -480,7 +486,13 @@ impl App {
         else {
             return;
         };
-        if force || self.state.chat_state.model_list_state(&provider).needs_refresh(Instant::now()) {
+        if force
+            || self
+                .state
+                .chat_state
+                .model_list_state(&provider)
+                .needs_refresh(Instant::now())
+        {
             self.start_model_fetch(provider);
         }
     }
@@ -517,10 +529,8 @@ impl App {
                     .provider
                     .eq_ignore_ascii_case(&provider)
                     .then(|| self.state.agent_config.llm.model.clone());
-                let models = crate::provider_service::pin_configured_model(
-                    models,
-                    configured.as_deref(),
-                );
+                let models =
+                    crate::provider_service::pin_configured_model(models, configured.as_deref());
                 if let Some(dialog) = self.state.provider_dialog.as_mut() {
                     dialog.replace_models(&provider, models.clone());
                 }

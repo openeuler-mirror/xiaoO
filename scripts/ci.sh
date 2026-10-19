@@ -11,6 +11,9 @@
 #        tests/ 命名合规（规则见 tests/README.md）。
 #   3. 文档门禁        scripts/check-docs.sh
 #      — 全仓 .md 的相对链接必须可达（纯链接检查，见该脚本头注释）。
+#   4. 代码格式门禁    scripts/check-fmt.sh
+#      — cargo fmt --check：全部 workspace 源码排版须与 cargo fmt 一致，
+#        提交前在仓库根运行 cargo fmt 修复（见该脚本头注释）。
 #
 # 门禁不涉及编译：全量测试执行统一走 tests/run.sh（见 tests/README.md），
 # 不接入本脚本。
@@ -30,13 +33,13 @@
 set -euo pipefail
 
 # ---- 依赖工具预安装 ---------------------------------------------------------
-# 静态门禁依赖 cargo / python3 / bash≥4 / coreutils / grep / sed / gawk。
+# 静态门禁依赖 cargo / rustfmt / python3 / bash≥4 / coreutils / grep / sed / gawk。
 # 干净 CI 镜像可能缺失，此处按 openEuler 包名 yum 兜底安装。先逐个探测，
 # 任一缺失才触发 yum（已装齐则零开销、不碰网络）；yum 不可用或无网络时
 # || true 不中断，由 check-facade.sh 的工具预检给出精确失败信息。
-DEPS_RPMS=(cargo)
+DEPS_RPMS=(cargo rustfmt)
 need_install=0
-for t in cargo python3 bash mktemp grep sed awk sort paste tr comm; do
+for t in cargo rustfmt python3 bash mktemp grep sed awk sort paste tr comm; do
     command -v "$t" >/dev/null 2>&1 || { need_install=1; break; }
 done
 
@@ -103,6 +106,7 @@ STEPS=(
     "门面纪律门禁|scripts/check-facade.sh"
     "tests-hygiene|bash scripts/check-tests-hygiene.sh"
     "文档门禁|bash scripts/check-docs.sh"
+    "代码格式门禁|bash scripts/check-fmt.sh"
 )
 
 # ---- 执行 -------------------------------------------------------------------

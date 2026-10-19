@@ -87,12 +87,18 @@ fn sanitize_expands_tabs_and_drops_control_chars() {
     // following character from ratatui's 1-column advance and leaving the
     // skipped columns unrepainted (stale rows until the next full repaint).
     assert_eq!(sanitize_terminal_text_for_mode("a\tb", false), "a    b");
-    assert_eq!(sanitize_terminal_text_for_mode("a\u{8}\u{7f}b", false), "ab");
+    assert_eq!(
+        sanitize_terminal_text_for_mode("a\u{8}\u{7f}b", false),
+        "ab"
+    );
     // '\n' is preserved: callers render line-by-line and ratatui splits
     // Paragraph text on it.
     assert_eq!(sanitize_terminal_text_for_mode("a\nb", false), "a\nb");
     // Clean text passes through untouched in non-ascii mode (fast path).
     assert_eq!(sanitize_terminal_text_for_mode("plain ✓", false), "plain ✓");
     // Ascii mode: control handling composes with symbol substitution.
-    assert_eq!(sanitize_terminal_text_for_mode("▸\tx\u{7f}", true), ">    x");
+    assert_eq!(
+        sanitize_terminal_text_for_mode("▸\tx\u{7f}", true),
+        ">    x"
+    );
 }

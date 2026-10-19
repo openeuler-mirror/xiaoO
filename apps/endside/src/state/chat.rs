@@ -589,7 +589,9 @@ impl ModelListState {
     /// 阈值取 facade 超时（20s）的 3 倍，正常慢请求不会误判。
     pub fn is_stale_loading(&self, now: Instant) -> bool {
         match self {
-            Self::Loading { since } => now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER,
+            Self::Loading { since } => {
+                now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER
+            }
             _ => false,
         }
     }
@@ -607,7 +609,9 @@ impl ModelListState {
         match self {
             Self::Builtin => true,
             // 陈旧的 `Loading` 视为可重拉（结果已经不可能回来了）。
-            Self::Loading { since } => now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER,
+            Self::Loading { since } => {
+                now.saturating_duration_since(*since) >= MODEL_LIST_STALE_AFTER
+            }
             Self::Unsupported => false,
             Self::Ready { fetched_at } => {
                 now.saturating_duration_since(*fetched_at) >= MODEL_LIST_TTL
@@ -1018,8 +1022,6 @@ impl ChatState {
         self.provider_model_status
             .insert(provider.to_string(), state);
     }
-
-
 
     /// 用官方列表替换某 provider 的模型（按名精确匹配，未命中返回 `false`）。
     ///

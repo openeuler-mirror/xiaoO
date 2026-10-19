@@ -444,7 +444,10 @@ fn model_list_state_needs_refresh_follows_ttl_and_failure_backoff() {
         "从未成功拉取过 → 要拉"
     );
     assert!(
-        !ModelListState::Loading { since: Instant::now() }.needs_refresh(now),
+        !ModelListState::Loading {
+            since: Instant::now()
+        }
+        .needs_refresh(now),
         "已有请求在飞 → 不重复发起"
     );
     assert!(
@@ -455,7 +458,10 @@ fn model_list_state_needs_refresh_follows_ttl_and_failure_backoff() {
     let just_fetched = ModelListState::Ready { fetched_at: now };
     assert!(!just_fetched.needs_refresh(now), "TTL 内直接复用缓存");
     assert!(!just_fetched.needs_refresh(now + MODEL_LIST_TTL - Duration::from_secs(1)));
-    assert!(just_fetched.needs_refresh(now + MODEL_LIST_TTL), "TTL 到点重拉");
+    assert!(
+        just_fetched.needs_refresh(now + MODEL_LIST_TTL),
+        "TTL 到点重拉"
+    );
 
     let failed = ModelListState::Failed {
         message: "boom".to_string(),
