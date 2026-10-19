@@ -660,7 +660,7 @@ impl super::AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            agent_config: Config::default(),
+            agent_config: std::sync::Arc::new(Config::default()),
             active_agent_role: None,
             reasoning_effort: Config::default().llm.reasoning_effort,
             config_path,

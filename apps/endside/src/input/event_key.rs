@@ -1,5 +1,6 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::App;
@@ -1472,7 +1473,7 @@ impl App {
                 self.state.input_mode = InputMode::Editing;
                 self.state.sandbox_dialog = None;
                 if let Some((id, name)) = selected {
-                    self.state.agent_config.operation_backend =
+                    Arc::make_mut(&mut self.state.agent_config).operation_backend =
                         sandbox_backend_config(id, &self.state.agent_config.operation_backend);
                     self.state.status_panel.set_backend(sandbox_display_name(
                         &self.state.agent_config.operation_backend,

@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
+use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::chat::ModelInfo;
@@ -117,10 +118,11 @@ fn persist_active_provider_selection_internal(
         tracing::warn!("Failed to save config: {}", error);
     }
 
-    state.agent_config.llm.provider = provider.clone();
-    state.agent_config.llm.model = model.clone();
-    state.agent_config.llm.api_key_env = api_key_env;
-    state.agent_config.llm.api_base = api_base;
+    let agent_config = Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = provider.clone();
+    agent_config.llm.model = model.clone();
+    agent_config.llm.api_key_env = api_key_env;
+    agent_config.llm.api_base = api_base;
 
     state.status_panel.set_provider(&provider, &model);
 }

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ratatui::{layout::Rect, text::Line, widgets::ScrollbarState};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xiaoo_api::chat::ReasoningEffort;
 use xiaoo_shared::session_diff::SessionDiffTracker;
@@ -447,7 +448,9 @@ pub struct AppState {
     pub delete_dialog: Option<crate::services::turn_delete::DeleteDialog>,
     pub cron_dialog: Option<crate::cron_dialog::CronDialog>,
     pub api_key_dialog: Option<ApiKeyDialogState>,
-    pub agent_config: Config,
+    /// `Arc`-shared so per-turn snapshots clone a handle, not the whole
+    /// config; mutations go through `Arc::make_mut` (clone-on-write).
+    pub agent_config: Arc<Config>,
     pub active_agent_role: Option<String>,
     pub reasoning_effort: ReasoningEffort,
     pub config_path: PathBuf,
@@ -511,7 +514,7 @@ impl AppState {
             delete_dialog: None,
             cron_dialog: None,
             api_key_dialog: None,
-            agent_config: config.clone(),
+            agent_config: Arc::new(config.clone()),
             active_agent_role: None,
             reasoning_effort: config.llm.reasoning_effort,
             config_path,
@@ -1362,9 +1365,8 @@ impl AppState {
     }
 
     pub fn active_agent_role_config(&self) -> Option<&AgentRoleConfig> {
-        self.active_agent_role
-            .as_deref()
-            .and_then(|role_id| self.agent_config.agent_role(role_id))
+        self.agent_config
+            .active_agent_role_config(self.active_agent_role.as_deref())
     }
 
     pub fn cycle_agent_role(&mut self, reverse: bool) -> bool {

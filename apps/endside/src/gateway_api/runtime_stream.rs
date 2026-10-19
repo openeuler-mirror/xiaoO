@@ -308,7 +308,11 @@ impl GatewayRuntime {
         self.draining_after_cancel = self.stream_rx.is_some();
         self.stream_reveal_buffer.clear();
         self.interaction_reply_tx = None;
-        self.request_start = None;
+        // Invalidate (not just clear): rejects late timestamp writes from
+        // tasks still building the cancelled turn's config.
+        if let Ok(mut turn_clock) = self.turn_clock.lock() {
+            turn_clock.invalidate();
+        }
         self.first_token_latency_recorded = false;
         if let Some(index) = stream_message_index {
             if let Some(message) = state.chat_state.messages.get_mut(index) {
@@ -424,7 +428,12 @@ impl GatewayRuntime {
             return;
         }
 
-        let Some(start) = self.request_start.as_ref() else {
+        let Some(start) = self
+            .turn_clock
+            .lock()
+            .ok()
+            .and_then(|turn_clock| turn_clock.dispatch_instant())
+        else {
             return;
         };
         state.status_panel.last_latency_ms = start.elapsed().as_millis() as u64;
@@ -908,7 +917,15 @@ impl GatewayRuntime {
         self.stream_message_index = None;
         self.interaction_reply_tx = None;
         self.first_token_latency_recorded = false;
-        if self.request_start.take().is_some() {
+        // Usage metrics are reported only for a `Done` of the currently
+        // dispatched turn: cancel and newer submits invalidate the marker,
+        // and consuming it here keeps the report one-shot.
+        if self
+            .turn_clock
+            .lock()
+            .ok()
+            .is_some_and(|mut turn_clock| turn_clock.take_dispatched())
+        {
             let (input_context_tokens, input_context_tokens_estimated) = if done.prompt_tokens > 0 {
                 (done.prompt_tokens, false)
             } else if done.estimated_input_tokens > 0 {

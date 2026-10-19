@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::unbounded_channel;
@@ -13,7 +13,7 @@ use crate::gateway::{
     SessionOpenRequest, SessionRuntimeDescriptor,
 };
 use xiaoo_api::chat::AgentId;
-use xiaoo_api::chat::{FeatureFlags, TokenBudgetConfig};
+use xiaoo_api::chat::{FeatureFlags, ReasoningEffort, TokenBudgetConfig};
 use xiaoo_shared::gateway::tool_assembly::{discover_tool_names, ToolAssemblyInput};
 
 use super::runtime::GatewayRuntime;
@@ -42,10 +42,9 @@ const DEFAULT_SYSTEM_TOKEN_RESERVE: usize = 2048;
 /// 网络恢复后至多 5 分钟内自我纠正。动态探测成功的结果不过期。
 const STATIC_FALLBACK_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// turn 路径内联等待动态探测的总时限。探测链各 HTTP 客户端自身超时之和
-/// 可达 ~40s（provider catalog 30s + OpenRouter 10s），TUI 事件循环不可
-/// 承受无界等待；超限立即回落静态值放行当前 turn，探测任务转后台继续，
-/// 成功后自写缓存供后续 turn 使用（见 [`resolve_total_token_budget`]）。
+/// turn 路径等待动态探测的总时限（在 spawned task 内等待，只决定派发
+/// 延迟，不阻塞事件循环；探测链 HTTP 超时之和可达 ~40s）。超限回落静态
+/// 值放行当前 turn，探测转后台自写缓存（见 [`resolve_total_token_budget`]）。
 const PROBE_INLINE_DEADLINE: Duration = Duration::from_secs(3);
 
 /// 进程级动态上下文窗口缓存，键为 `provider|model|api_base`：
@@ -63,16 +62,9 @@ fn dynamic_context_window_cache() -> &'static Mutex<HashMap<String, CachedWindow
 ///   turn 快速失败不再触网，避免逐 turn 重复等待探测后报同一错误。
 #[derive(Clone, Copy)]
 enum CachedWindow {
-    Dynamic {
-        window: usize,
-    },
-    Static {
-        window: usize,
-        cached_at: Instant,
-    },
-    Unresolved {
-        cached_at: Instant,
-    },
+    Dynamic { window: usize },
+    Static { window: usize, cached_at: Instant },
+    Unresolved { cached_at: Instant },
 }
 
 impl CachedWindow {
@@ -207,14 +199,23 @@ impl GatewayRuntime {
         // conversation history. This is an in-memory load and short-circuits
         // when the cache is already equal to the persisted state.
         self.sync_session_messages_from_store(state).await;
-
-        let runtime_config = self.build_runtime_config(state).await?;
         let open_request = self.session_open_request(state)?;
         let turn_request =
             self.turn_request(state, prompt.clone(), command_context, chain_depth)?;
 
+        // UI feedback first: the config build (context-window probe) runs in
+        // the spawned task below so Enter never blocks the event loop; build
+        // failures surface through the `SessionTurnUpdate::Err` channel.
         state.chat_state.stick_to_bottom = true;
-        self.request_start = Some(Instant::now());
+        // Capture the turn generation: the task may only record its dispatch
+        // timestamp while this generation is current — cancel, reset, or a
+        // newer submit revokes it.
+        let turn_generation = self
+            .turn_clock
+            .lock()
+            .ok()
+            .map(|mut turn_clock| turn_clock.invalidate())
+            .unwrap_or(0);
         self.first_token_latency_recorded = false;
         if append_user_message {
             state.chat_state.messages.push(Message::user(prompt));
@@ -243,9 +244,32 @@ impl GatewayRuntime {
         let session_gateway = self.session_gateway.clone();
         let pending_user_messages = self.pending_user_messages.clone();
         let prefetch_session_id = state.session_id.clone();
-        let kvcache_enabled = runtime_config.descriptor.feature_flags.kvcache_enabled;
+        let turn_clock = self.turn_clock.clone();
+        let config_inputs = TurnConfigInputs {
+            agent_config: state.agent_config.clone(),
+            workspace: state.workspace.clone(),
+            active_agent_role: state.active_agent_role.clone(),
+            reasoning_effort: state.reasoning_effort,
+        };
         tokio::spawn(async move {
-            if kvcache_enabled {
+            let runtime_config = match build_runtime_config_from_inputs(config_inputs).await {
+                Ok(config) => config,
+                Err(error) => {
+                    let _ = updates_tx.send(crate::session_gateway::SessionTurnUpdate::Err(error));
+                    return;
+                }
+            };
+            // Esc during the build: a cancelled turn must not be dispatched;
+            // dropping `updates_tx` lets the drain guard settle quietly.
+            if cancel_token.is_cancelled() {
+                return;
+            }
+            // Dispatch timestamp: after the build (probe excluded), before
+            // the open RPC; generation-guarded against stale tasks.
+            if let Ok(mut clock) = turn_clock.lock() {
+                clock.record_dispatch(turn_generation, Instant::now());
+            }
+            if runtime_config.descriptor.feature_flags.kvcache_enabled {
                 if let Some(snapshot) = session_gateway.session_snapshot(&prefetch_session_id).await
                 {
                     let chunk_hashes: Vec<String> = snapshot
@@ -264,6 +288,11 @@ impl GatewayRuntime {
                 let _ = updates_tx.send(crate::session_gateway::SessionTurnUpdate::Err(error));
                 return;
             }
+            // The open RPC can span an Esc press; re-check before dispatch
+            // (the token passed into `spawn_turn` is the final backstop).
+            if cancel_token.is_cancelled() {
+                return;
+            }
             session_gateway.spawn_turn(
                 runtime_config,
                 turn_request,
@@ -276,135 +305,171 @@ impl GatewayRuntime {
 
         Ok(())
     }
+}
 
-    async fn build_runtime_config(
-        &self,
-        state: &AppState,
-    ) -> Result<HostedSessionRuntimeConfig, String> {
-        let agent_id = resolve_agent_id(None, None, &state.agent_config)?;
-        let system_prompt = state
-            .active_agent_role_config()
-            .and_then(|role| role.prompt.clone())
-            .unwrap_or_else(|| {
-                DEFAULT_SYSTEM_PROMPT
-                    .trim_end_matches(['\r', '\n'])
-                    .to_string()
-            });
-        let total_budget = self
-            .resolve_total_token_budget(state)
-            .await
-            .ok_or_else(|| {
-                "invalid TUI runtime state: unable to resolve context window".to_string()
-            })?;
-        let reserved_for_output = usize::try_from(state.agent_config.llm.max_tokens)
-            .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
-        let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
+/// Submit-time state snapshot for building a turn's runtime config in the
+/// background task; the config is shared via `Arc` (handle, not deep copy).
+pub(crate) struct TurnConfigInputs {
+    agent_config: Arc<Config>,
+    workspace: std::path::PathBuf,
+    active_agent_role: Option<String>,
+    reasoning_effort: ReasoningEffort,
+}
 
-        Ok(HostedSessionRuntimeConfig {
-            descriptor: SessionRuntimeDescriptor {
-                agent_id: AgentId(agent_id),
-                model: state.agent_config.llm.model.clone(),
-                llm: Some(llm_runtime_config_from_state(state)),
-                system_prompt,
-                feature_flags: FeatureFlags {
-                    kvcache_enabled: state.agent_config.llm.kvcache_enabled,
-                    kvcache_debug_enabled: state.agent_config.llm.kvcache_debug_enabled,
-                    redact_secrets_display: state.agent_config.tui.redact_secrets_display,
-                    ..Default::default()
-                },
-                token_budget: TokenBudgetConfig {
-                    total_budget,
-                    reserved_for_output,
-                    reserved_for_system,
-                    hard_limit_ratio: 1.0,
-                },
-                workspace_root: state.workspace.clone(),
-                max_turns: state
-                    .active_agent_role_config()
-                    .and_then(|role| role.max_turns),
-                subagent_roles: state
-                    .agent_config
-                    .subagent
-                    .iter()
-                    .map(|(role_id, config)| {
-                        (
-                            role_id.clone(),
-                            crate::gateway::session_record::SubagentRoleRecord {
-                                role_id: role_id.clone(),
-                                description: config.description.clone(),
-                                prompt: config.prompt.clone(),
-                                max_turns: config.max_turns,
-                                tools: config.tools.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
+impl TurnConfigInputs {
+    fn active_agent_role_config(&self) -> Option<&crate::config::AgentRoleConfig> {
+        self.agent_config
+            .active_agent_role_config(self.active_agent_role.as_deref())
+    }
+}
+
+/// Build a turn's [`HostedSessionRuntimeConfig`] from a submit-time
+/// snapshot; failures surface via `SessionTurnUpdate::Err`.
+async fn build_runtime_config_from_inputs(
+    inputs: TurnConfigInputs,
+) -> Result<HostedSessionRuntimeConfig, String> {
+    let agent_id = resolve_agent_id(None, None, &inputs.agent_config)?;
+    let role_config = inputs.active_agent_role_config();
+    let system_prompt = role_config
+        .and_then(|role| role.prompt.clone())
+        .unwrap_or_else(|| {
+            DEFAULT_SYSTEM_PROMPT
+                .trim_end_matches(['\r', '\n'])
+                .to_string()
+        });
+    let total_budget = resolve_total_token_budget(&inputs.agent_config)
+        .await
+        .ok_or_else(|| "invalid TUI runtime state: unable to resolve context window".to_string())?;
+    let reserved_for_output = usize::try_from(inputs.agent_config.llm.max_tokens)
+        .map_err(|_| "invalid TUI runtime state: invalid [llm].max_tokens".to_string())?;
+    let reserved_for_system = DEFAULT_SYSTEM_TOKEN_RESERVE.min(total_budget.saturating_sub(1));
+
+    Ok(HostedSessionRuntimeConfig {
+        descriptor: SessionRuntimeDescriptor {
+            agent_id: AgentId(agent_id),
+            model: inputs.agent_config.llm.model.clone(),
+            llm: Some(llm_runtime_config_from_parts(
+                &inputs.agent_config,
+                inputs.reasoning_effort,
+            )),
+            system_prompt,
+            feature_flags: FeatureFlags {
+                kvcache_enabled: inputs.agent_config.llm.kvcache_enabled,
+                kvcache_debug_enabled: inputs.agent_config.llm.kvcache_debug_enabled,
+                redact_secrets_display: inputs.agent_config.tui.redact_secrets_display,
+                ..Default::default()
             },
-            provider: state.agent_config.llm.provider.clone(),
-            model: state.agent_config.llm.model.clone(),
-            api_key: None,
-            api_key_env: state.agent_config.llm.api_key_env.clone(),
-            api_base: if state.agent_config.llm.api_base.trim().is_empty() {
-                None
-            } else {
-                Some(state.agent_config.llm.api_base.clone())
+            token_budget: TokenBudgetConfig {
+                total_budget,
+                reserved_for_output,
+                reserved_for_system,
+                hard_limit_ratio: 1.0,
             },
-            visible_tool_names: resolve_visible_tool_names(state).await,
-            compression_pipeline: None,
-            llm_provider: None,
-            trace: state
-                .agent_config
-                .trace
-                .clone()
-                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-            hooker: state.agent_config.hooker.clone(),
-            operation_backend: state.agent_config.operation_backend.clone(),
-            lsp_registry: state.agent_config.build_lsp_registry(),
-            skills_config: state.agent_config.resolve_skills_config(),
-            subagent_roles: state
+            workspace_root: inputs.workspace.clone(),
+            max_turns: role_config.and_then(|role| role.max_turns),
+            subagent_roles: inputs
                 .agent_config
                 .subagent
                 .iter()
-                .map(|(k, v)| {
+                .map(|(role_id, config)| {
                     (
-                        k.clone(),
-                        crate::gateway::SubagentRoleConfigEntry {
-                            description: v.description.clone(),
-                            prompt: v.prompt.clone(),
-                            max_turns: v.max_turns,
-                            tools: v.tools.clone(),
+                        role_id.clone(),
+                        crate::gateway::session_record::SubagentRoleRecord {
+                            role_id: role_id.clone(),
+                            description: config.description.clone(),
+                            prompt: config.prompt.clone(),
+                            max_turns: config.max_turns,
+                            tools: config.tools.clone(),
                         },
                     )
                 })
                 .collect(),
-            mcp_servers: state.agent_config.mcp_servers().to_vec(),
-            memory_automation: state.agent_config.memory_automation.clone(),
-        })
-    }
-
-    /// 解析会话 token 总预算：动态探测链优先，失败/超时回落同步静态估算。
-    /// turn 路径只内联等待 [`PROBE_INLINE_DEADLINE`]——探测链各 HTTP 超时
-    /// 之和可达 ~40s，TUI 事件循环不能无界 await；超时后探测转后台自写
-    /// 缓存，下一个 turn 即自我纠正。结果按 `provider|model|api_base` 缓存
-    /// （静态回落值与"双失败"结果短期缓存以支持 key 补设/网络恢复后自动
-    /// 重试，见 [`STATIC_FALLBACK_CACHE_TTL`]）。
-    async fn resolve_total_token_budget(&self, state: &AppState) -> Option<usize> {
-        let llm = &state.agent_config.llm;
-        let provider = llm.provider.clone();
-        let model = llm.model.clone();
-        let api_key_env = llm.api_key_env.clone();
-        let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
-        resolve_window_with_probe(
-            format!("{}|{}|{}", llm.provider, llm.model, llm.api_base),
-            crate::config::resolve_context_window(&state.agent_config),
-            async move {
-                probe_dynamic_context_window(&provider, &model, None, api_key_env, api_base).await
-            },
-            PROBE_INLINE_DEADLINE,
+        },
+        provider: inputs.agent_config.llm.provider.clone(),
+        model: inputs.agent_config.llm.model.clone(),
+        api_key: None,
+        api_key_env: inputs.agent_config.llm.api_key_env.clone(),
+        api_base: if inputs.agent_config.llm.api_base.trim().is_empty() {
+            None
+        } else {
+            Some(inputs.agent_config.llm.api_base.clone())
+        },
+        visible_tool_names: resolve_visible_tool_names(
+            &inputs.agent_config,
+            inputs.active_agent_role.as_deref(),
+            &inputs.workspace,
         )
-        .await
-    }
+        .await,
+        compression_pipeline: None,
+        llm_provider: None,
+        trace: inputs
+            .agent_config
+            .trace
+            .clone()
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+        hooker: inputs.agent_config.hooker.clone(),
+        operation_backend: inputs.agent_config.operation_backend.clone(),
+        lsp_registry: inputs.agent_config.build_lsp_registry(),
+        skills_config: inputs.agent_config.resolve_skills_config(),
+        subagent_roles: inputs
+            .agent_config
+            .subagent
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    crate::gateway::SubagentRoleConfigEntry {
+                        description: v.description.clone(),
+                        prompt: v.prompt.clone(),
+                        max_turns: v.max_turns,
+                        tools: v.tools.clone(),
+                    },
+                )
+            })
+            .collect(),
+        mcp_servers: inputs.agent_config.mcp_servers().to_vec(),
+        memory_automation: inputs.agent_config.memory_automation.clone(),
+    })
+}
 
+/// 解析会话 token 总预算：动态探测优先（只等待 [`PROBE_INLINE_DEADLINE`]，
+/// 超时转后台自写缓存），失败/超时回落静态估算。结果按
+/// `provider|model|api_base` 缓存，静态/双失败短期缓存以便 key 补设或
+/// 网络恢复后重试（见 [`STATIC_FALLBACK_CACHE_TTL`]）。
+async fn resolve_total_token_budget(agent_config: &Config) -> Option<usize> {
+    resolve_window_with_shared_cache(
+        &agent_config.llm,
+        crate::config::resolve_context_window(agent_config),
+        PROBE_INLINE_DEADLINE,
+    )
+    .await
+}
+
+/// 进程级共享缓存窗口解析入口：turn 路径（[`resolve_total_token_budget`]）
+/// 与启动校验（main 的 `resolve_context_window_for_validation`）共用同一
+/// 缓存键、探测链与静态回落，启动探测直接写缓存，首个 turn 命中即免
+/// 重复等待。
+pub(crate) async fn resolve_window_with_shared_cache(
+    llm: &crate::config::LlmConfig,
+    static_window: Option<usize>,
+    inline_deadline: Duration,
+) -> Option<usize> {
+    let api_base = (!llm.api_base.trim().is_empty()).then(|| llm.api_base.clone());
+    let provider = llm.provider.clone();
+    let model = llm.model.clone();
+    let api_key_env = llm.api_key_env.clone();
+    resolve_window_with_probe(
+        format!("{}|{}|{}", llm.provider, llm.model, llm.api_base),
+        static_window,
+        async move {
+            probe_dynamic_context_window(&provider, &model, None, api_key_env, api_base).await
+        },
+        inline_deadline,
+    )
+    .await
+}
+
+impl GatewayRuntime {
     fn session_open_request(&self, state: &AppState) -> Result<SessionOpenRequest, String> {
         let sender_id = resolve_agent_id(None, None, &state.agent_config)?;
         Ok(SessionOpenRequest {
@@ -483,15 +548,22 @@ fn trim_non_empty(value: String) -> Option<String> {
 }
 
 pub(crate) fn llm_runtime_config_from_state(state: &AppState) -> LlmRuntimeConfig {
+    llm_runtime_config_from_parts(&state.agent_config, state.reasoning_effort)
+}
+
+pub(crate) fn llm_runtime_config_from_parts(
+    agent_config: &Config,
+    reasoning_effort: ReasoningEffort,
+) -> LlmRuntimeConfig {
     LlmRuntimeConfig {
         profile_id: None,
-        provider: Some(state.agent_config.llm.provider.clone()),
-        model: Some(state.agent_config.llm.model.clone()),
-        api_base: (!state.agent_config.llm.api_base.trim().is_empty())
-            .then(|| state.agent_config.llm.api_base.clone()),
-        api_key_env: state.agent_config.llm.api_key_env.clone(),
+        provider: Some(agent_config.llm.provider.clone()),
+        model: Some(agent_config.llm.model.clone()),
+        api_base: (!agent_config.llm.api_base.trim().is_empty())
+            .then(|| agent_config.llm.api_base.clone()),
+        api_key_env: agent_config.llm.api_key_env.clone(),
         api_key: None,
-        reasoning_effort: Some(state.reasoning_effort),
+        reasoning_effort: Some(reasoning_effort),
     }
 }
 
@@ -544,7 +616,7 @@ pub(crate) async fn probe_dynamic_context_window(
     }
 }
 
-/// [`GatewayRuntime::resolve_total_token_budget`] 的状态机核心（提取为
+/// [`resolve_total_token_budget`] 的状态机核心（提取为
 /// 自由函数以便单测：注入合成 probe 与短 deadline，不触网）：
 ///
 /// 1. 缓存命中（`Dynamic` 永久，`Static`/`Unresolved` 在 TTL 内）直接返回；
@@ -640,14 +712,18 @@ pub(crate) fn tui_entry_context(
     entry
 }
 
-async fn resolve_visible_tool_names(state: &AppState) -> Option<Vec<String>> {
-    let role = state.active_agent_role_config()?;
+async fn resolve_visible_tool_names(
+    agent_config: &Config,
+    active_agent_role: Option<&str>,
+    workspace: &std::path::Path,
+) -> Option<Vec<String>> {
+    let role = active_agent_role.and_then(|role_id| agent_config.agent_role(role_id))?;
     if role.tools.is_empty() {
         return None;
     }
 
     let input = ToolAssemblyInput {
-        workspace_root: Some(state.workspace.clone()),
+        workspace_root: Some(workspace.to_path_buf()),
         ..ToolAssemblyInput::default()
     };
     let all_tool_names: BTreeSet<String> = discover_tool_names(&input)

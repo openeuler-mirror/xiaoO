@@ -315,6 +315,16 @@ impl Config {
         self.agent.get(role_id)
     }
 
+    /// Resolve the active agent role's config; `None` if no role is
+    /// selected or the role is unknown. Shared by `AppState` and the
+    /// turn-config snapshot.
+    pub fn active_agent_role_config(
+        &self,
+        active_role: Option<&str>,
+    ) -> Option<&AgentRoleConfig> {
+        active_role.and_then(|role_id| self.agent_role(role_id))
+    }
+
     pub fn resolve_skills_config(&self) -> ResolvedSkillsConfig {
         let mut skills_dirs = Vec::new();
 

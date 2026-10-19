@@ -754,7 +754,11 @@ fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_toke
         .messages
         .push(Message::assistant_streaming());
     runtime.stream_message_index = Some(0);
-    runtime.request_start = Some(Instant::now() - Duration::from_millis(20));
+    runtime
+        .turn_clock
+        .lock()
+        .unwrap()
+        .set_dispatch(Instant::now() - Duration::from_millis(20));
 
     runtime.set_stream_message_content(&mut state, "H", true);
     runtime.record_first_token_latency_if_needed(&mut state);
@@ -762,7 +766,11 @@ fn first_token_latency_is_recorded_once_and_completion_uses_reported_prompt_toke
     assert!(first_token_latency_ms >= 20);
     assert!(runtime.first_token_latency_recorded);
 
-    runtime.request_start = Some(Instant::now() - Duration::from_millis(80));
+    runtime
+        .turn_clock
+        .lock()
+        .unwrap()
+        .set_dispatch(Instant::now() - Duration::from_millis(80));
     runtime.record_first_token_latency_if_needed(&mut state);
     assert_eq!(state.status_panel.last_latency_ms, first_token_latency_ms);
 
@@ -794,7 +802,11 @@ fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semanti
         .messages
         .push(Message::assistant_streaming());
     runtime.stream_message_index = Some(0);
-    runtime.request_start = Some(Instant::now());
+    runtime
+        .turn_clock
+        .lock()
+        .unwrap()
+        .set_dispatch(Instant::now());
 
     runtime.finish_stream_done(
         &mut state,
@@ -812,7 +824,11 @@ fn completion_accumulates_usage_totals_across_turns_without_changing_ctx_semanti
         .messages
         .push(Message::assistant_streaming());
     runtime.stream_message_index = Some(1);
-    runtime.request_start = Some(Instant::now());
+    runtime
+        .turn_clock
+        .lock()
+        .unwrap()
+        .set_dispatch(Instant::now());
 
     runtime.finish_stream_done(
         &mut state,
@@ -842,7 +858,11 @@ fn completion_falls_back_to_estimated_input_tokens_when_prompt_usage_is_missing(
         .messages
         .push(Message::assistant_streaming());
     runtime.stream_message_index = Some(0);
-    runtime.request_start = Some(Instant::now());
+    runtime
+        .turn_clock
+        .lock()
+        .unwrap()
+        .set_dispatch(Instant::now());
 
     runtime.finish_stream_done(
         &mut state,

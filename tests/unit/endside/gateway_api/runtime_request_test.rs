@@ -25,9 +25,13 @@ async fn resolve_visible_tool_names_requires_exact_tool_names() {
             .expect("app state should initialize");
     state.active_agent_role = Some("code-reviewer".to_string());
 
-    let visible = resolve_visible_tool_names(&state)
-        .await
-        .expect("tool visibility should resolve");
+    let visible = resolve_visible_tool_names(
+        &state.agent_config,
+        state.active_agent_role.as_deref(),
+        &state.workspace,
+    )
+    .await
+    .expect("tool visibility should resolve");
     let visible: BTreeSet<_> = visible.into_iter().collect();
 
     assert!(visible.contains("file_edit"));
