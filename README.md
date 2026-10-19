@@ -300,7 +300,7 @@ bash tests/run.sh                 # run the full suite (cargo test --workspace)
 bash tests/run.sh -p xiaoo-core   # extra args are passed through to cargo test
 ```
 
-`scripts/ci.sh` is the unified CI entry for static gates: facade discipline and test hygiene (keeps test code out of `src/`); it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
+`scripts/ci.sh` is the unified CI entry for static gates: facade discipline, test hygiene (keeps test code out of `src/`), doc link checks, and code formatting (`cargo fmt --check`); it does not compile. Layout and naming conventions are documented in [tests/README.md](./tests/README.md).
 
 ## More Documentation
 

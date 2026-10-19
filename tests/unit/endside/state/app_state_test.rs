@@ -988,7 +988,8 @@ mod clipboard_report_tests {
 
 #[test]
 fn model_fetch_accounting_is_global_and_survives_session_rebuild() {
-    let mut state = AppState::new(PathBuf::from("config.toml"), PathBuf::from(".")).expect("构造 AppState");
+    let mut state =
+        AppState::new(PathBuf::from("config.toml"), PathBuf::from(".")).expect("构造 AppState");
 
     assert!(state.begin_model_fetch("openai"));
     assert!(state.begin_model_fetch("deepseek"));
@@ -1005,7 +1006,11 @@ fn model_fetch_accounting_is_global_and_survives_session_rebuild() {
     // 实际在飞超过上限（旧任务仍在跑）。
     let before = state.model_fetch_session;
     state.reset_for_new_session();
-    assert_eq!(state.model_fetch_session, before + 1, "重建会话必须推进世代");
+    assert_eq!(
+        state.model_fetch_session,
+        before + 1,
+        "重建会话必须推进世代"
+    );
     assert!(
         !state.begin_model_fetch("qwen"),
         "旧会话的在飞任务仍占名额（它们的回传会被世代检查丢弃）"

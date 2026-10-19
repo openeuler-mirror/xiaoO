@@ -280,10 +280,11 @@ fn ids(models: &[ModelInfo]) -> Vec<&str> {
 #[test]
 fn model_fetch_request_switching_provider_uses_new_provider_defaults() {
     let (_temp_dir, mut state) = temp_state();
-    state.agent_config.llm.provider = "openai".to_string();
-    state.agent_config.llm.model = "gpt-4o".to_string();
-    state.agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
-    state.agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = "openai".to_string();
+    agent_config.llm.model = "gpt-4o".to_string();
+    agent_config.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
+    agent_config.llm.api_base = "https://api.openai.com/v1".to_string();
 
     let request = model_fetch_request(&state.agent_config, "deepseek");
 
@@ -298,9 +299,10 @@ fn model_fetch_request_switching_provider_uses_new_provider_defaults() {
 #[test]
 fn model_fetch_request_same_provider_preserves_configured_api_base() {
     let (_temp_dir, mut state) = temp_state();
-    state.agent_config.llm.provider = "openai".to_string();
-    state.agent_config.llm.api_base = "https://proxy.example/v1".to_string();
-    state.agent_config.llm.api_key_env = Some("XIAOO_TEST_MODEL_FETCH_KEY".to_string());
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = "openai".to_string();
+    agent_config.llm.api_base = "https://proxy.example/v1".to_string();
+    agent_config.llm.api_key_env = Some("XIAOO_TEST_MODEL_FETCH_KEY".to_string());
 
     let request = model_fetch_request(&state.agent_config, "openai");
 
@@ -318,8 +320,9 @@ fn model_fetch_request_same_provider_preserves_configured_api_base() {
 fn model_fetch_request_reads_api_key_from_env() {
     const ENV: &str = "XIAOO_TEST_MODEL_FETCH_KEY";
     let (_temp_dir, mut state) = temp_state();
-    state.agent_config.llm.provider = "openai".to_string();
-    state.agent_config.llm.api_key_env = Some(ENV.to_string());
+    let agent_config = std::sync::Arc::make_mut(&mut state.agent_config);
+    agent_config.llm.provider = "openai".to_string();
+    agent_config.llm.api_key_env = Some(ENV.to_string());
 
     // Edition 2021: std::env mutation is not yet `unsafe`。变量名是本测试专用的，
     // 不会与并行运行的其他测试相互干扰。
@@ -364,9 +367,7 @@ fn model_infos_from_summaries_prefers_display_name_and_dedupes_and_skips_empty_i
     assert_eq!(infos[0].name, "Model One", "display_name 优先");
     assert_eq!(infos[1].name, "m2", "display_name 全空白时回落到 id");
     assert_eq!(infos[2].name, "m3", "无 display_name 时回落到 id");
-    let with_control = model_infos_from_summaries(vec![
-        summary("m4", Some("shown\u{1b}[2Jname")),
-    ]);
+    let with_control = model_infos_from_summaries(vec![summary("m4", Some("shown\u{1b}[2Jname"))]);
     assert_eq!(
         with_control[0].name, "shown[2Jname",
         "display_name 与 id 走同一套消毒：控制字符必须剥掉"
@@ -384,7 +385,10 @@ fn pin_configured_model_inserts_missing_active_model_at_front() {
 #[test]
 fn pin_configured_model_keeps_list_untouched_when_present_or_blank() {
     assert_eq!(
-        ids(&pin_configured_model(vec![model("a"), model("b")], Some("B"))),
+        ids(&pin_configured_model(
+            vec![model("a"), model("b")],
+            Some("B")
+        )),
         vec!["a", "b"],
         "已在列表里（忽略大小写）时不插入"
     );
@@ -513,10 +517,7 @@ async fn fetch_provider_models_reports_empty_list_as_ok_empty() {
 
     mock.assert_async().await;
     // 空列表不是传输错误：由调用方（App）决定"不清空列表 + 记失败"。
-    assert!(outcome
-        .result
-        .expect("空列表本身解析成功")
-        .is_empty());
+    assert!(outcome.result.expect("空列表本身解析成功").is_empty());
 }
 
 /// 缺 key 必须在**发请求之前**失败：`expect(0)` + `assert_async()` 断言这个
@@ -589,7 +590,9 @@ async fn fetched_model_labels_cannot_inject_terminal_control_sequences() {
         .mock("GET", "/v1/models")
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(r#"{"data":[{"id":"evil\u001b[2Jmodel","display_name":"pwn\u001b]0;title\u0007"}]}"#)
+        .with_body(
+            r#"{"data":[{"id":"evil\u001b[2Jmodel","display_name":"pwn\u001b]0;title\u0007"}]}"#,
+        )
         .create_async()
         .await;
 
@@ -671,7 +674,10 @@ async fn a_panicking_fetch_task_still_reports_a_failure() {
     assert_eq!(outcome.provider, "openai-compatible");
     match outcome.result {
         Err(ModelFetchError::Failed(message)) => {
-            assert!(message.contains("panicked"), "期望 panic 记成失败，实际 {message}");
+            assert!(
+                message.contains("panicked"),
+                "期望 panic 记成失败，实际 {message}"
+            );
         }
         other => panic!("panic 必须转成 Failed，实际 {other:?}"),
     }
@@ -704,7 +710,10 @@ fn fetch_failure_messages_redact_bare_key_fields_and_bearer_tokens() {
         other => panic!("应映射为 Failed，实际 {other:?}"),
     };
 
-    assert!(!message.contains("sk-live-SECRET"), "密钥不得上屏：{message}");
+    assert!(
+        !message.contains("sk-live-SECRET"),
+        "密钥不得上屏：{message}"
+    );
     assert!(message.contains("<redacted>"), "应留下抹除痕迹：{message}");
 }
 
@@ -725,15 +734,22 @@ fn redacted_urls_keep_the_host_so_tls_failures_stay_diagnosable() {
     // 自签名网关场景：整条 URL 全抹掉会让"哪个端点握手失败"无从判断，所以只抹路径/query。
     let message = match map_model_fetch_error(
         crate::gateway::llm_assembly::LlmAssemblyError::ModelCatalog(
-            "error sending request for url (https://gw.example.com/v1/models?key=sk-live-SECRET)".to_string(),
+            "error sending request for url (https://gw.example.com/v1/models?key=sk-live-SECRET)"
+                .to_string(),
         ),
     ) {
         ModelFetchError::Failed(message) => message,
         other => panic!("应映射为 Failed，实际 {other:?}"),
     };
 
-    assert!(message.contains("https://gw.example.com/<redacted>"), "{message}");
-    assert!(!message.contains("sk-live-SECRET"), "密钥不得上屏/进日志：{message}");
+    assert!(
+        message.contains("https://gw.example.com/<redacted>"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("sk-live-SECRET"),
+        "密钥不得上屏/进日志：{message}"
+    );
     assert!(!message.contains("/v1/models"), "路径也应抹掉：{message}");
 }
 

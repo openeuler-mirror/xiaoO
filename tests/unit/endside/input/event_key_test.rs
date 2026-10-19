@@ -583,14 +583,20 @@ fn test_app_with_llm(provider: &str, model: &str, api_base: &str) -> App {
     .expect("App::new_with_config must build a headless test app")
 }
 
-fn ready_outcome(provider: &str, ids: &[&str]) -> crate::provider_service::ProviderModelFetchOutcome {
+fn ready_outcome(
+    provider: &str,
+    ids: &[&str],
+) -> crate::provider_service::ProviderModelFetchOutcome {
     crate::provider_service::ProviderModelFetchOutcome {
         provider: provider.to_string(),
         result: Ok(ids.iter().map(|id| model(id)).collect()),
     }
 }
 
-fn failed_outcome(provider: &str, message: &str) -> crate::provider_service::ProviderModelFetchOutcome {
+fn failed_outcome(
+    provider: &str,
+    message: &str,
+) -> crate::provider_service::ProviderModelFetchOutcome {
     crate::provider_service::ProviderModelFetchOutcome {
         provider: provider.to_string(),
         result: Err(crate::provider_service::ModelFetchError::Failed(
@@ -610,7 +616,11 @@ async fn opening_connect_schedules_fetch_for_active_provider() {
         .with_body(r#"{"data":[{"id":"m1"}]}"#)
         .create_async()
         .await;
-    let mut app = test_app_with_llm("openai-compatible", "pin-me", &format!("{}/v1", server.url()));
+    let mut app = test_app_with_llm(
+        "openai-compatible",
+        "pin-me",
+        &format!("{}/v1", server.url()),
+    );
 
     app.open_provider_selection_dialog();
 
@@ -655,11 +665,7 @@ async fn fetched_official_list_replaces_dialog_models_end_to_end() {
     app.apply_model_fetch_outcome(session, outcome);
 
     mock.assert_async().await;
-    let dialog = app
-        .state
-        .provider_dialog
-        .as_ref()
-        .expect("弹窗仍然打开");
+    let dialog = app.state.provider_dialog.as_ref().expect("弹窗仍然打开");
     let dialog_ids = model_ids(&dialog.current_models());
     let chat_ids = model_ids(
         &app.state
@@ -700,7 +706,11 @@ async fn failed_fetch_keeps_models_and_records_error() {
     app.apply_model_fetch_outcome(session, failed_outcome("openai-compatible", "连接失败"));
 
     let dialog = app.state.provider_dialog.as_ref().expect("弹窗仍然打开");
-    assert_eq!(model_ids(&dialog.current_models()), before, "失败不得改动列表");
+    assert_eq!(
+        model_ids(&dialog.current_models()),
+        before,
+        "失败不得改动列表"
+    );
     assert_eq!(dialog.selected_model, selected_before);
     match model_list_state(&app, "openai-compatible") {
         crate::chat::ModelListState::Failed {

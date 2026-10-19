@@ -288,7 +288,7 @@ bash tests/run.sh                 # 全量测试（cargo test --workspace）
 bash tests/run.sh -p xiaoo-core   # 额外参数原样透传给 cargo test
 ```
 
-`scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁与测试卫生门禁（防止测试代码回流 `src/`）。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
+`scripts/ci.sh` 为统一 CI 入口（仅静态门禁、不编译）：门面纪律门禁、测试卫生门禁（防止测试代码回流 `src/`）、文档链接门禁与代码格式门禁（`cargo fmt --check`）。目录约定与命名规则见 [tests/README.md](./tests/README.md)。
 
 ## 更多文档
 

@@ -86,7 +86,8 @@ fn selected_provider_name_returns_none_when_empty() {
 /// 官方列表顺序与内置表不同，因此选中项必须按 **id** 保持而不是按下标。
 #[test]
 fn replace_models_keeps_selection_by_id() {
-    let mut dialog = ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4-turbo"));
+    let mut dialog =
+        ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4-turbo"));
     assert_eq!(dialog.selected_model, 1);
 
     // 官方列表把 gpt-4-turbo 挪到了最后一位。
@@ -141,7 +142,8 @@ fn replace_models_leaves_selection_alone_for_non_selected_provider() {
 
 #[test]
 fn replace_models_rejects_empty_list_and_unknown_provider() {
-    let mut dialog = ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4o"));
+    let mut dialog =
+        ProviderDialog::new_with_selection(providers(), Some("openai"), Some("gpt-4o"));
 
     assert!(
         !dialog.replace_models("openai", Vec::new()),

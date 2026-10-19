@@ -20,15 +20,12 @@ pub use llm_client::{resolve_config, ResolveInput};
 // ---- provider registry ----
 #[doc(inline)]
 pub use llm_client::{
-    provider_catalog, resolve_provider_profile, ProviderMetadata, ProviderProfile,
-    ReasoningDialect,
+    provider_catalog, resolve_provider_profile, ProviderMetadata, ProviderProfile, ReasoningDialect,
 };
 
 // ---- 上下文窗口探测链 ----
 #[doc(inline)]
-pub use llm_client::{
-    resolve_model_context_length, resolve_protocol_family, ProtocolFamily,
-};
+pub use llm_client::{resolve_model_context_length, resolve_protocol_family, ProtocolFamily};
 
 // ---- 压缩管道 ----
 #[doc(inline)]

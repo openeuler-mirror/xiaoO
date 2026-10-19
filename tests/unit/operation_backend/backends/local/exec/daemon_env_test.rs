@@ -17,8 +17,7 @@ fn exec_does_not_inherit_the_daemon_environment() {
     std::env::set_var("XIAOO_TEST_DAEMON_SECRET", "sk-must-not-leak");
     std::env::set_var("XIAOO_TEST_REQUESTED", "explicitly-passed");
 
-    let backend =
-        local_backend_with_isolation(workspace.clone(), None, None, None, None).unwrap();
+    let backend = local_backend_with_isolation(workspace.clone(), None, None, None, None).unwrap();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
