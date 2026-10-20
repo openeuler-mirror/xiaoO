@@ -158,6 +158,25 @@ impl OperationFileSystem for PermissionAwareFileSystem {
         .await
     }
 
+    async fn create_dir_all_with_extra(
+        &self,
+        path: &BackendPath,
+        extra: Option<&serde_json::Value>,
+    ) -> Result<(), OperationError> {
+        run_with_permission(&self.inner, &self.interaction, || {
+            let inner = Arc::clone(&self.inner);
+            let path = path.clone();
+            let extra = extra.cloned();
+            async move {
+                inner
+                    .files()
+                    .create_dir_all_with_extra(&path, extra.as_ref())
+                    .await
+            }
+        })
+        .await
+    }
+
     async fn temp_path(&self, request: TempPathRequest) -> Result<BackendPath, OperationError> {
         run_with_permission(&self.inner, &self.interaction, || {
             let inner = Arc::clone(&self.inner);
