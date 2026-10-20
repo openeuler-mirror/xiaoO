@@ -364,12 +364,7 @@ impl LocalExec {
         // 这里从空环境起，再放回运行本身需要的少数几个变量，以及请求显式指定的那些。
         // 放在调用点而不是 `command_from_spec` 里，是因为那里有四条分支
         // （sandbox-exec / dyn-sandbox / bwrap / 裸执行），逐个 return 加容易漏。
-        command.env_clear();
-        for inherited in ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER"] {
-            if let Ok(value) = std::env::var(inherited) {
-                command.env(inherited, value);
-            }
-        }
+        crate::backends::local::spawn_env::scrub_child_environment(&mut command);
         if let Some(env_vars) = &request.env {
             for (k, v) in env_vars {
                 command.env(k, v);

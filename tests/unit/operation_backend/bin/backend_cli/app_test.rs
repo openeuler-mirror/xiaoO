@@ -148,9 +148,10 @@ async fn envelope_write_bytes_without_content_reports_a_request_error() {
     let config = config_for(&workspace);
 
     let error = execute_request(config, parsed.request).await.unwrap_err();
+    let message = error.to_string();
     assert!(
-        error.contains("content"),
-        "error must mention the missing content channel: {error}"
+        message.contains("content"),
+        "error must mention the missing content channel: {message}"
     );
     assert!(!workspace.join("x.txt").exists());
 }

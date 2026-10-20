@@ -46,6 +46,12 @@ pub async fn build_backend(
         workspace_root_host.as_path(),
         temp_root_host.as_path(),
     )?;
+    // Archive the config this backend was built from so externalization
+    // envelopes rebuild an identical backend (isolation included).
+    let source_config = Some(serde_json::json!({
+        "kind": config.kind,
+        "options": config.options,
+    }));
 
     let backend = LocalOperationBackend::new(Arc::new(LocalBackendState {
         backend_id: "local".to_string(),
@@ -56,6 +62,7 @@ pub async fn build_backend(
         temp_root_host,
         default_shell: options.default_shell,
         policy,
+        source_config,
         ..Default::default()
     }));
 
@@ -106,7 +113,9 @@ pub fn local_backend_with_isolation(
         .map(|path| backend_path_from_host_path(path.as_path()))
         .transpose()?;
     let temp_root_host = temp_root.unwrap_or_else(std::env::temp_dir);
-    let isolation = isolation
+    let isolation_json = isolation;
+    let isolation = isolation_json
+        .clone()
         .map(serde_json::from_value::<LocalIsolationOptions>)
         .transpose()
         .map_err(|error| OperationBackendBuildError::InvalidConfig {
@@ -117,6 +126,21 @@ pub fn local_backend_with_isolation(
         workspace_root_host.as_path(),
         temp_root_host.as_path(),
     )?;
+    // Synthesize the LocalBackendOptions-shaped JSON the config-file path
+    // archives, isolation included — no policy downgrade.
+    let mut archived_options = serde_json::json!({
+        "workspace_root": workspace_root_host.display().to_string(),
+        "home_dir": home_dir_host.as_ref().map(|path| path.display().to_string()),
+        "temp_root": temp_root_host.display().to_string(),
+        "default_shell": default_shell,
+    });
+    if let Some(isolation_value) = &isolation_json {
+        archived_options["isolation"] = isolation_value.clone();
+    }
+    let source_config = Some(serde_json::json!({
+        "kind": "local",
+        "options": archived_options,
+    }));
 
     Ok(Arc::new(LocalOperationBackend::new(Arc::new(
         LocalBackendState {
@@ -128,6 +152,7 @@ pub fn local_backend_with_isolation(
             temp_root_host,
             default_shell,
             policy,
+            source_config,
             ..Default::default()
         },
     ))))

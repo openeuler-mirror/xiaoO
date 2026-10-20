@@ -24,7 +24,7 @@ fn extra_channel() -> serde_json::Value {
             "hooker_id": "plugin-x",
             "spawn_wrapper": {
                 "prefix": ["/opt/dummy-wrapper", "--session=s1", "--"],
-                "externalize_fs_writes": true
+                "externalize_fs_writes": false
             }
         }
     ])

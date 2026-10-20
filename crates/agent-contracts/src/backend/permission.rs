@@ -1,8 +1,10 @@
 use crate::backend::BackendPath;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Capability requested by a sandboxed backend operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SandboxPermissionCapability {
     Read,
     Write,
@@ -29,7 +31,9 @@ pub enum SandboxPermissionScope {
 }
 
 /// Structured reason emitted when a sandbox policy blocks an operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Serialize`/`Deserialize` let it survive the backend CLI's structured
+/// error channel with full context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxPolicyDenial {
     pub backend_id: String,
     pub isolation: String,
