@@ -164,6 +164,19 @@ impl OperationFileSystem for DirtyTrackedFileSystem {
         Ok(())
     }
 
+    async fn create_dir_all_with_extra(
+        &self,
+        path: &BackendPath,
+        extra: Option<&serde_json::Value>,
+    ) -> Result<(), OperationError> {
+        self.inner
+            .files()
+            .create_dir_all_with_extra(path, extra)
+            .await?;
+        self.tracker.mark_dirty();
+        Ok(())
+    }
+
     async fn temp_path(&self, request: TempPathRequest) -> Result<BackendPath, OperationError> {
         let path = self.inner.files().temp_path(request).await?;
         self.tracker.mark_dirty();
@@ -201,3 +214,7 @@ impl OperationExec for DirtyTrackedExec {
         self.inner.exec().exec_streaming(request, sink).await
     }
 }
+
+#[cfg(test)]
+#[path = "../../../../tests/unit/shared/backend/dirty_write_test.rs"]
+mod tests;
